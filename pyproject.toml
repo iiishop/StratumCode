@@ -1,8 +1,15 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
 [project]
 name = "stratumcode"
 version = "0.1.0"
-description = "Add your description here"
 requires-python = ">=3.13"
 dependencies = [
     "pywebview>=6.2.1",
 ]
+
+[project.scripts]
+stratumcode = "stratumcode.main:main"
+stratumcode-dev = "stratumcode.main:main_dev"
