@@ -1,6 +1,7 @@
 <script setup>
 import { ref, reactive, onMounted, onUnmounted, nextTick } from 'vue'
 import { gsap } from 'gsap'
+import { animate as anime, stagger as animeStagger } from 'animejs'
 import hljs from 'highlight.js/lib/core'
 import python from 'highlight.js/lib/languages/python'
 import javascript from 'highlight.js/lib/languages/javascript'
@@ -8,7 +9,7 @@ import typescript from 'highlight.js/lib/languages/typescript'
 import bash from 'highlight.js/lib/languages/bash'
 import json from 'highlight.js/lib/languages/json'
 import diff from 'highlight.js/lib/languages/diff'
-import 'highlight.js/styles/github-dark.css'
+import 'highlight.js/styles/github.css'
 
 hljs.registerLanguage('python', python)
 hljs.registerLanguage('javascript', javascript)
@@ -20,17 +21,9 @@ hljs.registerLanguage('js', javascript)
 hljs.registerLanguage('ts', typescript)
 hljs.registerLanguage('sh', bash)
 
-/* ── agents & sessions ── */
-const agents = [
-  { id: 'build', label: 'Build', short: 'B', desc: 'Full access to code, shell, and files' },
-  { id: 'plan', label: 'Plan', short: 'P', desc: 'Read-only analysis and design' },
-  { id: 'explore', label: 'Explore', short: 'E', desc: 'Read-only codebase search' },
-]
-const activeAgent = ref(agents[0])
-const showAgentMenu = ref(false)
-
 /* ── todos ── */
 const todosOpen = ref(false)
+const toolsOpen = ref(false)
 const todos = reactive([
   { id: 1, content: 'Implement agent chat backend', done: false },
   { id: 2, content: 'Add provider connection testing', done: true },
@@ -45,10 +38,27 @@ const fileContext = reactive([
 ])
 
 const suggestions = [
-  { label: 'Trace a bug', detail: 'Follow the failure to its source', prompt: 'Find and fix a bug in the current branch' },
+  { label: 'Run the tool workflow', detail: 'See read and grep calls in action', prompt: 'Inspect the server tools and show me how they work' },
   { label: 'Explain a module', detail: 'Map structure, calls, and side effects', prompt: 'Explain how the main application module works' },
   { label: 'Refactor safely', detail: 'Reduce complexity without changing behavior', prompt: 'Review the current code and propose a focused refactor' },
 ]
+
+const fallbackTools = [
+  { name: 'read', description: 'Read a file or a selected line range.', parameters: { properties: { path: {}, start_line: {}, end_line: {} } } },
+  { name: 'glob', description: 'Find files using a workspace glob pattern.', parameters: { properties: { pattern: {} } } },
+  { name: 'grep', description: 'Search workspace text with ripgrep.', parameters: { properties: { pattern: {}, include: {} } } },
+  { name: 'webfetch', description: 'Fetch text from a public HTTP(S) URL.', parameters: { properties: { url: {} } } },
+  { name: 'todoread', description: 'Read the current task list.', parameters: { properties: {} } },
+]
+const toolCatalog = ref(fallbackTools)
+
+const toolVisuals = {
+  read: { symbol: 'R', tone: 'blue' },
+  glob: { symbol: '*', tone: 'yellow' },
+  grep: { symbol: '/', tone: 'red' },
+  webfetch: { symbol: 'W', tone: 'blue' },
+  todoread: { symbol: 'T', tone: 'yellow' },
+}
 
 /* ── chat state ── */
 const input = ref('')
@@ -70,14 +80,42 @@ function toggleTodo(id) {
   if (t) t.done = !t.done
 }
 
+function toggleTools() {
+  toolsOpen.value = !toolsOpen.value
+  if (toolsOpen.value) todosOpen.value = false
+}
+
+function toggleTodos() {
+  todosOpen.value = !todosOpen.value
+  if (todosOpen.value) toolsOpen.value = false
+}
+
+function toolVisual(name) {
+  return toolVisuals[name] || { symbol: '?', tone: 'red' }
+}
+
+function toolParameterCount(tool) {
+  return Object.keys(tool.parameters?.properties || {}).length
+}
+
+function toolDescription(name) {
+  return toolCatalog.value.find(tool => tool.name === name)?.description || 'Run a built-in workspace tool.'
+}
+
+async function loadTools() {
+  try {
+    const response = await fetch('/api/tools')
+    if (!response.ok) return
+    const tools = await response.json()
+    toolCatalog.value = tools.filter(tool => tool.name !== 'invalid')
+  } catch {
+    // Keep the static catalog when the API is offline.
+  }
+}
+
 function removeContextFile(p) {
   const i = fileContext.findIndex(f => f.path === p)
   if (i !== -1) fileContext.splice(i, 1)
-}
-
-function selectAgent(a) {
-  activeAgent.value = a
-  showAgentMenu.value = false
 }
 
 function send() {
@@ -90,6 +128,99 @@ function send() {
   setTimeout(simulateAgent, 400)
 }
 
+/* ── animation helpers ──────────────────────────────────── */
+
+function animEl(msg, selector) {
+  const container = msgRefs[msg.id]
+  if (!container) return null
+  return container.querySelector(selector)
+}
+
+function animAll(msg, selector) {
+  const container = msgRefs[msg.id]
+  if (!container) return []
+  return [...container.querySelectorAll(selector)]
+}
+
+function animThinkingEntrance(msg) {
+  const el = animEl(msg, '.think')
+  if (!el) return
+  gsap.fromTo(el, { autoAlpha: 0, y: 6, scale: 0.97 }, { autoAlpha: 1, y: 0, scale: 1, duration: 0.3, ease: 'power2.out' })
+}
+
+function animThinkingDone(msg) {
+  const el = animEl(msg, '.think')
+  if (!el) return
+  anime({ targets: el, borderColor: ['var(--border)', 'var(--warn)'], duration: 400, easing: 'easeOutCubic' })
+  const bar = el.querySelector('.think__bar')
+  if (bar) anime({ targets: bar, color: ['var(--text-muted)', 'var(--warn)'], duration: 400, easing: 'easeOutCubic' })
+}
+
+function animToolEntrance(msg) {
+  const items = animAll(msg, '.tc:not(.tc--entered)')
+  if (!items.length) return
+  anime({
+    targets: items,
+    translateX: [-10, 0],
+    opacity: [0, 1],
+    delay: animeStagger(40),
+    duration: 300,
+    easing: 'easeOutCubic',
+    complete: () => items.forEach(el => el.classList.add('tc--entered')),
+  })
+}
+
+function animToolDone(msg, toolId) {
+  const el = animEl(msg, `.tc [data-tool-id="${toolId}"]`)?.closest('.tc')
+  if (!el) return
+  anime({ targets: el, borderLeftColor: ['var(--accent)', 'var(--ok)'], duration: 350, easing: 'easeOutCubic' })
+  const state = el.querySelector('.tc__state')
+  if (state) gsap.fromTo(state, { scale: 0.6, autoAlpha: 0 }, { scale: 1, autoAlpha: 1, duration: 0.3, ease: 'back.out(1.7)' })
+  const output = el.querySelector('.tc__body')
+  if (output) gsap.fromTo(output, { autoAlpha: 0, y: -4 }, { autoAlpha: 1, y: 0, duration: 0.25, ease: 'power2.out', delay: 0.1 })
+}
+
+function animSubEntrance(msg) {
+  const items = animAll(msg, '.sub:not(.sub--entered)')
+  if (!items.length) return
+  anime({
+    targets: items,
+    translateY: [-8, 0],
+    opacity: [0, 1],
+    delay: animeStagger(50),
+    duration: 280,
+    easing: 'easeOutCubic',
+    complete: () => items.forEach(el => el.classList.add('sub--entered')),
+  })
+}
+
+function animSubDone(msg, subId) {
+  const el = animEl(msg, `.sub [data-sub-id="${subId}"]`)?.closest('.sub')
+  if (!el) return
+  anime({ targets: el, borderColor: ['var(--border)', 'var(--ok-border)'], duration: 350, easing: 'easeOutCubic' })
+  const check = el.querySelector('.sub__check')
+  if (check) gsap.fromTo(check, { scale: 0, rotation: -90 }, { scale: 1, rotation: 0, duration: 0.35, ease: 'back.out(1.7)' })
+}
+
+function animDiffEntrance(msg) {
+  const el = animEl(msg, '.diff')
+  if (!el) return
+  gsap.fromTo(el, { autoAlpha: 0, y: 10, maxHeight: 0 }, { autoAlpha: 1, y: 0, maxHeight: 500, duration: 0.4, ease: 'power3.out' })
+}
+
+function animDiffOutcome(msg, accepted) {
+  const el = animEl(msg, '.diff')
+  if (!el) return
+  const status = el.querySelector('.diff__status')
+  if (status) gsap.fromTo(status, { scale: 0.9, autoAlpha: 0 }, { scale: 1, autoAlpha: 1, duration: 0.25, ease: 'back.out(1.4)' })
+  gsap.to(el.querySelector('.diff__actions'), { autoAlpha: 0, y: -4, duration: 0.2, ease: 'power2.in' })
+}
+
+function animSmoothScroll() {
+  if (!msgList.value) return
+  gsap.to(msgList.value, { scrollTop: msgList.value.scrollHeight, duration: 0.25, ease: 'power2.out' })
+}
+
 function simulateAgent() {
   const id = Date.now()
   const msg = reactive({
@@ -100,30 +231,70 @@ function simulateAgent() {
     diff: null,
   })
   messages.push(msg)
-  nextTick(() => scrollBottom())
+  nextTick(() => { animSmoothScroll(); animThinkingEntrance(msg) })
 
   // thinking
-  const thought = `[${activeAgent.value.label} agent] Analyzing request with file context: ${fileContext.map(f => f.path).join(', ')}. I need to understand the codebase structure, then dispatch sub-agents for parallel exploration, and finally propose code changes.`
+  const thought = `Analyzing request with file context: ${fileContext.map(f => f.path).join(', ')}. I need to understand the codebase structure, then dispatch sub-agents for parallel exploration, and finally propose code changes.`
   let ti = 0
   const t1 = setInterval(() => {
-    if (ti < thought.length) { msg.thinking.text += thought[ti]; ti++; nextTick(() => scrollBottom()) }
-    else { clearInterval(t1); msg.thinking.done = true; setTimeout(() => simulateSubDispatch(msg), 300) }
+    if (ti < thought.length) { msg.thinking.text += thought[ti]; ti++; animSmoothScroll() }
+    else { clearInterval(t1); msg.thinking.done = true; nextTick(() => { animThinkingDone(msg); animSmoothScroll() }); setTimeout(() => simulateTools(msg), 250) }
   }, 8)
+
+  function simulateTools(msg) {
+    const readCall = reactive({
+      id: 'read-server',
+      name: 'read',
+      status: 'running',
+      input: '{\n  "path": "stratumcode/server.py",\n  "start_line": 1,\n  "end_line": 90\n}',
+      output: '',
+      _open: true,
+    })
+    msg.toolCalls.push(readCall)
+    nextTick(() => animToolEntrance(msg))
+
+    setTimeout(() => {
+      readCall.status = 'done'
+      readCall.output = 'Read 90 lines from stratumcode/server.py\nFound HTTP routes, tool registry access, and workspace context.'
+      nextTick(() => animToolDone(msg, 'read-server'))
+
+      const grepCall = reactive({
+        id: 'grep-routes',
+        name: 'grep',
+        status: 'running',
+        input: '{\n  "pattern": "/api/tools|registry\\\\.",\n  "include": "*.py"\n}',
+        output: '',
+        _open: true,
+      })
+      msg.toolCalls.push(grepCall)
+      nextTick(() => animToolEntrance(msg))
+
+      setTimeout(() => {
+        grepCall.status = 'done'
+        grepCall.output = 'stratumcode/server.py:22  GET /api/tools\nstratumcode/server.py:53  POST /api/tools/run\nstratumcode/tools/registry.py:25  list_all()'
+        nextTick(() => {
+          animToolDone(msg, 'grep-routes')
+          animSmoothScroll()
+        })
+        setTimeout(() => simulateSubDispatch(msg), 220)
+      }, 620)
+    }, 680)
+  }
 
   // sub-agent dispatch
   function simulateSubDispatch(msg) {
     msg.subDispatch.push(reactive({ id: 1, name: '@explore', task: 'Search codebase for auth-related files', status: 'running', result: '' }))
     msg.subDispatch.push(reactive({ id: 2, name: '@explore', task: 'Find all API route definitions', status: 'running', result: '' }))
-    nextTick(() => scrollBottom())
+    nextTick(() => { animSubEntrance(msg); animSmoothScroll() })
 
     setTimeout(() => {
       msg.subDispatch[0].status = 'done'
       msg.subDispatch[0].result = 'Found 3 files: auth.py, middleware.py, tokens.py'
-      nextTick(() => scrollBottom())
+      nextTick(() => animSubDone(msg, 1))
       setTimeout(() => {
         msg.subDispatch[1].status = 'done'
         msg.subDispatch[1].result = 'Found 6 routes: /api/providers, /api/chat, /api/config, ...'
-        nextTick(() => scrollBottom())
+        nextTick(() => animSubDone(msg, 2))
 
         // diff preview
         setTimeout(() => {
@@ -136,7 +307,7 @@ function simulateAgent() {
             ],
             accepted: null,
           })
-          nextTick(scrollBottom)
+          nextTick(() => { animDiffEntrance(msg); animSmoothScroll() })
           streamFinalReply(msg)
         }, 600)
       }, 500)
@@ -147,7 +318,7 @@ function simulateAgent() {
     const full = 'I analyzed the codebase and found the relevant files. Here is the proposed change to add chat support to the server.'
     let i = 0
     const timer = setInterval(() => {
-      if (i < full.length) { msg.content += full[i]; i++; nextTick(scrollBottom) }
+      if (i < full.length) { msg.content += full[i]; i++; animSmoothScroll() }
       else { clearInterval(timer); isStreaming.value = false }
     }, 10)
   }
@@ -236,6 +407,7 @@ function toggleToolCall(tc) { tc._open = !tc._open }
 function toggleSubTask(st) { st._open = !st._open }
 
 onMounted(() => {
+  loadTools()
   gsapCtx = gsap.context(() => {
     if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) return
     gsap.fromTo(
@@ -267,36 +439,12 @@ onUnmounted(() => { gsapCtx?.revert() })
       </div>
 
       <div class="chat__topbar-right">
-        <div class="agent-switch">
-          <button class="agent-switch__trigger" type="button" @click="showAgentMenu = !showAgentMenu">
-            <span class="agent-switch__icon">{{ activeAgent.short }}</span>
-            <span class="agent-switch__name">{{ activeAgent.label }}</span>
-            <span class="agent-switch__mode">{{ activeAgent.id === 'build' ? 'edit' : 'read' }}</span>
-            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="m7 9 5 5 5-5"/></svg>
-          </button>
-
-          <Transition name="drop">
-            <div v-if="showAgentMenu" class="agent-menu">
-              <button
-                v-for="a in agents"
-                :key="a.id"
-                class="agent-menu__item"
-                :class="{ 'is-on': activeAgent.id === a.id }"
-                type="button"
-                @click.stop="selectAgent(a)"
-              >
-                <span class="agent-menu__key">{{ a.short }}</span>
-                <span class="agent-menu__body">
-                  <span class="agent-menu__name">{{ a.label }}</span>
-                  <span class="agent-menu__desc">{{ a.desc }}</span>
-                </span>
-                <svg v-if="activeAgent.id === a.id" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m5 12 4 4L19 6"/></svg>
-              </button>
-            </div>
-          </Transition>
-        </div>
-
-        <button class="chat__topbtn" :class="{ 'is-on': todosOpen }" @click="todosOpen = !todosOpen" title="Tasks">
+        <button class="chat__topbtn chat__topbtn--tools" :class="{ 'is-on': toolsOpen }" @click="toggleTools" title="Built-in tools">
+          <span class="chat__tool-grid" aria-hidden="true"><i></i><i></i><i></i><i></i></span>
+          <span class="chat__topbtn-label">Tools</span>
+          <span class="chat__topbtn-badge chat__topbtn-badge--yellow">{{ toolCatalog.length }}</span>
+        </button>
+        <button class="chat__topbtn" :class="{ 'is-on': todosOpen }" @click="toggleTodos" title="Tasks">
           <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"/></svg>
           <span class="chat__topbtn-label">Tasks</span>
           <span class="chat__topbtn-badge">{{ todos.filter(t => !t.done).length }}</span>
@@ -360,7 +508,7 @@ onUnmounted(() => { gsapCtx?.revert() })
               <!-- sub-agent dispatch -->
               <div v-for="st in m.subDispatch" :key="st.id" class="sub" :class="{ 'sub--done': st.status === 'done' }">
                 <div class="sub__bar" @click="toggleSubTask(st)">
-                  <span class="sub__icon">
+                  <span class="sub__icon" :data-sub-id="st.id">
                     <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
                   </span>
                   <span class="sub__agent">{{ st.name }}</span>
@@ -377,14 +525,22 @@ onUnmounted(() => { gsapCtx?.revert() })
               </div>
 
               <!-- tool calls -->
-              <div v-for="tc in m.toolCalls" :key="tc.id" class="tc" :class="{ 'tc--done': tc.status === 'done' }">
+              <div
+                v-for="tc in m.toolCalls"
+                :key="tc.id"
+                class="tc"
+                :class="['tc--' + toolVisual(tc.name).tone, { 'tc--done': tc.status === 'done' }]"
+              >
                 <div class="tc__bar" @click="toggleToolCall(tc)">
-                  <span class="tc__icon">
-                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg>
+                  <span class="tc__icon" :data-tool-id="tc.id">{{ toolVisual(tc.name).symbol }}</span>
+                  <span class="tc__title">
+                    <strong>{{ tc.name }}</strong>
+                    <small>{{ toolDescription(tc.name) }}</small>
                   </span>
-                  <span class="tc__name">{{ tc.name }}</span>
-                  <span v-if="tc.status === 'running'" class="tc__spinner"></span>
-                  <span v-else class="tc__check"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="var(--ok)" stroke-width="2.5" stroke-linecap="round"><polyline points="20 6 9 17 4 12"/></svg></span>
+                  <span class="tc__state" :class="'tc__state--' + tc.status">
+                    <span v-if="tc.status === 'running'" class="tc__spinner"></span>
+                    {{ tc.status === 'running' ? 'Running' : 'Done' }}
+                  </span>
                   <svg class="tc__chevron" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polyline points="6 9 12 15 18 9"/></svg>
                 </div>
                 <Transition name="tc-slide">
@@ -410,11 +566,11 @@ onUnmounted(() => { gsapCtx?.revert() })
                     :class="'diff__line--' + diffLineType(hunk, line)"
                   ><span class="diff__marker">{{ diffLinePrefix(hunk, line) }}</span><span v-html="highlightCode(diffLineContent(line), m.diff.path)"></span></span></template></code></pre>
                 <div class="diff__actions" v-if="m.diff.accepted === null">
-                  <button class="diff__accept" @click="m.diff.accepted = true">
+                  <button class="diff__accept" @click="m.diff.accepted = true; nextTick(() => animDiffOutcome(m, true))">
                     <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><polyline points="20 6 9 17 4 12"/></svg>
                     Accept
                   </button>
-                  <button class="diff__reject" @click="m.diff.accepted = false">
+                  <button class="diff__reject" @click="m.diff.accepted = false; nextTick(() => animDiffOutcome(m, false))">
                     <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
                     Reject
                   </button>
@@ -457,6 +613,31 @@ onUnmounted(() => { gsapCtx?.revert() })
         </div>
       </Transition>
 
+      <Transition name="panel">
+        <aside v-if="toolsOpen" class="chat__tools">
+          <div class="chat__tools-head">
+            <div>
+              <span class="chat__tools-title">Built-in tools</span>
+              <span class="chat__tools-subtitle">Available to every agent session</span>
+            </div>
+            <span class="chat__tools-total">{{ toolCatalog.length }}</span>
+          </div>
+          <div class="chat__tools-list">
+            <div v-for="tool in toolCatalog" :key="tool.name" class="tool-card" :class="'tool-card--' + toolVisual(tool.name).tone">
+              <span class="tool-card__icon">{{ toolVisual(tool.name).symbol }}</span>
+              <span class="tool-card__copy">
+                <strong>{{ tool.name }}</strong>
+                <small>{{ tool.description }}</small>
+              </span>
+              <span class="tool-card__params">{{ toolParameterCount(tool) }} args</span>
+            </div>
+          </div>
+          <div class="chat__tools-foot">
+            Select “Run the tool workflow” to see live states.
+          </div>
+        </aside>
+      </Transition>
+
     </div>
 
     <div class="chat__foot">
@@ -489,7 +670,6 @@ onUnmounted(() => { gsapCtx?.revert() })
         </div>
 
         <div class="chat__composer-meta">
-          <span>{{ activeAgent.label }} agent</span>
           <span>Enter to send</span>
         </div>
       </div>
@@ -511,49 +691,6 @@ onUnmounted(() => { gsapCtx?.revert() })
   background: var(--bg); flex-shrink: 0;
 }
 .chat__topbar-right { display: flex; align-items: center; gap: 6px; }
-
-/* ---- agent switcher ---- */
-.agent-switch {
-  position: relative;
-  display: flex; align-items: center; gap: 7px;
-  padding: 4px 10px;
-  border: 1px solid var(--border); border-radius: var(--radius-sm);
-  cursor: pointer; user-select: none;
-  font-size: 12px; font-weight: 600; color: var(--text-h);
-  transition: border-color 0.12s, background 0.12s;
-}
-.agent-switch:hover { border-color: var(--accent-border); background: var(--accent-bg); }
-.agent-switch__dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
-.agent-switch__name { font-size: 12px; }
-.agent-switch__mode {
-  font-size: 10px; font-weight: 500; color: var(--text-muted);
-  padding: 1px 6px; border-radius: 3px; background: var(--code-bg);
-  text-transform: uppercase; letter-spacing: 0.04em;
-}
-
-.agent-menu {
-  position: absolute; top: calc(100% + 6px); left: 0;
-  min-width: 260px;
-  padding: 4px;
-  border: 1px solid var(--border); border-radius: var(--radius);
-  background: var(--bg-raised); box-shadow: var(--shadow-md);
-  z-index: 20;
-}
-.agent-menu__item {
-  display: flex; align-items: center; gap: 10px; padding: 8px 10px;
-  border-radius: var(--radius-sm); cursor: pointer;
-  transition: background 0.1s;
-}
-.agent-menu__item:hover { background: var(--accent-bg); }
-.agent-menu__item.is-on { background: var(--accent-bg); }
-.agent-menu__dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
-.agent-menu__body { flex: 1; display: flex; flex-direction: column; gap: 1px; }
-.agent-menu__name { font-size: 13px; font-weight: 600; color: var(--text-h); }
-.agent-menu__desc { font-size: 11px; color: var(--text-muted); }
-
-.drop-enter-active { transition: all 0.15s ease; }
-.drop-leave-active { transition: all 0.1s ease; }
-.drop-enter-from, .drop-leave-to { opacity: 0; transform: translateY(-4px); }
 
 /* ---- topbar buttons ---- */
 .chat__topbtn {
@@ -721,10 +858,10 @@ onUnmounted(() => { gsapCtx?.revert() })
 .chat__todo.is-done .chat__todo-check { border-color: var(--ok-border); background: var(--ok-bg); }
 .chat__todo-text { font-size: 12px; color: var(--text-h); line-height: 1.4; }
 
-.panel-enter-active { transition: all 0.2s ease; }
-.panel-leave-active { transition: all 0.15s ease; }
-.panel-enter-from, .panel-leave-to { width: 0; opacity: 0; }
-.panel-enter-to, .panel-leave-from { width: 240px; opacity: 1; }
+.panel-enter-active,
+.panel-leave-active { transition: opacity 180ms ease, transform 220ms cubic-bezier(0.16, 1, 0.3, 1); }
+.panel-enter-from,
+.panel-leave-to { opacity: 0; transform: translateX(14px); }
 
 /* ---- file context ---- */
 .chat__files { display: flex; align-items: center; gap: 6px; padding: 6px 32px; flex-wrap: wrap; flex-shrink: 0; }
@@ -790,7 +927,7 @@ onUnmounted(() => { gsapCtx?.revert() })
   min-height: 54px;
   padding: 0 18px;
   border-bottom-color: var(--border);
-  background: rgba(21, 21, 20, 0.82);
+  background: rgba(255, 255, 255, 0.9);
 }
 
 .chat__session {
@@ -830,107 +967,6 @@ onUnmounted(() => { gsapCtx?.revert() })
   gap: 7px;
 }
 
-.agent-switch {
-  position: relative;
-  padding: 0;
-  border: 0;
-  background: transparent;
-}
-
-.agent-switch__trigger {
-  display: flex;
-  height: 32px;
-  align-items: center;
-  gap: 7px;
-  padding: 0 9px 0 5px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  color: var(--text);
-  background: var(--bg-raised);
-  cursor: pointer;
-}
-
-.agent-switch__trigger:hover {
-  border-color: var(--border-strong);
-  background: var(--bg-overlay);
-}
-
-.agent-switch__icon,
-.agent-menu__key {
-  display: grid;
-  place-items: center;
-  border-radius: 6px;
-  color: #fff2ed;
-  background: var(--accent);
-  font: 650 9px/1 var(--mono);
-}
-
-.agent-switch__icon {
-  width: 22px;
-  height: 22px;
-}
-
-.agent-switch__name {
-  color: var(--text-h);
-  font-size: 11px;
-}
-
-.agent-switch__mode {
-  padding: 0;
-  color: var(--text-muted);
-  background: transparent;
-  font: 9px/1 var(--mono);
-  text-transform: lowercase;
-}
-
-.agent-menu {
-  top: calc(100% + 8px);
-  right: 0;
-  left: auto;
-  min-width: 286px;
-  padding: 6px;
-  border-color: var(--border-strong);
-  border-radius: var(--radius);
-  background: var(--bg-overlay);
-  box-shadow: var(--shadow-md);
-}
-
-.agent-menu__item {
-  width: 100%;
-  gap: 10px;
-  padding: 9px;
-  border: 1px solid transparent;
-  border-radius: var(--radius-sm);
-  color: var(--text);
-  background: transparent;
-  text-align: left;
-}
-
-.agent-menu__item:hover {
-  border-color: var(--border);
-  background: var(--code-bg-hover);
-}
-
-.agent-menu__item.is-on {
-  border-color: var(--accent-border);
-  background: var(--accent-bg);
-}
-
-.agent-menu__key {
-  width: 26px;
-  height: 26px;
-}
-
-.agent-menu__name {
-  color: var(--text-h);
-  font-size: 11px;
-}
-
-.agent-menu__desc {
-  color: var(--text-muted);
-  font-size: 9.5px;
-}
-
 .chat__topbtn {
   width: auto;
   height: 32px;
@@ -967,6 +1003,7 @@ onUnmounted(() => { gsapCtx?.revert() })
 }
 
 .chat__body {
+  position: relative;
   min-height: 0;
 }
 
@@ -1010,7 +1047,7 @@ onUnmounted(() => { gsapCtx?.revert() })
 .chat__subtitle {
   max-width: 520px;
   margin: 14px 0 0;
-  color: #8d8783;
+  color: #5f7193;
   font-size: 13px;
   line-height: 1.6;
 }
@@ -1071,7 +1108,7 @@ onUnmounted(() => { gsapCtx?.revert() })
   max-width: min(760px, 88%);
   padding: 0;
   border-radius: 0;
-  color: #d5cfca;
+  color: var(--text);
   font-size: 12.5px;
   line-height: 1.65;
 }
@@ -1080,7 +1117,7 @@ onUnmounted(() => { gsapCtx?.revert() })
   padding: 11px 14px;
   border: 1px solid var(--accent-border);
   border-radius: var(--radius);
-  color: #f4eae6;
+  color: var(--text-h);
   background: var(--accent-bg);
 }
 
@@ -1095,7 +1132,7 @@ onUnmounted(() => { gsapCtx?.revert() })
 
 .chat__time {
   margin-bottom: 6px;
-  color: #5e5956;
+  color: var(--text-muted);
   font-size: 9px;
 }
 
@@ -1139,7 +1176,7 @@ onUnmounted(() => { gsapCtx?.revert() })
   min-height: 38px;
   padding: 0 12px;
   border-bottom: 1px solid var(--border);
-  background: #191817;
+  background: #eef4ff;
 }
 
 .diff__tag {
@@ -1158,7 +1195,7 @@ onUnmounted(() => { gsapCtx?.revert() })
 .diff__actions {
   padding: 9px 12px;
   border-top-color: var(--border);
-  background: #181716;
+  background: #ffffff;
 }
 
 .diff__accept,
@@ -1171,7 +1208,7 @@ onUnmounted(() => { gsapCtx?.revert() })
 .chat__todos {
   width: 280px;
   border-left-color: var(--border);
-  background: #121211;
+  background: #ffffff;
 }
 
 .chat__todos-head {
@@ -1214,7 +1251,7 @@ onUnmounted(() => { gsapCtx?.revert() })
 }
 
 .chat__todo-text {
-  color: #b8b1ac;
+  color: var(--text);
   font-size: 10.5px;
 }
 
@@ -1230,14 +1267,14 @@ onUnmounted(() => { gsapCtx?.revert() })
   overflow: hidden;
   border: 1px solid var(--border-strong);
   border-radius: var(--radius-lg);
-  background: #191817;
-  box-shadow: 0 18px 44px rgba(5, 4, 3, 0.3), inset 0 1px 0 rgba(255, 255, 255, 0.025);
+  background: #ffffff;
+  box-shadow: 0 18px 44px rgba(23, 72, 150, 0.14), inset 0 1px 0 rgba(255, 255, 255, 0.7);
   transition: border-color var(--transition), box-shadow var(--transition);
 }
 
 .chat__composer:focus-within {
   border-color: var(--accent-border);
-  box-shadow: 0 18px 44px rgba(5, 4, 3, 0.3), 0 0 0 3px var(--accent-bg);
+  box-shadow: 0 18px 44px rgba(23, 72, 150, 0.16), 0 0 0 3px var(--accent-bg);
 }
 
 .chat__files {
@@ -1258,7 +1295,7 @@ onUnmounted(() => { gsapCtx?.revert() })
   padding: 0 6px;
   border-color: var(--border);
   border-radius: 6px;
-  color: #aaa39e;
+  color: var(--text);
   background: var(--code-bg);
   font-size: 9px;
 }
@@ -1294,7 +1331,7 @@ onUnmounted(() => { gsapCtx?.revert() })
 }
 
 .chat__input::placeholder {
-  color: #625d59;
+  color: #91a0ba;
 }
 
 .chat__send {
@@ -1303,7 +1340,7 @@ onUnmounted(() => { gsapCtx?.revert() })
   align-self: flex-end;
   border: 1px solid var(--accent);
   border-radius: 9px;
-  color: #fff5f1;
+  color: #ffffff;
   background: var(--accent);
 }
 
@@ -1315,7 +1352,7 @@ onUnmounted(() => { gsapCtx?.revert() })
   display: flex;
   justify-content: space-between;
   padding: 0 13px 9px;
-  color: #5f5a56;
+  color: var(--text-muted);
   font: 8.5px/1 var(--mono);
 }
 
@@ -1328,9 +1365,273 @@ onUnmounted(() => { gsapCtx?.revert() })
   background: var(--code-bg) !important;
 }
 
+.chat__tool-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 4px);
+  gap: 2px;
+}
+
+.chat__tool-grid i {
+  width: 4px;
+  height: 4px;
+  border-radius: 1px;
+  background: currentColor;
+}
+
+.chat__topbtn--tools.is-on {
+  color: #0f3f9e;
+  border-color: var(--yellow-border);
+  background: var(--yellow-bg);
+}
+
+.chat__topbtn-badge--yellow {
+  color: #103b91;
+  background: var(--yellow);
+}
+
+.tc {
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-left-width: 3px;
+  border-radius: var(--radius);
+  background: #ffffff;
+  box-shadow: var(--shadow-sm);
+}
+
+.tc--blue { border-left-color: var(--accent); }
+.tc--yellow { border-left-color: var(--yellow); }
+.tc--red { border-left-color: var(--red); }
+
+.tc__bar {
+  min-height: 52px;
+  padding: 7px 10px;
+  color: var(--text);
+  background: #ffffff;
+}
+
+.tc__bar:hover { background: #f8faff; }
+
+.tc__icon,
+.tool-card__icon {
+  display: grid;
+  place-items: center;
+  border-radius: 7px;
+  font: 700 10px/1 var(--mono);
+}
+
+.tc__icon {
+  width: 28px;
+  height: 28px;
+  flex: 0 0 28px;
+}
+
+.tc--blue .tc__icon,
+.tool-card--blue .tool-card__icon {
+  color: #ffffff;
+  background: var(--accent);
+}
+
+.tc--yellow .tc__icon,
+.tool-card--yellow .tool-card__icon {
+  color: #103b91;
+  background: var(--yellow);
+}
+
+.tc--red .tc__icon,
+.tool-card--red .tool-card__icon {
+  color: #ffffff;
+  background: var(--red);
+}
+
+.tc__title {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  flex-direction: column;
+}
+
+.tc__title strong {
+  color: var(--text-h);
+  font: 650 11px/1.25 var(--mono);
+}
+
+.tc__title small {
+  overflow: hidden;
+  color: var(--text-muted);
+  font: 9px/1.35 var(--sans);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tc__state {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 7px;
+  border-radius: 6px;
+  font: 650 8px/1 var(--mono);
+}
+
+.tc__state--running {
+  color: #735300;
+  background: var(--yellow-bg);
+}
+
+.tc__state--done {
+  color: var(--accent-text);
+  background: var(--accent-bg);
+}
+
+.tc__spinner {
+  width: 9px;
+  height: 9px;
+  border-color: rgba(115, 83, 0, 0.22);
+  border-top-color: #9b6a00;
+}
+
+.tc__body {
+  gap: 10px;
+  padding: 10px 12px;
+  border-top-color: var(--border);
+  background: #f8faff;
+}
+
+.tc__pre {
+  border: 1px solid var(--border);
+  color: #20365e;
+  background: #ffffff;
+}
+
+.chat__tools {
+  display: flex;
+  width: 330px;
+  flex: 0 0 330px;
+  flex-direction: column;
+  overflow: hidden;
+  border-left: 1px solid var(--border);
+  background: #ffffff;
+}
+
+.chat__tools-head {
+  display: flex;
+  min-height: 70px;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 16px;
+  border-bottom: 1px solid var(--border);
+  background: linear-gradient(135deg, #edf4ff, #fff9d8);
+}
+
+.chat__tools-head > div,
+.chat__tools-title,
+.chat__tools-subtitle {
+  display: flex;
+  flex-direction: column;
+}
+
+.chat__tools-title {
+  color: var(--text-h);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.chat__tools-subtitle {
+  margin-top: 3px;
+  color: var(--text-muted);
+  font-size: 9.5px;
+}
+
+.chat__tools-total {
+  display: grid;
+  width: 30px;
+  height: 30px;
+  place-items: center;
+  border: 1px solid var(--yellow-border);
+  border-radius: 8px;
+  color: #103b91;
+  background: var(--yellow);
+  font: 700 11px/1 var(--mono);
+}
+
+.chat__tools-list {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 7px;
+  overflow-y: auto;
+  padding: 12px;
+}
+
+.tool-card {
+  display: grid;
+  grid-template-columns: 30px minmax(0, 1fr) auto;
+  gap: 9px;
+  align-items: center;
+  min-height: 62px;
+  padding: 9px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: #ffffff;
+}
+
+.tool-card--blue:hover { border-color: var(--accent-border); background: #f5f8ff; }
+.tool-card--yellow:hover { border-color: var(--yellow-border); background: #fffbed; }
+.tool-card--red:hover { border-color: var(--red-border); background: var(--red-bg); }
+
+.tool-card__icon {
+  width: 30px;
+  height: 30px;
+}
+
+.tool-card__copy {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+}
+
+.tool-card__copy strong {
+  color: var(--text-h);
+  font: 650 10.5px/1.3 var(--mono);
+}
+
+.tool-card__copy small {
+  margin-top: 2px;
+  color: var(--text-muted);
+  font-size: 9px;
+  line-height: 1.35;
+}
+
+.tool-card__params {
+  padding: 3px 5px;
+  border-radius: 5px;
+  color: #5f7193;
+  background: var(--bg-overlay);
+  font: 8px/1 var(--mono);
+  white-space: nowrap;
+}
+
+.chat__tools-foot {
+  padding: 11px 14px;
+  border-top: 1px solid var(--border);
+  color: #725500;
+  background: var(--yellow-bg);
+  font-size: 9.5px;
+  line-height: 1.4;
+}
+
+.panel-enter-active,
+.panel-leave-active {
+  transition: opacity 180ms ease, transform 220ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.panel-enter-from,
+.panel-leave-to {
+  opacity: 0;
+  transform: translateX(14px);
+}
+
 @media (max-width: 780px) {
   .chat__topbtn-label,
-  .agent-switch__mode,
   .chat__session small {
     display: none;
   }
@@ -1348,11 +1649,17 @@ onUnmounted(() => { gsapCtx?.revert() })
     max-width: 94%;
   }
 
-  .chat__todos {
+  .chat__todos,
+  .chat__tools {
     position: absolute;
     inset: 0 0 0 auto;
     z-index: 10;
-    box-shadow: -18px 0 40px rgba(5, 4, 3, 0.4);
+    box-shadow: -18px 0 40px rgba(23, 72, 150, 0.18);
+  }
+
+  .chat__tools {
+    width: min(330px, calc(100% - 30px));
+    flex-basis: auto;
   }
 
   .chat__foot {
@@ -1363,7 +1670,6 @@ onUnmounted(() => { gsapCtx?.revert() })
 @media (max-width: 520px) {
   .chat__topbar { padding-inline: 12px; }
   .chat__session > div { display: none; }
-  .agent-switch__name { display: none; }
   .chat__title { font-size: 30px; }
   .chat__hint small { display: none; }
   .chat__file-chip { max-width: 190px; overflow: hidden; text-overflow: ellipsis; }

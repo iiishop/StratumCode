@@ -249,10 +249,10 @@ onUnmounted(() => {
   flex: 0 0 auto;
   flex-direction: column;
   overflow: hidden;
-  border-right: 1px solid var(--border);
-  color: var(--text);
-  background: #121211;
-  box-shadow: 8px 0 28px rgba(5, 4, 3, 0.08);
+  border-right: 1px solid #0d3b9b;
+  color: #dbe8ff;
+  background: #1248b8;
+  box-shadow: 8px 0 28px rgba(18, 72, 184, 0.18);
   z-index: 20;
 }
 
@@ -263,7 +263,7 @@ onUnmounted(() => {
   justify-content: space-between;
   gap: 8px;
   padding: 0 14px;
-  border-bottom: 1px solid var(--border);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.14);
 }
 
 .sb__brand {
@@ -285,12 +285,10 @@ onUnmounted(() => {
   height: 34px;
   flex: 0 0 34px;
   place-items: center;
-  border: 1px solid var(--accent-border);
+  border: 1px solid #ffe37a;
   border-radius: 9px;
-  color: #fff2ed;
-  background:
-    linear-gradient(135deg, rgba(255, 255, 255, 0.12), transparent 52%),
-    var(--accent);
+  color: #103b91;
+  background: var(--yellow);
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.15);
   font: 700 10px/1 var(--mono);
   letter-spacing: -0.06em;
@@ -310,14 +308,14 @@ onUnmounted(() => {
 }
 
 .sb__brand-copy strong {
-  color: var(--text-h);
+  color: #ffffff;
   font: 600 13px/1.2 var(--heading);
   letter-spacing: -0.02em;
 }
 
 .sb__brand-copy small {
   margin-top: 2px;
-  color: var(--text-muted);
+  color: #b9cff8;
   font: 8.5px/1.2 var(--mono);
 }
 
@@ -330,15 +328,15 @@ onUnmounted(() => {
   place-items: center;
   border: 1px solid transparent;
   border-radius: 7px;
-  color: var(--text-muted);
+  color: #b9cff8;
   background: transparent;
   cursor: pointer;
 }
 
 .sb__collapse:hover {
-  border-color: var(--border);
-  color: var(--text-h);
-  background: var(--code-bg-hover);
+  border-color: rgba(255, 255, 255, 0.25);
+  color: #ffffff;
+  background: rgba(255, 255, 255, 0.1);
 }
 
 .sb__new {
@@ -349,17 +347,17 @@ onUnmounted(() => {
   margin: 14px 12px 8px;
   padding: 0 9px;
   overflow: hidden;
-  border: 1px solid var(--accent-border);
+  border: 1px solid #e6bb2d;
   border-radius: var(--radius-sm);
-  color: #f0e4df;
-  background: var(--accent-bg);
+  color: #113a88;
+  background: var(--yellow);
   cursor: pointer;
   white-space: nowrap;
 }
 
 .sb__new:hover {
-  border-color: var(--accent);
-  background: var(--accent-bg-hover);
+  border-color: #ffe98f;
+  background: #ffdc5c;
 }
 
 .sb__new-icon,
@@ -373,7 +371,7 @@ onUnmounted(() => {
   place-items: center;
 }
 
-.sb__new-icon { color: var(--accent-text); }
+.sb__new-icon { color: #b72435; }
 .sb__new-label { font-size: 11px; font-weight: 600; }
 
 .sb__new-content {
@@ -387,7 +385,7 @@ onUnmounted(() => {
 
 .sb__new kbd {
   margin-left: auto;
-  color: #776e69;
+  color: #665000;
   font: 8px/1 var(--mono);
 }
 
@@ -399,7 +397,7 @@ onUnmounted(() => {
   height: 18px;
   padding: 0 7px;
   overflow: hidden;
-  color: #5f5a57;
+  color: #9dbcf4;
   font: 550 9px/1 var(--mono);
   white-space: nowrap;
   transition: opacity 120ms ease;
@@ -421,7 +419,7 @@ onUnmounted(() => {
   overflow: hidden;
   border: 1px solid transparent;
   border-radius: var(--radius-sm);
-  color: #8e8884;
+  color: #d4e2ff;
   background: transparent;
   cursor: pointer;
   text-align: left;
@@ -429,15 +427,15 @@ onUnmounted(() => {
 }
 
 .sb__nav-item:hover {
-  color: #c7c0bb;
-  border-color: #292624;
-  background: #191817;
+  color: #ffffff;
+  border-color: rgba(255, 255, 255, 0.18);
+  background: rgba(255, 255, 255, 0.09);
 }
 
 .sb__nav-item.is-active {
-  color: var(--accent-text);
-  border-color: var(--accent-border);
-  background: var(--accent-bg);
+  color: #123f9d;
+  border-color: #ffffff;
+  background: #ffffff;
 }
 
 .sb__nav-item.is-active::before {
@@ -447,7 +445,11 @@ onUnmounted(() => {
   width: 2px;
   height: 20px;
   border-radius: 0 2px 2px 0;
-  background: var(--accent);
+  background: var(--red);
+}
+
+.sb__nav-item.is-active .sb__nav-copy small {
+  color: #6179a8;
 }
 
 .sb__nav-copy strong,
@@ -468,7 +470,7 @@ onUnmounted(() => {
 .sb__runtime-copy small {
   margin-top: 2px;
   overflow: hidden;
-  color: #5f5a57;
+  color: #9dbcf4;
   font: 8.5px/1.2 var(--mono);
   text-overflow: ellipsis;
 }
@@ -483,18 +485,18 @@ onUnmounted(() => {
   overflow: hidden;
   border: 1px solid transparent;
   border-radius: var(--radius-sm);
-  color: #aaa39e;
+  color: #e0eaff;
   background: transparent;
   white-space: nowrap;
 }
 
 .sb__project {
-  border-color: #292624;
-  background: #171615;
+  border-color: rgba(255, 255, 255, 0.16);
+  background: rgba(6, 37, 111, 0.24);
 }
 
 .sb__project-icon {
-  color: #8c8580;
+  color: var(--yellow);
 }
 
 .sb__project-copy {
@@ -511,7 +513,7 @@ onUnmounted(() => {
 }
 
 .sb__project-state {
-  color: var(--text-muted);
+  color: #b9cff8;
   font: 8px/1 var(--mono);
 }
 
@@ -522,22 +524,22 @@ onUnmounted(() => {
 
 .sb__session {
   width: 100%;
-  color: #9a9490;
+  color: #dbe8ff;
   cursor: pointer;
   text-align: left;
 }
 
 .sb__session:hover {
-  color: #c7c0bb;
-  border-color: #292624;
-  background: #191817;
+  color: #ffffff;
+  border-color: rgba(255, 255, 255, 0.16);
+  background: rgba(255, 255, 255, 0.08);
 }
 
 .sb__footer {
   min-height: 58px;
   margin: 0 12px;
   padding: 9px 7px;
-  border-top: 1px solid var(--border);
+  border-top: 1px solid rgba(255, 255, 255, 0.14);
 }
 
 .sb__runtime {
@@ -552,21 +554,21 @@ onUnmounted(() => {
   height: 24px;
   flex: 0 0 24px;
   place-items: center;
-  border: 1px solid #33302e;
+  border: 1px solid rgba(255, 255, 255, 0.24);
   border-radius: 7px;
-  background: #181716;
+  background: rgba(255, 255, 255, 0.1);
 }
 
 .sb__runtime-icon i {
   width: 6px;
   height: 6px;
   border-radius: 50%;
-  background: var(--ok);
+  background: var(--yellow);
 }
 
 .sb__runtime-short {
   display: none;
-  color: var(--ok);
+  color: var(--yellow);
   font: 650 8px/1 var(--mono);
 }
 
@@ -579,8 +581,8 @@ onUnmounted(() => {
 .is-compact .sb__collapse {
   width: 20px;
   flex-basis: 20px;
-  border-color: var(--border);
-  background: #171615;
+  border-color: rgba(255, 255, 255, 0.2);
+  background: rgba(255, 255, 255, 0.08);
 }
 
 .is-compact .sb__new {
@@ -602,7 +604,7 @@ onUnmounted(() => {
 }
 
 .is-compact .sb__project {
-  background: transparent;
+  background: rgba(6, 37, 111, 0.2);
 }
 
 .is-compact .sb__footer {

@@ -1,31 +1,37 @@
 :root {
-  --text: #aaa5a1;
-  --text-h: #f0ece8;
-  --text-muted: #706b68;
-  --bg: #151514;
-  --bg-raised: #1b1a19;
-  --bg-overlay: #23211f;
-  --border: #302d2b;
-  --border-strong: #45403d;
-  --code-bg: #111110;
-  --code-bg-hover: #201e1c;
-  --accent: #dc684c;
-  --accent-hover: #eb795d;
-  --accent-bg: rgba(220, 104, 76, 0.11);
-  --accent-bg-hover: rgba(220, 104, 76, 0.17);
-  --accent-border: rgba(220, 104, 76, 0.42);
-  --accent-text: #f18a70;
-  --ok: #78b892;
-  --ok-bg: rgba(120, 184, 146, 0.1);
-  --ok-border: rgba(120, 184, 146, 0.28);
-  --err: #e07968;
-  --err-bg: rgba(224, 121, 104, 0.1);
-  --err-border: rgba(224, 121, 104, 0.28);
-  --warn: #caa56a;
-  --warn-bg: rgba(202, 165, 106, 0.1);
-  --shadow-sm: 0 1px 2px rgba(5, 4, 3, 0.24);
-  --shadow: 0 12px 32px rgba(5, 4, 3, 0.2);
-  --shadow-md: 0 20px 60px rgba(5, 4, 3, 0.36);
+  --text: #3f5274;
+  --text-h: #102a5c;
+  --text-muted: #71809c;
+  --bg: #f3f7ff;
+  --bg-raised: #ffffff;
+  --bg-overlay: #eef4ff;
+  --border: #d9e3f5;
+  --border-strong: #b9c9e7;
+  --code-bg: #f7f9fd;
+  --code-bg-hover: #edf3ff;
+  --accent: #1756d1;
+  --accent-hover: #0f43ad;
+  --accent-bg: rgba(23, 86, 209, 0.08);
+  --accent-bg-hover: rgba(23, 86, 209, 0.14);
+  --accent-border: rgba(23, 86, 209, 0.32);
+  --accent-text: #1748a3;
+  --yellow: #f5c842;
+  --yellow-bg: #fff6c9;
+  --yellow-border: #e7bf37;
+  --red: #d92d3d;
+  --red-bg: #fff0f1;
+  --red-border: #ef9da6;
+  --ok: #1756d1;
+  --ok-bg: rgba(23, 86, 209, 0.08);
+  --ok-border: rgba(23, 86, 209, 0.28);
+  --err: #d92d3d;
+  --err-bg: #fff0f1;
+  --err-border: #ef9da6;
+  --warn: #9b6a00;
+  --warn-bg: #fff6c9;
+  --shadow-sm: 0 1px 3px rgba(23, 72, 150, 0.1);
+  --shadow: 0 12px 32px rgba(23, 72, 150, 0.12);
+  --shadow-md: 0 20px 60px rgba(23, 72, 150, 0.18);
   --radius-sm: 8px;
   --radius: 10px;
   --radius-lg: 14px;
@@ -36,7 +42,7 @@
   --heading: "Bahnschrift", "Arial Narrow", "Aptos", sans-serif;
   --mono: "Cascadia Code", "JetBrains Mono", "SFMono-Regular", Consolas, monospace;
 
-  color-scheme: dark;
+  color-scheme: light;
   font: 13px/1.55 var(--sans);
   color: var(--text);
   background: var(--bg);
@@ -64,7 +70,8 @@ body,
 
 body {
   background:
-    radial-gradient(circle at 78% -20%, rgba(220, 104, 76, 0.055), transparent 30%),
+    radial-gradient(circle at 82% -14%, rgba(245, 200, 66, 0.2), transparent 25%),
+    linear-gradient(135deg, rgba(23, 86, 209, 0.035), transparent 40%),
     var(--bg);
 }
 
@@ -83,8 +90,8 @@ button:active:not(:disabled) {
 }
 
 ::selection {
-  color: var(--text-h);
-  background: rgba(220, 104, 76, 0.3);
+  color: #0d347e;
+  background: #ffe36f;
 }
 
 :focus-visible {
@@ -109,7 +116,7 @@ button:active:not(:disabled) {
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: #5a5350;
+  background: #93a8ce;
   background-clip: padding-box;
 }
 

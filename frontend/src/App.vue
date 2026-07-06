@@ -554,7 +554,7 @@ watch(currentView, (v) => { if (v === 'providers' && !providers.value.length) lo
   justify-content: space-between;
   padding: 0 20px;
   border-bottom: 1px solid var(--border);
-  background: rgba(21, 21, 20, 0.94);
+  background: rgba(255, 255, 255, 0.94);
 }
 
 .shell__crumbs,
@@ -592,7 +592,7 @@ watch(currentView, (v) => { if (v === 'providers' && !providers.value.length) lo
   flex: 1;
   overflow: auto;
   background:
-    linear-gradient(rgba(255, 255, 255, 0.012) 1px, transparent 1px),
+    linear-gradient(rgba(23, 86, 209, 0.035) 1px, transparent 1px),
     var(--bg);
   background-size: 100% 48px;
 }
@@ -628,7 +628,7 @@ watch(currentView, (v) => { if (v === 'providers' && !providers.value.length) lo
   padding: 0 15px;
   border: 1px solid var(--accent);
   border-radius: var(--radius-sm);
-  color: #fff5f1;
+  color: #ffffff;
   background: var(--accent);
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.13);
   font-size: 11px;
@@ -645,7 +645,7 @@ watch(currentView, (v) => { if (v === 'providers' && !providers.value.length) lo
   padding: 24px;
   border: 1px solid var(--border-strong);
   border-radius: var(--radius-lg);
-  background: #191817;
+  background: var(--bg-raised);
   box-shadow: var(--shadow);
 }
 
@@ -754,7 +754,7 @@ watch(currentView, (v) => { if (v === 'providers' && !providers.value.length) lo
 }
 
 .pm__field > span {
-  color: #918b87;
+  color: #5f7193;
   font-size: 10px;
   font-weight: 550;
 }
@@ -769,7 +769,7 @@ watch(currentView, (v) => { if (v === 'providers' && !providers.value.length) lo
   background: var(--code-bg);
 }
 
-.pm__input::placeholder { color: #595552; }
+.pm__input::placeholder { color: #93a0b8; }
 .pm__input:focus {
   border-color: var(--accent-border);
   box-shadow: 0 0 0 3px var(--accent-bg);
@@ -781,7 +781,7 @@ watch(currentView, (v) => { if (v === 'providers' && !providers.value.length) lo
   height: 38px;
   padding: 0 16px;
   border-radius: var(--radius-sm);
-  color: #fff5f1;
+  color: #ffffff;
   background: var(--accent);
   white-space: nowrap;
 }
@@ -828,10 +828,10 @@ watch(currentView, (v) => { if (v === 'providers' && !providers.value.length) lo
 
 .pm__row {
   border-bottom-color: var(--border);
-  background: rgba(21, 21, 20, 0.78);
+  background: rgba(255, 255, 255, 0.82);
 }
 
-.pm__row:hover { background: #191817; }
+.pm__row:hover { background: #edf3ff; }
 
 .pm__row-main {
   display: grid;
@@ -848,8 +848,8 @@ watch(currentView, (v) => { if (v === 'providers' && !providers.value.length) lo
   place-items: center;
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
-  color: #a49d98;
-  background: var(--code-bg);
+  color: var(--accent-text);
+  background: var(--accent-bg);
   font: 600 9px/1 var(--mono);
 }
 
@@ -916,13 +916,13 @@ watch(currentView, (v) => { if (v === 'providers' && !providers.value.length) lo
 
 .pm__models-head {
   height: 38px;
-  background: #181716;
+  background: #eef4ff;
 }
 
 .pm__models-item {
   padding: 8px 11px;
-  border-bottom-color: #242220;
-  color: #c8c1bc;
+  border-bottom-color: var(--border);
+  color: var(--text);
 }
 
 .pm__models-item:hover { background: var(--code-bg-hover); }
