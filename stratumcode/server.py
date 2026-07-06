@@ -5,6 +5,7 @@ from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from . import providers
+from . import chat
 from .tools import registry
 
 
@@ -53,6 +54,8 @@ class _Handler(SimpleHTTPRequestHandler):
 
         elif path == "/api/tools/run":
             self._handle_run(body)
+        elif path == "/api/chat":
+            self._handle_chat(body)
 
         else:
             self._json({"error": "not found"}, 404)
@@ -86,6 +89,33 @@ class _Handler(SimpleHTTPRequestHandler):
         except Exception:
             _logger.exception("tool execution failed: %s", tool_name)
             self._json({"title": f"error: {tool_name}", "output": "tool execution failed", "metadata": {}}, 500)
+
+    def _handle_chat(self, body: dict):
+        try:
+            events = chat.stream(body)
+        except ValueError as exc:
+            self._json({"error": str(exc)}, 400)
+            return
+
+        self.send_response(200)
+        self.send_header("Content-Type", "application/x-ndjson; charset=utf-8")
+        self.send_header("Cache-Control", "no-cache, no-transform")
+        self.send_header("Connection", "close")
+        self.end_headers()
+        try:
+            for event in events:
+                self.wfile.write(json.dumps(event, ensure_ascii=False).encode() + b"\n")
+                self.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError):
+            return
+        except Exception as exc:
+            _logger.exception("chat stream failed")
+            error = {"op": "error", "message": str(exc)}
+            try:
+                self.wfile.write(json.dumps(error, ensure_ascii=False).encode() + b"\n")
+                self.wfile.flush()
+            except (BrokenPipeError, ConnectionResetError):
+                pass
 
     def _json(self, data, status=200):
         payload = json.dumps(data, ensure_ascii=False).encode()

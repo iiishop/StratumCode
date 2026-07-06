@@ -80,6 +80,12 @@ def list_saved() -> list[dict]:
     return [dict(r) for r in rows]
 
 
+def get_saved(provider_id: int) -> dict | None:
+    _ensure_table()
+    row = get_db().execute("SELECT * FROM providers WHERE id = ?", (provider_id,)).fetchone()
+    return dict(row) if row else None
+
+
 def delete(provider_id: int):
     db = get_db()
     db.execute("DELETE FROM providers WHERE id = ?", (provider_id,))

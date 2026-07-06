@@ -9,6 +9,7 @@ defineProps({
   detail: { type: String, default: '' },
   status: { type: String, default: '' },
   symbol: { type: String, default: '·' },
+  state: { type: String, default: '' },
   open: { type: Boolean, default: true },
   collapsible: { type: Boolean, default: false },
 })
@@ -34,7 +35,7 @@ function moveSpotlight(event) {
 </script>
 
 <template>
-  <article class="event-frame" :class="`event-frame--${kind}`">
+  <article class="event-frame" :class="[`event-frame--${kind}`, state && `event-frame--${state}`]">
     <div class="event-frame__rail">
       <span class="event-frame__node">{{ symbol }}</span>
     </div>
@@ -72,8 +73,10 @@ function moveSpotlight(event) {
 }
 .event-frame--thinking { --event: #d49d00; }
 .event-frame--subagent { --event: #6658c7; }
-.event-frame--diff { --event: #d92d3d; }
+.event-frame--diff { --event: #e56b2f; }
 .event-frame--output { --event: #1756d1; }
+.event-frame--accepted { --event: #00a878; }
+.event-frame--rejected { --event: #e11d74; }
 .event-frame__rail { position: relative; display: flex; justify-content: flex-start; }
 .event-frame__rail::after { position: absolute; top: 25px; bottom: -10px; left: 10px; width: 1px; content: ""; background: linear-gradient(#a8bfe5, transparent); }
 .event-frame:last-child .event-frame__rail::after { display: none; }
@@ -118,6 +121,16 @@ function moveSpotlight(event) {
 .event-frame--thinking .event-frame__surface { background: radial-gradient(260px circle at var(--spot-x) var(--spot-y), rgba(245, 200, 66, .2), transparent 68%), linear-gradient(105deg, rgba(255, 249, 222, .72), rgba(255, 255, 255, .88)); }
 .event-frame--tool .event-frame__surface { background: radial-gradient(260px circle at var(--spot-x) var(--spot-y), rgba(23, 86, 209, .14), transparent 68%), linear-gradient(105deg, rgba(235, 243, 255, .74), rgba(255, 255, 255, .9)); }
 .event-frame--subagent .event-frame__surface { background: radial-gradient(260px circle at var(--spot-x) var(--spot-y), rgba(102, 88, 199, .15), transparent 68%), linear-gradient(105deg, rgba(242, 240, 255, .78), rgba(255, 255, 255, .9)); }
+.event-frame--accepted .event-frame__surface {
+  border-color: rgba(0, 168, 120, .46);
+  background: radial-gradient(320px circle at var(--spot-x) var(--spot-y), rgba(0, 220, 155, .2), transparent 68%), linear-gradient(105deg, rgba(224, 255, 246, .94), rgba(255, 255, 255, .96));
+  box-shadow: 0 12px 32px rgba(0, 168, 120, .15);
+}
+.event-frame--rejected .event-frame__surface {
+  border-color: rgba(225, 29, 116, .44);
+  background: radial-gradient(320px circle at var(--spot-x) var(--spot-y), rgba(255, 45, 139, .17), transparent 68%), linear-gradient(105deg, rgba(255, 232, 244, .94), rgba(255, 255, 255, .96));
+  box-shadow: 0 12px 32px rgba(225, 29, 116, .14);
+}
 .event-frame--thinking .event-frame__node,
 .event-frame--tool .event-frame__node,
 .event-frame--subagent .event-frame__node { color: #fff; background: var(--event); border-color: var(--event); }
@@ -128,7 +141,17 @@ function moveSpotlight(event) {
 .event-frame__head.is-static { cursor: default; }.event-frame__head:disabled { opacity: 1; }
 .event-frame__titles { display: grid; min-width: 0; gap: 2px; }
 .event-frame__label { color: #153252; font: 720 11px/1.2 var(--mono, monospace); letter-spacing: .015em; }
-.event-frame__titles small { overflow: hidden; color: #76889f; font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+.event-frame__titles small {
+  display: flex;
+  min-height: 23px;
+  align-items: center;
+  overflow: visible;
+  color: #76889f;
+  font-size: 10px;
+  line-height: 23px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .event-frame__status { margin-left: auto; color: var(--event); font: 750 9px/1 var(--mono, monospace); letter-spacing: .09em; text-transform: uppercase; }
 .event-frame__status.is-running {
   color: transparent;

@@ -2,7 +2,7 @@
 import { ref, reactive, onMounted, onUnmounted, nextTick } from 'vue'
 import { gsap } from 'gsap'
 import ChatEvent from './chat/ChatEvent.vue'
-import { useChatTimeline } from '../composables/useChatTimeline'
+import { useChatStream } from '../composables/useChatStream'
 import FileReference from './FileReference.vue'
 
 /* ── todos ── */
@@ -82,10 +82,6 @@ function toolParameterCount(tool) {
   return Object.keys(tool.parameters?.properties || {}).length
 }
 
-function toolDescription(name) {
-  return toolCatalog.value.find(tool => tool.name === name)?.description || 'Run a built-in workspace tool.'
-}
-
 async function loadTools() {
   try {
     const response = await fetch('/api/tools')
@@ -102,14 +98,33 @@ function removeContextFile(p) {
   if (i !== -1) fileContext.splice(i, 1)
 }
 
-function send() {
+async function send() {
   const text = input.value.trim()
-  if (!text) return
+  if (!text || isStreaming.value) return
   messages.push({ id: Date.now(), role: 'user', content: text, time: timeNow() })
+  const message = reactive({ id: Date.now() + 1, role: 'assistant', time: timeNow(), events: [] })
+  messages.push(message)
   input.value = ''
   isStreaming.value = true
   nextTick(() => { scrollBottom(); animateLast() })
-  setTimeout(simulateAgent, 400)
+  try {
+    await chatStream(message, {
+      mode: 'test',
+      message: text,
+      context: fileContext.map(file => file.path),
+    })
+  } catch (error) {
+    if (error.name !== 'AbortError') {
+      message.events.push({
+        id: `${message.id}-error`,
+        type: 'output',
+        data: reactive({ content: `Chat failed: ${error.message}`, streaming: false }),
+      })
+    }
+  } finally {
+    isStreaming.value = false
+    nextTick(scrollBottom)
+  }
 }
 
 /* ── animation helpers ──────────────────────────────────── */
@@ -119,103 +134,13 @@ function animSmoothScroll() {
   gsap.to(msgList.value, { scrollTop: msgList.value.scrollHeight, duration: 0.25, ease: 'power2.out' })
 }
 
-function simulateAgent() {
-  const id = Date.now()
-  const msg = reactive({
-    id, role: 'assistant', time: timeNow(), events: [],
-  })
-  messages.push(msg)
-  const thinking = showThinking(msg, { text: '', done: false, open: true })
-
-  const thought = `Analyzing request with file context: ${fileContext.map(f => f.path).join(', ')}. I need to understand the codebase structure, then dispatch sub-agents for parallel exploration, and finally propose code changes.`
-  let ti = 0
-  const t1 = setInterval(() => {
-    if (ti < thought.length) { thinking.text += thought[ti]; ti++; animSmoothScroll() }
-    else { clearInterval(t1); thinking.done = true; setTimeout(() => simulateTools(msg), 250) }
-  }, 8)
-
-  function simulateTools(msg) {
-    const visual = toolVisual('read')
-    const readCall = showTool(msg, {
-      name: 'read',
-      description: toolDescription('read'),
-      symbol: visual.symbol,
-      tone: visual.tone,
-      status: 'running',
-      input: '{\n  "path": "stratumcode/server.py",\n  "start_line": 1,\n  "end_line": 90\n}',
-      output: '',
-      open: true,
-    })
-
-    setTimeout(() => {
-      readCall.status = 'done'
-      readCall.output = 'Read 90 lines from stratumcode/server.py\nFound HTTP routes, tool registry access, and workspace context.'
-
-      const grepVisual = toolVisual('grep')
-      const grepCall = showTool(msg, {
-        name: 'grep',
-        description: toolDescription('grep'),
-        symbol: grepVisual.symbol,
-        tone: grepVisual.tone,
-        status: 'running',
-        input: '{\n  "pattern": "/api/tools|registry\\\\.",\n  "include": "*.py"\n}',
-        output: '',
-        open: true,
-      })
-
-      setTimeout(() => {
-        grepCall.status = 'done'
-        grepCall.output = 'stratumcode/server.py:22  GET /api/tools\nstratumcode/server.py:53  POST /api/tools/run\nstratumcode/tools/registry.py:25  list_all()'
-        setTimeout(() => simulateSubDispatch(msg), 220)
-      }, 620)
-    }, 680)
-  }
-
-  function simulateSubDispatch(msg) {
-    const first = showSubagent(msg, { name: '@explore', task: 'Search codebase for auth-related files', status: 'running', result: '', open: true })
-    const second = showSubagent(msg, { name: '@explore', task: 'Find all API route definitions', status: 'running', result: '', open: true })
-
-    setTimeout(() => {
-      first.status = 'done'
-      first.result = 'Found 3 files: auth.py, middleware.py, tokens.py'
-      setTimeout(() => {
-        second.status = 'done'
-        second.result = 'Found 6 routes: /api/providers, /api/chat, /api/config, ...'
-
-        setTimeout(() => {
-          showDiff(msg, {
-            path: 'stratumcode/server.py',
-            hunks: [
-              { type: 'add', lines: ['+    self.send_response(200)', '+    self.send_header("Content-Type", "application/json")', '+    self.end_headers()'] },
-              { type: 'keep', lines: ['     # existing route handling', '     if path == "/api/providers":'] },
-              { type: 'add', lines: ['+         return self.handle_chat(data)', '+', '+     def handle_chat(self, data):'] },
-            ],
-            accepted: null,
-          })
-          streamFinalReply(msg)
-        }, 600)
-      }, 500)
-    }, 600)
-  }
-
-  function streamFinalReply(msg) {
-    const full = 'I analyzed the codebase and found the relevant files. Here is the proposed change to add chat support to the server.'
-    const output = showOutput(msg, { content: '', streaming: true })
-    let i = 0
-    const timer = setInterval(() => {
-      if (i < full.length) { output.content += full[i]; i++; animSmoothScroll() }
-      else { clearInterval(timer); output.streaming = false; isStreaming.value = false }
-    }, 10)
-  }
-}
-
 function onKeydown(e) {
   if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send() }
 }
 
 function scrollBottom() { if (msgList.value) msgList.value.scrollTop = msgList.value.scrollHeight }
 
-const { showThinking, showTool, showSubagent, showDiff, showOutput } = useChatTimeline(animSmoothScroll)
+const { stream: chatStream, abort: abortChat } = useChatStream(animSmoothScroll)
 
 function animateLast() {
   const ids = Object.keys(msgRefs)
@@ -241,7 +166,7 @@ onMounted(() => {
     gsap.fromTo('.chat__composer', { y: 12, autoAlpha: 0 }, { y: 0, autoAlpha: 1, duration: 0.46, ease: 'power2.out', delay: 0.16 })
   }, chatRef.value)
 })
-onUnmounted(() => { gsapCtx?.revert() })
+onUnmounted(() => { abortChat(); gsapCtx?.revert() })
 </script>
 
 <template>
@@ -848,10 +773,39 @@ onUnmounted(() => { gsapCtx?.revert() })
 }
 
 .chat__msgs {
-  width: min(900px, calc(100% - 48px));
-  margin: 0 auto;
-  padding: 30px 4px 22px;
+  width: 100%;
+  margin: 0;
+  padding: 30px 0 22px;
   gap: 24px;
+  scrollbar-gutter: stable;
+  scrollbar-color: rgba(95, 113, 147, .42) transparent;
+  scrollbar-width: thin;
+}
+
+.chat__msgs::-webkit-scrollbar {
+  width: 12px;
+}
+
+.chat__msgs::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.chat__msgs::-webkit-scrollbar-thumb {
+  border: 4px solid transparent;
+  border-radius: 999px;
+  background: rgba(95, 113, 147, .38);
+  background-clip: padding-box;
+}
+
+.chat__msgs::-webkit-scrollbar-thumb:hover {
+  background: rgba(23, 86, 209, .52);
+  background-clip: padding-box;
+}
+
+.chat__msg {
+  width: min(900px, calc(100% - 48px));
+  margin-inline: auto;
+  padding-inline: 4px;
 }
 
 .chat__bubble {
@@ -1392,7 +1346,12 @@ onUnmounted(() => { gsapCtx?.revert() })
   }
 
   .chat__msgs {
+    width: 100%;
+  }
+
+  .chat__msg {
     width: calc(100% - 28px);
+    padding-inline: 0;
   }
 
   .chat__bubble {
