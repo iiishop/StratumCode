@@ -2,6 +2,7 @@
 import { ref, onMounted, onUnmounted, nextTick } from 'vue'
 import { gsap } from 'gsap'
 import { animate, stagger } from 'animejs'
+import ShuffleText from './ShuffleText.vue'
 
 defineProps({ active: { type: String, default: 'home' } })
 const emit = defineEmits(['navigate'])
@@ -118,13 +119,13 @@ onUnmounted(() => {
   <aside ref="sidebarRef" class="sb" :class="{ 'is-compact': compactLayout }" aria-label="Primary navigation">
     <header class="sb__header">
       <button class="sb__brand" type="button" aria-label="Open workspace" @click="navigate('home')">
-        <span class="sb__logo sb__rail-icon">SC</span>
-        <Transition name="sb-copy">
-          <span v-if="showContent" class="sb__brand-copy">
-            <strong>StratumCode</strong>
-            <small>Agent workspace</small>
-          </span>
-        </Transition>
+        <div class="sb__shuffle-logo">
+          <ShuffleText
+            :text="collapsed ? 'S' : 'StratumCode'"
+            :duration="0.56"
+            :stagger="0.035"
+          />
+        </div>
       </button>
 
       <button
@@ -268,6 +269,9 @@ onUnmounted(() => {
 
 .sb__brand {
   display: flex;
+  width: 100%;
+  height: 40px;
+  flex: 1 1 auto;
   min-width: 0;
   align-items: center;
   gap: 10px;
@@ -285,13 +289,30 @@ onUnmounted(() => {
   height: 34px;
   flex: 0 0 34px;
   place-items: center;
-  border: 1px solid #ffe37a;
+  border: 1px solid rgba(56, 189, 248, 0.3);
   border-radius: 9px;
-  color: #103b91;
-  background: var(--yellow);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.15);
-  font: 700 10px/1 var(--mono);
+  color: #38bdf8;
+  background: #0b1424;
+  font: 700 12px/1 var(--mono);
   letter-spacing: -0.06em;
+  text-shadow: 0 0 8px rgba(56, 189, 248, 0.4);
+}
+
+.sb__shuffle-logo {
+  display: flex;
+  width: 100%;
+  height: 40px;
+  min-width: 0;
+  flex: 1 1 auto;
+  align-items: center;
+  overflow: hidden;
+}
+
+.is-compact .sb__shuffle-logo :deep(.shuffle-text) {
+  color: var(--yellow);
+  font-size: 20px;
+  letter-spacing: 0;
+  text-align: center;
 }
 
 .sb__brand-copy,
@@ -574,8 +595,14 @@ onUnmounted(() => {
 
 /* Compact alignment is applied only near the end of the GSAP collapse. */
 .is-compact .sb__header {
-  justify-content: center;
-  padding-inline: 0;
+  justify-content: space-between;
+  gap: 2px;
+  padding-inline: 8px;
+}
+
+.is-compact .sb__brand {
+  width: 34px;
+  flex: 0 0 34px;
 }
 
 .is-compact .sb__collapse {

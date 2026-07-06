@@ -1,25 +1,9 @@
 <script setup>
 import { ref, reactive, onMounted, onUnmounted, nextTick } from 'vue'
 import { gsap } from 'gsap'
-import { animate as anime, stagger as animeStagger } from 'animejs'
-import hljs from 'highlight.js/lib/core'
-import python from 'highlight.js/lib/languages/python'
-import javascript from 'highlight.js/lib/languages/javascript'
-import typescript from 'highlight.js/lib/languages/typescript'
-import bash from 'highlight.js/lib/languages/bash'
-import json from 'highlight.js/lib/languages/json'
-import diff from 'highlight.js/lib/languages/diff'
-import 'highlight.js/styles/github.css'
-
-hljs.registerLanguage('python', python)
-hljs.registerLanguage('javascript', javascript)
-hljs.registerLanguage('typescript', typescript)
-hljs.registerLanguage('bash', bash)
-hljs.registerLanguage('json', json)
-hljs.registerLanguage('diff', diff)
-hljs.registerLanguage('js', javascript)
-hljs.registerLanguage('ts', typescript)
-hljs.registerLanguage('sh', bash)
+import ChatEvent from './chat/ChatEvent.vue'
+import { useChatTimeline } from '../composables/useChatTimeline'
+import FileReference from './FileReference.vue'
 
 /* ── todos ── */
 const todosOpen = ref(false)
@@ -130,92 +114,6 @@ function send() {
 
 /* ── animation helpers ──────────────────────────────────── */
 
-function animEl(msg, selector) {
-  const container = msgRefs[msg.id]
-  if (!container) return null
-  return container.querySelector(selector)
-}
-
-function animAll(msg, selector) {
-  const container = msgRefs[msg.id]
-  if (!container) return []
-  return [...container.querySelectorAll(selector)]
-}
-
-function animThinkingEntrance(msg) {
-  const el = animEl(msg, '.think')
-  if (!el) return
-  gsap.fromTo(el, { autoAlpha: 0, y: 6, scale: 0.97 }, { autoAlpha: 1, y: 0, scale: 1, duration: 0.3, ease: 'power2.out' })
-}
-
-function animThinkingDone(msg) {
-  const el = animEl(msg, '.think')
-  if (!el) return
-  anime({ targets: el, borderColor: ['var(--border)', 'var(--warn)'], duration: 400, easing: 'easeOutCubic' })
-  const bar = el.querySelector('.think__bar')
-  if (bar) anime({ targets: bar, color: ['var(--text-muted)', 'var(--warn)'], duration: 400, easing: 'easeOutCubic' })
-}
-
-function animToolEntrance(msg) {
-  const items = animAll(msg, '.tc:not(.tc--entered)')
-  if (!items.length) return
-  anime({
-    targets: items,
-    translateX: [-10, 0],
-    opacity: [0, 1],
-    delay: animeStagger(40),
-    duration: 300,
-    easing: 'easeOutCubic',
-    complete: () => items.forEach(el => el.classList.add('tc--entered')),
-  })
-}
-
-function animToolDone(msg, toolId) {
-  const el = animEl(msg, `.tc [data-tool-id="${toolId}"]`)?.closest('.tc')
-  if (!el) return
-  anime({ targets: el, borderLeftColor: ['var(--accent)', 'var(--ok)'], duration: 350, easing: 'easeOutCubic' })
-  const state = el.querySelector('.tc__state')
-  if (state) gsap.fromTo(state, { scale: 0.6, autoAlpha: 0 }, { scale: 1, autoAlpha: 1, duration: 0.3, ease: 'back.out(1.7)' })
-  const output = el.querySelector('.tc__body')
-  if (output) gsap.fromTo(output, { autoAlpha: 0, y: -4 }, { autoAlpha: 1, y: 0, duration: 0.25, ease: 'power2.out', delay: 0.1 })
-}
-
-function animSubEntrance(msg) {
-  const items = animAll(msg, '.sub:not(.sub--entered)')
-  if (!items.length) return
-  anime({
-    targets: items,
-    translateY: [-8, 0],
-    opacity: [0, 1],
-    delay: animeStagger(50),
-    duration: 280,
-    easing: 'easeOutCubic',
-    complete: () => items.forEach(el => el.classList.add('sub--entered')),
-  })
-}
-
-function animSubDone(msg, subId) {
-  const el = animEl(msg, `.sub [data-sub-id="${subId}"]`)?.closest('.sub')
-  if (!el) return
-  anime({ targets: el, borderColor: ['var(--border)', 'var(--ok-border)'], duration: 350, easing: 'easeOutCubic' })
-  const check = el.querySelector('.sub__check')
-  if (check) gsap.fromTo(check, { scale: 0, rotation: -90 }, { scale: 1, rotation: 0, duration: 0.35, ease: 'back.out(1.7)' })
-}
-
-function animDiffEntrance(msg) {
-  const el = animEl(msg, '.diff')
-  if (!el) return
-  gsap.fromTo(el, { autoAlpha: 0, y: 10, maxHeight: 0 }, { autoAlpha: 1, y: 0, maxHeight: 500, duration: 0.4, ease: 'power3.out' })
-}
-
-function animDiffOutcome(msg, accepted) {
-  const el = animEl(msg, '.diff')
-  if (!el) return
-  const status = el.querySelector('.diff__status')
-  if (status) gsap.fromTo(status, { scale: 0.9, autoAlpha: 0 }, { scale: 1, autoAlpha: 1, duration: 0.25, ease: 'back.out(1.4)' })
-  gsap.to(el.querySelector('.diff__actions'), { autoAlpha: 0, y: -4, duration: 0.2, ease: 'power2.in' })
-}
-
 function animSmoothScroll() {
   if (!msgList.value) return
   gsap.to(msgList.value, { scrollTop: msgList.value.scrollHeight, duration: 0.25, ease: 'power2.out' })
@@ -224,81 +122,68 @@ function animSmoothScroll() {
 function simulateAgent() {
   const id = Date.now()
   const msg = reactive({
-    id, role: 'assistant', content: '', time: timeNow(),
-    thinking: { text: '', done: false },
-    toolCalls: [],
-    subDispatch: [],
-    diff: null,
+    id, role: 'assistant', time: timeNow(), events: [],
   })
   messages.push(msg)
-  nextTick(() => { animSmoothScroll(); animThinkingEntrance(msg) })
+  const thinking = showThinking(msg, { text: '', done: false, open: true })
 
-  // thinking
   const thought = `Analyzing request with file context: ${fileContext.map(f => f.path).join(', ')}. I need to understand the codebase structure, then dispatch sub-agents for parallel exploration, and finally propose code changes.`
   let ti = 0
   const t1 = setInterval(() => {
-    if (ti < thought.length) { msg.thinking.text += thought[ti]; ti++; animSmoothScroll() }
-    else { clearInterval(t1); msg.thinking.done = true; nextTick(() => { animThinkingDone(msg); animSmoothScroll() }); setTimeout(() => simulateTools(msg), 250) }
+    if (ti < thought.length) { thinking.text += thought[ti]; ti++; animSmoothScroll() }
+    else { clearInterval(t1); thinking.done = true; setTimeout(() => simulateTools(msg), 250) }
   }, 8)
 
   function simulateTools(msg) {
-    const readCall = reactive({
-      id: 'read-server',
+    const visual = toolVisual('read')
+    const readCall = showTool(msg, {
       name: 'read',
+      description: toolDescription('read'),
+      symbol: visual.symbol,
+      tone: visual.tone,
       status: 'running',
       input: '{\n  "path": "stratumcode/server.py",\n  "start_line": 1,\n  "end_line": 90\n}',
       output: '',
-      _open: true,
+      open: true,
     })
-    msg.toolCalls.push(readCall)
-    nextTick(() => animToolEntrance(msg))
 
     setTimeout(() => {
       readCall.status = 'done'
       readCall.output = 'Read 90 lines from stratumcode/server.py\nFound HTTP routes, tool registry access, and workspace context.'
-      nextTick(() => animToolDone(msg, 'read-server'))
 
-      const grepCall = reactive({
-        id: 'grep-routes',
+      const grepVisual = toolVisual('grep')
+      const grepCall = showTool(msg, {
         name: 'grep',
+        description: toolDescription('grep'),
+        symbol: grepVisual.symbol,
+        tone: grepVisual.tone,
         status: 'running',
         input: '{\n  "pattern": "/api/tools|registry\\\\.",\n  "include": "*.py"\n}',
         output: '',
-        _open: true,
+        open: true,
       })
-      msg.toolCalls.push(grepCall)
-      nextTick(() => animToolEntrance(msg))
 
       setTimeout(() => {
         grepCall.status = 'done'
         grepCall.output = 'stratumcode/server.py:22  GET /api/tools\nstratumcode/server.py:53  POST /api/tools/run\nstratumcode/tools/registry.py:25  list_all()'
-        nextTick(() => {
-          animToolDone(msg, 'grep-routes')
-          animSmoothScroll()
-        })
         setTimeout(() => simulateSubDispatch(msg), 220)
       }, 620)
     }, 680)
   }
 
-  // sub-agent dispatch
   function simulateSubDispatch(msg) {
-    msg.subDispatch.push(reactive({ id: 1, name: '@explore', task: 'Search codebase for auth-related files', status: 'running', result: '' }))
-    msg.subDispatch.push(reactive({ id: 2, name: '@explore', task: 'Find all API route definitions', status: 'running', result: '' }))
-    nextTick(() => { animSubEntrance(msg); animSmoothScroll() })
+    const first = showSubagent(msg, { name: '@explore', task: 'Search codebase for auth-related files', status: 'running', result: '', open: true })
+    const second = showSubagent(msg, { name: '@explore', task: 'Find all API route definitions', status: 'running', result: '', open: true })
 
     setTimeout(() => {
-      msg.subDispatch[0].status = 'done'
-      msg.subDispatch[0].result = 'Found 3 files: auth.py, middleware.py, tokens.py'
-      nextTick(() => animSubDone(msg, 1))
+      first.status = 'done'
+      first.result = 'Found 3 files: auth.py, middleware.py, tokens.py'
       setTimeout(() => {
-        msg.subDispatch[1].status = 'done'
-        msg.subDispatch[1].result = 'Found 6 routes: /api/providers, /api/chat, /api/config, ...'
-        nextTick(() => animSubDone(msg, 2))
+        second.status = 'done'
+        second.result = 'Found 6 routes: /api/providers, /api/chat, /api/config, ...'
 
-        // diff preview
         setTimeout(() => {
-          msg.diff = reactive({
+          showDiff(msg, {
             path: 'stratumcode/server.py',
             hunks: [
               { type: 'add', lines: ['+    self.send_response(200)', '+    self.send_header("Content-Type", "application/json")', '+    self.end_headers()'] },
@@ -307,7 +192,6 @@ function simulateAgent() {
             ],
             accepted: null,
           })
-          nextTick(() => { animDiffEntrance(msg); animSmoothScroll() })
           streamFinalReply(msg)
         }, 600)
       }, 500)
@@ -316,10 +200,11 @@ function simulateAgent() {
 
   function streamFinalReply(msg) {
     const full = 'I analyzed the codebase and found the relevant files. Here is the proposed change to add chat support to the server.'
+    const output = showOutput(msg, { content: '', streaming: true })
     let i = 0
     const timer = setInterval(() => {
-      if (i < full.length) { msg.content += full[i]; i++; animSmoothScroll() }
-      else { clearInterval(timer); isStreaming.value = false }
+      if (i < full.length) { output.content += full[i]; i++; animSmoothScroll() }
+      else { clearInterval(timer); output.streaming = false; isStreaming.value = false }
     }, 10)
   }
 }
@@ -330,81 +215,14 @@ function onKeydown(e) {
 
 function scrollBottom() { if (msgList.value) msgList.value.scrollTop = msgList.value.scrollHeight }
 
+const { showThinking, showTool, showSubagent, showDiff, showOutput } = useChatTimeline(animSmoothScroll)
+
 function animateLast() {
   const ids = Object.keys(msgRefs)
   if (!ids.length) return
   const el = msgRefs[ids[ids.length - 1]]
   if (el) gsap.fromTo(el, { autoAlpha: 0, y: 8, scale: 0.98 }, { autoAlpha: 1, y: 0, scale: 1, duration: 0.25, ease: 'power2.out' })
 }
-
-const languageAliases = {
-  py: 'python',
-  js: 'javascript',
-  jsx: 'javascript',
-  ts: 'typescript',
-  tsx: 'typescript',
-  sh: 'bash',
-}
-
-function highlightCode(code, languageOrPath = '') {
-  const name = languageOrPath.toLowerCase().split('.').pop()
-  const language = languageAliases[name] || name
-  return hljs.getLanguage(language)
-    ? hljs.highlight(code, { language, ignoreIllegals: true }).value
-    : code.replace(/[&<>]/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' })[char])
-}
-
-function diffLineType(hunk, line) {
-  if (line.startsWith('+')) return 'add'
-  if (line.startsWith('-')) return 'remove'
-  return ['add', 'remove'].includes(hunk.type) ? hunk.type : 'keep'
-}
-
-function diffLinePrefix(hunk, line) {
-  if (/^[ +\-]/.test(line)) return line[0]
-  return { add: '+', remove: '-', keep: ' ' }[diffLineType(hunk, line)]
-}
-
-function diffLineContent(line) {
-  return /^[ +\-]/.test(line) ? line.slice(1) : line
-}
-
-function diffCount(diff, type) {
-  return diff.hunks.reduce(
-    (count, hunk) => count + hunk.lines.filter(line => diffLineType(hunk, line) === type).length,
-    0,
-  )
-}
-
-function renderContent(text) {
-  const parts = []
-  const codeRegex = /```(\w*)\n([\s\S]*?)```/g
-  let last = 0, match
-  while ((match = codeRegex.exec(text)) !== null) {
-    if (match.index > last) parts.push(...renderInline(text.slice(last, match.index)))
-    parts.push({ type: 'code', lang: match[1] || 'plaintext', content: match[2].trim() })
-    last = match.index + match[0].length
-  }
-  if (last < text.length) parts.push(...renderInline(text.slice(last)))
-  return parts
-}
-
-function renderInline(text) {
-  const parts = []
-  const boldRegex = /\*\*(.+?)\*\*/g
-  let last = 0, match
-  while ((match = boldRegex.exec(text)) !== null) {
-    if (match.index > last) parts.push({ type: 'text', content: text.slice(last, match.index) })
-    parts.push({ type: 'bold', content: match[1] })
-    last = match.index + match[0].length
-  }
-  if (last < text.length) parts.push({ type: 'text', content: text.slice(last) })
-  return parts
-}
-
-function toggleThinking(msg) { msg._thinkOpen = !msg._thinkOpen }
-function toggleToolCall(tc) { tc._open = !tc._open }
-function toggleSubTask(st) { st._open = !st._open }
 
 onMounted(() => {
   loadTools()
@@ -490,105 +308,10 @@ onUnmounted(() => { gsapCtx?.revert() })
             <div class="chat__bubble">
               <div class="chat__time">{{ m.time }}</div>
 
-              <!-- thinking -->
-              <div v-if="m.thinking" class="think" :class="{ 'think--done': m.thinking.done }" @click="toggleThinking(m)">
-                <div class="think__bar">
-                  <span class="think__icon">
-                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 2a3 3 0 0 0-3 3v1a6 6 0 0 0-5 5H3a3 3 0 0 0 0 6h1a6 6 0 0 0 5 5v1a3 3 0 0 0 6 0v-1a6 6 0 0 0 5-5h1a3 3 0 0 0 0-6h-1a6 6 0 0 0-5-5V5a3 3 0 0 0-3-3z"/></svg>
-                  </span>
-                  <span class="think__label">{{ m.thinking.done ? 'Thought for a few seconds' : 'Thinking…' }}</span>
-                  <span v-if="!m.thinking.done" class="think__dots"><i></i><i></i><i></i></span>
-                  <svg class="think__chevron" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polyline points="6 9 12 15 18 9"/></svg>
-                </div>
-                <Transition name="think-slide">
-                  <div v-if="m._thinkOpen !== false" class="think__body">{{ m.thinking.text }}</div>
-                </Transition>
-              </div>
-
-              <!-- sub-agent dispatch -->
-              <div v-for="st in m.subDispatch" :key="st.id" class="sub" :class="{ 'sub--done': st.status === 'done' }">
-                <div class="sub__bar" @click="toggleSubTask(st)">
-                  <span class="sub__icon" :data-sub-id="st.id">
-                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
-                  </span>
-                  <span class="sub__agent">{{ st.name }}</span>
-                  <span class="sub__task">{{ st.task }}</span>
-                  <span v-if="st.status === 'running'" class="sub__spinner"></span>
-                  <span v-else class="sub__check">
-                    <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="var(--ok)" stroke-width="2.5" stroke-linecap="round"><polyline points="20 6 9 17 4 12"/></svg>
-                  </span>
-                  <svg class="sub__chevron" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polyline points="6 9 12 15 18 9"/></svg>
-                </div>
-                <Transition name="sub-slide">
-                  <div v-if="st._open" class="sub__body">{{ st.result || 'Loading…' }}</div>
-                </Transition>
-              </div>
-
-              <!-- tool calls -->
-              <div
-                v-for="tc in m.toolCalls"
-                :key="tc.id"
-                class="tc"
-                :class="['tc--' + toolVisual(tc.name).tone, { 'tc--done': tc.status === 'done' }]"
-              >
-                <div class="tc__bar" @click="toggleToolCall(tc)">
-                  <span class="tc__icon" :data-tool-id="tc.id">{{ toolVisual(tc.name).symbol }}</span>
-                  <span class="tc__title">
-                    <strong>{{ tc.name }}</strong>
-                    <small>{{ toolDescription(tc.name) }}</small>
-                  </span>
-                  <span class="tc__state" :class="'tc__state--' + tc.status">
-                    <span v-if="tc.status === 'running'" class="tc__spinner"></span>
-                    {{ tc.status === 'running' ? 'Running' : 'Done' }}
-                  </span>
-                  <svg class="tc__chevron" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polyline points="6 9 12 15 18 9"/></svg>
-                </div>
-                <Transition name="tc-slide">
-                  <div v-if="tc._open" class="tc__body">
-                    <div class="tc__section"><div class="tc__section-label">Input</div><pre class="tc__pre">{{ tc.input }}</pre></div>
-                    <div v-if="tc.output" class="tc__section"><div class="tc__section-label">Output</div><pre class="tc__pre">{{ tc.output }}</pre></div>
-                  </div>
-                </Transition>
-              </div>
-
-              <!-- diff preview -->
-              <div v-if="m.diff" class="diff">
-                <div class="diff__head">
-                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
-                  <span class="diff__path">{{ m.diff.path }}</span>
-                  <span class="diff__tag diff__tag--add">+{{ diffCount(m.diff, 'add') }}</span>
-                  <span class="diff__tag diff__tag--remove">−{{ diffCount(m.diff, 'remove') }}</span>
-                </div>
-                <pre class="diff__code"><code><template v-for="(hunk, hi) in m.diff.hunks" :key="hi"><span
-                    v-for="(line, li) in hunk.lines"
-                    :key="hi + '-' + li"
-                    class="diff__line"
-                    :class="'diff__line--' + diffLineType(hunk, line)"
-                  ><span class="diff__marker">{{ diffLinePrefix(hunk, line) }}</span><span v-html="highlightCode(diffLineContent(line), m.diff.path)"></span></span></template></code></pre>
-                <div class="diff__actions" v-if="m.diff.accepted === null">
-                  <button class="diff__accept" @click="m.diff.accepted = true; nextTick(() => animDiffOutcome(m, true))">
-                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><polyline points="20 6 9 17 4 12"/></svg>
-                    Accept
-                  </button>
-                  <button class="diff__reject" @click="m.diff.accepted = false; nextTick(() => animDiffOutcome(m, false))">
-                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
-                    Reject
-                  </button>
-                </div>
-                <div v-else class="diff__status" :class="m.diff.accepted ? 'diff__status--ok' : 'diff__status--err'">
-                  {{ m.diff.accepted ? 'Accepted' : 'Rejected' }}
-                </div>
-              </div>
-
-              <!-- message text -->
-              <div v-if="m.content" class="chat__content">
-                <template v-for="(part, pi) in renderContent(m.content)" :key="pi">
-                  <pre v-if="part.type === 'code'" class="chat__code-block"><code :class="'language-' + part.lang" v-html="highlightCode(part.content, part.lang)"></code></pre>
-                  <strong v-else-if="part.type === 'bold'">{{ part.content }}</strong>
-                  <template v-else>{{ part.content }}</template>
-                </template>
-                <span v-if="m.role === 'assistant' && m === messages[messages.length - 1] && isStreaming" class="chat__cursor">|</span>
-              </div>
+              <div v-if="m.role === 'user'" class="chat__content">{{ m.content }}</div>
+              <TransitionGroup v-else name="timeline-event" tag="div" class="chat__timeline">
+                <ChatEvent v-for="event in m.events" :key="event.id" :event="event" />
+              </TransitionGroup>
             </div>
           </div>
         </div>
@@ -644,13 +367,14 @@ onUnmounted(() => { gsapCtx?.revert() })
       <div class="chat__composer">
         <div v-if="fileContext.length" class="chat__files">
           <span class="chat__files-label">Context</span>
-          <span v-for="f in fileContext" :key="f.path" class="chat__file-chip">
-            <span class="chat__file-ext">{{ f.lang.slice(0, 2) }}</span>
-            {{ f.path }}
-            <button class="chat__file-chip-x" type="button" @click="removeContextFile(f.path)" :aria-label="'Remove ' + f.path">
-              <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m6 6 12 12M18 6 6 18"/></svg>
-            </button>
-          </span>
+          <FileReference
+            v-for="f in fileContext"
+            :key="f.path"
+            :path="f.path"
+            :language="f.lang"
+            removable
+            @remove="removeContextFile(f.path)"
+          />
         </div>
 
         <div class="chat__input-row">
@@ -679,6 +403,32 @@ onUnmounted(() => { gsapCtx?.revert() })
 </template>
 
 <style scoped>
+.chat__timeline {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.timeline-event-enter-active {
+  transition: opacity .26s ease, transform .26s cubic-bezier(.22, 1, .36, 1);
+}
+
+.timeline-event-enter-from {
+  opacity: 0;
+  transform: translateY(10px) scale(.985);
+}
+
+.timeline-event-move {
+  transition: transform .26s cubic-bezier(.22, 1, .36, 1);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .timeline-event-enter-active,
+  .timeline-event-move {
+    transition-duration: .01ms;
+  }
+}
+
 .chat {
   display: flex; flex-direction: column;
   height: 100svh; overflow: hidden;
