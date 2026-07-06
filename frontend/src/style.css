@@ -5,14 +5,14 @@
   --bg: #fafafa;
   --bg-raised: #ffffff;
   --border: #e5e4e7;
-  --border-focus: #aa3bff;
+  --border-focus: #0284c7;
   --code-bg: #f4f3ec;
   --code-bg-hover: #eeece4;
-  --accent: #7c3aed;
-  --accent-bg: rgba(124, 58, 237, 0.06);
-  --accent-bg-hover: rgba(124, 58, 237, 0.1);
-  --accent-border: rgba(124, 58, 237, 0.3);
-  --accent-text: #6d28d9;
+  --accent: #0284c7;
+  --accent-bg: rgba(2, 132, 199, 0.06);
+  --accent-bg-hover: rgba(2, 132, 199, 0.1);
+  --accent-border: rgba(2, 132, 199, 0.3);
+  --accent-text: #0369a1;
   --ok: #059669;
   --ok-bg: rgba(5, 150, 105, 0.08);
   --ok-border: rgba(5, 150, 105, 0.3);
@@ -52,14 +52,14 @@
     --bg: #0a0a0b;
     --bg-raised: #111113;
     --border: #2e303a;
-    --border-focus: #a78bfa;
+    --border-focus: #38bdf8;
     --code-bg: #16171e;
     --code-bg-hover: #1e1f28;
-    --accent: #a78bfa;
-    --accent-bg: rgba(167, 139, 250, 0.08);
-    --accent-bg-hover: rgba(167, 139, 250, 0.14);
-    --accent-border: rgba(167, 139, 250, 0.3);
-    --accent-text: #c4b5fd;
+    --accent: #38bdf8;
+    --accent-bg: rgba(56, 189, 248, 0.08);
+    --accent-bg-hover: rgba(56, 189, 248, 0.14);
+    --accent-border: rgba(56, 189, 248, 0.3);
+    --accent-text: #7dd3fc;
     --ok: #34d399;
     --ok-bg: rgba(52, 211, 153, 0.1);
     --ok-border: rgba(52, 211, 153, 0.3);
@@ -85,15 +85,9 @@ body {
 }
 
 #app {
-  width: 1126px;
-  max-width: 100%;
-  margin: 0 auto;
-  padding: 32px 40px;
-  min-height: 100svh;
-
-  @media (max-width: 768px) {
-    padding: 20px 16px;
-  }
+  width: 100%;
+  height: 100svh;
+  overflow: hidden;
 }
 
 /* focus ring */
