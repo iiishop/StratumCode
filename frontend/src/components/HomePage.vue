@@ -813,7 +813,7 @@ onUnmounted(() => { abortChat(); gsapCtx?.revert() })
   padding: 0;
   border-radius: 0;
   color: var(--text);
-  font-size: 12.5px;
+  font-size: var(--font-body);
   line-height: 1.65;
 }
 
@@ -1026,7 +1026,7 @@ onUnmounted(() => { abortChat(); gsapCtx?.revert() })
   border-radius: 0;
   color: var(--text-h);
   background: transparent;
-  font-size: 12px;
+  font-size: var(--font-body);
 }
 
 .chat__input:focus {

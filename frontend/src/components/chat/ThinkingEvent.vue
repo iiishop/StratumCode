@@ -19,5 +19,5 @@ defineProps({ event: { type: Object, required: true } })
 </template>
 
 <style scoped>
-.thinking-copy { margin: 0; padding: 2px 3px 1px; color: #596c84; font-size: 11px; line-height: 1.65; white-space: pre-wrap; }
+.thinking-copy { margin: 0; padding: 3px; color: #596c84; font-size: 13px; line-height: 1.65; white-space: pre-wrap; }
 </style>

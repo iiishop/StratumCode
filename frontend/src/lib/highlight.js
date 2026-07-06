@@ -5,9 +5,13 @@ import typescript from 'highlight.js/lib/languages/typescript'
 import bash from 'highlight.js/lib/languages/bash'
 import json from 'highlight.js/lib/languages/json'
 import diff from 'highlight.js/lib/languages/diff'
+import css from 'highlight.js/lib/languages/css'
+import xml from 'highlight.js/lib/languages/xml'
+import markdown from 'highlight.js/lib/languages/markdown'
+import yaml from 'highlight.js/lib/languages/yaml'
 import 'highlight.js/styles/github.css'
 
-const languages = { python, javascript, typescript, bash, json, diff }
+const languages = { python, javascript, typescript, bash, json, diff, css, xml, markdown, yaml }
 Object.entries(languages).forEach(([name, grammar]) => hljs.registerLanguage(name, grammar))
 
 const aliases = {
@@ -17,6 +21,10 @@ const aliases = {
   ts: 'typescript',
   tsx: 'typescript',
   sh: 'bash',
+  html: 'xml',
+  vue: 'xml',
+  md: 'markdown',
+  yml: 'yaml',
 }
 
 export function highlightCode(code, languageOrPath = '') {

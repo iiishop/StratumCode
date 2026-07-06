@@ -1,3 +1,11 @@
+@font-face {
+  font-family: "Monocraft";
+  src: url("./assets/Monocraft.ttf") format("truetype");
+  font-style: normal;
+  font-weight: 400 700;
+  font-display: swap;
+}
+
 :root {
   --text: #3f5274;
   --text-h: #102a5c;
@@ -40,10 +48,14 @@
 
   --sans: "Aptos", "Segoe UI Variable", "Segoe UI", system-ui, sans-serif;
   --heading: "Bahnschrift", "Arial Narrow", "Aptos", sans-serif;
-  --mono: "Cascadia Code", "JetBrains Mono", "SFMono-Regular", Consolas, monospace;
+  --mono: "Monocraft", "Cascadia Code", "JetBrains Mono", "SFMono-Regular", Consolas, monospace;
+  --font-body: 14px;
+  --font-ui: 12px;
+  --font-caption: 11px;
+  --font-code: 12px;
 
   color-scheme: light;
-  font: 13px/1.55 var(--sans);
+  font: var(--font-body)/1.55 var(--sans);
   color: var(--text);
   background: var(--bg);
   font-synthesis: none;

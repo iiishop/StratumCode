@@ -19,6 +19,10 @@ class ChatProtocolTests(unittest.TestCase):
             started,
             ["thinking", "tool", "tool", "subagent", "diff", "output"],
         )
+        read_update = next(event for event in events if event.get("id") == "test-read" and event["op"] == "update")
+        grep_update = next(event for event in events if event.get("id") == "test-grep" and event["op"] == "update")
+        self.assertIn("class _Handler", read_update["patch"]["output"])
+        self.assertIn("server.py", grep_update["patch"]["output"])
         self.assertEqual(events[-1], {"op": "done"})
 
     def test_chat_endpoint_streams_ndjson(self):
@@ -56,6 +60,33 @@ class ChatProtocolTests(unittest.TestCase):
     def test_chat_requires_a_message(self):
         with self.assertRaisesRegex(ValueError, "message is required"):
             chat.stream({"mode": "test", "message": "  "})
+
+
+class FilePreviewTests(unittest.TestCase):
+    def test_file_preview_reads_real_workspace_content(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "sample.py").write_text("def hello():\n    return 'world'\n", encoding="utf-8")
+            server = create(root, 0, workspace_dir=root)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                request = Request(
+                    f"http://localhost:{server.server_port}/api/files/preview",
+                    data=json.dumps({"path": "sample.py"}).encode(),
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                with urlopen(request) as response:
+                    preview = json.load(response)
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=2)
+
+        self.assertIn("def hello", preview["content"])
+        self.assertEqual(preview["total_lines"], 2)
+        self.assertFalse(preview["truncated"])
 
 
 if __name__ == "__main__":

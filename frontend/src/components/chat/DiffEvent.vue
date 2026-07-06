@@ -131,7 +131,7 @@ onUnmounted(() => decisionTimeline?.revert())
 <style scoped>
 .event-diff__stats { display: flex; min-height: 20px; align-items: center; justify-content: flex-end; gap: 8px; margin: 0 2px 6px; padding-top: 1px; font: 700 10px/16px var(--mono, monospace); }
 .event-diff__add { color: #00a878; }.event-diff__remove { color: #e11d74; }
-.event-diff__code { margin: 0; padding: 7px 0; overflow: auto; border: 1px solid #dae3ef; border-radius: 8px; background: rgba(247, 249, 253, .86); color: #304863; font: 10px/1.55 var(--mono, monospace); }
+.event-diff__code { margin: 0; padding: 8px 0; overflow: auto; border: 1px solid #dae3ef; border-radius: 8px; background: rgba(247, 249, 253, .86); color: #304863; font: var(--font-code, 12px)/1.6 var(--mono, monospace); }
 .event-diff__line { display: block; padding: 0 10px; white-space: pre; }.event-diff__line--add { background: #e7fff7; }.event-diff__line--remove { background: #ffeaf3; }.event-diff__marker { display: inline-block; width: 16px; color: #8291a5; user-select: none; }
 .event-diff__footer { display: flex; min-height: 31px; align-items: center; justify-content: flex-end; gap: 7px; padding-top: 8px; }
 .event-diff__footer button { padding: 5px 10px; border-radius: 6px; font: 650 10px/1 inherit; cursor: pointer; transition: filter .18s ease, transform .18s ease; }

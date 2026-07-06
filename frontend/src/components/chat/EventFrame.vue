@@ -140,19 +140,19 @@ function moveSpotlight(event) {
 .event-frame__head { display: flex; width: 100%; min-height: 43px; align-items: center; gap: 9px; padding: 8px 11px; border: 0; color: #1b3656; background: transparent; text-align: left; cursor: pointer; }
 .event-frame__head.is-static { cursor: default; }.event-frame__head:disabled { opacity: 1; }
 .event-frame__titles { display: grid; min-width: 0; gap: 2px; }
-.event-frame__label { color: #153252; font: 720 11px/1.2 var(--mono, monospace); letter-spacing: .015em; }
+.event-frame__label { color: #153252; font: 720 var(--font-ui, 12px)/1.25 var(--mono, monospace); letter-spacing: .01em; }
 .event-frame__titles small {
   display: flex;
   min-height: 23px;
   align-items: center;
   overflow: visible;
   color: #76889f;
-  font-size: 10px;
+  font-size: var(--font-caption, 11px);
   line-height: 23px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.event-frame__status { margin-left: auto; color: var(--event); font: 750 9px/1 var(--mono, monospace); letter-spacing: .09em; text-transform: uppercase; }
+.event-frame__status { margin-left: auto; color: var(--event); font: 750 10px/1 var(--mono, monospace); letter-spacing: .07em; text-transform: uppercase; }
 .event-frame__status.is-running {
   color: transparent;
   background: linear-gradient(100deg, color-mix(in srgb, var(--event) 70%, #40536d) 30%, #fff 48%, var(--event) 66%);

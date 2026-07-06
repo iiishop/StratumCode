@@ -11,6 +11,8 @@ from .tools import registry
 
 _logger = logging.getLogger(__name__)
 _MAX_BODY_SIZE = 1_000_000
+_FILE_PREVIEW_LINES = 120
+_FILE_PREVIEW_BYTES = 64_000
 
 
 class _Handler(SimpleHTTPRequestHandler):
@@ -56,6 +58,8 @@ class _Handler(SimpleHTTPRequestHandler):
             self._handle_run(body)
         elif path == "/api/chat":
             self._handle_chat(body)
+        elif path == "/api/files/preview":
+            self._handle_file_preview(body)
 
         else:
             self._json({"error": "not found"}, 404)
@@ -92,7 +96,7 @@ class _Handler(SimpleHTTPRequestHandler):
 
     def _handle_chat(self, body: dict):
         try:
-            events = chat.stream(body)
+            events = chat.stream(body, self.workspace_dir)
         except ValueError as exc:
             self._json({"error": str(exc)}, 400)
             return
@@ -116,6 +120,38 @@ class _Handler(SimpleHTTPRequestHandler):
                 self.wfile.flush()
             except (BrokenPipeError, ConnectionResetError):
                 pass
+
+    def _handle_file_preview(self, body: dict):
+        path = body.get("path")
+        if not isinstance(path, str) or not path.strip():
+            self._json({"error": "path is required"}, 400)
+            return
+        tool = registry.get("read")
+        try:
+            result = asyncio.run(tool.execute(
+                {"path": path, "start_line": 1, "end_line": _FILE_PREVIEW_LINES},
+                {"directory": self.workspace_dir},
+            ))
+        except PermissionError as exc:
+            self._json({"error": str(exc)}, 403)
+            return
+        if result.title.startswith("[error]"):
+            self._json({"error": result.output}, 404)
+            return
+
+        content = result.output
+        encoded = content.encode("utf-8")
+        truncated_bytes = len(encoded) > _FILE_PREVIEW_BYTES
+        if truncated_bytes:
+            content = encoded[:_FILE_PREVIEW_BYTES].decode("utf-8", errors="ignore")
+        total_lines = result.metadata.get("total_lines", len(content.splitlines()))
+        self._json({
+            "path": path,
+            "content": content,
+            "total_lines": total_lines,
+            "shown_lines": min(total_lines, _FILE_PREVIEW_LINES),
+            "truncated": truncated_bytes or total_lines > _FILE_PREVIEW_LINES,
+        })
 
     def _json(self, data, status=200):
         payload = json.dumps(data, ensure_ascii=False).encode()

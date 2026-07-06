@@ -1,16 +1,30 @@
+import asyncio
 import json
 import time
 from collections.abc import Iterator
 from urllib.request import Request, urlopen
 
 from . import providers
+from .tools import registry
 
 
 def _start(event_id: str, event_type: str, data: dict) -> dict:
     return {"op": "start", "id": event_id, "event": event_type, "data": data}
 
 
-def test_stream(message: str, context: list[str], delay: float = 0.04) -> Iterator[dict]:
+def _execute_tool(name: str, params: dict, workspace_dir: str):
+    tool = registry.get(name)
+    if not tool:
+        raise ValueError(f"unknown tool: {name}")
+    return tool, asyncio.run(tool.execute(params, {"directory": workspace_dir}))
+
+
+def test_stream(
+    message: str,
+    context: list[str],
+    workspace_dir: str = ".",
+    delay: float = 0.04,
+) -> Iterator[dict]:
     """Backend-owned deterministic stream used to exercise the complete chat UI."""
     def pause(multiplier=1):
         if delay:
@@ -25,31 +39,41 @@ def test_stream(message: str, context: list[str], delay: float = 0.04) -> Iterat
     yield {"op": "update", "id": thinking, "patch": {"done": True}}
 
     read_id = "test-read"
+    read_params = {"path": "stratumcode/server.py", "start_line": 1, "end_line": 90}
+    read_tool = registry.get("read")
     pause(2)
     yield _start(read_id, "tool", {
-        "name": "read", "description": "Read a selected workspace file.", "symbol": "R",
+        "name": "read", "description": read_tool.description, "symbol": "R",
         "tone": "blue", "status": "running", "open": True,
-        "input": json.dumps({"path": "stratumcode/server.py", "start_line": 1, "end_line": 90}, indent=2),
+        "input": json.dumps(read_params, indent=2),
         "output": "",
     })
-    pause(4)
+    _, read_result = _execute_tool("read", read_params, workspace_dir)
+    pause(2)
     yield {"op": "update", "id": read_id, "patch": {
-        "status": "done",
-        "output": "Read 90 lines from stratumcode/server.py\nFound the HTTP handler and API routes.",
+        "status": "error" if read_result.title.startswith("[error]") else "done",
+        "output": read_result.output,
+        "title": read_result.title,
+        "metadata": read_result.metadata,
     }}
 
     grep_id = "test-grep"
+    grep_params = {"pattern": "/api/tools|registry\\.", "include": "*.py"}
+    grep_tool = registry.get("grep")
     pause(2)
     yield _start(grep_id, "tool", {
-        "name": "grep", "description": "Search workspace text with ripgrep.", "symbol": "/",
+        "name": "grep", "description": grep_tool.description, "symbol": "/",
         "tone": "red", "status": "running", "open": True,
-        "input": json.dumps({"pattern": "/api/tools|registry\\.", "include": "*.py"}, indent=2),
+        "input": json.dumps(grep_params, indent=2),
         "output": "",
     })
-    pause(4)
+    _, grep_result = _execute_tool("grep", grep_params, workspace_dir)
+    pause(2)
     yield {"op": "update", "id": grep_id, "patch": {
-        "status": "done",
-        "output": "stratumcode/server.py:24  GET /api/tools\nstratumcode/server.py:65  POST /api/tools/run",
+        "status": "error" if grep_result.title.startswith("[error]") else "done",
+        "output": grep_result.output,
+        "title": grep_result.title,
+        "metadata": grep_result.metadata,
     }}
 
     agent_id = "test-agent"
@@ -128,7 +152,7 @@ def provider_stream(provider_id: int, model: str, message: str, context: list[st
     yield {"op": "done"}
 
 
-def stream(request: dict) -> Iterator[dict]:
+def stream(request: dict, workspace_dir: str = ".") -> Iterator[dict]:
     message = request.get("message", "").strip()
     if not message:
         raise ValueError("message is required")
@@ -136,5 +160,5 @@ def stream(request: dict) -> Iterator[dict]:
     if not isinstance(context, list) or not all(isinstance(path, str) for path in context):
         raise ValueError("context must be an array of file paths")
     if request.get("mode") == "test":
-        return test_stream(message, context)
+        return test_stream(message, context, workspace_dir)
     return provider_stream(request.get("provider_id"), request.get("model", ""), message, context)
