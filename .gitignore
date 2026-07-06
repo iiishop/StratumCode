@@ -7,3 +7,5 @@ dist/
 frontend/node_modules/
 frontend/dist/
 *.db
+stratumcode.db-shm
+stratumcode.db-wal

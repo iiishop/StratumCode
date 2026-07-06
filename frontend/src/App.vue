@@ -187,21 +187,43 @@ watch(currentView, (v) => { if (v === 'providers' && !providers.value.length) lo
   <div class="layout">
     <Sidebar :active="currentView" @navigate="currentView = $event" />
 
-    <main class="main">
+    <section class="shell">
+      <header class="shell__bar">
+        <div class="shell__crumbs">
+          <span>StratumCode</span>
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="m9 18 6-6-6-6"/></svg>
+          <strong>{{ currentView === 'home' ? 'Workspace' : 'Providers' }}</strong>
+        </div>
+        <div class="shell__runtime"><span></span>Local runtime</div>
+      </header>
+
+      <main class="main">
       <!-- Providers view -->
       <div v-if="currentView === 'providers'" class="pm">
         <div class="pm__top">
-          <h2 class="pm__heading">Providers</h2>
+          <div>
+            <h1 class="pm__heading">Model providers</h1>
+            <p class="pm__intro">Connect endpoints, inspect available models, and verify requests.</p>
+          </div>
           <button v-if="!showForm" class="pm__add-btn" @click="showForm = true">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
-            Add
+            Add provider
           </button>
         </div>
 
         <!-- add form -->
         <Transition name="form-slide">
           <div v-if="showForm" class="pm__add">
-            <p class="pm__preset-label">Quick setup</p>
+            <div class="pm__add-head">
+              <div>
+                <h2>New connection</h2>
+                <p>Start with a preset or enter a compatible endpoint.</p>
+              </div>
+              <button type="button" @click="showForm = false" aria-label="Close form">
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="m6 6 12 12M18 6 6 18"/></svg>
+              </button>
+            </div>
+            <p class="pm__preset-label">Provider presets</p>
             <div class="pm__presets">
               <button v-for="p in presets" :key="p.name" class="pm__preset" @click="selectPreset(p)">
                 <span class="pm__preset-avatar" :style="{ background: p.color }">{{ p.name[0] }}</span>
@@ -213,12 +235,20 @@ watch(currentView, (v) => { if (v === 'providers' && !providers.value.length) lo
             </div>
 
             <form class="pm__form" @submit.prevent="save">
-              <input v-model="form.name" placeholder="Provider name" class="pm__input" />
-              <input v-model="form.base_url" placeholder="https://api.openai.com" class="pm__input pm__input--url" />
+              <label class="pm__field">
+                <span>Name</span>
+                <input v-model="form.name" placeholder="OpenAI" class="pm__input" />
+              </label>
+              <label class="pm__field pm__field--wide">
+                <span>Base URL</span>
+                <input v-model="form.base_url" placeholder="https://api.openai.com" class="pm__input pm__input--url" />
+              </label>
+              <label class="pm__field pm__field--key">
+                <span>API key</span>
+                <input v-model="form.api_key" placeholder="sk-..." type="password" class="pm__input pm__input--key" />
+              </label>
               <div class="pm__key-row">
-                <input v-model="form.api_key" placeholder="API Key" type="password" class="pm__input pm__input--key" />
-                <button class="pm__save-btn">Save</button>
-                <button type="button" class="pm__cancel-btn" @click="showForm = false">Cancel</button>
+                <button class="pm__save-btn">Save provider</button>
               </div>
             </form>
           </div>
@@ -226,10 +256,19 @@ watch(currentView, (v) => { if (v === 'providers' && !providers.value.length) lo
 
         <!-- empty -->
         <div class="pm__empty" v-if="!providers.length && !showForm">
-          <p>No providers yet. Click "Add" to connect your first API endpoint.</p>
+          <span class="pm__empty-mark">+</span>
+          <div>
+            <h2>No providers connected</h2>
+            <p>Add an API endpoint before starting a model-backed session.</p>
+          </div>
         </div>
 
         <!-- provider rows -->
+        <div v-if="providers.length" class="pm__table-head">
+          <span>Provider</span>
+          <span>Status</span>
+          <span>Actions</span>
+        </div>
         <TransitionGroup name="row" tag="div" class="pm__rows" v-if="providers.length">
           <div
             v-for="p in providers" :key="p.id"
@@ -238,10 +277,14 @@ watch(currentView, (v) => { if (v === 'providers' && !providers.value.length) lo
             :class="{ 'is-open': expandedId === p.id }"
           >
             <div class="pm__row-main">
-              <span :ref="(el) => setDotRef(p.id, el)" class="pm__row-dot" :style="{ background: statusColor(state[p.id]) }"></span>
+              <span class="pm__provider-mark">{{ p.name.slice(0, 2).toUpperCase() }}</span>
               <div class="pm__row-info" @click="toggleExpand(p)">
                 <span class="pm__row-name">{{ p.name }}</span>
                 <span class="pm__row-url">{{ p.base_url }}</span>
+              </div>
+              <div class="pm__row-status">
+                <span :ref="(el) => setDotRef(p.id, el)" class="pm__row-dot" :style="{ background: statusColor(state[p.id]) }"></span>
+                {{ statusLabel(state[p.id]) || 'Not tested' }}
               </div>
               <div class="pm__row-actions">
                 <button class="pm__act" @click.stop="testConn(p)" :disabled="state[p.id]?.loading === 'conn'" title="Test connection">
@@ -289,7 +332,8 @@ watch(currentView, (v) => { if (v === 'providers' && !providers.value.length) lo
 
       <!-- Home view -->
       <HomePage v-if="currentView === 'home'" />
-    </main>
+      </main>
+    </section>
   </div>
 </template>
 
@@ -486,4 +530,430 @@ watch(currentView, (v) => { if (v === 'providers' && !providers.value.length) lo
 .slide-leave-active { transition: all 0.12s ease; overflow: hidden; }
 .slide-enter-from, .slide-leave-to { opacity: 0; max-height: 0; }
 .slide-enter-to, .slide-leave-from { max-height: 400px; }
+
+/* visual system override */
+.layout {
+  display: flex;
+  height: 100svh;
+  overflow: hidden;
+  background: var(--bg);
+}
+
+.shell {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  flex-direction: column;
+}
+
+.shell__bar {
+  display: flex;
+  min-height: 48px;
+  flex: 0 0 48px;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 20px;
+  border-bottom: 1px solid var(--border);
+  background: rgba(21, 21, 20, 0.94);
+}
+
+.shell__crumbs,
+.shell__runtime {
+  display: flex;
+  align-items: center;
+}
+
+.shell__crumbs {
+  gap: 7px;
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.shell__crumbs strong {
+  color: var(--text-h);
+  font-weight: 550;
+}
+
+.shell__runtime {
+  gap: 7px;
+  color: var(--text-muted);
+  font: 10px/1 var(--mono);
+}
+
+.shell__runtime span {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--ok);
+}
+
+.main {
+  min-height: 0;
+  flex: 1;
+  overflow: auto;
+  background:
+    linear-gradient(rgba(255, 255, 255, 0.012) 1px, transparent 1px),
+    var(--bg);
+  background-size: 100% 48px;
+}
+
+.pm {
+  width: min(1120px, 100%);
+  max-width: none;
+  margin: 0 auto;
+  padding: 48px 56px 80px;
+}
+
+.pm__top {
+  align-items: flex-end;
+  margin-bottom: 38px;
+}
+
+.pm__heading {
+  margin: 0;
+  color: var(--text-h);
+  font: 570 clamp(26px, 3vw, 34px)/1.05 var(--heading);
+  letter-spacing: -0.035em;
+}
+
+.pm__intro {
+  max-width: 520px;
+  margin: 9px 0 0;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.pm__add-btn {
+  height: 36px;
+  padding: 0 15px;
+  border: 1px solid var(--accent);
+  border-radius: var(--radius-sm);
+  color: #fff5f1;
+  background: var(--accent);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.13);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.pm__add-btn:hover {
+  border-color: var(--accent-hover);
+  background: var(--accent-hover);
+}
+
+.pm__add {
+  margin-bottom: 40px;
+  padding: 24px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-lg);
+  background: #191817;
+  box-shadow: var(--shadow);
+}
+
+.pm__add-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  margin-bottom: 24px;
+}
+
+.pm__add-head h2,
+.pm__empty h2 {
+  margin: 0;
+  color: var(--text-h);
+  font: 560 18px/1.2 var(--heading);
+  letter-spacing: -0.02em;
+}
+
+.pm__add-head p,
+.pm__empty p {
+  margin: 5px 0 0;
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.pm__add-head > button {
+  display: grid;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  place-items: center;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text-muted);
+  background: transparent;
+  cursor: pointer;
+}
+
+.pm__add-head > button:hover {
+  color: var(--text-h);
+  border-color: var(--border-strong);
+  background: var(--code-bg-hover);
+}
+
+.pm__preset-label {
+  margin: 0 0 10px;
+  color: var(--text-muted);
+  font: 550 10px/1 var(--mono);
+  letter-spacing: 0;
+  text-transform: none;
+}
+
+.pm__presets {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 7px;
+  margin-bottom: 22px;
+}
+
+.pm__preset {
+  min-width: 0;
+  padding: 9px;
+  border-color: var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+}
+
+.pm__preset:hover {
+  border-color: var(--accent-border);
+  background: var(--accent-bg);
+  box-shadow: none;
+}
+
+.pm__preset-avatar {
+  width: 25px;
+  height: 25px;
+  border-radius: 7px;
+  filter: saturate(0.68);
+}
+
+.pm__preset-name {
+  color: var(--text-h);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.pm__preset-url {
+  max-width: 190px;
+  color: var(--text-muted);
+  font-size: 9px;
+}
+
+.pm__form {
+  display: grid;
+  grid-template-columns: 0.75fr 1.5fr 1.25fr auto;
+  gap: 10px;
+  align-items: end;
+  padding-top: 20px;
+  border-top: 1px solid var(--border);
+}
+
+.pm__field {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.pm__field > span {
+  color: #918b87;
+  font-size: 10px;
+  font-weight: 550;
+}
+
+.pm__input {
+  width: 100%;
+  height: 38px;
+  padding: 0 11px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text-h);
+  background: var(--code-bg);
+}
+
+.pm__input::placeholder { color: #595552; }
+.pm__input:focus {
+  border-color: var(--accent-border);
+  box-shadow: 0 0 0 3px var(--accent-bg);
+}
+
+.pm__key-row { display: flex; }
+
+.pm__save-btn {
+  height: 38px;
+  padding: 0 16px;
+  border-radius: var(--radius-sm);
+  color: #fff5f1;
+  background: var(--accent);
+  white-space: nowrap;
+}
+
+.pm__save-btn:hover { background: var(--accent-hover); }
+
+.pm__empty {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  padding: 34px 4px;
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+  text-align: left;
+}
+
+.pm__empty-mark {
+  display: grid;
+  width: 42px;
+  height: 42px;
+  flex: 0 0 42px;
+  place-items: center;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  color: var(--accent-text);
+  background: var(--accent-bg);
+  font: 300 24px/1 var(--sans);
+}
+
+.pm__table-head {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 150px 148px;
+  gap: 14px;
+  padding: 0 4px 9px 58px;
+  color: var(--text-muted);
+  font: 9px/1 var(--mono);
+}
+
+.pm__table-head span:last-child { text-align: right; }
+
+.pm__rows {
+  border-top: 1px solid var(--border-strong);
+}
+
+.pm__row {
+  border-bottom-color: var(--border);
+  background: rgba(21, 21, 20, 0.78);
+}
+
+.pm__row:hover { background: #191817; }
+
+.pm__row-main {
+  display: grid;
+  grid-template-columns: 40px minmax(0, 1fr) 150px 148px;
+  gap: 14px;
+  min-height: 64px;
+  padding: 9px 4px;
+}
+
+.pm__provider-mark {
+  display: grid;
+  width: 34px;
+  height: 34px;
+  place-items: center;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: #a49d98;
+  background: var(--code-bg);
+  font: 600 9px/1 var(--mono);
+}
+
+.pm__row-info {
+  align-self: center;
+  gap: 2px;
+}
+
+.pm__row-name {
+  color: var(--text-h);
+  font-size: 12px;
+}
+
+.pm__row-url {
+  color: var(--text-muted);
+  font-size: 10px;
+}
+
+.pm__row-status {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--text-muted);
+  font-size: 10px;
+}
+
+.pm__row-dot {
+  width: 6px;
+  height: 6px;
+  border: 1px solid var(--border-strong);
+  background: transparent;
+}
+
+.pm__row-actions {
+  justify-content: flex-end;
+  gap: 3px;
+}
+
+.pm__act {
+  width: 31px;
+  height: 31px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  color: var(--text-muted);
+}
+
+.pm__act:hover {
+  border-color: var(--border);
+  color: var(--text-h);
+  background: var(--code-bg-hover);
+}
+
+.pm__toast {
+  margin: 0 4px 10px 58px;
+  border-radius: var(--radius-sm);
+}
+
+.pm__models {
+  margin: 0 4px 12px 58px;
+  border-color: var(--border);
+  border-radius: var(--radius);
+  background: var(--code-bg);
+}
+
+.pm__models-head {
+  height: 38px;
+  background: #181716;
+}
+
+.pm__models-item {
+  padding: 8px 11px;
+  border-bottom-color: #242220;
+  color: #c8c1bc;
+}
+
+.pm__models-item:hover { background: var(--code-bg-hover); }
+
+@media (max-width: 900px) {
+  .pm { padding: 36px 28px 64px; }
+  .pm__presets { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .pm__form { grid-template-columns: 1fr 1fr; }
+  .pm__field--key { grid-column: 1 / 2; }
+  .pm__key-row { grid-column: 2 / 3; }
+  .pm__save-btn { width: 100%; }
+  .pm__table-head { display: none; }
+  .pm__row-main { grid-template-columns: 40px minmax(0, 1fr) auto; }
+  .pm__row-status { display: none; }
+}
+
+@media (max-width: 620px) {
+  .shell__bar { padding-inline: 14px; }
+  .shell__runtime { display: none; }
+  .pm { padding: 28px 18px 48px; }
+  .pm__top { align-items: flex-start; gap: 18px; }
+  .pm__add-btn { flex: 0 0 auto; }
+  .pm__presets { grid-template-columns: 1fr; }
+  .pm__form { grid-template-columns: 1fr; }
+  .pm__field,
+  .pm__field--key,
+  .pm__key-row { grid-column: 1; }
+  .pm__row-main { grid-template-columns: 36px minmax(0, 1fr) auto; gap: 8px; }
+  .pm__provider-mark { width: 30px; height: 30px; }
+  .pm__row-actions .pm__act:not(.pm__act--chevron) { display: none; }
+  .pm__toast,
+  .pm__models { margin-left: 4px; }
+}
 </style>
