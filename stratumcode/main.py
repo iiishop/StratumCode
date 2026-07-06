@@ -12,6 +12,7 @@ from .server import create as create_server
 
 FRONTEND_DIR = Path(__file__).resolve().parent.parent / "frontend"
 DIST_DIR = FRONTEND_DIR / "dist"
+WORKSPACE_DIR = FRONTEND_DIR.parent
 
 
 def _free_port():
@@ -36,7 +37,7 @@ def main():
             "npm run build", cwd=str(FRONTEND_DIR), shell=True, check=True,
         )
 
-    server = create_server(DIST_DIR)
+    server = create_server(DIST_DIR, workspace_dir=WORKSPACE_DIR)
     port = server.server_address[1]
     threading.Thread(target=server.serve_forever, daemon=True).start()
 
@@ -46,7 +47,7 @@ def main():
 
 def main_dev():
     api_port = _free_port()
-    server = create_server(DIST_DIR, api_port)  # API only, 静态文件走 Vite
+    server = create_server(DIST_DIR, api_port, workspace_dir=WORKSPACE_DIR)  # API only, 静态文件走 Vite
     threading.Thread(target=server.serve_forever, daemon=True).start()
 
     env = {**os.environ, "VITE_API_PORT": str(api_port)}

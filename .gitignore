@@ -9,3 +9,4 @@ frontend/dist/
 *.db
 stratumcode.db-shm
 stratumcode.db-wal
+.claude/settings.local.json
