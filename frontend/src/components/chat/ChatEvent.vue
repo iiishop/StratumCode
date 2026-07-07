@@ -9,6 +9,7 @@ import HypothesisEvent from './HypothesisEvent.vue'
 import EvidenceEvent from './EvidenceEvent.vue'
 import EvidenceRelationEvent from './EvidenceRelationEvent.vue'
 import VerdictEvent from './VerdictEvent.vue'
+import UsageEvent from './UsageEvent.vue'
 
 defineProps({ event: { type: Object, required: true } })
 
@@ -23,6 +24,7 @@ const eventComponents = {
   evidence: EvidenceEvent,
   evidence_relation: EvidenceRelationEvent,
   verdict: VerdictEvent,
+  usage: UsageEvent,
 }
 </script>
 

@@ -7,6 +7,7 @@ import re
 import time
 from collections.abc import Iterator
 from dataclasses import asdict
+from datetime import datetime, timezone
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 from uuid import uuid4
@@ -62,7 +63,9 @@ def _call_model(
     choices = data.get("choices") or []
     if not choices or not isinstance(choices[0].get("message"), dict):
         raise ValueError("provider returned no assistant message")
-    return choices[0]["message"]
+    message = choices[0]["message"]
+    message["_usage"] = data.get("usage") or {}
+    return message
 
 
 def _content_text(content) -> str:
@@ -91,6 +94,7 @@ def evidence_stream(
 
     provider = setting["provider"]
     model = setting["model_id"]
+    pricing_rules = providers.get_model_pricing(provider["id"], model)
     run = EvidenceRun(hypothesis)
     run.transition(RunState.GATHERING)
     policy = EvidencePolicy(max_rounds=max_rounds or MAX_AGENT_ROUNDS)
@@ -115,7 +119,11 @@ def evidence_stream(
     messages = [
         {
             "role": "system",
-            "content": prompt.build_evidence(
+            "content": prompt.build_evidence_static(),
+        },
+        {
+            "role": "system",
+            "content": prompt.build_evidence_context(
                 hypothesis=hypothesis,
                 directory=workspace_dir,
                 platform=platform.system(),
@@ -128,27 +136,42 @@ def evidence_stream(
     ]
     observed_calls: dict[str, dict] = {}
     empty_tool_rounds = 0
+    usage_total = _empty_usage(pricing_rules)
+    next_system_hint = ""
 
     for round_index in range(policy.max_rounds):
         allowed_tools, _, checkpoint_instruction = policy.next_request(run)
         phase_before = policy.phase
+        system_parts = []
+        if next_system_hint:
+            system_parts.append(next_system_hint)
+            next_system_hint = ""
         if checkpoint_instruction:
-            messages.append({
+            system_parts.extend(
+                part for part in (
+                    checkpoint_instruction,
+                    _checkpoint_observations(observed_calls),
+                )
+                if part
+            )
+        request_messages = messages
+        if system_parts:
+            request_messages = messages + [{
                 "role": "system",
-                "content": "\n\n".join(
-                    part for part in (
-                        checkpoint_instruction,
-                        _checkpoint_observations(observed_calls),
-                    )
-                    if part
-                ),
-            })
+                "content": "\n\n".join(system_parts),
+            }]
         assistant = _call_model(
             provider,
             model,
-            messages,
-            tools=agent_tools(DISCOVERY_TOOLS, allowed_tools),
+            request_messages,
+            tools=agent_tools(DISCOVERY_TOOLS),
         )
+        if usage := _usage_delta(pricing_rules, assistant.pop("_usage", {})):
+            _add_usage(usage_total, usage)
+            yield _start(f"{run_id}-usage-{round_index}", "usage", {
+                "delta": usage,
+                "total": usage_total,
+            })
         content = _content_text(assistant.get("content"))
         tool_calls = assistant.get("tool_calls") or []
         messages.append({
@@ -168,30 +191,25 @@ def evidence_stream(
             empty_tool_rounds += 1
             if empty_tool_rounds >= MAX_EMPTY_TOOL_ROUNDS:
                 policy.request_checkpoint()
-                messages.append({
-                    "role": "system",
-                    "content": (
-                        "You have stopped without tool calls twice. Record evidence "
-                        "from existing observations or conclude if enough evidence is recorded."
-                    ),
-                })
+                next_system_hint = (
+                    "You have stopped without tool calls twice. Record evidence "
+                    "from existing observations or conclude if enough evidence is recorded."
+                )
                 if not run.evidence:
                     break
                 continue
             if policy.phase != EvidencePhase.EVALUATE and (run.evidence or observed_calls):
-                messages.append({
-                    "role": "system",
-                    "content": "Continue the current evidence phase. Use one of the tools "
-                    "available in this phase rather than stopping.",
-                })
+                next_system_hint = (
+                    "Continue the current evidence phase. Use one of the tools "
+                    "available in this phase rather than stopping."
+                )
                 continue
             if not run.evidence and observed_calls:
                 policy.request_checkpoint()
-                messages.append({
-                    "role": "system",
-                    "content": "You have tool observations but no recorded evidence. "
-                    "The next turn must call record_evidence.",
-                })
+                next_system_hint = (
+                    "You have tool observations but no recorded evidence. "
+                    "The next turn must call record_evidence."
+                )
                 continue
             break
 
@@ -220,6 +238,8 @@ def evidence_stream(
                     policy=policy,
                 )
                 yield from emitted
+                if name == "record_evidence":
+                    _compact_tool_message(messages, arguments)
                 if policy.phase != phase_before:
                     yield {"op": "update", "id": stage_id, "patch": {
                         "phase": policy.phase.value,
@@ -289,6 +309,101 @@ def _fallback_summary(run: EvidenceRun) -> str:
     return "Verdict computed from recorded evidence: " + "; ".join(findings)
 
 
+def _compact_tool_message(messages: list[dict], evidence_args: dict) -> None:
+    source_call_id = evidence_args.get("source_tool_call_id")
+    if not source_call_id:
+        return
+    compact = json.dumps({
+        "tool_call_id": source_call_id,
+        "compacted": True,
+        "summary": "Tool output compacted after this evidence was recorded.",
+        "recorded_evidence": {
+            "id": evidence_args.get("evidence_id"),
+            "source_uri": evidence_args.get("source_uri"),
+            "excerpt": evidence_args.get("excerpt"),
+        },
+    }, ensure_ascii=False)
+    for message in messages:
+        if message.get("role") == "tool" and message.get("tool_call_id") == source_call_id:
+            message["content"] = compact
+            return
+
+
+def _empty_usage(pricing_rules: list[dict]) -> dict:
+    return {
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "cached_tokens": 0,
+        "total_tokens": 0,
+        "cost": 0.0,
+        "currency": _pricing_currency(pricing_rules),
+    }
+
+
+def _usage_delta(pricing_rules: list[dict], usage: dict) -> dict:
+    if not usage:
+        return {}
+    input_tokens = int(usage.get("prompt_tokens") or 0)
+    output_tokens = int(usage.get("completion_tokens") or 0)
+    details = usage.get("prompt_tokens_details") or {}
+    cached_tokens = int(
+        usage.get("prompt_cache_hit_tokens")
+        or details.get("cached_tokens")
+        or 0
+    )
+    pricing = _active_pricing(pricing_rules)
+    cost = _usage_cost(input_tokens, output_tokens, cached_tokens, pricing) if pricing else 0.0
+    return {
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "cached_tokens": cached_tokens,
+        "total_tokens": int(usage.get("total_tokens") or input_tokens + output_tokens),
+        "cost": round(cost, 6),
+        "currency": (pricing or {}).get("currency") or _pricing_currency(pricing_rules),
+    }
+
+
+def _add_usage(total: dict, delta: dict) -> None:
+    for key in ("input_tokens", "output_tokens", "cached_tokens", "total_tokens"):
+        total[key] += delta.get(key, 0)
+    total["cost"] = round(total["cost"] + delta.get("cost", 0), 6)
+    total["currency"] = delta.get("currency") or total["currency"]
+
+
+def _pricing_currency(pricing_rules: list[dict]) -> str:
+    pricing = _active_pricing(pricing_rules)
+    return (pricing or {}).get("currency", "USD")
+
+
+def _active_pricing(rules: list[dict]) -> dict | None:
+    if isinstance(rules, dict):
+        rules = [rules]
+    if not isinstance(rules, list):
+        return None
+    now = datetime.now(timezone.utc)
+    minute = now.hour * 60 + now.minute
+    for rule in rules:
+        start = _minute(rule.get("start", "00:00"))
+        end = _minute(rule.get("end", "24:00"))
+        if start <= minute < end or (end < start and (minute >= start or minute < end)):
+            return rule
+    return rules[0] if rules else None
+
+
+def _minute(value: str) -> int:
+    hour, minute = [int(part) for part in value.split(":", 1)]
+    return hour * 60 + minute
+
+
+def _usage_cost(input_tokens: int, output_tokens: int, cached_tokens: int, pricing: dict) -> float:
+    uncached_input = max(0, input_tokens - cached_tokens)
+    return (
+        uncached_input * float(pricing.get("input_per_m") or 0)
+        + output_tokens * float(pricing.get("output_per_m") or 0)
+        + cached_tokens * float(pricing.get("cache_per_m") or 0)
+    ) / 1_000_000
+
+
 def _no_evidence_summary(observed_calls: dict[str, dict]) -> str:
     summary = (
         "Evidence gathering ended without a valid evidence record. "
@@ -351,7 +466,7 @@ def _useful_excerpt_candidate(line: str) -> bool:
     if len(text) < 8:
         return False
     lowered = text.casefold()
-    if lowered in {"(no matches)", "<!doctype html>"}:
+    if lowered in {"(no matches)", "(no results)", "<!doctype html>"}:
         return False
     return any(ch.isalnum() for ch in text)
 
@@ -430,11 +545,15 @@ def _handle_agent_tool(
         return json.dumps(model_output, ensure_ascii=False), events, False
 
     if name == "record_evidence":
-        source_call_id = arguments.pop("source_tool_call_id")
+        source_call_id = arguments.get("source_tool_call_id")
         observed = observed_calls.get(source_call_id)
         if observed is None:
             raise ValueError("source_tool_call_id must reference a completed discovery tool")
+        record_args = dict(arguments)
+        record_args.pop("source_tool_call_id", None)
         excerpt = arguments.get("excerpt", "")
+        if _normalized(excerpt) in {"(no matches)", "(no results)"}:
+            raise ValueError("empty search results cannot be recorded as evidence excerpt")
         observed_output = observed["result"].output
         if not excerpt or _normalized(excerpt) not in _normalized(observed_output):
             replacement = _best_excerpt_candidate(
@@ -443,6 +562,7 @@ def _handle_agent_tool(
             )
             if replacement:
                 arguments["excerpt"] = replacement
+                record_args["excerpt"] = replacement
             else:
                 sample = next(
                     (
@@ -456,7 +576,7 @@ def _handle_agent_tool(
                     "evidence excerpt must be copied from the cited tool output "
                     f"(whitespace differences are allowed). Try an exact excerpt like: {sample!r}"
                 )
-        item = run.add_evidence(**arguments, tool_call_id=source_call_id)
+        item = run.add_evidence(**record_args, tool_call_id=source_call_id)
         if policy:
             policy.note_evidence(item.stance)
         data = {

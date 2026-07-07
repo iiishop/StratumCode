@@ -16,6 +16,7 @@ export function useChatStream(onRender, onPacket) {
       evidence: timeline.showEvidence,
       evidence_relation: timeline.showEvidenceRelation,
       verdict: timeline.showVerdict,
+      usage: timeline.showUsage,
     }
     const handler = handlers[packet.event]
     if (!handler) return

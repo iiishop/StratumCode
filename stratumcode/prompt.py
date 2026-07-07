@@ -33,11 +33,8 @@ WORKSPACE_SECTION = """\
 EVIDENCE_STAGE = """\
 ## Current stage: gather and evaluate evidence
 
-The user's message below is the hypothesis. Do not generate a replacement
-hypothesis in this version of the agent.
-
-Hypothesis:
-{hypothesis}
+The user's message is the hypothesis. Do not generate a replacement hypothesis
+in this version of the agent.
 
 Use only the tools that fit the hypothesis. For a claim about this workspace,
 glob/grep/read are normally sufficient; web tools add no value unless the claim
@@ -92,8 +89,39 @@ different primary purpose.
 The runtime computes confidence and the final verdict from recorded evidence;
 do not claim an unsupported numeric confidence.
 
-You have at most {max_rounds} model rounds. Stop when further searches are
-unlikely to change the verdict."""
+Stop when further searches are unlikely to change the verdict."""
+
+HYPOTHESIS_SECTION = """\
+## Current hypothesis
+{hypothesis}
+
+You have at most {max_rounds} model rounds."""
+
+
+def build_evidence_static() -> str:
+    """Stable first message. Keep dynamic run data out to improve prefix-cache hits."""
+    return "\n\n".join(section.strip() for section in (PERSONA, RULES, EVIDENCE_STAGE))
+
+
+def build_evidence_context(
+    *,
+    hypothesis: str,
+    directory: str,
+    platform: str,
+    model: str,
+    context: list[str] | None = None,
+    max_rounds: int = 12,
+) -> str:
+    return "\n\n".join((
+        WORKSPACE_SECTION.format(
+            current_date=date.today().isoformat(),
+            platform=platform or "unknown",
+            model=model,
+            directory=directory,
+            context=", ".join(context or []) or "(none)",
+        ),
+        HYPOTHESIS_SECTION.format(hypothesis=hypothesis, max_rounds=max_rounds),
+    ))
 
 
 def build_evidence(
@@ -105,16 +133,14 @@ def build_evidence(
     context: list[str] | None = None,
     max_rounds: int = 12,
 ) -> str:
-    sections = [
-        PERSONA,
-        RULES,
-        WORKSPACE_SECTION.format(
-            current_date=date.today().isoformat(),
-            platform=platform or "unknown",
-            model=model,
+    return "\n\n".join((
+        build_evidence_static(),
+        build_evidence_context(
+            hypothesis=hypothesis,
             directory=directory,
-            context=", ".join(context or []) or "(none)",
+            platform=platform,
+            model=model,
+            context=context,
+            max_rounds=max_rounds,
         ),
-        EVIDENCE_STAGE.format(hypothesis=hypothesis, max_rounds=max_rounds),
-    ]
-    return "\n\n".join(section.strip() for section in sections)
+    ))

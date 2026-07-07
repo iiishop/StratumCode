@@ -1,8 +1,29 @@
 from __future__ import annotations
 
+from functools import lru_cache
+
 from ..tools import registry
 
 CONTROL_TOOL_NAMES = ("record_evidence", "link_evidence", "conclude")
+COMPACT_DESCRIPTIONS = {
+    "read": "Read a workspace file.",
+    "glob": "List workspace files by glob.",
+    "grep": "Search workspace files with regex.",
+    "webfetch": "Fetch URL text.",
+    "websearch": "Search the public web.",
+}
+
+
+def _compact_schema(value):
+    if isinstance(value, dict):
+        return {
+            key: _compact_schema(item)
+            for key, item in value.items()
+            if key != "description"
+        }
+    if isinstance(value, list):
+        return [_compact_schema(item) for item in value]
+    return value
 
 
 def openai_tool_schema(name: str, description: str, parameters: dict) -> dict:
@@ -10,8 +31,8 @@ def openai_tool_schema(name: str, description: str, parameters: dict) -> dict:
         "type": "function",
         "function": {
             "name": name,
-            "description": description,
-            "parameters": parameters,
+            "description": COMPACT_DESCRIPTIONS.get(name, description),
+            "parameters": _compact_schema(parameters),
         },
     }
 
@@ -90,13 +111,19 @@ CONTROL_TOOLS = (
 )
 
 
-def agent_tools(discovery_names: tuple[str, ...], allowed: tuple[str, ...] | None = None) -> list[dict]:
+@lru_cache(maxsize=8)
+def _all_agent_tools(discovery_names: tuple[str, ...]) -> tuple[dict, ...]:
     tools = [
         openai_tool_schema(tool.name, tool.description, tool.parameters)
         for name in discovery_names
         if (tool := registry.get(name))
     ]
     tools.extend(CONTROL_TOOLS)
+    return tuple(tools)
+
+
+def agent_tools(discovery_names: tuple[str, ...], allowed: tuple[str, ...] | None = None) -> list[dict]:
+    tools = list(_all_agent_tools(discovery_names))
     if allowed is None:
         return tools
     allowed_names = set(allowed)

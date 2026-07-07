@@ -256,10 +256,20 @@ class _DuckDuckGoParser(HTMLParser):
         self._current: dict[str, str] | None = None
         self._capture = ""
 
+    def _push_current(self) -> None:
+        if self._current is None:
+            return
+        self._current = {key: value.strip() for key, value in self._current.items()}
+        if self._current["title"] and self._current["url"]:
+            self.results.append(self._current)
+        self._current = None
+        self._capture = ""
+
     def handle_starttag(self, tag, attrs):
         attrs = dict(attrs)
         classes = attrs.get("class", "").split()
         if tag == "a" and "result__a" in classes:
+            self._push_current()
             self._current = {
                 "title": "",
                 "url": _decode_ddg_url(attrs.get("href", "")),
@@ -273,11 +283,11 @@ class _DuckDuckGoParser(HTMLParser):
         if tag == "a" and self._capture == "title":
             self._capture = ""
         elif self._current is not None and self._capture == "snippet" and tag in {"a", "div"}:
-            self._current = {key: value.strip() for key, value in self._current.items()}
-            if self._current["title"] and self._current["url"]:
-                self.results.append(self._current)
-            self._current = None
-            self._capture = ""
+            self._push_current()
+
+    def close(self):
+        self._push_current()
+        super().close()
 
     def handle_data(self, data):
         if self._current is not None and self._capture:
@@ -304,11 +314,15 @@ async def _websearch(params: dict, ctx: dict) -> ToolResult:
             body = response.read(500_000).decode("utf-8", errors="replace")
         parser = _DuckDuckGoParser()
         parser.feed(body)
+        parser.close()
         results = parser.results[:limit]
     except Exception as exc:
         return ToolResult.err("websearch", str(exc))
     if not results:
-        return ToolResult.ok(f"search {query}", "(no results)", count=0)
+        return ToolResult.err(
+            f"search {query}",
+            "search provider returned no results; treat websearch as unavailable, not as evidence",
+        )
     output = "\n\n".join(
         f"{index}. {item['title']}\n{item['url']}\n{item['snippet']}"
         for index, item in enumerate(results, 1)

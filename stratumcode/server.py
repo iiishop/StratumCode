@@ -61,7 +61,12 @@ class _Handler(SimpleHTTPRequestHandler):
             return
 
         if path == "/api/providers/save":
-            pid = providers.save(body["name"], body["base_url"], body["api_key"])
+            pid = providers.save(
+                body["name"],
+                body["base_url"],
+                body["api_key"],
+                body.get("pricing_rules"),
+            )
             self._json({"id": pid})
         elif path == "/api/providers/delete":
             providers.delete(body["id"])
@@ -72,6 +77,20 @@ class _Handler(SimpleHTTPRequestHandler):
         elif path == "/api/providers/list-models":
             models = providers.list_models(body["base_url"], body["api_key"])
             self._json({"models": models})
+        elif path == "/api/providers/model-pricing/get":
+            self._json({
+                "pricing_rules": providers.get_model_pricing(
+                    int(body["provider_id"]),
+                    body["model_id"],
+                )
+            })
+        elif path == "/api/providers/model-pricing/save":
+            providers.save_model_pricing(
+                int(body["provider_id"]),
+                body["model_id"],
+                body.get("pricing_rules", []),
+            )
+            self._json({"ok": True})
         elif path == "/api/providers/models":
             provider = providers.get_saved(int(body["provider_id"]))
             if provider is None:

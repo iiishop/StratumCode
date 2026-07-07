@@ -27,5 +27,6 @@ export function useChatTimeline(onAppend) {
     showEvidence: (message, payload) => appendEvent(message, 'evidence', payload),
     showEvidenceRelation: (message, payload) => appendEvent(message, 'evidence_relation', payload),
     showVerdict: (message, payload) => appendEvent(message, 'verdict', payload),
+    showUsage: (message, payload) => appendEvent(message, 'usage', payload),
   }
 }

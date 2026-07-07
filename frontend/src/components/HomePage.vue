@@ -1,5 +1,5 @@
 <script setup>
-import { ref, reactive, onMounted, onUnmounted, nextTick } from 'vue'
+import { ref, reactive, computed, onMounted, onUnmounted, nextTick } from 'vue'
 import { gsap } from 'gsap'
 import ChatEvent from './chat/ChatEvent.vue'
 import { useChatStream } from '../composables/useChatStream'
@@ -45,7 +45,8 @@ const msgList = ref(null)
 const messages = reactive([])
 const msgRefs = reactive({})
 const isStreaming = ref(false)
-const evidenceRun = reactive({
+const emptyEvidenceRun = reactive({
+  id: '',
   hypothesis: '',
   confidence: .5,
   status: 'idle',
@@ -53,6 +54,17 @@ const evidenceRun = reactive({
   evidence: [],
   relations: [],
   verdict: null,
+})
+const evidenceRuns = reactive([])
+const activeRunId = ref('')
+const evidenceRun = computed(() => evidenceRuns.find(run => run.id === activeRunId.value) || emptyEvidenceRun)
+const sessionUsage = reactive({
+  input_tokens: 0,
+  output_tokens: 0,
+  cached_tokens: 0,
+  total_tokens: 0,
+  cost: 0,
+  currency: 'USD',
 })
 const {
   items: workspaces,
@@ -78,6 +90,19 @@ function toggleTodo(id) {
 
 function toggleInspector(tab) {
   inspectorTab.value = inspectorTab.value === tab ? null : tab
+}
+
+function currentEvidenceRun() {
+  return evidenceRuns.find(run => run.id === activeRunId.value)
+}
+
+function addUsage(delta = {}) {
+  sessionUsage.input_tokens += delta.input_tokens || 0
+  sessionUsage.output_tokens += delta.output_tokens || 0
+  sessionUsage.cached_tokens += delta.cached_tokens || 0
+  sessionUsage.total_tokens += delta.total_tokens || 0
+  sessionUsage.cost = Number((sessionUsage.cost + (delta.cost || 0)).toFixed(6))
+  sessionUsage.currency = delta.currency || sessionUsage.currency
 }
 
 async function loadTools() {
@@ -140,7 +165,8 @@ function scrollBottom() { if (msgList.value) msgList.value.scrollTop = msgList.v
 
 function onAgentPacket(packet, type, data) {
   if (packet.op === 'start' && type === 'hypothesis') {
-    Object.assign(evidenceRun, {
+    const run = reactive({
+      id: packet.id,
       hypothesis: data.text,
       confidence: data.confidence,
       status: data.status,
@@ -148,24 +174,39 @@ function onAgentPacket(packet, type, data) {
       evidence: [],
       relations: [],
       verdict: null,
+      open: true,
     })
+    evidenceRuns.push(run)
+    activeRunId.value = run.id
   } else if (packet.op === 'start' && type === 'evidence') {
-    evidenceRun.evidence.push({ ...data })
-    evidenceRun.confidence = data.confidence
+    const run = currentEvidenceRun()
+    if (!run) return
+    run.evidence.push({ ...data })
+    run.confidence = data.confidence
   } else if (packet.op === 'start' && type === 'evidence_relation') {
-    evidenceRun.relations.push({ ...data })
-    evidenceRun.confidence = data.confidence
+    const run = currentEvidenceRun()
+    if (!run) return
+    run.relations.push({ ...data })
+    run.confidence = data.confidence
   } else if (packet.op === 'start' && type === 'verdict') {
-    evidenceRun.verdict = { ...data }
-    evidenceRun.status = data.verdict
-    evidenceRun.confidence = data.confidence
-  } else if (type === 'stage' && data?.phase) {
-    evidenceRun.phase = data.phase
+    const run = currentEvidenceRun()
+    if (!run) return
+    run.verdict = { ...data }
+    run.status = data.verdict
+    run.confidence = data.confidence
+  } else if (packet.op === 'start' && type === 'usage') {
+    addUsage(data.delta)
+  } else if (packet.op === 'update' && type === 'stage' && data?.phase) {
+    const run = currentEvidenceRun()
+    if (run) run.phase = data.phase
   } else if (type === 'hypothesis' && data) {
-    evidenceRun.confidence = data.confidence
-    evidenceRun.status = data.status
+    const run = currentEvidenceRun()
+    if (!run) return
+    run.confidence = data.confidence
+    run.status = data.status
   } else if (packet.op === 'done' && packet.run) {
-    evidenceRun.status = packet.run.state
+    const run = currentEvidenceRun()
+    if (run) run.status = packet.run.state
   }
 }
 
@@ -207,7 +248,7 @@ onUnmounted(() => { abortChat(); gsapCtx?.revert() })
         <span class="chat__session-mark">&gt;_</span>
         <div>
           <strong>New session</strong>
-          <small>No changes yet</small>
+          <small>↑ {{ sessionUsage.input_tokens }} ↓ {{ sessionUsage.output_tokens }} · {{ sessionUsage.currency }} {{ sessionUsage.cost.toFixed(6) }}</small>
         </div>
       </div>
 
@@ -215,7 +256,7 @@ onUnmounted(() => { abortChat(); gsapCtx?.revert() })
         <button class="chat__topbtn" :class="{ 'is-on': inspectorTab === 'evidence' }" @click="toggleInspector('evidence')" title="Evidence">
           <span aria-hidden="true">◎</span>
           <span class="chat__topbtn-label">Evidence</span>
-          <span class="chat__topbtn-badge">{{ evidenceRun.evidence.length }}</span>
+          <span class="chat__topbtn-badge">{{ evidenceRuns.length }}</span>
         </button>
         <button class="chat__topbtn chat__topbtn--tools" :class="{ 'is-on': inspectorTab === 'tools' }" @click="toggleInspector('tools')" title="Built-in tools">
           <span class="chat__tool-grid" aria-hidden="true"><i></i><i></i><i></i><i></i></span>
@@ -288,6 +329,8 @@ onUnmounted(() => { abortChat(); gsapCtx?.revert() })
           v-if="inspectorTab"
           :tab="inspectorTab"
           :run="evidenceRun"
+          :runs="evidenceRuns"
+          :usage="sessionUsage"
           :todos="todos"
           :tools="toolCatalog"
           :workspaces="workspaces"

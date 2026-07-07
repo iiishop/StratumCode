@@ -6,6 +6,8 @@ import { animate, stagger } from 'animejs'
 const props = defineProps({
   tab: { type: String, default: 'evidence' },
   run: { type: Object, required: true },
+  runs: { type: Array, default: () => [] },
+  usage: { type: Object, default: () => ({}) },
   todos: { type: Array, required: true },
   tools: { type: Array, required: true },
   workspaces: { type: Array, required: true },
@@ -21,6 +23,7 @@ const workspacePath = ref('')
 const percent = computed(() => Math.round((props.run.confidence ?? .5) * 100))
 const supportCount = computed(() => props.run.evidence.filter(item => item.stance === 'support').length)
 const opposeCount = computed(() => props.run.evidence.filter(item => item.stance === 'oppose').length)
+const visibleRuns = computed(() => props.runs.length ? props.runs : [props.run])
 const phases = [
   ['support', 'Support'],
   ['oppose', 'Oppose'],
@@ -62,6 +65,10 @@ function addWorkspace() {
   workspaceName.value = ''
   workspacePath.value = ''
 }
+
+function countEvidence(run, stance) {
+  return run.evidence.filter(item => item.stance === stance).length
+}
 </script>
 
 <template>
@@ -82,7 +89,53 @@ function addWorkspace() {
 
     <div class="inspector__content">
       <template v-if="tab === 'evidence'">
-        <section class="confidence-card" :class="`is-${run.status}`">
+        <section class="usage-card">
+          <span>Session usage</span>
+          <strong>{{ usage.currency || 'USD' }} {{ Number(usage.cost || 0).toFixed(6) }}</strong>
+          <p>↑ {{ usage.input_tokens || 0 }} · ↓ {{ usage.output_tokens || 0 }} · cache {{ usage.cached_tokens || 0 }}</p>
+        </section>
+
+        <details
+          v-for="itemRun in visibleRuns"
+          v-show="runs.length && itemRun.hypothesis"
+          :key="itemRun.id"
+          class="hypothesis-row"
+          :open="itemRun.open"
+          @toggle="itemRun.open = $event.target.open"
+        >
+          <summary>
+            <span>{{ itemRun.hypothesis }}</span>
+            <b>{{ Math.round((itemRun.confidence ?? .5) * 100) }}%</b>
+          </summary>
+          <section class="confidence-card" :class="`is-${itemRun.status}`">
+            <div class="confidence-card__top">
+              <span>Hypothesis confidence</span>
+              <strong>{{ Math.round((itemRun.confidence ?? .5) * 100) }}%</strong>
+            </div>
+            <div class="confidence-card__track"><i :style="{ transform: `scaleX(${itemRun.confidence ?? .5})` }"></i></div>
+            <p>{{ itemRun.hypothesis }}</p>
+            <div class="confidence-card__counts">
+              <span class="support">+{{ countEvidence(itemRun, 'support') }} support</span>
+              <span class="oppose">−{{ countEvidence(itemRun, 'oppose') }} oppose</span>
+            </div>
+          </section>
+          <article v-for="item in itemRun.evidence" :key="item.id" class="evidence-card" :class="`is-${item.stance}`">
+            <span class="evidence-card__sign">{{ item.stance === 'support' ? '+' : '−' }}</span>
+            <div>
+              <strong>{{ item.claim }}</strong>
+              <small>{{ item.source_uri }}</small>
+              <p>{{ item.excerpt }}</p>
+            </div>
+            <b>{{ Math.round(item.strength * 100) }}</b>
+          </article>
+          <section v-if="itemRun.verdict" class="verdict-card" :class="`is-${itemRun.verdict.verdict}`">
+            <small>Verdict</small>
+            <strong>{{ itemRun.verdict.verdict }}</strong>
+            <p>{{ itemRun.verdict.summary }}</p>
+          </section>
+        </details>
+
+        <section v-if="!runs.length" class="confidence-card" :class="`is-${run.status}`">
           <div class="confidence-card__top">
             <span>Hypothesis confidence</span>
             <strong>{{ percent }}%</strong>
@@ -102,7 +155,7 @@ function addWorkspace() {
           </div>
         </section>
 
-        <TransitionGroup name="evidence-list" tag="div" class="evidence-list">
+        <TransitionGroup v-if="!runs.length" name="evidence-list" tag="div" class="evidence-list">
           <article v-for="item in run.evidence" :key="item.id" class="evidence-card" :class="`is-${item.stance}`">
             <span class="evidence-card__sign">{{ item.stance === 'support' ? '+' : '−' }}</span>
             <div>
@@ -114,7 +167,7 @@ function addWorkspace() {
           </article>
         </TransitionGroup>
 
-        <section v-if="run.relations.length" class="relation-list">
+        <section v-if="!runs.length && run.relations.length" class="relation-list">
           <strong>Relationships</strong>
           <div v-for="(edge, index) in run.relations" :key="`${edge.source_id}-${edge.target_id}-${index}`">
             <span>{{ edge.source_id }}</span>
@@ -123,7 +176,7 @@ function addWorkspace() {
           </div>
         </section>
 
-        <section v-if="run.verdict" class="verdict-card" :class="`is-${run.verdict.verdict}`">
+        <section v-if="!runs.length && run.verdict" class="verdict-card" :class="`is-${run.verdict.verdict}`">
           <small>Verdict</small>
           <strong>{{ run.verdict.verdict }}</strong>
           <p>{{ run.verdict.summary }}</p>
@@ -175,6 +228,10 @@ function addWorkspace() {
 .inspector__tabs { display: grid; grid-template-columns: repeat(4, 1fr); gap: 3px; padding: 7px; border-bottom: 1px solid #dbe5f2; }
 .inspector__tabs button { padding: 7px 2px; border: 0; border-radius: 6px; color: #71859f; background: transparent; font: 700 9px/1 var(--mono); text-transform: uppercase; cursor: pointer; }.inspector__tabs button.active { color: #fff; background: #1756d1; box-shadow: 0 4px 12px rgba(23, 86, 209, .22); }
 .inspector__content { height: calc(100% - 102px); overflow-y: auto; padding: 12px; scrollbar-gutter: stable; }
+.usage-card,.hypothesis-row { margin-bottom: 10px; padding: 11px; border: 1px solid #d8e2ef; border-radius: 10px; background: #fff; }
+.usage-card span,.usage-card p { color: #71859e; font: 9px/1.45 var(--mono); }.usage-card strong { display: block; margin: 4px 0; color: #1756d1; font: 700 15px/1 var(--mono); }.usage-card p { margin: 0; }
+.hypothesis-row summary { display: flex; align-items: center; justify-content: space-between; gap: 8px; color: #294564; cursor: pointer; font-size: 10.5px; font-weight: 700; }.hypothesis-row summary span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }.hypothesis-row summary b { color: #1756d1; font: 800 11px/1 var(--mono); }
+.hypothesis-row .confidence-card { margin-top: 10px; box-shadow: none; }.hypothesis-row .evidence-card { margin-top: 7px; }
 .confidence-card { padding: 13px; border: 1px solid #cbdcf2; border-radius: 12px; background: #fff; box-shadow: 0 7px 20px rgba(34, 70, 118, .06); }
 .confidence-card__top { display: flex; align-items: baseline; justify-content: space-between; color: #71859e; font: 700 9px/1 var(--mono); text-transform: uppercase; }.confidence-card__top strong { color: #1756d1; font-size: 20px; }
 .confidence-card__track { height: 7px; margin: 9px 0 11px; overflow: hidden; border-radius: 9px; background: #e2ebf7; }.confidence-card__track i { display: block; width: 100%; height: 100%; border-radius: inherit; background: linear-gradient(90deg, #1756d1 0 55%, #f5c642); transform: scaleX(.5); transform-origin: left; }

@@ -9,6 +9,14 @@ import StageModelSettings from './components/providers/StageModelSettings.vue'
 const currentView = ref('home')
 const providers = ref([])
 const showForm = ref(false)
+const defaultPricingRule = () => ({
+  currency: 'CNY',
+  start: '00:00',
+  end: '05:00',
+  input_per_m: 3,
+  output_per_m: 1,
+  cache_per_m: 0.25,
+})
 const form = ref({ name: '', base_url: '', api_key: '' })
 const expandedId = ref(null)
 const state = reactive({})
@@ -56,7 +64,15 @@ const api = async (path, body) => {
 
 function init(id) {
   if (!state[id]) {
-    state[id] = reactive({ testMsg: null, models: [], modelResults: {}, loading: '', filter: '', connOk: null })
+    state[id] = reactive({
+      testMsg: null,
+      models: [],
+      modelResults: {},
+      pricing: {},
+      loading: '',
+      filter: '',
+      connOk: null,
+    })
   }
   return state[id]
 }
@@ -158,6 +174,51 @@ async function testModel(p, model_id) {
       if (resultEl) animate(resultEl, { scale: [0.5, 1], opacity: [0, 1], duration: 250, ease: 'outBack' })
     }
   }
+}
+
+function pricingState(p, model) {
+  const s = init(p.id)
+  if (!s.pricing[model]) {
+    s.pricing[model] = reactive({
+      loaded: false,
+      loading: false,
+      saving: false,
+      rules: [defaultPricingRule()],
+    })
+  }
+  return s.pricing[model]
+}
+
+async function loadModelPricing(p, model) {
+  const ps = pricingState(p, model)
+  ps.loading = true
+  const r = await api('/providers/model-pricing/get', { provider_id: p.id, model_id: model })
+  ps.rules = Array.isArray(r.pricing_rules) && r.pricing_rules.length
+    ? r.pricing_rules.map(rule => ({ ...defaultPricingRule(), ...rule }))
+    : [defaultPricingRule()]
+  ps.loaded = true
+  ps.loading = false
+}
+
+function addPricingRule(p, model) {
+  pricingState(p, model).rules.push(defaultPricingRule())
+}
+
+function removePricingRule(p, model, index) {
+  const ps = pricingState(p, model)
+  ps.rules.splice(index, 1)
+  if (!ps.rules.length) ps.rules.push(defaultPricingRule())
+}
+
+async function saveModelPricing(p, model) {
+  const ps = pricingState(p, model)
+  ps.saving = true
+  await api('/providers/model-pricing/save', {
+    provider_id: p.id,
+    model_id: model,
+    pricing_rules: ps.rules,
+  })
+  ps.saving = false
 }
 
 function filtered(s) {
@@ -319,12 +380,57 @@ watch(currentView, (v) => { if (v === 'providers' && !providers.value.length) lo
                   <span class="pm__models-count" v-if="state[p.id].filter">{{ filtered(state[p.id]).length }}/{{ state[p.id].models.length }}</span>
                 </div>
                 <ul :ref="(el) => setListRef(p.id, el)" class="pm__models-list">
-                  <li v-for="m in filtered(state[p.id])" :key="m" :data-model="m" class="pm__models-item" @click="testModel(p, m)">
-                    <span class="pm__models-name">{{ m }}</span>
-                    <span class="pm__models-badge" v-if="state[p.id].modelResults[m]" :class="state[p.id].modelResults[m].ok ? 'pm__models-badge--ok' : 'pm__models-badge--fail'">
-                      {{ state[p.id].modelResults[m].ok ? 'OK' : 'FAIL' }}
-                    </span>
-                    <span class="pm__models-reply" v-if="state[p.id].modelResults[m]?.ok">{{ state[p.id].modelResults[m].msg }}</span>
+                  <li v-for="m in filtered(state[p.id])" :key="m" :data-model="m" class="pm__models-item">
+                    <div class="pm__models-line" @click="testModel(p, m)">
+                      <span class="pm__models-name">{{ m }}</span>
+                      <span class="pm__models-badge" v-if="state[p.id].modelResults[m]" :class="state[p.id].modelResults[m].ok ? 'pm__models-badge--ok' : 'pm__models-badge--fail'">
+                        {{ state[p.id].modelResults[m].ok ? 'OK' : 'FAIL' }}
+                      </span>
+                      <span class="pm__models-reply" v-if="state[p.id].modelResults[m]?.ok">{{ state[p.id].modelResults[m].msg }}</span>
+                      <button class="pm__price-toggle" type="button" @click.stop="loadModelPricing(p, m)">
+                        {{ state[p.id].pricing[m]?.loaded ? 'Pricing' : 'Set pricing' }}
+                      </button>
+                    </div>
+                    <div v-if="state[p.id].pricing[m]?.loaded" class="pm__pricing" @click.stop>
+                      <div class="pm__pricing-help">Prices are per 1M tokens. Times are UTC.</div>
+                      <div v-for="(rule, index) in state[p.id].pricing[m].rules" :key="index" class="pm__pricing-rule">
+                        <label>
+                          <span>Currency</span>
+                          <select v-model="rule.currency" class="pm__input" title="Billing currency">
+                            <option>CNY</option>
+                            <option>USD</option>
+                            <option>GBP</option>
+                          </select>
+                        </label>
+                        <label>
+                          <span>UTC start</span>
+                          <input v-model="rule.start" type="time" class="pm__input" title="UTC start time for this rate" />
+                        </label>
+                        <label>
+                          <span>UTC end</span>
+                          <input v-model="rule.end" type="time" class="pm__input" title="UTC end time for this rate" />
+                        </label>
+                        <label>
+                          <span>Input / 1M</span>
+                          <input v-model.number="rule.input_per_m" type="number" step="0.0001" class="pm__input" title="Prompt/input token price per 1M tokens" />
+                        </label>
+                        <label>
+                          <span>Output / 1M</span>
+                          <input v-model.number="rule.output_per_m" type="number" step="0.0001" class="pm__input" title="Completion/output token price per 1M tokens" />
+                        </label>
+                        <label>
+                          <span>Cache hit / 1M</span>
+                          <input v-model.number="rule.cache_per_m" type="number" step="0.0001" class="pm__input" title="Cached input token price per 1M tokens" />
+                        </label>
+                        <button class="pm__rule-remove" type="button" @click="removePricingRule(p, m, index)">×</button>
+                      </div>
+                      <div class="pm__pricing-actions">
+                        <button type="button" class="pm__price-toggle" @click="addPricingRule(p, m)">Add rule</button>
+                        <button type="button" class="pm__save-btn" :disabled="state[p.id].pricing[m].saving" @click="saveModelPricing(p, m)">
+                          {{ state[p.id].pricing[m].saving ? 'Saving…' : 'Save pricing' }}
+                        </button>
+                      </div>
+                    </div>
                   </li>
                 </ul>
               </div>
@@ -334,7 +440,9 @@ watch(currentView, (v) => { if (v === 'providers' && !providers.value.length) lo
       </div>
 
       <!-- Home view -->
-      <HomePage v-if="currentView === 'home'" />
+      <KeepAlive>
+        <HomePage v-if="currentView === 'home'" />
+      </KeepAlive>
       </main>
     </section>
   </div>
@@ -502,7 +610,7 @@ watch(currentView, (v) => { if (v === 'providers' && !providers.value.length) lo
 
 .pm__models-list { list-style: none; margin: 0; padding: 0; max-height: 200px; overflow-y: auto; }
 .pm__models-item {
-  display: flex; align-items: center; gap: 10px;
+  display: flex; flex-direction: column; gap: 8px;
   padding: 6px 10px; cursor: pointer;
   font-family: var(--mono); font-size: 11px; color: var(--text-h);
   transition: background 0.08s;
@@ -511,11 +619,98 @@ watch(currentView, (v) => { if (v === 'providers' && !providers.value.length) lo
 .pm__models-item:last-child { border-bottom: none; }
 .pm__models-item:hover { background: var(--code-bg-hover); }
 
+.pm__models-line {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  gap: 10px;
+}
 .pm__models-name  { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .pm__models-badge { flex-shrink: 0; font-size: 9px; font-weight: 700; padding: 1px 5px; border-radius: 3px; }
 .pm__models-badge--ok   { background: var(--ok-bg);  color: var(--ok); }
 .pm__models-badge--fail { background: var(--err-bg); color: var(--err); }
 .pm__models-reply { flex-shrink: 0; font-size: 10px; color: var(--text-muted); max-width: 100px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.pm__price-toggle {
+  height: 24px;
+  padding: 0 9px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--accent-text);
+  background: #ffffff;
+  font: 10px/1 var(--mono);
+  cursor: pointer;
+}
+
+.pm__price-toggle:hover {
+  border-color: var(--accent-border);
+  background: var(--accent-bg);
+}
+
+.pm__pricing {
+  width: 100%;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: rgba(255, 255, 255, 0.74);
+  cursor: default;
+}
+
+.pm__pricing-help {
+  margin-bottom: 8px;
+  color: var(--text-muted);
+  font: 10px/1.4 var(--mono);
+}
+
+.pm__pricing-rule {
+  display: grid;
+  grid-template-columns: 76px 96px 96px repeat(3, minmax(96px, 1fr)) 28px;
+  gap: 7px;
+  align-items: end;
+  margin-bottom: 7px;
+}
+
+.pm__pricing-rule label {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.pm__pricing-rule label > span {
+  color: var(--text-muted);
+  font: 9px/1 var(--mono);
+}
+
+.pm__pricing-rule .pm__input {
+  height: 30px;
+  min-width: 0;
+  font-size: 10px;
+}
+
+.pm__rule-remove {
+  display: grid;
+  width: 28px;
+  height: 28px;
+  place-items: center;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--err);
+  background: var(--err-bg);
+  cursor: pointer;
+}
+
+.pm__pricing-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.pm__pricing-actions .pm__save-btn {
+  height: 24px;
+  padding: 0 10px;
+  font: 10px/1 var(--mono);
+}
 
 /* ---- transitions ---- */
 .form-slide-enter-active { transition: all 0.25s ease; overflow: hidden; }
