@@ -4,6 +4,7 @@ import { gsap } from 'gsap'
 import { animate, stagger as animeStagger } from 'animejs'
 import Sidebar from './components/Sidebar.vue'
 import HomePage from './components/HomePage.vue'
+import StageModelSettings from './components/providers/StageModelSettings.vue'
 
 const currentView = ref('home')
 const providers = ref([])
@@ -253,6 +254,8 @@ watch(currentView, (v) => { if (v === 'providers' && !providers.value.length) lo
             </form>
           </div>
         </Transition>
+
+        <StageModelSettings v-if="providers.length" :providers="providers" />
 
         <!-- empty -->
         <div class="pm__empty" v-if="!providers.length && !showForm">

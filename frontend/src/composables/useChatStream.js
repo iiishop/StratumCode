@@ -1,7 +1,7 @@
 import { useChatTimeline } from './useChatTimeline'
 
-export function useChatStream(onEvent) {
-  const timeline = useChatTimeline(onEvent)
+export function useChatStream(onRender, onPacket) {
+  const timeline = useChatTimeline(onRender)
   let controller = null
 
   function startEvent(message, packet, active) {
@@ -11,10 +11,17 @@ export function useChatStream(onEvent) {
       subagent: timeline.showSubagent,
       diff: timeline.showDiff,
       output: timeline.showOutput,
+      stage: timeline.showStage,
+      hypothesis: timeline.showHypothesis,
+      evidence: timeline.showEvidence,
+      evidence_relation: timeline.showEvidenceRelation,
+      verdict: timeline.showVerdict,
     }
     const handler = handlers[packet.event]
     if (!handler) return
-    active.set(packet.id, handler(message, packet.data))
+    const data = handler(message, packet.data)
+    active.set(packet.id, { type: packet.event, data })
+    onPacket?.(packet, packet.event, data)
   }
 
   function applyPacket(message, packet, active) {
@@ -24,10 +31,14 @@ export function useChatStream(onEvent) {
     }
     if (packet.op === 'error') throw new Error(packet.message || 'Chat stream failed')
     const target = active.get(packet.id)
-    if (!target) return
-    if (packet.op === 'delta') target[packet.field] = `${target[packet.field] || ''}${packet.value || ''}`
-    if (packet.op === 'update') Object.assign(target, packet.patch)
-    onEvent?.()
+    if (!target) {
+      onPacket?.(packet)
+      return
+    }
+    if (packet.op === 'delta') target.data[packet.field] = `${target.data[packet.field] || ''}${packet.value || ''}`
+    if (packet.op === 'update') Object.assign(target.data, packet.patch)
+    onPacket?.(packet, target.type, target.data)
+    onRender?.()
   }
 
   async function stream(message, request) {

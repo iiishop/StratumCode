@@ -10,7 +10,7 @@ defineProps({
   status: { type: String, default: '' },
   symbol: { type: String, default: '·' },
   state: { type: String, default: '' },
-  open: { type: Boolean, default: true },
+  open: { type: Boolean, default: false },
   collapsible: { type: Boolean, default: false },
 })
 
@@ -35,7 +35,7 @@ function moveSpotlight(event) {
 </script>
 
 <template>
-  <article class="event-frame" :class="[`event-frame--${kind}`, state && `event-frame--${state}`]">
+  <article class="event-frame" :class="[`event-frame--${kind}`, state && `event-frame--${state}`, status && `event-frame--${status}`]">
     <div class="event-frame__rail">
       <span class="event-frame__node">{{ symbol }}</span>
     </div>
@@ -75,8 +75,18 @@ function moveSpotlight(event) {
 .event-frame--subagent { --event: #6658c7; }
 .event-frame--diff { --event: #e56b2f; }
 .event-frame--output { --event: #1756d1; }
+.event-frame--stage { --event: #1756d1; }
+.event-frame--hypothesis { --event: #1756d1; }
+.event-frame--evidence { --event: #11866f; }
+.event-frame--evidence.event-frame--oppose { --event: #d49300; }
+.event-frame--relation { --event: #6658c7; }
+.event-frame--verdict { --event: #1756d1; }
+.event-frame--verdict.event-frame--supported { --event: #11866f; }
+.event-frame--verdict.event-frame--refuted { --event: #c44747; }
+.event-frame--verdict.event-frame--inconclusive { --event: #d49300; }
 .event-frame--accepted { --event: #00a878; }
 .event-frame--rejected { --event: #e11d74; }
+.event-frame--error { --event: #c44747; }
 .event-frame__rail { position: relative; display: flex; justify-content: flex-start; }
 .event-frame__rail::after { position: absolute; top: 25px; bottom: -10px; left: 10px; width: 1px; content: ""; background: linear-gradient(#a8bfe5, transparent); }
 .event-frame:last-child .event-frame__rail::after { display: none; }

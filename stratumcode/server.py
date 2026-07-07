@@ -4,8 +4,7 @@ import logging
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from . import providers
-from . import chat
+from . import chat, model_settings, providers, workspaces
 from .tools import registry
 
 
@@ -23,14 +22,37 @@ class _Handler(SimpleHTTPRequestHandler):
         super().__init__(*args, **kwargs)
 
     def do_GET(self):
+        try:
+            self._dispatch_get()
+        except Exception:
+            _logger.exception("GET request failed: %s", self.path)
+            self._json({"error": "request failed"}, 500)
+
+    def _dispatch_get(self):
         if self.path == "/api/providers":
             self._json(providers.list_saved())
+        elif self.path == "/api/model-settings":
+            self._json(model_settings.list_all())
+        elif self.path == "/api/workspaces":
+            self._json({
+                "items": workspaces.list_all(self.workspace_dir),
+                "active": workspaces.active(self.workspace_dir),
+            })
         elif self.path == "/api/tools":
             self._json([t.to_json() for t in registry.list_all()])
         else:
             super().do_GET()
 
     def do_POST(self):
+        try:
+            self._dispatch_post()
+        except (KeyError, TypeError, ValueError) as exc:
+            self._json({"error": str(exc)}, 400)
+        except Exception:
+            _logger.exception("POST request failed: %s", self.path)
+            self._json({"error": "request failed"}, 500)
+
+    def _dispatch_post(self):
         path = self.path
         try:
             body = self._read_body()
@@ -50,9 +72,32 @@ class _Handler(SimpleHTTPRequestHandler):
         elif path == "/api/providers/list-models":
             models = providers.list_models(body["base_url"], body["api_key"])
             self._json({"models": models})
+        elif path == "/api/providers/models":
+            provider = providers.get_saved(int(body["provider_id"]))
+            if provider is None:
+                self._json({"error": "provider not found"}, 404)
+                return
+            self._json({"models": providers.list_models(provider["base_url"], provider["api_key"])})
         elif path == "/api/providers/test-model":
             ok, msg = providers.test_model(body["base_url"], body["api_key"], body["model_id"])
             self._json({"ok": ok, "msg": msg})
+        elif path == "/api/model-settings/save":
+            model_settings.save(
+                body["stage"], int(body["provider_id"]), body["model_id"]
+            )
+            self._json({"ok": True})
+        elif path == "/api/model-settings/delete":
+            model_settings.delete(body["stage"])
+            self._json({"ok": True})
+        elif path == "/api/workspaces/save":
+            workspace_id = workspaces.save(body.get("name", ""), body["path"])
+            self._json({"id": workspace_id})
+        elif path == "/api/workspaces/activate":
+            workspaces.activate(int(body["id"]))
+            self._json({"ok": True})
+        elif path == "/api/workspaces/delete":
+            workspaces.delete(int(body["id"]), self.workspace_dir)
+            self._json({"ok": True})
 
         elif path == "/api/tools/run":
             self._handle_run(body)
@@ -86,7 +131,7 @@ class _Handler(SimpleHTTPRequestHandler):
             self._json({"error": f"unknown tool: {tool_name}"}, 404)
             return
 
-        ctx = {"directory": self.workspace_dir}
+        ctx = {"directory": self._workspace_path()}
         try:
             result = asyncio.run(tool.execute(params, ctx))
             self._json({"title": result.title, "output": result.output, "metadata": result.metadata})
@@ -96,7 +141,7 @@ class _Handler(SimpleHTTPRequestHandler):
 
     def _handle_chat(self, body: dict):
         try:
-            events = chat.stream(body, self.workspace_dir)
+            events = chat.stream(body, self._workspace_path())
         except ValueError as exc:
             self._json({"error": str(exc)}, 400)
             return
@@ -130,7 +175,7 @@ class _Handler(SimpleHTTPRequestHandler):
         try:
             result = asyncio.run(tool.execute(
                 {"path": path, "start_line": 1, "end_line": _FILE_PREVIEW_LINES},
-                {"directory": self.workspace_dir},
+                {"directory": self._workspace_path()},
             ))
         except PermissionError as exc:
             self._json({"error": str(exc)}, 403)
@@ -153,6 +198,9 @@ class _Handler(SimpleHTTPRequestHandler):
             "truncated": truncated_bytes or total_lines > _FILE_PREVIEW_LINES,
         })
 
+    def _workspace_path(self) -> str:
+        return workspaces.active(self.workspace_dir)["path"]
+
     def _json(self, data, status=200):
         payload = json.dumps(data, ensure_ascii=False).encode()
         self.send_response(status)
@@ -165,6 +213,7 @@ class _Handler(SimpleHTTPRequestHandler):
 def create(static_dir: str, port: int = 0, workspace_dir: str | None = None) -> ThreadingHTTPServer:
     static_root = Path(static_dir).resolve()
     workspace_root = Path(workspace_dir or static_root).resolve()
+    workspaces.activate_path(str(workspace_root))
 
     def handler(*args, **kwargs):
         return _Handler(

@@ -8,6 +8,7 @@ from urllib.request import urlopen
 
 import webview
 
+from . import workspaces
 from .server import create as create_server
 
 FRONTEND_DIR = Path(__file__).resolve().parent.parent / "frontend"
@@ -37,7 +38,8 @@ def main():
             "npm run build", cwd=str(FRONTEND_DIR), shell=True, check=True,
         )
 
-    server = create_server(DIST_DIR, workspace_dir=WORKSPACE_DIR)
+    workspace = workspaces.active(str(WORKSPACE_DIR))["path"]
+    server = create_server(DIST_DIR, workspace_dir=workspace)
     port = server.server_address[1]
     threading.Thread(target=server.serve_forever, daemon=True).start()
 
@@ -47,7 +49,8 @@ def main():
 
 def main_dev():
     api_port = _free_port()
-    server = create_server(DIST_DIR, api_port, workspace_dir=WORKSPACE_DIR)  # API only, 静态文件走 Vite
+    workspace = workspaces.active(str(WORKSPACE_DIR))["path"]
+    server = create_server(DIST_DIR, api_port, workspace_dir=workspace)  # API only, 静态文件走 Vite
     threading.Thread(target=server.serve_forever, daemon=True).start()
 
     env = {**os.environ, "VITE_API_PORT": str(api_port)}

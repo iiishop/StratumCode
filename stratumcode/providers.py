@@ -2,7 +2,7 @@ import json
 from urllib.request import Request, urlopen
 from urllib.error import URLError
 
-from .db import get_db
+from .db import db_session
 
 
 def list_models(base_url: str, api_key: str) -> list[str]:
@@ -50,43 +50,48 @@ def test_model(base_url: str, api_key: str, model_id: str) -> tuple[bool, str]:
 # --- 持久化 ---
 
 def _ensure_table():
-    db = get_db()
-    db.execute("""
-        CREATE TABLE IF NOT EXISTS providers (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT NOT NULL,
-            base_url TEXT NOT NULL,
-            api_key TEXT NOT NULL
-        )
-    """)
-    db.commit()
+    with db_session() as db:
+        db.execute("""
+            CREATE TABLE IF NOT EXISTS providers (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                base_url TEXT NOT NULL,
+                api_key TEXT NOT NULL
+            )
+        """)
 
 
 def save(name: str, base_url: str, api_key: str) -> int:
     _ensure_table()
-    db = get_db()
-    cur = db.execute(
-        "INSERT INTO providers (name, base_url, api_key) VALUES (?, ?, ?)",
-        (name, base_url, api_key),
-    )
-    db.commit()
-    return cur.lastrowid
+    with db_session() as db:
+        cur = db.execute(
+            "INSERT INTO providers (name, base_url, api_key) VALUES (?, ?, ?)",
+            (name, base_url, api_key),
+        )
+        return cur.lastrowid
 
 
 def list_saved() -> list[dict]:
     _ensure_table()
-    db = get_db()
-    rows = db.execute("SELECT * FROM providers ORDER BY id").fetchall()
+    with db_session() as db:
+        rows = db.execute("SELECT * FROM providers ORDER BY id").fetchall()
     return [dict(r) for r in rows]
 
 
 def get_saved(provider_id: int) -> dict | None:
     _ensure_table()
-    row = get_db().execute("SELECT * FROM providers WHERE id = ?", (provider_id,)).fetchone()
+    with db_session() as db:
+        row = db.execute(
+            "SELECT * FROM providers WHERE id = ?", (provider_id,)
+        ).fetchone()
     return dict(row) if row else None
 
 
 def delete(provider_id: int):
-    db = get_db()
-    db.execute("DELETE FROM providers WHERE id = ?", (provider_id,))
-    db.commit()
+    with db_session() as db:
+        has_settings = db.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'model_settings'"
+        ).fetchone()
+        if has_settings:
+            db.execute("DELETE FROM model_settings WHERE provider_id = ?", (provider_id,))
+        db.execute("DELETE FROM providers WHERE id = ?", (provider_id,))

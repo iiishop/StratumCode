@@ -2,27 +2,59 @@
 
 from __future__ import annotations
 
+import html
 import ipaddress
 import socket
 import subprocess
 import urllib.request
+from html.parser import HTMLParser
 from pathlib import Path
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, unquote, urlencode, urlsplit
 
 from ..spec import ToolDef, ToolResult
 
 
 _WEBFETCH_LIMIT = 1_000_000
+_IGNORED_DIRS = {
+    ".git",
+    ".venv",
+    "venv",
+    "node_modules",
+    "dist",
+    "__pycache__",
+    ".pytest_cache",
+}
 
 
 # ── helpers ────────────────────────────────────────────────────
 
 def _resolve(path: str, ctx: dict) -> Path:
     d = Path(ctx.get("directory", ".")).resolve()
+    path = path or "."
     p = (d / path).resolve()
     if not p.is_relative_to(d):
         raise PermissionError(f"path escapes worktree: {path}")
     return p
+
+
+def _ignored(path: Path, root: Path) -> bool:
+    try:
+        return any(part in _IGNORED_DIRS for part in path.relative_to(root).parts)
+    except ValueError:
+        return False
+
+
+def _expand_braces(pattern: str) -> list[str]:
+    start = pattern.find("{")
+    end = pattern.find("}", start + 1)
+    if start == -1 or end == -1:
+        return [pattern]
+    prefix, suffix = pattern[:start], pattern[end + 1:]
+    return [
+        expanded
+        for option in pattern[start + 1:end].split(",")
+        for expanded in _expand_braces(prefix + option + suffix)
+    ]
 
 
 # ── read ───────────────────────────────────────────────────────
@@ -62,12 +94,25 @@ read_tool = ToolDef(
 
 async def _glob(params: dict, ctx: dict) -> ToolResult:
     d = Path(ctx.get("directory", ".")).resolve()
-    pattern = params["pattern"]
-    matches = sorted(str(p.relative_to(d)) for p in d.rglob(pattern) if p.is_file())
+    pattern = params.get("pattern") or "**/*"
+    matches = sorted({
+        p.relative_to(d).as_posix()
+        for expanded in _expand_braces(pattern)
+        for p in d.rglob(expanded)
+        if p.is_file() and not _ignored(p, d)
+    })
+    max_matches = 100
+    selected = matches[:max_matches]
+    truncated = len(matches) > max_matches
     return ToolResult.ok(
         f"glob {pattern}",
-        "\n".join(matches) if matches else "(no matches)",
+        (
+            "\n".join(selected) + ("\n... (truncated)" if truncated else "")
+            if matches
+            else "(no matches)"
+        ),
         count=len(matches),
+        truncated=truncated,
     )
 
 glob_tool = ToolDef(
@@ -87,18 +132,28 @@ glob_tool = ToolDef(
 # ── grep ───────────────────────────────────────────────────────
 
 async def _grep(params: dict, ctx: dict) -> ToolResult:
-    pattern = params["pattern"]
-    include = params.get("include")
+    pattern = params.get("pattern") or ""
+    if not pattern:
+        return ToolResult.err("grep", "pattern is required")
+    include = params.get("include") or ""
     d = Path(ctx.get("directory", ".")).resolve()
+    target = _resolve(params.get("path") or ".", ctx)
+    if _ignored(target, d):
+        return ToolResult.ok("grep", "(no matches)", count=0)
+    target_arg = "." if target == d else str(target.relative_to(d))
 
-    cmd = ["rg", "--no-heading", "--line-number", "--color", "never", pattern, str(d)]
+    cmd = ["rg", "--no-heading", "--line-number", "--color", "never"]
+    for ignored in sorted(_IGNORED_DIRS):
+        cmd.extend(["--glob", f"!{ignored}/**"])
     if include:
-        cmd.insert(5, "--glob")
-        cmd.insert(6, include)
+        for expanded in _expand_braces(include):
+            cmd.extend(["--glob", expanded])
+    cmd.extend([pattern, target_arg])
 
     try:
-        out = subprocess.run(cmd, capture_output=True, text=True, timeout=15, cwd=str(d))
-        lines = out.stdout.strip().splitlines()
+        out = subprocess.run(cmd, capture_output=True, timeout=15, cwd=str(d))
+        stdout = out.stdout.decode("utf-8", errors="replace")
+        lines = stdout.strip().splitlines()
     except (FileNotFoundError, subprocess.TimeoutExpired):
         return ToolResult.err("grep", "rg not found; install ripgrep for grep support")
 
@@ -122,6 +177,7 @@ grep_tool = ToolDef(
         "properties": {
             "pattern": {"type": "string", "description": "Regex pattern to search for"},
             "include": {"type": "string", "description": "Glob pattern to filter files (e.g. *.py)"},
+            "path": {"type": "string", "description": "Optional file or directory path to search within"},
         },
         "required": ["pattern"],
     },
@@ -193,6 +249,93 @@ webfetch_tool = ToolDef(
 
 _todos: list[dict] = []
 
+class _DuckDuckGoParser(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.results: list[dict[str, str]] = []
+        self._current: dict[str, str] | None = None
+        self._capture = ""
+
+    def handle_starttag(self, tag, attrs):
+        attrs = dict(attrs)
+        classes = attrs.get("class", "").split()
+        if tag == "a" and "result__a" in classes:
+            self._current = {
+                "title": "",
+                "url": _decode_ddg_url(attrs.get("href", "")),
+                "snippet": "",
+            }
+            self._capture = "title"
+        elif self._current is not None and "result__snippet" in classes:
+            self._capture = "snippet"
+
+    def handle_endtag(self, tag):
+        if tag == "a" and self._capture == "title":
+            self._capture = ""
+        elif self._current is not None and self._capture == "snippet" and tag in {"a", "div"}:
+            self._current = {key: value.strip() for key, value in self._current.items()}
+            if self._current["title"] and self._current["url"]:
+                self.results.append(self._current)
+            self._current = None
+            self._capture = ""
+
+    def handle_data(self, data):
+        if self._current is not None and self._capture:
+            self._current[self._capture] += html.unescape(data)
+
+
+def _decode_ddg_url(url: str) -> str:
+    query = parse_qs(urlsplit(url).query)
+    return unquote(query.get("uddg", [url])[0])
+
+
+async def _websearch(params: dict, ctx: dict) -> ToolResult:
+    query = (params.get("query") or "").strip()
+    limit = min(8, max(1, int(params.get("limit", 5))))
+    if not query:
+        return ToolResult.err("websearch", "query is required")
+    url = "https://html.duckduckgo.com/html/?" + urlencode({"q": query})
+    try:
+        request = urllib.request.Request(
+            url,
+            headers={"User-Agent": "Mozilla/5.0 (compatible; StratumCode/0.1)"},
+        )
+        with urllib.request.urlopen(request, timeout=15) as response:
+            body = response.read(500_000).decode("utf-8", errors="replace")
+        parser = _DuckDuckGoParser()
+        parser.feed(body)
+        results = parser.results[:limit]
+    except Exception as exc:
+        return ToolResult.err("websearch", str(exc))
+    if not results:
+        return ToolResult.ok(f"search {query}", "(no results)", count=0)
+    output = "\n\n".join(
+        f"{index}. {item['title']}\n{item['url']}\n{item['snippet']}"
+        for index, item in enumerate(results, 1)
+    )
+    return ToolResult.ok(f"search {query}", output, count=len(results), query=query)
+
+
+websearch_tool = ToolDef(
+    name="websearch",
+    description="Search the public web and return result titles, URLs, and snippets.",
+    parameters={
+        "type": "object",
+        "properties": {
+            "query": {"type": "string", "description": "Search query"},
+            "limit": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 8,
+                "description": "Maximum results",
+            },
+        },
+        "required": ["query"],
+    },
+    execute=_websearch,
+)
+
+
 async def _todo_read(params: dict, ctx: dict) -> ToolResult:
     if not _todos:
         return ToolResult.ok("todo", "(empty)")
@@ -236,6 +379,7 @@ BUILTIN: list[ToolDef] = [
     glob_tool,
     grep_tool,
     webfetch_tool,
+    websearch_tool,
     todo_read_tool,
     invalid_tool,
 ]

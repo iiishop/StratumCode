@@ -3,11 +3,12 @@ import { ref, reactive, onMounted, onUnmounted, nextTick } from 'vue'
 import { gsap } from 'gsap'
 import ChatEvent from './chat/ChatEvent.vue'
 import { useChatStream } from '../composables/useChatStream'
+import { useWorkspaces } from '../composables/useWorkspaces'
 import FileReference from './FileReference.vue'
+import InspectorPanel from './inspector/InspectorPanel.vue'
 
 /* ── todos ── */
-const todosOpen = ref(false)
-const toolsOpen = ref(false)
+const inspectorTab = ref(null)
 const todos = reactive([
   { id: 1, content: 'Implement agent chat backend', done: false },
   { id: 2, content: 'Add provider connection testing', done: true },
@@ -32,17 +33,10 @@ const fallbackTools = [
   { name: 'glob', description: 'Find files using a workspace glob pattern.', parameters: { properties: { pattern: {} } } },
   { name: 'grep', description: 'Search workspace text with ripgrep.', parameters: { properties: { pattern: {}, include: {} } } },
   { name: 'webfetch', description: 'Fetch text from a public HTTP(S) URL.', parameters: { properties: { url: {} } } },
+  { name: 'websearch', description: 'Search the public web for relevant sources.', parameters: { properties: { query: {}, limit: {} } } },
   { name: 'todoread', description: 'Read the current task list.', parameters: { properties: {} } },
 ]
 const toolCatalog = ref(fallbackTools)
-
-const toolVisuals = {
-  read: { symbol: 'R', tone: 'blue' },
-  glob: { symbol: '*', tone: 'yellow' },
-  grep: { symbol: '/', tone: 'red' },
-  webfetch: { symbol: 'W', tone: 'blue' },
-  todoread: { symbol: 'T', tone: 'yellow' },
-}
 
 /* ── chat state ── */
 const input = ref('')
@@ -51,6 +45,24 @@ const msgList = ref(null)
 const messages = reactive([])
 const msgRefs = reactive({})
 const isStreaming = ref(false)
+const evidenceRun = reactive({
+  hypothesis: '',
+  confidence: .5,
+  status: 'idle',
+  phase: 'idle',
+  evidence: [],
+  relations: [],
+  verdict: null,
+})
+const {
+  items: workspaces,
+  active: activeWorkspace,
+  error: workspaceError,
+  load: loadWorkspaces,
+  add: addWorkspace,
+  activate: activateWorkspace,
+  remove: deleteWorkspace,
+} = useWorkspaces()
 let gsapCtx
 
 function setMsgRef(id, el) { if (el) msgRefs[id] = el }
@@ -64,22 +76,8 @@ function toggleTodo(id) {
   if (t) t.done = !t.done
 }
 
-function toggleTools() {
-  toolsOpen.value = !toolsOpen.value
-  if (toolsOpen.value) todosOpen.value = false
-}
-
-function toggleTodos() {
-  todosOpen.value = !todosOpen.value
-  if (todosOpen.value) toolsOpen.value = false
-}
-
-function toolVisual(name) {
-  return toolVisuals[name] || { symbol: '?', tone: 'red' }
-}
-
-function toolParameterCount(tool) {
-  return Object.keys(tool.parameters?.properties || {}).length
+function toggleInspector(tab) {
+  inspectorTab.value = inspectorTab.value === tab ? null : tab
 }
 
 async function loadTools() {
@@ -106,10 +104,10 @@ async function send() {
   messages.push(message)
   input.value = ''
   isStreaming.value = true
+  inspectorTab.value = 'evidence'
   nextTick(() => { scrollBottom(); animateLast() })
   try {
     await chatStream(message, {
-      mode: 'test',
       message: text,
       context: fileContext.map(file => file.path),
     })
@@ -140,7 +138,38 @@ function onKeydown(e) {
 
 function scrollBottom() { if (msgList.value) msgList.value.scrollTop = msgList.value.scrollHeight }
 
-const { stream: chatStream, abort: abortChat } = useChatStream(animSmoothScroll)
+function onAgentPacket(packet, type, data) {
+  if (packet.op === 'start' && type === 'hypothesis') {
+    Object.assign(evidenceRun, {
+      hypothesis: data.text,
+      confidence: data.confidence,
+      status: data.status,
+      phase: 'support',
+      evidence: [],
+      relations: [],
+      verdict: null,
+    })
+  } else if (packet.op === 'start' && type === 'evidence') {
+    evidenceRun.evidence.push({ ...data })
+    evidenceRun.confidence = data.confidence
+  } else if (packet.op === 'start' && type === 'evidence_relation') {
+    evidenceRun.relations.push({ ...data })
+    evidenceRun.confidence = data.confidence
+  } else if (packet.op === 'start' && type === 'verdict') {
+    evidenceRun.verdict = { ...data }
+    evidenceRun.status = data.verdict
+    evidenceRun.confidence = data.confidence
+  } else if (type === 'stage' && data?.phase) {
+    evidenceRun.phase = data.phase
+  } else if (type === 'hypothesis' && data) {
+    evidenceRun.confidence = data.confidence
+    evidenceRun.status = data.status
+  } else if (packet.op === 'done' && packet.run) {
+    evidenceRun.status = packet.run.state
+  }
+}
+
+const { stream: chatStream, abort: abortChat } = useChatStream(animSmoothScroll, onAgentPacket)
 
 function animateLast() {
   const ids = Object.keys(msgRefs)
@@ -151,6 +180,7 @@ function animateLast() {
 
 onMounted(() => {
   loadTools()
+  loadWorkspaces()
   gsapCtx = gsap.context(() => {
     if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) return
     gsap.fromTo(
@@ -182,20 +212,29 @@ onUnmounted(() => { abortChat(); gsapCtx?.revert() })
       </div>
 
       <div class="chat__topbar-right">
-        <button class="chat__topbtn chat__topbtn--tools" :class="{ 'is-on': toolsOpen }" @click="toggleTools" title="Built-in tools">
+        <button class="chat__topbtn" :class="{ 'is-on': inspectorTab === 'evidence' }" @click="toggleInspector('evidence')" title="Evidence">
+          <span aria-hidden="true">◎</span>
+          <span class="chat__topbtn-label">Evidence</span>
+          <span class="chat__topbtn-badge">{{ evidenceRun.evidence.length }}</span>
+        </button>
+        <button class="chat__topbtn chat__topbtn--tools" :class="{ 'is-on': inspectorTab === 'tools' }" @click="toggleInspector('tools')" title="Built-in tools">
           <span class="chat__tool-grid" aria-hidden="true"><i></i><i></i><i></i><i></i></span>
           <span class="chat__topbtn-label">Tools</span>
           <span class="chat__topbtn-badge chat__topbtn-badge--yellow">{{ toolCatalog.length }}</span>
         </button>
-        <button class="chat__topbtn" :class="{ 'is-on': todosOpen }" @click="toggleTodos" title="Tasks">
+        <button class="chat__topbtn" :class="{ 'is-on': inspectorTab === 'tasks' }" @click="toggleInspector('tasks')" title="Tasks">
           <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"/></svg>
           <span class="chat__topbtn-label">Tasks</span>
           <span class="chat__topbtn-badge">{{ todos.filter(t => !t.done).length }}</span>
         </button>
+        <button class="chat__topbtn" :class="{ 'is-on': inspectorTab === 'workspace' }" @click="toggleInspector('workspace')" title="Workspace">
+          <span aria-hidden="true">⌂</span>
+          <span class="chat__topbtn-label">Workspace</span>
+        </button>
       </div>
     </div>
 
-    <div class="chat__body" :class="{ 'chat__body--has-todos': todosOpen }">
+    <div class="chat__body" :class="{ 'chat__body--has-panel': inspectorTab }">
 
       <!-- ============= message area ============= -->
       <div class="chat__main">
@@ -245,45 +284,22 @@ onUnmounted(() => { abortChat(); gsapCtx?.revert() })
 
       <!-- ============= todo panel ============= -->
       <Transition name="panel">
-        <div v-if="todosOpen" class="chat__todos">
-          <div class="chat__todos-head">
-            <span class="chat__todos-title">Tasks</span>
-            <span class="chat__todos-count">{{ todos.filter(t => !t.done).length }} remaining</span>
-          </div>
-          <div class="chat__todos-list">
-            <div v-for="t in todos" :key="t.id" class="chat__todo" :class="{ 'is-done': t.done }" @click="toggleTodo(t.id)">
-              <span class="chat__todo-check">
-                <svg v-if="t.done" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="var(--ok)" stroke-width="3" stroke-linecap="round"><polyline points="20 6 9 17 4 12"/></svg>
-              </span>
-              <span class="chat__todo-text">{{ t.content }}</span>
-            </div>
-          </div>
-        </div>
-      </Transition>
-
-      <Transition name="panel">
-        <aside v-if="toolsOpen" class="chat__tools">
-          <div class="chat__tools-head">
-            <div>
-              <span class="chat__tools-title">Built-in tools</span>
-              <span class="chat__tools-subtitle">Available to every agent session</span>
-            </div>
-            <span class="chat__tools-total">{{ toolCatalog.length }}</span>
-          </div>
-          <div class="chat__tools-list">
-            <div v-for="tool in toolCatalog" :key="tool.name" class="tool-card" :class="'tool-card--' + toolVisual(tool.name).tone">
-              <span class="tool-card__icon">{{ toolVisual(tool.name).symbol }}</span>
-              <span class="tool-card__copy">
-                <strong>{{ tool.name }}</strong>
-                <small>{{ tool.description }}</small>
-              </span>
-              <span class="tool-card__params">{{ toolParameterCount(tool) }} args</span>
-            </div>
-          </div>
-          <div class="chat__tools-foot">
-            Select “Run the tool workflow” to see live states.
-          </div>
-        </aside>
+        <InspectorPanel
+          v-if="inspectorTab"
+          :tab="inspectorTab"
+          :run="evidenceRun"
+          :todos="todos"
+          :tools="toolCatalog"
+          :workspaces="workspaces"
+          :active-workspace="activeWorkspace"
+          :workspace-error="workspaceError"
+          @update:tab="inspectorTab = $event"
+          @toggle-todo="toggleTodo"
+          @add-workspace="addWorkspace"
+          @activate-workspace="activateWorkspace"
+          @delete-workspace="deleteWorkspace"
+          @close="inspectorTab = null"
+        />
       </Transition>
 
     </div>
