@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import platform
+import re
 from collections.abc import Iterator
 from uuid import uuid4
 
@@ -160,7 +161,12 @@ def investigation_stream(
         "state": "done",
         "phase": "patch_planning_ready" if final.get("ready_for_patch_planning") else "needs_more_info",
     }}
-    yield start_event(f"{run_id}-step-result", "step_result", _step_result(final))
+    step = _step_result(final)
+    yield start_event(f"{run_id}-step-result", "step_result", step)
+    if step["next_step"] == "ask_user":
+        yield start_event(f"{run_id}-user-question", "user_question", _user_question(final, step, message))
+        yield {"op": "done", "investigation": final}
+        return
     yield start_event(f"{run_id}-output", "output", {
         "content": _summary(final),
         "streaming": False,
@@ -406,6 +412,17 @@ def _tool_arguments(raw: str | None) -> dict:
 
 def _finish_payload(arguments: dict) -> dict:
     unknowns = _unknowns(arguments.get("unknowns"))
+    open_questions = arguments.get("open_questions") if isinstance(arguments.get("open_questions"), list) else []
+    if open_questions and not unknowns:
+        unknowns = [
+            {
+                "id": f"Q{index}",
+                "question": question,
+                "blocking": True,
+                "resolution_strategy": "ask_user",
+            }
+            for index, question in enumerate(_clean_questions(open_questions), start=1)
+        ]
     ready = bool(arguments.get("ready_for_patch_planning"))
     if any(item["blocking"] for item in unknowns):
         ready = False
@@ -413,7 +430,7 @@ def _finish_payload(arguments: dict) -> dict:
         "summary": str(arguments.get("summary") or "").strip(),
         "ready_for_patch_planning": ready,
         "beliefs": arguments.get("beliefs") if isinstance(arguments.get("beliefs"), list) else [],
-        "open_questions": arguments.get("open_questions") if isinstance(arguments.get("open_questions"), list) else [],
+        "open_questions": open_questions,
         "unknowns": unknowns,
         "patch_planning_context": (
             arguments.get("patch_planning_context")
@@ -421,6 +438,10 @@ def _finish_payload(arguments: dict) -> dict:
             else []
         ),
     }
+
+
+def _clean_questions(value: list) -> list[str]:
+    return [text for item in value if (text := str(item).strip())]
 
 
 def _step_result(final: dict) -> dict:
@@ -437,7 +458,7 @@ def _step_result(final: dict) -> dict:
         return {
             "next_step": "ask_user",
             "continue_reason": "; ".join(item["question"] for item in ask_user[:3]),
-            "target_unknown_ids": [],
+            "target_unknown_ids": [item["id"] for item in ask_user],
         }
     if final.get("ready_for_patch_planning"):
         return {
@@ -453,6 +474,154 @@ def _step_result(final: dict) -> dict:
         or "Investigation did not reach patch planning readiness.",
         "target_unknown_ids": [],
     }
+
+
+def _user_question(final: dict, step: dict, origin_message: str = "") -> dict:
+    unknown = next(
+        (
+            item for item in final.get("unknowns", [])
+            if item.get("blocking") and item.get("resolution_strategy") == "ask_user"
+        ),
+        None,
+    )
+    question = (unknown or {}).get("question") or (final.get("open_questions") or [step["continue_reason"]])[0]
+    options = _question_options(question)
+    unknown_id = (unknown or {}).get("id", "")
+    return {
+        "id": unknown_id or "question",
+        "question": question,
+        "origin_message": origin_message,
+        "reason": step["continue_reason"],
+        "why_it_matters": (
+            f"This answer resolves blocking unknown {unknown_id} before patch planning."
+            if unknown_id
+            else "This answer resolves an open decision before patch planning."
+        ),
+        "blocks_next_step": "patch_planning",
+        "target_unknown_ids": [unknown_id] if unknown_id else list(step.get("target_unknown_ids") or []),
+        "unknown_id": unknown_id,
+        "linked_unknown": unknown or {},
+        "related_beliefs": _related_dict_items(question, final.get("beliefs") or [], ("statement", "status"), limit=3),
+        "related_open_questions": _related_text_items(question, final.get("open_questions") or [], limit=3),
+        "patch_planning_context_refs": _related_text_items(
+            question,
+            final.get("patch_planning_context") or [],
+            limit=3,
+            fallback=True,
+        ),
+        "options": options,
+        "custom_allowed": True,
+    }
+
+
+def _related_dict_items(question: str, items: list, fields: tuple[str, ...], *, limit: int) -> list[dict]:
+    scored: list[tuple[int, int, dict]] = []
+    q_tokens = _tokens(question)
+    for index, item in enumerate(items):
+        if not isinstance(item, dict):
+            continue
+        haystack = " ".join(str(item.get(field) or "") for field in fields)
+        score = len(q_tokens & _tokens(haystack))
+        if score:
+            scored.append((score, -index, item))
+    scored.sort(reverse=True)
+    return [item for _, _, item in scored[:limit]]
+
+
+def _related_text_items(question: str, items: list, *, limit: int, fallback: bool = False) -> list[str]:
+    q_tokens = _tokens(question)
+    scored: list[tuple[int, int, str]] = []
+    normalized: list[str] = []
+    for index, item in enumerate(items):
+        text = str(item).strip()
+        if not text:
+            continue
+        normalized.append(text)
+        score = len(q_tokens & _tokens(text))
+        if score:
+            scored.append((score, -index, text))
+    scored.sort(reverse=True)
+    if scored:
+        return [item for _, _, item in scored[:limit]]
+    return normalized[:limit] if fallback else []
+
+
+def _tokens(value: str) -> set[str]:
+    return set(re.findall(r"[a-z0-9_]{3,}|[\u4e00-\u9fff]{2,}", str(value).casefold()))
+
+
+def _question_options(question: str) -> list[dict]:
+    text = question.casefold()
+    if any(word in text for word in ("keyboard", "trigger", "modifier", "hotkey", "key")):
+        return [
+            {
+                "id": "any_key",
+                "label": "Any key",
+                "value": "Allow users to set any keyboard key as the trigger.",
+            },
+            {
+                "id": "modifiers_only",
+                "label": "Modifiers only",
+                "value": "Only allow modifier keys such as Alt/Ctrl/Shift/Win as triggers.",
+                "recommended": True,
+            },
+            {
+                "id": "continue_research",
+                "label": "Research more",
+                "value": "Continue investigating the existing hotkey design before deciding.",
+            },
+        ]
+    if any(word in text for word in ("pyobjc", "quartz", "applescript", "window manipulation")):
+        return [
+            {
+                "id": "pyobjc_quartz",
+                "label": "Use PyObjC/Quartz",
+                "value": "Use PyObjC/Quartz Accessibility API for macOS window manipulation.",
+                "recommended": True,
+            },
+            {
+                "id": "applescript",
+                "label": "Use AppleScript",
+                "value": "Use AppleScript/osascript for macOS window manipulation.",
+            },
+            {
+                "id": "research_more",
+                "label": "Research more",
+                "value": "Continue researching macOS window manipulation before editing code.",
+            },
+        ]
+    if any(word in text for word in ("password", "hash")):
+        return [
+            {
+                "id": "hash_passwords",
+                "label": "Hash passwords",
+                "value": "Passwords must be hashed; implement the project default securely.",
+                "recommended": True,
+            },
+            {
+                "id": "prototype_only",
+                "label": "Prototype only",
+                "value": "This is only a prototype; do not add password hashing yet.",
+            },
+            {
+                "id": "ask_details",
+                "label": "Ask me details",
+                "value": "Ask for more password storage and authentication policy details first.",
+            },
+        ]
+    return [
+        {
+            "id": "best_practice",
+            "label": "Use best practice",
+            "value": f"Use standard engineering best practice for this decision: {question}",
+            "recommended": True,
+        },
+        {
+            "id": "continue_research",
+            "label": "Research more",
+            "value": f"Continue investigating this decision before choosing: {question}",
+        },
+    ]
 
 
 def _unknowns(value) -> list[dict]:

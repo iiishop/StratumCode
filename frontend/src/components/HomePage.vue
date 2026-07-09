@@ -58,6 +58,7 @@ const msgList = ref(null)
 const messages = reactive([])
 const msgRefs = reactive({})
 const isStreaming = ref(false)
+const pendingQuestion = ref(null)
 const emptyEvidenceRun = reactive({
   id: '',
   hypothesis: '',
@@ -176,6 +177,7 @@ function snapshotState() {
     activeRunId: activeRunId.value,
     taskAnalyses: plain(taskAnalyses),
     subagentRuns: plain(subagentRuns),
+    pendingQuestion: plain(pendingQuestion.value),
     fileContext: plain(fileContext),
     usage: plain(sessionUsage),
   }
@@ -195,6 +197,7 @@ function restoreState(state = {}) {
   evidenceRuns.splice(0, evidenceRuns.length, ...(state.evidenceRuns || []).map(run => reactive(run)))
   taskAnalyses.splice(0, taskAnalyses.length, ...(state.taskAnalyses || []).map(analysis => reactive(analysis)))
   subagentRuns.splice(0, subagentRuns.length, ...(state.subagentRuns || []).map(run => reactive(run)))
+  pendingQuestion.value = state.pendingQuestion || null
   activeRunId.value = state.activeRunId || ''
   fileContext.splice(0, fileContext.length, ...((state.fileContext && state.fileContext.length) ? state.fileContext : defaultFileContext()))
   Object.assign(sessionUsage, usageDefaults(), state.usage || {})
@@ -218,7 +221,29 @@ function removeContextFile(p) {
   if (i !== -1) fileContext.splice(i, 1)
 }
 
-async function send() {
+function answerPayloadFromPending(text) {
+  if (!pendingQuestion.value) return null
+  return {
+    question_id: pendingQuestion.value.id,
+    unknown_id: pendingQuestion.value.unknown_id,
+    linked_unknown_id: pendingQuestion.value.linked_unknown_id,
+    blocks_next_step: pendingQuestion.value.blocks_next_step,
+    origin_message: pendingQuestion.value.origin_message,
+    question: pendingQuestion.value.question,
+    response: text,
+    custom: true,
+  }
+}
+
+function pendingQuestionLabel(question) {
+  const id = question?.unknown_id || question?.linked_unknown_id || question?.id
+  const blocked = question?.blocks_next_step
+  if (id && blocked) return `Answering ${id} -> ${blocked}`
+  if (id) return `Answering ${id}`
+  return 'Answering'
+}
+
+async function send(answer = null) {
   const text = input.value.trim()
   if (!text || isStreaming.value) return
   messages.push({ id: Date.now(), role: 'user', content: text, time: timeNow() })
@@ -230,10 +255,14 @@ async function send() {
   inspectorTab.value = 'evidence'
   nextTick(() => { scrollBottom(); animateLast() })
   try {
-    await chatStream(message, {
-      message: text,
+    const structuredAnswer = answer || answerPayloadFromPending(text)
+    const request = {
+      message: structuredAnswer?.origin_message || text,
       context: fileContext.map(file => file.path),
-    })
+    }
+    if (structuredAnswer) request.answer = structuredAnswer
+    await chatStream(message, request)
+    if (structuredAnswer) pendingQuestion.value = null
   } catch (error) {
     if (error.name !== 'AbortError') {
       message.events.push({
@@ -248,6 +277,32 @@ async function send() {
     scheduleSave()
     nextTick(scrollBottom)
   }
+}
+
+function answerQuestion(answer) {
+  if (!answer) return
+  pendingQuestion.value = {
+    id: answer.question_id,
+    unknown_id: answer.unknown_id,
+    linked_unknown_id: answer.linked_unknown_id,
+    blocks_next_step: answer.blocks_next_step,
+    origin_message: answer.origin_message,
+    question: answer.question,
+  }
+  input.value = answer.response || ''
+  nextTick(() => {
+    if (answer.send) send({
+      question_id: answer.question_id,
+      unknown_id: answer.unknown_id,
+      linked_unknown_id: answer.linked_unknown_id,
+      blocks_next_step: answer.blocks_next_step,
+      origin_message: answer.origin_message,
+      question: answer.question,
+      selected_option_id: answer.selected_option_id,
+      selected_option_label: answer.selected_option_label,
+      response: answer.response,
+    })
+  })
 }
 
 /* ── animation helpers ──────────────────────────────────── */
@@ -292,6 +347,8 @@ function onAgentPacket(packet, type, data) {
   } else if (packet.op === 'start' && type === 'task_analysis') {
     taskAnalyses.push(data)
     inspectorTab.value = 'tasks'
+  } else if (packet.op === 'start' && type === 'user_question') {
+    pendingQuestion.value = plain(data)
   } else if (packet.op === 'start' && type === 'evidence') {
     const run = currentEvidenceRun()
     if (!run) return
@@ -456,7 +513,12 @@ watch(() => props.session?.id, () => {
 
               <div v-if="m.role === 'user'" class="chat__content">{{ m.content }}</div>
               <TransitionGroup v-else name="timeline-event" tag="div" class="chat__timeline">
-                <ChatEvent v-for="event in m.events" :key="event.id" :event="event" />
+                <ChatEvent
+                  v-for="event in m.events"
+                  :key="event.id"
+                  :event="event"
+                  @answer="answerQuestion"
+                />
               </TransitionGroup>
             </div>
           </div>
@@ -529,6 +591,11 @@ watch(() => props.session?.id, () => {
             removable
             @remove="removeContextFile(f.path)"
           />
+        </div>
+        <div v-if="pendingQuestion" class="chat__pending-question">
+          <span>{{ pendingQuestionLabel(pendingQuestion) }}</span>
+          <strong>{{ pendingQuestion.question }}</strong>
+          <button type="button" @click="pendingQuestion = null">Clear</button>
         </div>
 
         <div class="chat__input-row">
@@ -1423,6 +1490,42 @@ watch(() => props.session?.id, () => {
 .chat__files {
   padding: 7px 11px 0;
   gap: 6px;
+}
+
+.chat__pending-question {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  margin: 7px 11px 0;
+  padding: 7px 8px;
+  border: 1px solid #e2d28a;
+  border-radius: 7px;
+  background: #fff9db;
+}
+
+.chat__pending-question span {
+  color: #7a5a00;
+  font: 800 8px/1 var(--mono);
+  text-transform: uppercase;
+}
+
+.chat__pending-question strong {
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  color: #4d3a00;
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chat__pending-question button {
+  border: 0;
+  color: #1756d1;
+  background: transparent;
+  font: 700 9px/1 var(--mono);
+  cursor: pointer;
 }
 
 .chat__files-label {

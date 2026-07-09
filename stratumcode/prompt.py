@@ -78,6 +78,9 @@ Unknowns must use exactly one resolution_strategy:
 - investigate_project: blocking facts that can be resolved by code/project investigation.
 - ask_user: facts that require user preference or external intent.
 - deferred: non-blocking facts that can wait until packaging, polish, or later planning.
+If the user did not explicitly request an engineering policy choice, do not
+silently add it as a requirement. Record it as an ask_user unknown when it
+changes scope, security, compatibility, or user-visible behavior.
 
 Every material finding must be captured with record_evidence:
 - stance: support or oppose

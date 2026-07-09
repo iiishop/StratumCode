@@ -415,7 +415,6 @@ function addWorkspace() {
   font-weight: 700;
   cursor: pointer;
   text-align: left;
-  user-select: none;
   transition: background .15s ease;
 }
 .hypothesis-row__summary:hover { background: #f5f8fd; }

@@ -1,9 +1,21 @@
 <script setup>
-import { computed } from 'vue'
+import { computed, ref } from 'vue'
 import { highlightCode } from '../../lib/highlight'
 import EventFrame from './EventFrame.vue'
 
 const props = defineProps({ event: { type: Object, required: true } })
+
+const copied = ref(false)
+let copyTimer
+
+async function copyContent() {
+  try {
+    await navigator.clipboard.writeText(props.event.content || '')
+    copied.value = true
+    clearTimeout(copyTimer)
+    copyTimer = setTimeout(() => { copied.value = false }, 1600)
+  } catch { /* clipboard denied */ }
+}
 
 function escapeHtml(text) {
   return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
@@ -135,6 +147,10 @@ const parts = computed(() => {
 <template>
   <EventFrame kind="output" symbol="&rsaquo;" label="Response" :status="event.streaming ? 'writing' : 'done'">
     <div class="output-copy">
+      <button class="output-copy-btn" :class="{ copied }" @click.stop="copyContent" :aria-label="copied ? 'Copied' : 'Copy'">
+        <svg v-if="!copied" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+        <svg v-else width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M20 6 9 17l-5-5"/></svg>
+      </button>
       <template v-for="(part, index) in parts" :key="index">
         <pre v-if="part.type === 'code'"><code v-html="highlightCode(part.content, part.lang)"></code></pre>
         <div v-else class="output-md" v-html="part.html"></div>
@@ -146,12 +162,44 @@ const parts = computed(() => {
 
 <style scoped>
 .output-copy {
+  position: relative;
   padding: 4px 0;
   color: var(--text-h, #102a5c);
   font-size: var(--font-body, 14px);
   line-height: 1.72;
   overflow-wrap: anywhere;
   word-break: break-word;
+}
+
+.output-copy-btn {
+  position: absolute;
+  top: 0;
+  right: 0;
+  display: flex; align-items: center; justify-content: center;
+  width: 28px; height: 28px;
+  border: 1px solid var(--border, #d9e3f5);
+  border-radius: 7px;
+  color: var(--text-muted, #71809c);
+  background: #fff;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity .15s, color .15s, border-color .15s;
+  z-index: 2;
+}
+
+.output-copy:hover .output-copy-btn {
+  opacity: 1;
+}
+
+.output-copy-btn:hover {
+  border-color: var(--accent-border, rgba(23,86,209,.32));
+  color: var(--accent-text, #1748a3);
+}
+
+.output-copy-btn.copied {
+  opacity: 1;
+  border-color: #00a878;
+  color: #00a878;
 }
 
 .output-copy pre {

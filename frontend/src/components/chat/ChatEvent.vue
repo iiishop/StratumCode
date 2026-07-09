@@ -13,8 +13,10 @@ import VerdictEvent from './VerdictEvent.vue'
 import UsageEvent from './UsageEvent.vue'
 import StepResultEvent from './StepResultEvent.vue'
 import SafetyStopEvent from './SafetyStopEvent.vue'
+import UserQuestionEvent from './UserQuestionEvent.vue'
 
 defineProps({ event: { type: Object, required: true } })
+defineEmits(['answer'])
 
 const eventComponents = {
   thinking: ThinkingEvent,
@@ -30,10 +32,16 @@ const eventComponents = {
   verdict: VerdictEvent,
   step_result: StepResultEvent,
   safety_stop: SafetyStopEvent,
+  user_question: UserQuestionEvent,
   usage: UsageEvent,
 }
 </script>
 
 <template>
-  <component :is="eventComponents[event.type]" v-if="eventComponents[event.type]" :event="event.data" />
+  <component
+    :is="eventComponents[event.type]"
+    v-if="eventComponents[event.type]"
+    :event="event.data"
+    @answer="$emit('answer', $event)"
+  />
 </template>
