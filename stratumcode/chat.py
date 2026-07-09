@@ -294,6 +294,9 @@ def evidence_stream(
             "verdict": run.state.value,
             "confidence": run.confidence,
             "summary": run.summary,
+            "findings": _build_findings(run),
+            "support_count": sum(1 for e in run.evidence.values() if e.stance == "support"),
+            "oppose_count": sum(1 for e in run.evidence.values() if e.stance == "oppose"),
         })
 
     if run.summary.strip():
@@ -310,6 +313,21 @@ def _fallback_summary(run: EvidenceRun) -> str:
         stance = "supports" if item.stance == "support" else "opposes"
         findings.append(f"{item.id} {stance}: {item.claim} ({item.source_uri})")
     return "Verdict computed from recorded evidence: " + "; ".join(findings)
+
+
+def _build_findings(run: EvidenceRun) -> list[dict]:
+    return [
+        {
+            "id": item.id,
+            "stance": item.stance,
+            "claim": item.claim,
+            "weight": round(item.strength * 100),
+            "source_type": item.source_type,
+            "source_uri": item.source_uri,
+            "excerpt": item.excerpt[:200],
+        }
+        for item in run.evidence.values()
+    ]
 
 
 def _discovery_tools(hypothesis: str = "", context: list[str] | None = None) -> tuple[str, ...]:
@@ -624,6 +642,9 @@ def _handle_agent_tool(
             "verdict": verdict.value,
             "confidence": run.confidence,
             "summary": run.summary,
+            "findings": _build_findings(run),
+            "support_count": sum(1 for e in run.evidence.values() if e.stance == "support"),
+            "oppose_count": sum(1 for e in run.evidence.values() if e.stance == "oppose"),
         }
         yield _start(f"{run_id}-verdict", "verdict", data)
         return json.dumps(data, ensure_ascii=False), True
