@@ -75,8 +75,68 @@ watch(() => props.tab, async () => {
   if (children?.length) animate(children, { translateY: [6, 0], opacity: [0, 1], delay: stagger(24), duration: 260, ease: 'outCubic' })
 })
 
+watch(() => props.runs.length, (newLen, oldLen) => {
+  if (newLen <= oldLen || !props.runs.length) return
+  props.runs.forEach((itemRun, i) => { itemRun.open = i === props.runs.length - 1 })
+})
+
+function toggleHypothesis(itemRun) {
+  itemRun.open = !itemRun.open
+}
+
+function hypothesisEnter(el, done) {
+  el.style.overflow = 'hidden'
+  gsap.fromTo(el, { height: 0, autoAlpha: 0 }, {
+    height: el.scrollHeight,
+    autoAlpha: 1,
+    duration: .38,
+    ease: 'power3.out',
+    onComplete: () => {
+      gsap.set(el, { height: 'auto', clearProps: 'overflow' })
+      done()
+    },
+  })
+  const cards = el.querySelectorAll('.evidence-card, .confidence-card, .verdict-card, .relation-list')
+  if (cards.length) {
+    animate(cards, {
+      translateY: [14, 0],
+      opacity: [0, 1],
+      delay: stagger(35, { from: 'first' }),
+      duration: 360,
+      ease: 'outCubic',
+    })
+  }
+}
+
+function hypothesisLeave(el, done) {
+  el.style.overflow = 'hidden'
+  const cards = el.querySelectorAll('.evidence-card, .confidence-card, .verdict-card, .relation-list')
+  if (cards.length) {
+    animate(cards, {
+      translateY: [0, -8],
+      opacity: [1, 0],
+      delay: stagger(18, { from: 'last' }),
+      duration: 200,
+      ease: 'inCubic',
+    })
+  }
+  gsap.fromTo(el, { height: el.scrollHeight, autoAlpha: 1 }, {
+    height: 0,
+    autoAlpha: 0,
+    duration: .3,
+    ease: 'power2.inOut',
+    delay: cards.length ? .12 : 0,
+    onComplete: done,
+  })
+}
+
 function countEvidence(run, stance) {
   return run.evidence.filter(item => item.stance === stance).length
+}
+
+function runResultClass(itemRun) {
+  if (itemRun.verdict) return `is-${itemRun.verdict.verdict}`
+  return itemRun.status === 'running' ? 'is-running' : ''
 }
 
 function serverClass(status) {
@@ -118,45 +178,51 @@ function addWorkspace() {
           <p>↑ {{ usage.input_tokens || 0 }} · ↓ {{ usage.output_tokens || 0 }} · cache {{ usage.cached_tokens || 0 }}</p>
         </section>
 
-        <details
+        <div
           v-for="itemRun in visibleRuns"
           v-show="runs.length && itemRun.hypothesis"
           :key="itemRun.id"
           class="hypothesis-row"
-          :open="itemRun.open"
-          @toggle="itemRun.open = $event.target.open"
+          :class="[runResultClass(itemRun), { 'is-open': itemRun.open }]"
         >
-          <summary>
+          <button class="hypothesis-row__summary" @click="toggleHypothesis(itemRun)">
             <span>{{ itemRun.hypothesis }}</span>
-            <b>{{ Math.round((itemRun.confidence ?? .5) * 100) }}%</b>
-          </summary>
-          <section class="confidence-card" :class="`is-${itemRun.status}`">
-            <div class="confidence-card__top">
-              <span>Hypothesis confidence</span>
-              <strong>{{ Math.round((itemRun.confidence ?? .5) * 100) }}%</strong>
+            <span class="hypothesis-row__meta">
+              <b>{{ Math.round((itemRun.confidence ?? .5) * 100) }}%</b>
+              <i class="hypothesis-row__chevron"></i>
+            </span>
+          </button>
+          <Transition @enter="hypothesisEnter" @leave="hypothesisLeave">
+            <div v-show="itemRun.open" class="hypothesis-row__body">
+              <section class="confidence-card" :class="`is-${itemRun.status}`">
+                <div class="confidence-card__top">
+                  <span>Hypothesis confidence</span>
+                  <strong>{{ Math.round((itemRun.confidence ?? .5) * 100) }}%</strong>
+                </div>
+                <div class="confidence-card__track"><i :style="{ transform: `scaleX(${itemRun.confidence ?? .5})` }"></i></div>
+                <p>{{ itemRun.hypothesis }}</p>
+                <div class="confidence-card__counts">
+                  <span class="support">+{{ countEvidence(itemRun, 'support') }} support</span>
+                  <span class="oppose">−{{ countEvidence(itemRun, 'oppose') }} oppose</span>
+                </div>
+              </section>
+              <article v-for="item in itemRun.evidence" :key="item.id" class="evidence-card" :class="`is-${item.stance}`">
+                <span class="evidence-card__sign">{{ item.stance === 'support' ? '+' : '−' }}</span>
+                <div>
+                  <strong>{{ item.claim }}</strong>
+                  <small>{{ item.source_uri }}</small>
+                  <p>{{ item.excerpt }}</p>
+                </div>
+                <b>{{ Math.round(item.strength * 100) }}</b>
+              </article>
+              <section v-if="itemRun.verdict" class="verdict-card" :class="`is-${itemRun.verdict.verdict}`">
+                <small>Verdict</small>
+                <strong>{{ itemRun.verdict.verdict }}</strong>
+                <p>{{ itemRun.verdict.summary }}</p>
+              </section>
             </div>
-            <div class="confidence-card__track"><i :style="{ transform: `scaleX(${itemRun.confidence ?? .5})` }"></i></div>
-            <p>{{ itemRun.hypothesis }}</p>
-            <div class="confidence-card__counts">
-              <span class="support">+{{ countEvidence(itemRun, 'support') }} support</span>
-              <span class="oppose">−{{ countEvidence(itemRun, 'oppose') }} oppose</span>
-            </div>
-          </section>
-          <article v-for="item in itemRun.evidence" :key="item.id" class="evidence-card" :class="`is-${item.stance}`">
-            <span class="evidence-card__sign">{{ item.stance === 'support' ? '+' : '−' }}</span>
-            <div>
-              <strong>{{ item.claim }}</strong>
-              <small>{{ item.source_uri }}</small>
-              <p>{{ item.excerpt }}</p>
-            </div>
-            <b>{{ Math.round(item.strength * 100) }}</b>
-          </article>
-          <section v-if="itemRun.verdict" class="verdict-card" :class="`is-${itemRun.verdict.verdict}`">
-            <small>Verdict</small>
-            <strong>{{ itemRun.verdict.verdict }}</strong>
-            <p>{{ itemRun.verdict.summary }}</p>
-          </section>
-        </details>
+          </Transition>
+        </div>
 
         <section v-if="!runs.length" class="confidence-card" :class="`is-${run.status}`">
           <div class="confidence-card__top">
@@ -294,10 +360,52 @@ function addWorkspace() {
 .inspector__tabs { display: grid; grid-template-columns: repeat(auto-fit, minmax(58px, 1fr)); gap: 3px; padding: 7px; border-bottom: 1px solid #dbe5f2; }
 .inspector__tabs button { padding: 7px 2px; border: 0; border-radius: 6px; color: #71859f; background: transparent; font: 700 9px/1 var(--mono); text-transform: uppercase; cursor: pointer; }.inspector__tabs button.active { color: #fff; background: #1756d1; box-shadow: 0 4px 12px rgba(23, 86, 209, .22); }
 .inspector__content { height: calc(100% - 138px); overflow-y: auto; padding: 12px; scrollbar-gutter: stable; }
-.usage-card,.hypothesis-row { margin-bottom: 10px; padding: 11px; border: 1px solid #d8e2ef; border-radius: 10px; background: #fff; }
+.usage-card,.hypothesis-row { margin-bottom: 10px; border: 1px solid #d8e2ef; border-radius: 10px; background: #fff; }
+.hypothesis-row { overflow: hidden; border-left: 3px solid #d8e2ef; }
+.hypothesis-row.is-supported { border-left-color: #11866f; background: rgba(15, 125, 101, .025); }
+.hypothesis-row.is-refuted { border-left-color: #c44747; background: rgba(196, 71, 71, .025); }
+.hypothesis-row.is-inconclusive { border-left-color: #c48b00; background: rgba(196, 139, 0, .025); }
+.hypothesis-row.is-running { border-left-color: #f5c842; background: rgba(245, 200, 66, .04); }
+.hypothesis-row.is-supported .hypothesis-row__meta b { color: #11866f; }
+.hypothesis-row.is-refuted .hypothesis-row__meta b { color: #c44747; }
+.hypothesis-row.is-inconclusive .hypothesis-row__meta b { color: #c48b00; }
+.hypothesis-row.is-running .hypothesis-row__meta b { color: #c48b00; }
+.usage-card { padding: 11px; }
 .usage-card span,.usage-card p { color: #71859e; font: 9px/1.45 var(--mono); }.usage-card strong { display: block; margin: 4px 0; color: #1756d1; font: 700 15px/1 var(--mono); }.usage-card p { margin: 0; }
-.hypothesis-row summary { display: flex; align-items: center; justify-content: space-between; gap: 8px; color: #294564; cursor: pointer; font-size: 10.5px; font-weight: 700; }.hypothesis-row summary span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }.hypothesis-row summary b { color: #1756d1; font: 800 11px/1 var(--mono); }
-.hypothesis-row .confidence-card { margin-top: 10px; box-shadow: none; }.hypothesis-row .evidence-card { margin-top: 7px; }
+.hypothesis-row__summary {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 11px;
+  border: 0;
+  color: #294564;
+  background: transparent;
+  font-size: 10.5px;
+  font-weight: 700;
+  cursor: pointer;
+  text-align: left;
+  user-select: none;
+  transition: background .15s ease;
+}
+.hypothesis-row__summary:hover { background: #f5f8fd; }
+.hypothesis-row__summary span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
+.hypothesis-row__meta { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
+.hypothesis-row__meta b { color: var(--accent-text, #1756d1); font: 800 11px/1 var(--mono, monospace); }
+.hypothesis-row__chevron {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  border-right: 1.5px solid #94a8c2;
+  border-bottom: 1.5px solid #94a8c2;
+  transform: rotate(45deg);
+  transition: transform .28s cubic-bezier(.22, 1, .36, 1);
+}
+.hypothesis-row.is-open .hypothesis-row__chevron { transform: rotate(-135deg); }
+.hypothesis-row .confidence-card { margin: 0 10px 10px; box-shadow: none; }
+.hypothesis-row .evidence-card { margin: 7px 10px; }
+.hypothesis-row .verdict-card { margin: 7px 10px 10px; }
 .confidence-card { padding: 13px; border: 1px solid #cbdcf2; border-radius: 12px; background: #fff; box-shadow: 0 7px 20px rgba(34, 70, 118, .06); }
 .confidence-card__top { display: flex; align-items: baseline; justify-content: space-between; color: #71859e; font: 700 9px/1 var(--mono); text-transform: uppercase; }.confidence-card__top strong { color: #1756d1; font-size: 20px; }
 .confidence-card__track { height: 7px; margin: 9px 0 11px; overflow: hidden; border-radius: 9px; background: #e2ebf7; }.confidence-card__track i { display: block; width: 100%; height: 100%; border-radius: inherit; background: linear-gradient(90deg, #1756d1 0 55%, #f5c642); transform: scaleX(.5); transform-origin: left; }
