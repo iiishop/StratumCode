@@ -7,8 +7,6 @@ import re
 import time
 from collections.abc import Iterator
 from dataclasses import asdict
-from datetime import datetime, timezone
-from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 from uuid import uuid4
 
@@ -16,17 +14,20 @@ from . import model_settings, prompt, providers
 from .agent import EvidencePolicy, EvidenceRun, RunState
 from .agent.policy import DISCOVERY_TOOLS, EvidencePhase
 from .agent.tools import agent_tools
+from .agent_runtime import (
+    MAX_MODEL_OUTPUT_TOKENS,
+    add_usage as _add_usage,
+    call_model as _call_model,
+    content_text as _content_text,
+    empty_usage as _empty_usage,
+    start_event,
+    tool_error_json,
+    usage_delta as _usage_delta,
+)
 from .tools import registry
 
 MAX_AGENT_ROUNDS = 14
 MAX_EMPTY_TOOL_ROUNDS = 2
-MAX_MODEL_OUTPUT_TOKENS = 2048
-MODEL_RETRY_STATUS_CODES = {429, 502, 503, 504}
-MODEL_RETRY_DELAYS = (0.5, 1.0)
-
-
-def _start(event_id: str, event_type: str, data: dict) -> dict:
-    return {"op": "start", "id": event_id, "event": event_type, "data": data}
 
 
 def _execute_tool(name: str, params: dict, workspace_dir: str):
@@ -34,62 +35,6 @@ def _execute_tool(name: str, params: dict, workspace_dir: str):
     if not tool:
         raise ValueError(f"unknown tool: {name}")
     return tool, asyncio.run(tool.execute(params, {"directory": workspace_dir}))
-
-
-def _call_model(
-    provider: dict,
-    model: str,
-    messages: list[dict],
-    *,
-    tools: list[dict] | None = None,
-) -> dict:
-    payload = {
-        "model": model,
-        "messages": messages,
-        "tools": tools or agent_tools(DISCOVERY_TOOLS),
-        "temperature": 0.1,
-        "max_tokens": MAX_MODEL_OUTPUT_TOKENS,
-    }
-    body = json.dumps(payload).encode()
-    url = f"{provider['base_url'].rstrip('/')}/v1/chat/completions"
-    headers = {
-        "Authorization": f"Bearer {provider['api_key']}",
-        "Content-Type": "application/json",
-    }
-    attempts = len(MODEL_RETRY_DELAYS) + 1
-    for attempt in range(attempts):
-        request = Request(url, data=body, headers=headers)
-        try:
-            with urlopen(request, timeout=90) as response:
-                data = json.load(response)
-            break
-        except HTTPError as exc:
-            detail = exc.read().decode("utf-8", errors="replace")[:1000]
-            if exc.code not in MODEL_RETRY_STATUS_CODES or attempt == attempts - 1:
-                raise ValueError(f"provider request failed ({exc.code}): {detail}") from exc
-        except URLError as exc:
-            detail = str(exc.reason if hasattr(exc, "reason") else exc)
-            if attempt == attempts - 1:
-                raise ValueError(f"provider request failed: {detail}") from exc
-        time.sleep(MODEL_RETRY_DELAYS[attempt])
-    choices = data.get("choices") or []
-    if not choices or not isinstance(choices[0].get("message"), dict):
-        raise ValueError("provider returned no assistant message")
-    message = choices[0]["message"]
-    message["_usage"] = data.get("usage") or {}
-    return message
-
-
-def _content_text(content) -> str:
-    if isinstance(content, str):
-        return content.strip()
-    if isinstance(content, list):
-        return "\n".join(
-            part.get("text", "")
-            for part in content
-            if isinstance(part, dict) and part.get("type") == "text"
-        ).strip()
-    return ""
 
 
 def evidence_stream(
@@ -117,7 +62,7 @@ def evidence_stream(
     run_id = uuid4().hex[:10]
     stage_id = f"{run_id}-stage"
     hypothesis_id = f"{run_id}-hypothesis"
-    yield _start(stage_id, "stage", {
+    yield start_event(stage_id, "stage", {
         "name": "evidence",
         "label": "Gather evidence",
         "state": run.state.value,
@@ -127,7 +72,7 @@ def evidence_stream(
         "provider": provider["name"],
         "inherited": setting["inherited"],
     })
-    yield _start(hypothesis_id, "hypothesis", {
+    yield start_event(hypothesis_id, "hypothesis", {
         "text": hypothesis,
         "confidence": run.confidence,
         "status": run.state.value,
@@ -159,7 +104,7 @@ def evidence_stream(
         allowed_tools, _, _ = policy.next_request(run)
         phase_before = policy.phase
         thinking_id = f"{run_id}-thinking-{round_index}"
-        yield _start(thinking_id, "thinking", {
+        yield start_event(thinking_id, "thinking", {
             "text": "",
             "done": False,
             "open": True,
@@ -172,7 +117,7 @@ def evidence_stream(
         )
         if usage := _usage_delta(pricing_rules, assistant.pop("_usage", {})):
             _add_usage(usage_total, usage)
-            yield _start(f"{run_id}-usage-{round_index}", "usage", {
+            yield start_event(f"{run_id}-usage-{round_index}", "usage", {
                 "delta": usage,
                 "total": usage_total,
             })
@@ -248,10 +193,10 @@ def evidence_stream(
                     }}
                     phase_before = policy.phase
             except Exception as exc:
-                output = _tool_error_json(exc, name)
+                output = tool_error_json(exc, name)
                 if name == "record_evidence":
                     policy.note_checkpoint_failure()
-                yield _start(call_id, "tool", {
+                yield start_event(call_id, "tool", {
                     "name": name or "invalid",
                     "description": (
                         registry.get(name).description
@@ -290,7 +235,7 @@ def evidence_stream(
             "confidence": run.confidence,
             "status": run.state.value,
         }}
-        yield _start(f"{run_id}-verdict", "verdict", {
+        yield start_event(f"{run_id}-verdict", "verdict", {
             "verdict": run.state.value,
             "confidence": run.confidence,
             "summary": run.summary,
@@ -300,7 +245,7 @@ def evidence_stream(
         })
 
     if run.summary.strip():
-        yield _start(f"{run_id}-output", "output", {
+        yield start_event(f"{run_id}-output", "output", {
             "content": run.summary,
             "streaming": False,
         })
@@ -358,81 +303,6 @@ def _compact_tool_message(evidence_args: dict) -> dict | None:
     }
 
 
-def _empty_usage(pricing_rules: list[dict]) -> dict:
-    return {
-        "input_tokens": 0,
-        "output_tokens": 0,
-        "cached_tokens": 0,
-        "total_tokens": 0,
-        "cost": 0.0,
-        "currency": _pricing_currency(pricing_rules),
-    }
-
-
-def _usage_delta(pricing_rules: list[dict], usage: dict) -> dict:
-    if not usage:
-        return {}
-    input_tokens = int(usage.get("prompt_tokens") or 0)
-    output_tokens = int(usage.get("completion_tokens") or 0)
-    details = usage.get("prompt_tokens_details") or {}
-    cached_tokens = int(
-        usage.get("prompt_cache_hit_tokens")
-        or details.get("cached_tokens")
-        or 0
-    )
-    pricing = _active_pricing(pricing_rules)
-    cost = _usage_cost(input_tokens, output_tokens, cached_tokens, pricing) if pricing else 0.0
-    return {
-        "input_tokens": input_tokens,
-        "output_tokens": output_tokens,
-        "cached_tokens": cached_tokens,
-        "total_tokens": int(usage.get("total_tokens") or input_tokens + output_tokens),
-        "cost": round(cost, 6),
-        "currency": (pricing or {}).get("currency") or _pricing_currency(pricing_rules),
-    }
-
-
-def _add_usage(total: dict, delta: dict) -> None:
-    for key in ("input_tokens", "output_tokens", "cached_tokens", "total_tokens"):
-        total[key] += delta.get(key, 0)
-    total["cost"] = round(total["cost"] + delta.get("cost", 0), 6)
-    total["currency"] = delta.get("currency") or total["currency"]
-
-
-def _pricing_currency(pricing_rules: list[dict]) -> str:
-    pricing = _active_pricing(pricing_rules)
-    return (pricing or {}).get("currency", "USD")
-
-
-def _active_pricing(rules: list[dict]) -> dict | None:
-    if isinstance(rules, dict):
-        rules = [rules]
-    if not isinstance(rules, list):
-        return None
-    now = datetime.now(timezone.utc)
-    minute = now.hour * 60 + now.minute
-    for rule in rules:
-        start = _minute(rule.get("start", "00:00"))
-        end = _minute(rule.get("end", "24:00"))
-        if start <= minute < end or (end < start and (minute >= start or minute < end)):
-            return rule
-    return rules[0] if rules else None
-
-
-def _minute(value: str) -> int:
-    hour, minute = [int(part) for part in value.split(":", 1)]
-    return hour * 60 + minute
-
-
-def _usage_cost(input_tokens: int, output_tokens: int, cached_tokens: int, pricing: dict) -> float:
-    uncached_input = max(0, input_tokens - cached_tokens)
-    return (
-        uncached_input * float(pricing.get("input_per_m") or 0)
-        + output_tokens * float(pricing.get("output_per_m") or 0)
-        + cached_tokens * float(pricing.get("cache_per_m") or 0)
-    ) / 1_000_000
-
-
 def _no_evidence_summary(observed_calls: dict[str, dict]) -> str:
     summary = (
         "Evidence gathering ended without a valid evidence record. "
@@ -452,37 +322,6 @@ def _observed_call_summary(observed_calls: dict[str, dict]) -> str:
         )[:200]
         lines.append(f"- {call_id} {observed['name']}: {result.title} :: {excerpt}")
     return "\n".join(line for line in lines if line.strip())
-
-
-def _tool_error_json(exc: Exception, tool_name: str) -> str:
-    return json.dumps({
-        "error": {
-            "code": exc.__class__.__name__,
-            "tool": tool_name or "invalid",
-            "message": str(exc),
-            "retryable": _tool_error_retryable(exc),
-        }
-    }, ensure_ascii=False)
-
-
-def _tool_error_retryable(exc: Exception) -> bool:
-    if isinstance(exc, (FileNotFoundError, IsADirectoryError, NotADirectoryError, PermissionError)):
-        return False
-    if isinstance(exc, json.JSONDecodeError):
-        return False
-    if isinstance(exc, (KeyError, TypeError)):
-        return False
-    if isinstance(exc, ValueError):
-        message = str(exc).casefold()
-        permanent = (
-            "path escapes worktree",
-            "not a file",
-            "unknown agent tool",
-            "tool arguments must be an object",
-            "source_tool_call_id must reference",
-        )
-        return not any(text in message for text in permanent)
-    return True
 
 
 def _useful_excerpt_candidate(line: str) -> bool:
@@ -534,7 +373,7 @@ def _handle_agent_tool(
         if policy:
             arguments = policy.prepare_discovery(name, arguments)
         tool = registry.get(name)
-        yield _start(call_id, "tool", {
+        yield start_event(call_id, "tool", {
             "name": name,
             "description": tool.description,
             "status": "running",
@@ -604,7 +443,7 @@ def _handle_agent_tool(
             **asdict(item),
             "confidence": run.confidence,
         }
-        yield _start(f"{run_id}-evidence-{item.id}", "evidence", data)
+        yield start_event(f"{run_id}-evidence-{item.id}", "evidence", data)
         yield {"op": "update", "id": hypothesis_id, "patch": {
             "confidence": run.confidence,
         }}
@@ -617,7 +456,7 @@ def _handle_agent_tool(
         if policy:
             policy.note_audit()
         data = {**asdict(edge), "confidence": run.confidence}
-        yield _start(
+        yield start_event(
             f"{run_id}-relation-{len(run.relations)}",
             "evidence_relation",
             data,
@@ -646,7 +485,7 @@ def _handle_agent_tool(
             "support_count": sum(1 for e in run.evidence.values() if e.stance == "support"),
             "oppose_count": sum(1 for e in run.evidence.values() if e.stance == "oppose"),
         }
-        yield _start(f"{run_id}-verdict", "verdict", data)
+        yield start_event(f"{run_id}-verdict", "verdict", data)
         return json.dumps(data, ensure_ascii=False), True
 
     raise ValueError(f"unknown agent tool: {name}")
@@ -668,7 +507,7 @@ def test_stream(
             time.sleep(delay * multiplier)
 
     thinking = "test-thinking"
-    yield _start(thinking, "thinking", {"text": "", "done": False, "open": True})
+    yield start_event(thinking, "thinking", {"text": "", "done": False, "open": True})
     thought = f"Inspecting {', '.join(context) or 'the workspace'} for: {message}"
     for index in range(0, len(thought), 12):
         pause()
@@ -681,7 +520,7 @@ def test_stream(
     ):
         tool = registry.get(name)
         pause(2)
-        yield _start(call_id, "tool", {
+        yield start_event(call_id, "tool", {
             "name": name,
             "description": tool.description,
             "status": "running",
@@ -697,19 +536,19 @@ def test_stream(
             "metadata": result.metadata,
         }}
 
-    yield _start("test-agent", "subagent", {
+    yield start_event("test-agent", "subagent", {
         "name": "@explore",
         "task": "Map the server routes and chat integration points",
         "status": "done",
         "result": "Found the request handler and provider integration.",
         "open": True,
     })
-    yield _start("test-diff", "diff", {
+    yield start_event("test-diff", "diff", {
         "path": "stratumcode/server.py",
         "hunks": [{"type": "add", "lines": ["+        elif path == \"/api/chat\":"]}],
         "accepted": None,
     })
-    yield _start("test-output", "output", {
+    yield start_event("test-output", "output", {
         "content": "The backend chat stream is connected.",
         "streaming": False,
     })
@@ -747,7 +586,7 @@ def provider_stream(provider_id: int, model: str, message: str, context: list[st
             content = data.get("choices", [{}])[0].get("delta", {}).get("content")
             if content:
                 if not started:
-                    yield _start(output_id, "output", {
+                    yield start_event(output_id, "output", {
                         "content": "",
                         "streaming": True,
                     })

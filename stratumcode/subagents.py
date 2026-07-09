@@ -9,17 +9,21 @@ from uuid import uuid4
 
 from . import mcp, model_settings, providers
 from .agent.tools import openai_tool_schema
-from .chat import _add_usage, _call_model, _content_text, _empty_usage, _tool_error_retryable, _usage_delta
+from .agent_runtime import (
+    add_usage as _add_usage,
+    call_model as _call_model,
+    content_text as _content_text,
+    empty_usage as _empty_usage,
+    start_event,
+    tool_error_json,
+    usage_delta as _usage_delta,
+)
 from .subagent_catalog import list_available, normalize_agent_name
 from .tools import registry
 from .tools.spec import ToolResult
 
 
 MAX_INSTALLER_ROUNDS = 8
-
-
-def _start(event_id: str, event_type: str, data: dict) -> dict:
-    return {"op": "start", "id": event_id, "event": event_type, "data": data}
 
 
 def run_stream(agent: str, task: str, workspace_dir: str = ".") -> Iterator[dict]:
@@ -38,7 +42,7 @@ def mcp_install_stream(hint: str, workspace_dir: str = ".") -> Iterator[dict]:
 
     run_id = uuid4().hex[:10]
     agent_id = f"{run_id}-agent"
-    yield _start(agent_id, "subagent", {
+    yield start_event(agent_id, "subagent", {
         "name": "@mcp-installer",
         "task": f"Install MCP from: {_short(hint, 140)}",
         "status": "running",
@@ -68,7 +72,7 @@ def mcp_install_stream(hint: str, workspace_dir: str = ".") -> Iterator[dict]:
             "status": "done" if server.get("status") == "running" else server.get("status", "done"),
             "result": result,
         }}
-        yield _start(f"{run_id}-output", "output", {"content": result, "streaming": False})
+        yield start_event(f"{run_id}-output", "output", {"content": result, "streaming": False})
         yield {"op": "done", "server": server}
     except Exception as exc:
         yield {"op": "update", "id": agent_id, "patch": {
@@ -104,7 +108,7 @@ def _react_install(
 
     for round_index in range(MAX_INSTALLER_ROUNDS):
         thinking_id = f"{run_id}-thinking-{round_index}"
-        yield _start(thinking_id, "thinking", {
+        yield start_event(thinking_id, "thinking", {
             "text": "",
             "done": False,
             "open": True,
@@ -112,7 +116,7 @@ def _react_install(
         assistant = _call_model(provider, model, messages, tools=_installer_tools())
         if usage := _usage_delta(pricing_rules, assistant.pop("_usage", {})):
             _add_usage(usage_total, usage)
-            yield _start(f"{run_id}-usage-{round_index}", "usage", {
+            yield start_event(f"{run_id}-usage-{round_index}", "usage", {
                 "delta": usage,
                 "total": usage_total,
             })
@@ -158,14 +162,8 @@ def _react_install(
                 except StopIteration as e:
                     output, server = e.value
             except Exception as exc:
-                output = json.dumps({
-                    "error": {
-                        "tool": name or "invalid",
-                        "message": str(exc),
-                        "retryable": _tool_error_retryable(exc),
-                    }
-                }, ensure_ascii=False)
-                yield _start(call_id, "tool", {
+                output = tool_error_json(exc, name)
+                yield start_event(call_id, "tool", {
                     "name": name or "invalid",
                     "description": "MCP installer tool",
                     "status": "error",
@@ -281,7 +279,7 @@ def _handle_installer_tool(
     if name not in {"websearch", "webfetch", "install_mcp"}:
         raise ValueError(f"unknown installer tool: {name or 'tool'}")
 
-    yield _start(call_id, "tool", {
+    yield start_event(call_id, "tool", {
         "name": name,
         "description": _tool_description(name),
         "status": "running",
@@ -393,7 +391,7 @@ def _fallback_install(hint: str, workspace_dir: str, run_id: str) -> Iterator[di
     if first_url:
         call_id = f"{run_id}-fallback-fetch"
         args = {"url": first_url}
-        yield _start(call_id, "tool", {
+        yield start_event(call_id, "tool", {
             "name": "webfetch",
             "description": _tool_description("webfetch"),
             "status": "running",
@@ -417,7 +415,7 @@ def _fallback_install(hint: str, workspace_dir: str, run_id: str) -> Iterator[di
         "source_text": page_text,
         "rationale": "Deterministic install fallback after model/tool discovery did not produce a final config.",
     }
-    yield _start(call_id, "tool", {
+    yield start_event(call_id, "tool", {
         "name": "install_mcp",
         "description": _tool_description("install_mcp"),
         "status": "running",
@@ -476,7 +474,7 @@ def _tool_description(name: str) -> str:
 
 
 def _thinking(run_id: str, index: int, text: str, open_: bool = False) -> dict:
-    return _start(f"{run_id}-thinking-{index}", "thinking", {
+    return start_event(f"{run_id}-thinking-{index}", "thinking", {
         "text": text,
         "done": True,
         "open": open_,
