@@ -256,7 +256,10 @@ def start_server(server_id: int) -> dict:
 def load_enabled() -> None:
     for server in list_all():
         if server["enabled"]:
-            start_server(server["id"])
+            try:
+                start_server(server["id"])
+            except ValueError:
+                pass
 
 
 def _register_tools(server: dict, tools: list[dict]) -> None:

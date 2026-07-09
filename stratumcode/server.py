@@ -26,7 +26,10 @@ class _Handler(SimpleHTTPRequestHandler):
             self._dispatch_get()
         except Exception:
             _logger.exception("GET request failed: %s", self.path)
-            self._json({"error": "request failed"}, 500)
+            try:
+                self._json({"error": "request failed"}, 500)
+            except OSError:
+                pass
 
     def _dispatch_get(self):
         if self.path == "/api/providers":
@@ -51,10 +54,16 @@ class _Handler(SimpleHTTPRequestHandler):
         try:
             self._dispatch_post()
         except (KeyError, TypeError, ValueError) as exc:
-            self._json({"error": str(exc)}, 400)
+            try:
+                self._json({"error": str(exc)}, 400)
+            except OSError:
+                pass
         except Exception:
             _logger.exception("POST request failed: %s", self.path)
-            self._json({"error": "request failed"}, 500)
+            try:
+                self._json({"error": "request failed"}, 500)
+            except OSError:
+                pass
 
     def _dispatch_post(self):
         path = self.path

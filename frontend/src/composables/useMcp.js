@@ -29,18 +29,30 @@ export function useMcp() {
   }
 
   async function start(id) {
-    await request('/mcp/start', { id })
-    await load()
+    try {
+      await request('/mcp/start', { id })
+      await load()
+    } catch (reason) {
+      error.value = reason.message
+    }
   }
 
   async function remove(id) {
-    await request('/mcp/delete', { id })
-    await load()
+    try {
+      await request('/mcp/delete', { id })
+      await load()
+    } catch (reason) {
+      error.value = reason.message
+    }
   }
 
   async function configure(id, env) {
-    await request('/mcp/configure', { id, env })
-    await load()
+    try {
+      await request('/mcp/configure', { id, env })
+      await load()
+    } catch (reason) {
+      error.value = reason.message
+    }
   }
 
   return { items, loading, error, load, start, remove, configure }
