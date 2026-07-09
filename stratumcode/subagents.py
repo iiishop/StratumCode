@@ -7,7 +7,7 @@ import re
 from collections.abc import Iterator
 from uuid import uuid4
 
-from . import hypothesis_verifier, mcp, model_settings, providers
+from . import app_settings, hypothesis_verifier, mcp, model_settings, prompt, providers
 from .agent.tools import openai_tool_schema
 from .agent_runtime import (
     add_usage as _add_usage,
@@ -257,6 +257,7 @@ def _installer_system_prompt() -> str:
     return (
         "You are @mcp-installer, a focused ReAct subagent. Your job is to install one MCP "
         "server into StratumCode's MCP registry.\n\n"
+        f"{prompt.output_language_section(app_settings.get_output_language())}\n\n"
         "The user may provide a docs URL, repository URL, package name, prose hint, or raw config. "
         "If the config is not explicit, use webfetch and/or websearch to identify the MCP server, "
         "transport, command, URL, args, cwd, and required environment variables. Do not invent an "

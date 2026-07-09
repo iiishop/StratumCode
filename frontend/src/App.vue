@@ -6,6 +6,7 @@ import Sidebar from './components/Sidebar.vue'
 import HomePage from './components/HomePage.vue'
 import StageModelSettings from './components/providers/StageModelSettings.vue'
 import McpPage from './components/mcp/McpPage.vue'
+import SettingsPage from './components/settings/SettingsPage.vue'
 import { useMcp } from './composables/useMcp'
 import { useSessions } from './composables/useSessions'
 import { useWorkspaces } from './composables/useWorkspaces'
@@ -31,6 +32,7 @@ const currentTitle = computed(() => ({
   home: 'Workspace',
   providers: 'Providers',
   mcp: 'MCP',
+  settings: 'Settings',
 })[currentView.value] || 'Workspace')
 const workspaceLabel = computed(() => activeWorkspace.value?.name || 'No workspace')
 const sessionLabel = computed(() => currentView.value === 'home' ? activeSession.value?.name : '')
@@ -52,6 +54,8 @@ const cardRefs = reactive({})
 const dotRefs = reactive({})
 const listRefs = reactive({})
 const toastRefs = reactive({})
+const appSettings = ref({ output_language: 'zh', languages: [] })
+const settingsSaving = ref(false)
 
 let gsapCtx
 
@@ -68,7 +72,7 @@ const presets = [
 ]
 
 async function bootstrap() {
-  await Promise.all([loadWorkspaces(), mcpStore.load()])
+  await Promise.all([loadWorkspaces(), mcpStore.load(), loadAppSettings()])
   if (activeWorkspace.value?.id) {
     await sessionStore.load(activeWorkspace.value.id)
     if (sessionStore.items.value[0]) await sessionStore.open(sessionStore.items.value[0].id)
@@ -163,6 +167,21 @@ const api = async (path, body) => {
     : {}
   const r = await fetch('/api' + path, opts)
   return r.json()
+}
+
+async function loadAppSettings() {
+  const data = await api('/app-settings')
+  appSettings.value = data
+}
+
+async function saveOutputLanguage(language) {
+  settingsSaving.value = true
+  try {
+    const data = await api('/app-settings/save', { output_language: language })
+    appSettings.value = { ...appSettings.value, output_language: data.output_language }
+  } finally {
+    settingsSaving.value = false
+  }
 }
 
 function init(id) {
@@ -598,6 +617,12 @@ watch(currentView, (v) => {
         @start="mcpStore.start"
         @delete="mcpStore.remove"
         @configure="mcpStore.configure"
+      />
+      <SettingsPage
+        v-if="currentView === 'settings'"
+        :settings="appSettings"
+        :saving="settingsSaving"
+        @save="saveOutputLanguage"
       />
       </main>
     </section>

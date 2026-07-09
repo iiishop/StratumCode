@@ -8,7 +8,7 @@ from collections.abc import Iterator
 from dataclasses import asdict
 from uuid import uuid4
 
-from . import model_settings, prompt, providers
+from . import app_settings, model_settings, prompt, providers
 from .agent import EvidencePolicy, EvidenceRun, RunState
 from .agent.policy import DISCOVERY_TOOLS, EvidencePhase
 from .agent.tools import agent_tools
@@ -78,7 +78,7 @@ def evidence_stream(
     messages = [
         {
             "role": "system",
-            "content": prompt.build_evidence_static(),
+            "content": prompt.build_evidence_static(app_settings.get_output_language()),
         },
         {
             "role": "system",

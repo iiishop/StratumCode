@@ -51,6 +51,12 @@ const nav = [
     detail: 'External tools',
     icon: 'M7 8h10M7 12h10M7 16h10M4 5h16v14H4z',
   },
+  {
+    id: 'settings',
+    label: 'Settings',
+    detail: 'Agent behavior',
+    icon: 'M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8z M4 12h3 M17 12h3 M12 4v3 M12 17v3',
+  },
 ]
 
 function navigate(id) {

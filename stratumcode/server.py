@@ -4,7 +4,7 @@ import logging
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from . import chat, mcp, model_settings, providers, sessions, subagents, workspaces
+from . import app_settings, chat, mcp, model_settings, providers, sessions, subagents, workspaces
 from .tools import registry
 
 
@@ -36,6 +36,8 @@ class _Handler(SimpleHTTPRequestHandler):
             self._json(providers.list_saved())
         elif self.path == "/api/model-settings":
             self._json(model_settings.list_all())
+        elif self.path == "/api/app-settings":
+            self._json(app_settings.to_json())
         elif self.path == "/api/workspaces":
             self._json({
                 "items": workspaces.list_all(self.workspace_dir),
@@ -121,6 +123,9 @@ class _Handler(SimpleHTTPRequestHandler):
         elif path == "/api/model-settings/delete":
             model_settings.delete(body["stage"])
             self._json({"ok": True})
+        elif path == "/api/app-settings/save":
+            language = app_settings.save_output_language(body.get("output_language", ""))
+            self._json({"output_language": language})
         elif path == "/api/workspaces/save":
             workspace_id = workspaces.save(body.get("name", ""), body["path"])
             self._json({"id": workspace_id})

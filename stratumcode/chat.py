@@ -7,7 +7,7 @@ from collections.abc import Iterator
 from urllib.request import Request, urlopen
 from uuid import uuid4
 
-from . import hypothesis_verifier, investigator, model_settings, prompt, providers
+from . import app_settings, hypothesis_verifier, investigator, model_settings, prompt, providers
 from .agent_runtime import (
     MAX_MODEL_OUTPUT_TOKENS,
     call_model as _call_model,
@@ -43,7 +43,7 @@ def analyze_task(message: str, context: list[str], workspace_dir: str) -> dict:
             provider,
             model,
             [
-                {"role": "system", "content": prompt.build_task_analyzer()},
+                {"role": "system", "content": prompt.build_task_analyzer(app_settings.get_output_language())},
                 {
                     "role": "user",
                     "content": prompt.build_task_analyzer_user(

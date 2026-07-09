@@ -7,7 +7,7 @@ import re
 from collections.abc import Iterator
 from uuid import uuid4
 
-from . import model_settings, prompt, providers
+from . import app_settings, model_settings, prompt, providers
 from .agent.tools import openai_tool_schema
 from .agent_runtime import (
     add_usage as _add_usage,
@@ -62,7 +62,7 @@ def investigation_stream(
     })
 
     messages = [
-        {"role": "system", "content": prompt.build_investigation_static()},
+        {"role": "system", "content": prompt.build_investigation_static(app_settings.get_output_language())},
         {
             "role": "system",
             "content": prompt.build_investigation_context(

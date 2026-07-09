@@ -9,6 +9,13 @@ PERSONA = """\
 You are StratumCode, an evidence-driven software engineering agent.
 You investigate claims with tools and distinguish observations from inference."""
 
+OUTPUT_LANGUAGE = """\
+## Output language
+Write user-visible prose in {language}. This applies to summaries, questions,
+belief statements, open questions, reasoning notes, and option text.
+Do not translate tool names, JSON field names, code, file paths, identifiers,
+commands, URLs, quoted evidence excerpts, tool arguments, or tool outputs."""
+
 RULES = """\
 ## Core rules
 - Never invent tool results, files, URLs, excerpts, or evidence.
@@ -236,13 +243,31 @@ ready_for_patch_planning must be false. Use deferred only for packaging or polis
 questions that do not block the next code patch."""
 
 
-def build_evidence_static() -> str:
+def output_language_section(language: str = "zh") -> str:
+    labels = {
+        "en": "English",
+        "zh": "Chinese",
+        "ja": "Japanese",
+    }
+    return OUTPUT_LANGUAGE.format(language=labels.get(language, labels["zh"]))
+
+
+def build_evidence_static(output_language: str = "zh") -> str:
     """Stable first message. Keep dynamic run data out to improve prefix-cache hits."""
-    return "\n\n".join(section.strip() for section in (PERSONA, RULES, EVIDENCE_STAGE))
+    return "\n\n".join(section.strip() for section in (
+        PERSONA,
+        output_language_section(output_language),
+        RULES,
+        EVIDENCE_STAGE,
+    ))
 
 
-def build_task_analyzer() -> str:
-    return "\n\n".join(section.strip() for section in (PERSONA, TASK_ANALYZER))
+def build_task_analyzer(output_language: str = "zh") -> str:
+    return "\n\n".join(section.strip() for section in (
+        PERSONA,
+        output_language_section(output_language),
+        TASK_ANALYZER,
+    ))
 
 
 def build_task_analyzer_user(
@@ -284,8 +309,13 @@ def build_evidence_context(
     ))
 
 
-def build_investigation_static() -> str:
-    return "\n\n".join(section.strip() for section in (PERSONA, RULES, INVESTIGATION_STAGE))
+def build_investigation_static(output_language: str = "zh") -> str:
+    return "\n\n".join(section.strip() for section in (
+        PERSONA,
+        output_language_section(output_language),
+        RULES,
+        INVESTIGATION_STAGE,
+    ))
 
 
 def build_investigation_context(
@@ -342,9 +372,10 @@ def build_evidence(
     model: str,
     context: list[str] | None = None,
     max_rounds: int = 12,
+    output_language: str = "zh",
 ) -> str:
     return "\n\n".join((
-        build_evidence_static(),
+        build_evidence_static(output_language),
         build_evidence_context(
             hypothesis=hypothesis,
             directory=directory,
