@@ -59,7 +59,7 @@ export function useSessions() {
   async function remove(id, workspaceId) {
     await request('/sessions/delete', { id })
     await load(workspaceId)
-    if (active.value?.id === id) active.value = items.value[0] || null
+    if (active.value?.id === id) active.value = items.value[0] ? await open(items.value[0].id) : null
   }
 
   async function saveState(id, state) {

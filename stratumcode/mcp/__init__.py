@@ -24,6 +24,8 @@ from ..tools.spec import ToolDef, ToolResult
 PROTOCOL_VERSION = "2025-06-18"
 REQUEST_TIMEOUT = 30
 CODEGRAPH_MCP_TOOLS = "context,explore,node,search,callers,callees,impact,files,status,trace"
+_stdio_clients: dict[int, "_StdioClient"] = {}
+_stdio_clients_lock = threading.RLock()
 
 
 def _ensure_table() -> None:
@@ -140,6 +142,7 @@ def save_server(config: dict) -> int:
     with db_session() as db:
         existing = db.execute("SELECT id FROM mcp_servers WHERE name = ?", (name,)).fetchone()
         if existing:
+            _close_stdio_client(int(existing["id"]))
             db.execute(
                 """
                 UPDATE mcp_servers
@@ -208,6 +211,7 @@ def configure(server_id: int, env: dict[str, str]) -> dict:
 
 def delete_server(server_id: int) -> None:
     server = _raw_server(server_id)
+    _close_stdio_client(int(server_id))
     registry.unregister_prefix(f"mcp_{_slug(server['name'])}_")
     with db_session() as db:
         db.execute("DELETE FROM mcp_servers WHERE id = ?", (int(server_id),))
@@ -235,6 +239,7 @@ def start_server(server_id: int) -> dict:
     server = _raw_server(server_id)
     prefix = f"mcp_{_slug(server['name'])}_"
     registry.unregister_prefix(prefix)
+    _close_stdio_client(int(server_id))
     if not server["enabled"]:
         _set_status(server_id, "disabled", "server is disabled", [])
         return _raw_server(server_id)
@@ -243,6 +248,7 @@ def start_server(server_id: int) -> dict:
         _register_tools(server, tools)
         _set_status(server_id, "running", f"{len(tools)} tools ready", tools)
     except Exception as exc:
+        _close_stdio_client(int(server_id))
         _set_status(server_id, "error", str(exc), [])
     return _raw_server(server_id)
 
@@ -432,7 +438,22 @@ def _command_from_text(text: str) -> dict | None:
 
 
 def _client(server: dict):
-    return _HttpClient(server) if server["transport"] == "http" else _StdioClient(server)
+    if server["transport"] == "http":
+        return _HttpClient(server)
+    server_id = int(server["id"])
+    with _stdio_clients_lock:
+        client = _stdio_clients.get(server_id)
+        if client is None:
+            client = _StdioClient(server)
+            _stdio_clients[server_id] = client
+        return client
+
+
+def _close_stdio_client(server_id: int) -> None:
+    with _stdio_clients_lock:
+        client = _stdio_clients.pop(int(server_id), None)
+    if client:
+        client.close()
 
 
 @dataclass
@@ -511,9 +532,14 @@ class _HttpClient:
 
 
 def _expand_env(value: str, env: dict[str, str]) -> str:
-    for key, fallback in (env or {}).items():
-        value = value.replace("${" + key + "}", fallback or os.environ.get(key, ""))
-    return value
+    def replace(match):
+        key = match.group(1)
+        resolved = (env or {}).get(key) or os.environ.get(key)
+        if not resolved:
+            raise ValueError(f"missing MCP environment value: {key}")
+        return resolved
+
+    return re.sub(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}", replace, value)
 
 
 def _resolve_command(command: str, env: dict[str, str]) -> str:
@@ -565,19 +591,22 @@ class _StdioClient:
         self.process: subprocess.Popen | None = None
         self.messages: queue.Queue[dict] = queue.Queue()
         self.next_id = 1
+        self.initialized = False
+        self.lock = threading.RLock()
 
     def list_tools(self) -> list[dict]:
-        with self:
-            self.initialize()
-            result = self.request("tools/list", {})
-            return result.get("tools") or []
+        self.initialize()
+        result = self.request("tools/list", {})
+        return result.get("tools") or []
 
     def call_tool(self, name: str, arguments: dict) -> dict:
-        with self:
-            self.initialize()
-            return self.request("tools/call", {"name": name, "arguments": arguments})
+        self.initialize()
+        return self.request("tools/call", {"name": name, "arguments": arguments})
 
-    def __enter__(self):
+    def start(self) -> None:
+        if self.process and self.process.poll() is None:
+            return
+        self.messages = queue.Queue()
         env = {**os.environ, **{k: v for k, v in self.server["env"].items() if v}}
         cwd = self.server.get("cwd") or None
         if cwd:
@@ -595,9 +624,9 @@ class _StdioClient:
             errors="replace",
         )
         threading.Thread(target=self._reader, daemon=True).start()
-        return self
 
-    def __exit__(self, exc_type, exc, tb):
+    def close(self) -> None:
+        self.initialized = False
         if not self.process:
             return
         try:
@@ -605,6 +634,8 @@ class _StdioClient:
             self.process.wait(timeout=2)
         except Exception:
             self.process.kill()
+        finally:
+            self.process = None
 
     def _reader(self) -> None:
         assert self.process and self.process.stdout
@@ -615,32 +646,39 @@ class _StdioClient:
                 continue
 
     def initialize(self) -> None:
-        self.request("initialize", {
-            "protocolVersion": PROTOCOL_VERSION,
-            "capabilities": {},
-            "clientInfo": {"name": "StratumCode", "version": "0.1.0"},
-        })
-        self.notify("notifications/initialized", {})
+        with self.lock:
+            if self.initialized and self.process and self.process.poll() is None:
+                return
+            self.start()
+            self.request("initialize", {
+                "protocolVersion": PROTOCOL_VERSION,
+                "capabilities": {},
+                "clientInfo": {"name": "StratumCode", "version": "0.1.0"},
+            })
+            self.notify("notifications/initialized", {})
+            self.initialized = True
 
     def request(self, method: str, params: dict) -> dict:
-        request_id = self.next_id
-        self.next_id += 1
-        self._send({"jsonrpc": "2.0", "id": request_id, "method": method, "params": params})
-        deadline = time.time() + REQUEST_TIMEOUT
-        while time.time() < deadline:
-            try:
-                message = self.messages.get(timeout=0.2)
-            except queue.Empty:
-                continue
-            if message.get("id") != request_id:
-                continue
-            if "error" in message:
-                raise ValueError(message["error"].get("message") or json.dumps(message["error"]))
-            return message.get("result") or {}
-        raise TimeoutError(f"MCP stdio request timed out: {method}")
+        with self.lock:
+            request_id = self.next_id
+            self.next_id += 1
+            self._send({"jsonrpc": "2.0", "id": request_id, "method": method, "params": params})
+            deadline = time.time() + REQUEST_TIMEOUT
+            while time.time() < deadline:
+                try:
+                    message = self.messages.get(timeout=0.2)
+                except queue.Empty:
+                    continue
+                if message.get("id") != request_id:
+                    continue
+                if "error" in message:
+                    raise ValueError(message["error"].get("message") or json.dumps(message["error"]))
+                return message.get("result") or {}
+            raise TimeoutError(f"MCP stdio request timed out: {method}")
 
     def notify(self, method: str, params: dict) -> None:
-        self._send({"jsonrpc": "2.0", "method": method, "params": params})
+        with self.lock:
+            self._send({"jsonrpc": "2.0", "method": method, "params": params})
 
     def _send(self, message: dict) -> None:
         if not self.process or not self.process.stdin:

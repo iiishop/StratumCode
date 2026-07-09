@@ -1,5 +1,5 @@
 <script setup>
-import { computed } from 'vue'
+import { computed, inject } from 'vue'
 import FileReference from '../FileReference.vue'
 
 const props = defineProps({
@@ -12,24 +12,36 @@ const props = defineProps({
   highlightTools: { type: Boolean, default: false },
 })
 
-const toolNames = new Set([
-  'read', 'write', 'edit', 'grep', 'glob', 'webfetch', 'todoread',
-  'shell', 'bash', 'python', 'apply_patch',
-])
+const providedToolNames = inject('toolNames', null)
+const fileExtensions = 'py|js|jsx|ts|tsx|vue|json|md|css|scss|html|yaml|yml|toml|sh|rs|go|java|kt|swift|c|cc|cpp|h|hpp'
 
-const tokenPattern = /(@[\w-]+)|((?:(?:[A-Za-z]:)?[\w.-]*[\\/])?[\w.-]+\.(?:py|js|jsx|ts|tsx|vue|json|md|css|scss|html|yaml|yml|toml|sh|rs|go|java|kt|swift|c|cc|cpp|h|hpp))|(`[^`\n]+`)|(\b(?:read|write|edit|grep|glob|webfetch|todoread|shell|bash|python|apply_patch)\b)/gi
+function escapeRegExp(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
+const toolNames = computed(() => new Set(
+  (providedToolNames?.value || []).map(name => String(name).toLowerCase()),
+))
+
+const tokenPattern = computed(() => {
+  const tools = [...toolNames.value].map(escapeRegExp).join('|')
+  const agentPattern = '(@[\\w-]+)'
+  const filePattern = `((?:(?:[A-Za-z]:)?[\\w.-]*[\\\\/])?[\\w.-]+\\.(?:${fileExtensions}))`
+  const codePattern = '(`[^`\\n]+`)'
+  return new RegExp(`${agentPattern}|${filePattern}|${codePattern}${tools ? `|(\\b(?:${tools})\\b)` : ''}`, 'gi')
+})
 
 const parts = computed(() => {
   const result = []
   let cursor = 0
 
-  for (const match of props.text.matchAll(tokenPattern)) {
+  for (const match of props.text.matchAll(tokenPattern.value)) {
     if (match.index > cursor) result.push({ type: 'text', value: props.text.slice(cursor, match.index) })
     const value = match[0]
     let type = 'code'
     if (value.startsWith('@')) type = props.context === 'prose' ? 'agent' : 'text'
     else if (match[2]) type = 'file'
-    else if (toolNames.has(value.toLowerCase())) type = props.context === 'prose' && props.highlightTools ? 'tool' : 'text'
+    else if (match[4] && toolNames.value.has(value.toLowerCase())) type = props.context === 'prose' && props.highlightTools ? 'tool' : 'text'
     else if (props.context === 'tool-data') type = 'text'
     result.push({ type, value: value.replace(/^`|`$/g, '') })
     cursor = match.index + value.length

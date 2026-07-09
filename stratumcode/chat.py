@@ -8,7 +8,7 @@ import time
 from collections.abc import Iterator
 from dataclasses import asdict
 from datetime import datetime, timezone
-from urllib.error import HTTPError
+from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 from uuid import uuid4
 
@@ -20,6 +20,9 @@ from .tools import registry
 
 MAX_AGENT_ROUNDS = 14
 MAX_EMPTY_TOOL_ROUNDS = 2
+MAX_MODEL_OUTPUT_TOKENS = 2048
+MODEL_RETRY_STATUS_CODES = {429, 502, 503, 504}
+MODEL_RETRY_DELAYS = (0.5, 1.0)
 
 
 def _start(event_id: str, event_type: str, data: dict) -> dict:
@@ -45,21 +48,30 @@ def _call_model(
         "messages": messages,
         "tools": tools or agent_tools(DISCOVERY_TOOLS),
         "temperature": 0.1,
+        "max_tokens": MAX_MODEL_OUTPUT_TOKENS,
     }
-    request = Request(
-        f"{provider['base_url'].rstrip('/')}/v1/chat/completions",
-        data=json.dumps(payload).encode(),
-        headers={
-            "Authorization": f"Bearer {provider['api_key']}",
-            "Content-Type": "application/json",
-        },
-    )
-    try:
-        with urlopen(request, timeout=90) as response:
-            data = json.load(response)
-    except HTTPError as exc:
-        detail = exc.read().decode("utf-8", errors="replace")[:1000]
-        raise ValueError(f"provider request failed ({exc.code}): {detail}") from exc
+    body = json.dumps(payload).encode()
+    url = f"{provider['base_url'].rstrip('/')}/v1/chat/completions"
+    headers = {
+        "Authorization": f"Bearer {provider['api_key']}",
+        "Content-Type": "application/json",
+    }
+    attempts = len(MODEL_RETRY_DELAYS) + 1
+    for attempt in range(attempts):
+        request = Request(url, data=body, headers=headers)
+        try:
+            with urlopen(request, timeout=90) as response:
+                data = json.load(response)
+            break
+        except HTTPError as exc:
+            detail = exc.read().decode("utf-8", errors="replace")[:1000]
+            if exc.code not in MODEL_RETRY_STATUS_CODES or attempt == attempts - 1:
+                raise ValueError(f"provider request failed ({exc.code}): {detail}") from exc
+        except URLError as exc:
+            detail = str(exc.reason if hasattr(exc, "reason") else exc)
+            if attempt == attempts - 1:
+                raise ValueError(f"provider request failed: {detail}") from exc
+        time.sleep(MODEL_RETRY_DELAYS[attempt])
     choices = data.get("choices") or []
     if not choices or not isinstance(choices[0].get("message"), dict):
         raise ValueError("provider returned no assistant message")
@@ -111,6 +123,7 @@ def evidence_stream(
         "state": run.state.value,
         "phase": policy.phase.value,
         "model": model,
+        "context_length": providers.model_context_length(provider["base_url"], provider["api_key"], model),
         "provider": provider["name"],
         "inherited": setting["inherited"],
     })
@@ -149,7 +162,7 @@ def evidence_stream(
             provider,
             model,
             messages,
-            tools=agent_tools(discovery_tools, allowed_tools),
+            tools=agent_tools(discovery_tools),
         )
         if usage := _usage_delta(pricing_rules, assistant.pop("_usage", {})):
             _add_usage(usage_total, usage)
@@ -188,6 +201,7 @@ def evidence_stream(
 
         empty_tool_rounds = 0
         concluded = False
+        compaction_messages: list[dict] = []
         for raw_call in tool_calls:
             call_id = raw_call.get("id") or f"call-{uuid4().hex[:8]}"
             function = raw_call.get("function") or {}
@@ -212,7 +226,8 @@ def evidence_stream(
                 )
                 yield from emitted
                 if name == "record_evidence":
-                    _compact_tool_message(messages, arguments)
+                    if compact_message := _compact_tool_message(arguments):
+                        compaction_messages.append(compact_message)
                 if policy.phase != phase_before:
                     yield {"op": "update", "id": stage_id, "patch": {
                         "phase": policy.phase.value,
@@ -241,6 +256,7 @@ def evidence_stream(
             })
             if concluded:
                 break
+        messages.extend(compaction_messages)
         if concluded:
             break
 
@@ -287,24 +303,27 @@ def _discovery_tools(hypothesis: str = "", context: list[str] | None = None) -> 
     return DISCOVERY_TOOLS + tuple(name for name in mcp_tools if name not in DISCOVERY_TOOLS)
 
 
-def _compact_tool_message(messages: list[dict], evidence_args: dict) -> None:
+def _compact_tool_message(evidence_args: dict) -> dict | None:
     source_call_id = evidence_args.get("source_tool_call_id")
     if not source_call_id:
-        return
-    compact = json.dumps({
+        return None
+    compact = {
         "tool_call_id": source_call_id,
         "compacted": True,
-        "summary": "Tool output compacted after this evidence was recorded.",
+        "summary": (
+            "The referenced tool output has been recorded as evidence. "
+            "For future reasoning, use the recorded excerpt instead of re-reading the full output."
+        ),
         "recorded_evidence": {
             "id": evidence_args.get("evidence_id"),
             "source_uri": evidence_args.get("source_uri"),
             "excerpt": evidence_args.get("excerpt"),
         },
-    }, ensure_ascii=False)
-    for message in messages:
-        if message.get("role") == "tool" and message.get("tool_call_id") == source_call_id:
-            message["content"] = compact
-            return
+    }
+    return {
+        "role": "user",
+        "content": json.dumps(compact, ensure_ascii=False),
+    }
 
 
 def _empty_usage(pricing_rules: list[dict]) -> dict:
@@ -409,9 +428,29 @@ def _tool_error_json(exc: Exception, tool_name: str) -> str:
             "code": exc.__class__.__name__,
             "tool": tool_name or "invalid",
             "message": str(exc),
-            "retryable": True,
+            "retryable": _tool_error_retryable(exc),
         }
     }, ensure_ascii=False)
+
+
+def _tool_error_retryable(exc: Exception) -> bool:
+    if isinstance(exc, (FileNotFoundError, IsADirectoryError, NotADirectoryError, PermissionError)):
+        return False
+    if isinstance(exc, json.JSONDecodeError):
+        return False
+    if isinstance(exc, (KeyError, TypeError)):
+        return False
+    if isinstance(exc, ValueError):
+        message = str(exc).casefold()
+        permanent = (
+            "path escapes worktree",
+            "not a file",
+            "unknown agent tool",
+            "tool arguments must be an object",
+            "source_tool_call_id must reference",
+        )
+        return not any(text in message for text in permanent)
+    return True
 
 
 def _useful_excerpt_candidate(line: str) -> bool:
@@ -438,14 +477,10 @@ def _best_excerpt_candidate(output: str, claim: str) -> str:
 
 
 def _excerpt_tokens(value: str) -> set[str]:
-    return {
-        token
-        for token in re.findall(
-            r"[a-zA-Z_][a-zA-Z0-9_]{2,}|[\u4e00-\u9fff]{2,}",
-            value.casefold(),
-        )
-        if len(token) >= 3 or "\u4e00" <= token[0] <= "\u9fff"
-    }
+    return set(re.findall(
+        r"[a-zA-Z_][a-zA-Z0-9_]{2,}|[\u4e00-\u9fff]{2,}",
+        value.casefold(),
+    ))
 
 
 def _handle_agent_tool(

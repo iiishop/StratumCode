@@ -4,9 +4,10 @@ from dataclasses import dataclass
 from enum import StrEnum
 
 from .evidence import EvidenceRun
+from .tools import CONTROL_TOOL_NAMES
 
-DISCOVERY_TOOLS = ("glob", "grep", "read", "websearch", "webfetch", "subagent_mcp_install")
-EVIDENCE_TOOLS = ("record_evidence", "link_evidence", "conclude")
+DISCOVERY_TOOLS = ("glob", "grep", "read", "websearch", "webfetch", "subagent")
+EVIDENCE_TOOLS = CONTROL_TOOL_NAMES
 
 
 class EvidencePhase(StrEnum):
@@ -124,8 +125,9 @@ class EvidencePolicy:
             prepared["pattern"] = prepared.get("pattern") or "**/*"
         elif name == "websearch":
             prepared["query"] = prepared.get("query") or ""
-        elif name == "subagent_mcp_install":
-            prepared["hint"] = prepared.get("hint") or prepared.get("url") or ""
+        elif name == "subagent":
+            prepared["agent"] = prepared.get("agent") or prepared.get("name") or "mcp-installer"
+            prepared["task"] = prepared.get("task") or prepared.get("hint") or prepared.get("url") or ""
         return prepared
 
     def note_discovery(self, name: str, arguments: dict, *, useful: bool) -> None:

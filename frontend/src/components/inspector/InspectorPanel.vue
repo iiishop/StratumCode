@@ -12,11 +12,29 @@ const props = defineProps({
   tools: { type: Array, required: true },
   mcpServers: { type: Array, default: () => [] },
   subagents: { type: Array, default: () => [] },
+  workspaces: { type: Array, default: () => [] },
+  activeWorkspace: { type: Object, default: null },
+  workspaceError: { type: String, default: '' },
+  sessions: { type: Array, default: () => [] },
+  activeSession: { type: Object, default: null },
 })
-const emit = defineEmits(['update:tab', 'toggle-todo', 'close'])
+const emit = defineEmits([
+  'update:tab',
+  'toggle-todo',
+  'add-workspace',
+  'activate-workspace',
+  'delete-workspace',
+  'create-session',
+  'open-session',
+  'rename-session',
+  'delete-session',
+  'close',
+])
 
 const root = ref(null)
 const confidenceBar = ref(null)
+const workspaceName = ref('')
+const workspacePath = ref('')
 const percent = computed(() => Math.round((props.run.confidence ?? .5) * 100))
 const supportCount = computed(() => props.run.evidence.filter(item => item.stance === 'support').length)
 const opposeCount = computed(() => props.run.evidence.filter(item => item.stance === 'oppose').length)
@@ -27,6 +45,7 @@ const phases = [
   ['audit', 'Audit'],
   ['evaluate', 'Evaluate'],
 ]
+const tabs = ['evidence', 'sessions', 'workspace', 'mcp', 'subagents', 'tasks', 'tools']
 
 onMounted(() => {
   if (!matchMedia('(prefers-reduced-motion: reduce)').matches) {
@@ -65,6 +84,14 @@ function serverClass(status) {
   if (status === 'error') return 'error'
   return 'idle'
 }
+
+function addWorkspace() {
+  const path = workspacePath.value.trim()
+  if (!path) return
+  emit('add-workspace', { name: workspaceName.value.trim(), path })
+  workspaceName.value = ''
+  workspacePath.value = ''
+}
 </script>
 
 <template>
@@ -78,7 +105,7 @@ function serverClass(status) {
     </header>
 
     <nav class="inspector__tabs">
-      <button v-for="name in ['evidence', 'mcp', 'subagents', 'tasks', 'tools']" :key="name" :class="{ active: tab === name }" @click="emit('update:tab', name)">
+      <button v-for="name in tabs" :key="name" :class="{ active: tab === name }" @click="emit('update:tab', name)">
         {{ name }}
       </button>
     </nav>
@@ -179,6 +206,24 @@ function serverClass(status) {
         </section>
       </template>
 
+      <template v-else-if="tab === 'sessions'">
+        <div class="inspector__section-head">
+          <strong>Sessions</strong>
+          <button type="button" class="section-action" @click="emit('create-session')">New</button>
+        </div>
+        <article v-for="session in sessions" :key="session.id" class="session-row" :class="{ active: activeSession?.id === session.id }">
+          <button type="button" @click="emit('open-session', session.id)">
+            <strong>{{ session.name }}</strong>
+            <small>{{ session.usage?.total_tokens || 0 }} tokens · {{ session.updated_at || session.created_at }}</small>
+          </button>
+          <span>
+            <button type="button" title="Rename session" @click="emit('rename-session', session.id)">Rename</button>
+            <button type="button" title="Delete session" @click="emit('delete-session', session.id)">Delete</button>
+          </span>
+        </article>
+        <p v-if="!sessions.length" class="workspace-note">No sessions in this workspace yet.</p>
+      </template>
+
       <template v-else-if="tab === 'mcp'">
         <div class="inspector__section-head"><strong>MCP</strong><span>{{ mcpServers.length }} configured</span></div>
         <article v-for="server in mcpServers" :key="server.id" class="mcp-row" :class="serverClass(server.status)">
@@ -224,7 +269,7 @@ function serverClass(status) {
         <div class="inspector__section-head"><strong>Workspaces</strong><span>Agent scope</span></div>
         <p class="workspace-note">All local discovery and file previews are constrained to the active root.</p>
         <p v-if="workspaceError" class="workspace-error">{{ workspaceError }}</p>
-        <article v-for="workspace in workspaces" :key="workspace.id" class="workspace-row" :class="{ active: workspace.is_active }">
+        <article v-for="workspace in workspaces" :key="workspace.id" class="workspace-row" :class="{ active: activeWorkspace?.id === workspace.id }">
           <button @click="emit('activate-workspace', workspace.id)">
             <i></i>
             <span><strong>{{ workspace.name }}</strong><small>{{ workspace.path }}</small></span>
@@ -246,9 +291,9 @@ function serverClass(status) {
 .inspector__head { display: flex; height: 58px; align-items: center; justify-content: space-between; padding: 0 14px 0 17px; border-bottom: 1px solid #d8e3f1; }
 .inspector__head div { display: grid; gap: 2px; }.inspector__head strong { font-size: 12px; }.inspector__head small { max-width: 240px; overflow: hidden; color: #8192a8; font: 9.5px/1.2 var(--mono); text-overflow: ellipsis; white-space: nowrap; }
 .inspector__head button { width: 27px; height: 27px; border: 0; border-radius: 7px; color: #6d829d; background: transparent; font-size: 18px; cursor: pointer; }.inspector__head button:hover { background: #e6eef9; }
-.inspector__tabs { display: grid; grid-template-columns: repeat(5, 1fr); gap: 3px; padding: 7px; border-bottom: 1px solid #dbe5f2; }
+.inspector__tabs { display: grid; grid-template-columns: repeat(auto-fit, minmax(58px, 1fr)); gap: 3px; padding: 7px; border-bottom: 1px solid #dbe5f2; }
 .inspector__tabs button { padding: 7px 2px; border: 0; border-radius: 6px; color: #71859f; background: transparent; font: 700 9px/1 var(--mono); text-transform: uppercase; cursor: pointer; }.inspector__tabs button.active { color: #fff; background: #1756d1; box-shadow: 0 4px 12px rgba(23, 86, 209, .22); }
-.inspector__content { height: calc(100% - 102px); overflow-y: auto; padding: 12px; scrollbar-gutter: stable; }
+.inspector__content { height: calc(100% - 138px); overflow-y: auto; padding: 12px; scrollbar-gutter: stable; }
 .usage-card,.hypothesis-row { margin-bottom: 10px; padding: 11px; border: 1px solid #d8e2ef; border-radius: 10px; background: #fff; }
 .usage-card span,.usage-card p { color: #71859e; font: 9px/1.45 var(--mono); }.usage-card strong { display: block; margin: 4px 0; color: #1756d1; font: 700 15px/1 var(--mono); }.usage-card p { margin: 0; }
 .hypothesis-row summary { display: flex; align-items: center; justify-content: space-between; gap: 8px; color: #294564; cursor: pointer; font-size: 10.5px; font-weight: 700; }.hypothesis-row summary span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }.hypothesis-row summary b { color: #1756d1; font: 800 11px/1 var(--mono); }
@@ -262,10 +307,19 @@ function serverClass(status) {
 .evidence-card__sign { display: grid; width: 21px; height: 21px; place-items: center; border-radius: 6px; color: #fff; background: #11866f; font-weight: 900; }.is-oppose .evidence-card__sign { background: #d99b00; }.evidence-card div { min-width: 0; }.evidence-card strong { display: block; color: #294564; font-size: 10.5px; line-height: 1.4; }.evidence-card small { display: block; overflow: hidden; margin-top: 3px; color: #7188a3; font: 8.5px/1.3 var(--mono); text-overflow: ellipsis; white-space: nowrap; }.evidence-card p { max-height: 48px; overflow: hidden; margin: 7px 0 0; color: #617791; font: 9px/1.45 var(--mono); }.evidence-card b { color: #8799ad; font: 800 10px/1 var(--mono); }
 .relation-list,.verdict-card { margin-top: 10px; padding: 11px; border: 1px solid #d8e2ef; border-radius: 10px; background: #fff; }.relation-list > strong { font-size: 10px; }.relation-list div { display: flex; align-items: center; gap: 6px; margin-top: 7px; font: 8.5px/1 var(--mono); }.relation-list i { flex: 1; height: 1px; color: #6658c7; background: #c9c3ef; text-align: center; }
 .verdict-card { border-top: 3px solid #1756d1; }.verdict-card.is-supported { border-top-color: #11866f; }.verdict-card.is-refuted { border-top-color: #c44747; }.verdict-card small { color: #8798ac; font: 700 8px/1 var(--mono); text-transform: uppercase; }.verdict-card strong { display: block; margin: 4px 0; font-size: 16px; text-transform: capitalize; }.verdict-card p { margin: 0; color: #566d88; font-size: 10px; line-height: 1.5; }
-.inspector__section-head { display: flex; align-items: center; justify-content: space-between; margin: 2px 2px 10px; }.inspector__section-head strong { font-size: 12px; }.inspector__section-head span { color: #8294aa; font: 9px/1 var(--mono); }
+.inspector__section-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin: 2px 2px 10px; }.inspector__section-head strong { font-size: 12px; }.inspector__section-head span { color: #8294aa; font: 9px/1 var(--mono); }
+.section-action { height: 24px; padding: 0 8px; border: 1px solid #bfd0ea; border-radius: 6px; color: #1756d1; background: #eef4ff; font: 700 9px/1 var(--mono); cursor: pointer; }
 .task-row { display: flex; width: 100%; align-items: center; gap: 8px; padding: 9px; border: 0; border-radius: 8px; color: #37516f; background: transparent; text-align: left; cursor: pointer; }.task-row:hover { background: #eaf1fb; }.task-row i { display: grid; width: 17px; height: 17px; place-items: center; border: 1px solid #a9bad0; border-radius: 5px; color: #11866f; font-style: normal; }.task-row.done span { color: #91a0b2; text-decoration: line-through; }
 .inspector-tool { display: grid; grid-template-columns: 28px 1fr auto; align-items: center; gap: 9px; margin-bottom: 6px; padding: 9px; border: 1px solid #d7e2ef; border-radius: 9px; background: #fff; }.inspector-tool > b { display: grid; width: 27px; height: 27px; place-items: center; border-radius: 7px; color: #1756d1; background: #e8f0ff; font: 800 10px/1 var(--mono); }.inspector-tool div { display: grid; gap: 3px; }.inspector-tool strong { font: 700 10px/1 var(--mono); }.inspector-tool small { color: #778ba4; font-size: 9px; line-height: 1.35; }.inspector-tool > span { color: #8da0b6; font: 800 9px/1 var(--mono); }
 .mcp-row,.subagent-row { margin-bottom: 7px; padding: 10px; border: 1px solid #d7e2ef; border-radius: 10px; background: #fff; }
+.session-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 8px; margin-bottom: 7px; padding: 8px; border: 1px solid #d7e2ef; border-radius: 10px; background: #fff; }
+.session-row.active { border-color: #83a9ec; box-shadow: 0 0 0 2px rgba(23, 86, 209, .08); }
+.session-row > button:first-child { display: grid; min-width: 0; gap: 3px; padding: 0; border: 0; color: inherit; background: transparent; text-align: left; cursor: pointer; }
+.session-row strong { overflow: hidden; color: #294564; font: 800 10.5px/1.25 var(--mono); text-overflow: ellipsis; white-space: nowrap; }
+.session-row small { overflow: hidden; color: #7188a3; font: 8.5px/1.3 var(--mono); text-overflow: ellipsis; white-space: nowrap; }
+.session-row > span { display: flex; gap: 2px; }
+.session-row > span button { display: grid; height: 21px; padding: 0 5px; place-items: center; border: 1px solid transparent; border-radius: 5px; color: #8194ad; background: transparent; font: 700 8px/1 var(--mono); cursor: pointer; }
+.session-row > span button:hover { border-color: #cbd9ec; color: #1756d1; background: #eef4ff; }
 .mcp-row__main { display: grid; grid-template-columns: 12px minmax(0, 1fr) auto; align-items: center; gap: 8px; }
 .mcp-row__main i { width: 9px; height: 9px; border-radius: 50%; background: #91a0b2; }
 .mcp-row.running .mcp-row__main i { background: #11866f; box-shadow: 0 0 0 3px #dff8f1; }

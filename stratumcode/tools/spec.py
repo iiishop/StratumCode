@@ -18,8 +18,8 @@ class ToolResult:
         return ToolResult(title=title, output=output, metadata=meta)
 
     @staticmethod
-    def err(title: str, output: str) -> "ToolResult":
-        return ToolResult(title="[error] " + title, output=output)
+    def err(title: str, output: str, **meta) -> "ToolResult":
+        return ToolResult(title="[error] " + title, output=output, metadata=meta)
 
 
 @dataclass
@@ -28,7 +28,6 @@ class ToolDef:
     description: str
     parameters: dict[str, Any]  # JSON Schema object
     execute: Callable[..., Any]  # async (params: dict, ctx: dict) -> ToolResult
-    format_error: Callable[[Exception], str] = lambda e: str(e)
 
     def to_json(self) -> dict:
         return {

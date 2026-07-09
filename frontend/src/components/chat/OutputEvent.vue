@@ -31,7 +31,7 @@ const parts = computed(() => {
 </template>
 
 <style scoped>
-.output-copy { padding: 3px; color: #203a59; font-size: var(--font-body, 14px); line-height: 1.7; white-space: pre-wrap; }
+.output-copy { padding: 3px; color: #203a59; font-size: var(--font-body, 14px); line-height: 1.7; white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word; }
 .output-copy pre { margin: 9px 0; padding: 11px; overflow: auto; border: 1px solid #d7e1ef; border-radius: 8px; background: rgba(238, 243, 250, .8); white-space: pre; font: var(--font-code, 12px)/1.6 var(--mono, monospace); }
 .output-cursor { display: inline-block; width: 5px; height: 1em; margin-left: 2px; vertical-align: -2px; border-radius: 2px; background: #1756d1; animation: blink .75s step-end infinite; }
 @keyframes blink { 50% { opacity: 0; } }

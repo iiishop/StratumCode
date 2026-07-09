@@ -9,7 +9,8 @@ from uuid import uuid4
 
 from . import mcp, model_settings, providers
 from .agent.tools import openai_tool_schema
-from .chat import _add_usage, _call_model, _content_text, _empty_usage, _usage_delta
+from .chat import _add_usage, _call_model, _content_text, _empty_usage, _tool_error_retryable, _usage_delta
+from .subagent_catalog import list_available, normalize_agent_name
 from .tools import registry
 from .tools.spec import ToolResult
 
@@ -19,6 +20,14 @@ MAX_INSTALLER_ROUNDS = 8
 
 def _start(event_id: str, event_type: str, data: dict) -> dict:
     return {"op": "start", "id": event_id, "event": event_type, "data": data}
+
+
+def run_stream(agent: str, task: str, workspace_dir: str = ".") -> Iterator[dict]:
+    name = normalize_agent_name(agent)
+    if name == "mcp-installer":
+        yield from mcp_install_stream(task, workspace_dir)
+        return
+    raise ValueError(f"unknown subagent: {agent}")
 
 
 def mcp_install_stream(hint: str, workspace_dir: str = ".") -> Iterator[dict]:
@@ -113,13 +122,6 @@ def _react_install(
         })
 
         if not tool_calls:
-            messages.append({
-                "role": "system",
-                "content": (
-                    "Continue the MCP install task. Use webfetch/websearch if you still need "
-                    "facts, then call install_mcp with the final StratumCode MCP config."
-                ),
-            })
             continue
 
         for raw_call in tool_calls:
@@ -141,7 +143,7 @@ def _react_install(
                     "error": {
                         "tool": name or "invalid",
                         "message": str(exc),
-                        "retryable": True,
+                        "retryable": _tool_error_retryable(exc),
                     }
                 }, ensure_ascii=False)
                 emitted = [_start(call_id, "tool", {

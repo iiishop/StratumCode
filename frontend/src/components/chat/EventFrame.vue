@@ -192,20 +192,21 @@ function collapseLeave(el, done) {
 }
 .event-frame__head { display: flex; width: 100%; min-height: 43px; align-items: center; gap: 9px; padding: 8px 11px; border: 0; color: #1b3656; background: transparent; text-align: left; cursor: pointer; }
 .event-frame__head.is-static { cursor: default; }.event-frame__head:disabled { opacity: 1; }
-.event-frame__titles { display: grid; min-width: 0; gap: 2px; }
-.event-frame__label { color: #153252; font: 720 var(--font-ui, 12px)/1.25 var(--mono, monospace); letter-spacing: .01em; }
+.event-frame__titles { display: grid; min-width: 0; flex: 1 1 auto; gap: 2px; }
+.event-frame__label { overflow: hidden; color: #153252; font: 720 var(--font-ui, 12px)/1.25 var(--mono, monospace); letter-spacing: .01em; text-overflow: ellipsis; white-space: nowrap; }
 .event-frame__titles small {
   display: flex;
   min-height: 23px;
   align-items: center;
-  overflow: visible;
+  min-width: 0;
+  overflow: hidden;
   color: #76889f;
   font-size: var(--font-caption, 11px);
   line-height: 23px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.event-frame__status { margin-left: auto; color: var(--event); font: 750 10px/1 var(--mono, monospace); letter-spacing: .07em; text-transform: uppercase; }
+.event-frame__status { flex: 0 0 auto; margin-left: auto; color: var(--event); font: 750 10px/1 var(--mono, monospace); letter-spacing: .07em; text-transform: uppercase; white-space: nowrap; }
 .event-frame__status.is-running {
   color: transparent;
   background: linear-gradient(100deg, color-mix(in srgb, var(--event) 70%, #40536d) 30%, #fff 48%, var(--event) 66%);
@@ -220,6 +221,8 @@ function collapseLeave(el, done) {
 .event-frame__clip { min-height: 0; overflow: hidden; }
 .event-frame__body {
   padding: 0 11px 11px;
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 @keyframes shiny { to { background-position: -220% 0; } }
 @keyframes node-pulse { 50% { box-shadow: 0 0 0 6px color-mix(in srgb, var(--event) 17%, transparent), 0 0 16px color-mix(in srgb, var(--event) 35%, transparent); } }

@@ -1,5 +1,5 @@
 <script setup>
-import { ref, reactive, computed, onMounted, onUnmounted, nextTick, watch } from 'vue'
+import { ref, reactive, computed, provide, onMounted, onUnmounted, nextTick, watch } from 'vue'
 import { gsap } from 'gsap'
 import ChatEvent from './chat/ChatEvent.vue'
 import { useChatStream } from '../composables/useChatStream'
@@ -9,8 +9,21 @@ import InspectorPanel from './inspector/InspectorPanel.vue'
 const props = defineProps({
   session: { type: Object, default: null },
   mcpServers: { type: Array, default: () => [] },
+  workspaces: { type: Array, default: () => [] },
+  activeWorkspace: { type: Object, default: null },
+  workspaceError: { type: String, default: '' },
+  sessions: { type: Array, default: () => [] },
 })
-const emit = defineEmits(['save-session-state'])
+const emit = defineEmits([
+  'save-session-state',
+  'add-workspace',
+  'activate-workspace',
+  'delete-workspace',
+  'create-session',
+  'open-session',
+  'rename-session',
+  'delete-session',
+])
 
 /* ── todos ── */
 const inspectorTab = ref(null)
@@ -34,15 +47,9 @@ const suggestions = [
   { label: 'Refactor safely', detail: 'Reduce complexity without changing behavior', prompt: 'Review the current code and propose a focused refactor' },
 ]
 
-const fallbackTools = [
-  { name: 'read', description: 'Read a file or a selected line range.', parameters: { properties: { path: {}, start_line: {}, end_line: {} } } },
-  { name: 'glob', description: 'Find files using a workspace glob pattern.', parameters: { properties: { pattern: {} } } },
-  { name: 'grep', description: 'Search workspace text with ripgrep.', parameters: { properties: { pattern: {}, include: {} } } },
-  { name: 'webfetch', description: 'Fetch text from a public HTTP(S) URL.', parameters: { properties: { url: {} } } },
-  { name: 'websearch', description: 'Search the public web for relevant sources.', parameters: { properties: { query: {}, limit: {} } } },
-  { name: 'todoread', description: 'Read the current task list.', parameters: { properties: {} } },
-]
-const toolCatalog = ref(fallbackTools)
+const toolCatalog = ref([])
+const toolNames = computed(() => toolCatalog.value.map(tool => tool.name).filter(Boolean))
+provide('toolNames', toolNames)
 
 /* ── chat state ── */
 const input = ref('')
@@ -70,7 +77,7 @@ const availableSubagents = [
     name: '@mcp-installer',
     task: 'Install MCP servers from docs, URLs, or config hints.',
     status: 'ready',
-    result: 'Available from the MCP page and the subagent_mcp_install tool.',
+    result: 'Available from the MCP page and the subagent tool.',
   },
 ]
 const evidenceRun = computed(() => evidenceRuns.find(run => run.id === activeRunId.value) || emptyEvidenceRun)
@@ -84,6 +91,20 @@ const sessionUsage = reactive({
   cost: 0,
   currency: 'USD',
 })
+const agentStatus = reactive({
+  state: 'idle',
+  phase: '',
+  provider: '',
+  model: '',
+  contextLength: null,
+  contextUsed: 0,
+})
+const contextPercent = computed(() => {
+  if (!agentStatus.contextLength) return 0
+  return Math.min(100, Math.round((agentStatus.contextUsed / agentStatus.contextLength) * 100))
+})
+const agentRunning = computed(() => isStreaming.value)
+const contextRatio = computed(() => `${contextPercent.value}%`)
 let gsapCtx
 let saveTimer
 
@@ -126,6 +147,10 @@ function usageDefaults() {
   }
 }
 
+function formatNumber(value) {
+  return Number(value || 0).toLocaleString()
+}
+
 function plain(value) {
   return JSON.parse(JSON.stringify(value))
 }
@@ -157,6 +182,7 @@ function restoreState(state = {}) {
   activeRunId.value = state.activeRunId || ''
   fileContext.splice(0, fileContext.length, ...((state.fileContext && state.fileContext.length) ? state.fileContext : defaultFileContext()))
   Object.assign(sessionUsage, usageDefaults(), state.usage || {})
+  Object.assign(agentStatus, { state: 'idle', phase: '', provider: '', model: '', contextLength: null, contextUsed: 0 })
   nextTick(scrollBottom)
 }
 
@@ -165,9 +191,9 @@ async function loadTools() {
     const response = await fetch('/api/tools')
     if (!response.ok) return
     const tools = await response.json()
-    toolCatalog.value = tools.filter(tool => tool.name !== 'invalid')
+    toolCatalog.value = Array.isArray(tools) ? tools : []
   } catch {
-    // Keep the static catalog when the API is offline.
+    toolCatalog.value = []
   }
 }
 
@@ -184,6 +210,7 @@ async function send() {
   messages.push(message)
   input.value = ''
   isStreaming.value = true
+  Object.assign(agentStatus, { state: 'running', phase: 'starting', contextUsed: 0 })
   inspectorTab.value = 'evidence'
   nextTick(() => { scrollBottom(); animateLast() })
   try {
@@ -201,6 +228,7 @@ async function send() {
     }
   } finally {
     isStreaming.value = false
+    agentStatus.state = 'idle'
     scheduleSave()
     nextTick(scrollBottom)
   }
@@ -252,11 +280,21 @@ function onAgentPacket(packet, type, data) {
     run.confidence = data.confidence
   } else if (packet.op === 'start' && type === 'usage') {
     addUsage(data.delta)
+    agentStatus.contextUsed = data.delta?.input_tokens || agentStatus.contextUsed
   } else if (packet.op === 'start' && type === 'subagent') {
     subagentRuns.push(data)
   } else if (packet.op === 'update' && type === 'stage' && data?.phase) {
     const run = currentEvidenceRun()
     if (run) run.phase = data.phase
+    agentStatus.phase = data.phase
+  } else if (packet.op === 'start' && type === 'stage') {
+    Object.assign(agentStatus, {
+      state: data.state || 'running',
+      phase: data.phase || '',
+      provider: data.provider || '',
+      model: data.model || '',
+      contextLength: data.context_length || null,
+    })
   } else if (type === 'hypothesis' && data) {
     const run = currentEvidenceRun()
     if (!run) return
@@ -309,7 +347,7 @@ watch(() => props.session?.id, () => {
         <span class="chat__session-mark">&gt;_</span>
         <div>
           <strong>{{ sessionName }}</strong>
-          <small>↑ {{ sessionUsage.input_tokens }} ↓ {{ sessionUsage.output_tokens }} · {{ sessionUsage.currency }} {{ sessionUsage.cost.toFixed(6) }}</small>
+          <small>{{ agentRunning ? 'Agent running' : 'Agent idle' }}</small>
         </div>
       </div>
 
@@ -409,11 +447,17 @@ watch(() => props.session?.id, () => {
           :workspaces="workspaces"
           :active-workspace="activeWorkspace"
           :workspace-error="workspaceError"
+          :sessions="sessions"
+          :active-session="session"
           @update:tab="inspectorTab = $event"
           @toggle-todo="toggleTodo"
-          @add-workspace="addWorkspace"
-          @activate-workspace="activateWorkspace"
-          @delete-workspace="deleteWorkspace"
+          @add-workspace="emit('add-workspace', $event)"
+          @activate-workspace="emit('activate-workspace', $event)"
+          @delete-workspace="emit('delete-workspace', $event)"
+          @create-session="emit('create-session')"
+          @open-session="emit('open-session', $event)"
+          @rename-session="emit('rename-session', $event)"
+          @delete-session="emit('delete-session', $event)"
           @close="inspectorTab = null"
         />
       </Transition>
@@ -422,6 +466,26 @@ watch(() => props.session?.id, () => {
 
     <div class="chat__foot">
       <div class="chat__composer">
+        <div class="chat__runbar" :class="{ 'is-running': agentRunning }">
+          <div class="chat__runstate">
+            <i></i>
+            <span>{{ agentRunning ? 'Running' : 'Idle' }}</span>
+            <small>{{ agentStatus.phase || 'ready' }}</small>
+          </div>
+          <div class="chat__meter" :style="{ '--context': contextRatio }">
+            <span>
+              <b>{{ formatNumber(agentStatus.contextUsed) }}</b>
+              <small>/ {{ agentStatus.contextLength ? formatNumber(agentStatus.contextLength) : 'unknown' }}</small>
+            </span>
+            <em><i></i></em>
+          </div>
+          <div class="chat__usage-strip">
+            <span><small>Tokens</small><b>{{ formatNumber(sessionUsage.total_tokens) }}</b></span>
+            <span><small>Cache</small><b>{{ formatNumber(sessionUsage.cached_tokens) }}</b></span>
+            <span><small>Cost</small><b>{{ sessionUsage.currency }} {{ sessionUsage.cost.toFixed(6) }}</b></span>
+          </div>
+          <div v-if="agentStatus.model" class="chat__model">{{ agentStatus.provider }} / {{ agentStatus.model }}</div>
+        </div>
         <div v-if="fileContext.length" class="chat__files">
           <span class="chat__files-label">Context</span>
           <FileReference
@@ -1114,8 +1178,144 @@ watch(() => props.session?.id, () => {
   box-shadow: 0 18px 44px rgba(23, 72, 150, 0.16), 0 0 0 3px var(--accent-bg);
 }
 
+.chat__runbar {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 10px;
+  overflow-x: auto;
+  padding: 9px 11px 2px;
+  color: #5f7193;
+  font: 9px/1.2 var(--mono);
+  scrollbar-width: none;
+}
+
+.chat__runbar::-webkit-scrollbar { display: none; }
+
+.chat__runstate {
+  display: grid;
+  grid-template-columns: 10px auto;
+  min-width: 88px;
+  align-items: center;
+  column-gap: 6px;
+  padding: 6px 8px;
+  border: 1px solid #d7e2f0;
+  border-radius: 8px;
+  background: linear-gradient(180deg, #ffffff, #f5f8ff);
+}
+
+.chat__runstate i {
+  grid-row: 1 / 3;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #9badc4;
+  box-shadow: 0 0 0 3px #e7edf7;
+}
+
+.chat__runstate span {
+  color: #29435f;
+  font-weight: 800;
+}
+
+.chat__runstate small {
+  max-width: 72px;
+  overflow: hidden;
+  color: #8192aa;
+  font-size: 8px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chat__runbar.is-running .chat__runstate {
+  border-color: #d9b226;
+  background: linear-gradient(180deg, #fff9d9, #fff2ad);
+}
+
+.chat__runbar.is-running .chat__runstate i {
+  background: var(--yellow);
+  box-shadow: 0 0 0 3px rgba(245, 200, 66, .24), 0 0 18px rgba(245, 200, 66, .78);
+  animation: status-pulse 1s ease-in-out infinite;
+}
+
+.chat__meter {
+  --context: 0%;
+  display: grid;
+  min-width: 170px;
+  gap: 5px;
+  padding: 6px 8px;
+  border: 1px solid #cbd9ec;
+  border-radius: 8px;
+  background: #f8fbff;
+}
+
+.chat__meter span {
+  display: flex;
+  justify-content: space-between;
+  gap: 9px;
+  white-space: nowrap;
+}
+
+.chat__meter b {
+  color: var(--accent-text);
+  font-weight: 800;
+}
+
+.chat__meter small {
+  color: #8192aa;
+}
+
+.chat__meter em {
+  height: 5px;
+  overflow: hidden;
+  border-radius: 99px;
+  background: #dfe8f6;
+}
+
+.chat__meter em i {
+  display: block;
+  width: var(--context);
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, #1756d1, #f5c842);
+  transition: width .32s cubic-bezier(.22,1,.36,1);
+}
+
+.chat__usage-strip {
+  display: flex;
+  min-width: max-content;
+  overflow: hidden;
+  border: 1px solid #d7e2f0;
+  border-radius: 8px;
+  background: #ffffff;
+}
+
+.chat__usage-strip span {
+  display: grid;
+  min-width: 64px;
+  gap: 2px;
+  padding: 5px 8px;
+  border-right: 1px solid #e1e9f5;
+}
+
+.chat__usage-strip span:last-child { border-right: 0; }
+.chat__usage-strip small { color: #8292a8; font-size: 7.5px; text-transform: uppercase; }
+.chat__usage-strip b { color: #29435f; font-weight: 800; }
+
+.chat__model {
+  max-width: min(360px, 44vw);
+  overflow: hidden;
+  padding: 6px 8px;
+  border: 1px solid #d7e2f0;
+  border-radius: 8px;
+  color: #665000;
+  background: #fff9df;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .chat__files {
-  padding: 9px 11px 0;
+  padding: 7px 11px 0;
   gap: 6px;
 }
 
@@ -1201,6 +1401,8 @@ watch(() => props.session?.id, () => {
 .chat__code-block code {
   background: var(--code-bg) !important;
 }
+
+@keyframes status-pulse { 50% { transform: scale(1.45); opacity: .58; } }
 
 .chat__tool-grid {
   display: grid;

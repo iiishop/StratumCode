@@ -24,7 +24,7 @@ defineProps({ event: { type: Object, required: true } })
 
 <style scoped>
 .tool-io { display: grid; gap: 7px; }
-.tool-io div { display: grid; grid-template-columns: 43px minmax(0, 1fr); gap: 7px; align-items: start; }
+.tool-io div { display: grid; grid-template-columns: 43px minmax(0, 1fr); gap: 7px; align-items: start; min-width: 0; }
 .tool-io span { padding-top: 8px; color: #8a9bb0; font: 700 9px/1 var(--mono, monospace); letter-spacing: .08em; }
-.tool-io pre { margin: 0; padding: 8px 10px; overflow: auto; border-radius: 7px; color: #39516d; background: rgba(224, 233, 247, .52); font: var(--font-code, 12px)/1.55 var(--mono, monospace); white-space: pre-wrap; }
+.tool-io pre { min-width: 0; margin: 0; padding: 8px 10px; overflow: auto; border-radius: 7px; color: #39516d; background: rgba(224, 233, 247, .52); font: var(--font-code, 12px)/1.55 var(--mono, monospace); white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word; }
 </style>

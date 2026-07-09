@@ -32,6 +32,8 @@ const currentTitle = computed(() => ({
   providers: 'Providers',
   mcp: 'MCP',
 })[currentView.value] || 'Workspace')
+const workspaceLabel = computed(() => activeWorkspace.value?.name || 'No workspace')
+const sessionLabel = computed(() => currentView.value === 'home' ? activeSession.value?.name : '')
 const providers = ref([])
 const showForm = ref(false)
 const defaultPricingRule = () => ({
@@ -101,9 +103,16 @@ async function removeSession(id) {
 
 async function createSessionForWorkspace(workspace) {
   await activateWorkspace(workspace.id)
-  await loadWorkspaces()
   await sessionStore.load(workspace.id)
-  await createSession(workspace.id)
+  if (sessionStore.items.value[0]) await sessionStore.open(sessionStore.items.value[0].id)
+  else await createSession(workspace.id)
+  currentView.value = 'home'
+}
+
+async function activateWorkspaceAndSession(id) {
+  const workspace = workspaces.value.find(item => item.id === id)
+  if (!workspace) return
+  await createSessionForWorkspace(workspace)
 }
 
 async function addWorkspacePrompt() {
@@ -113,10 +122,17 @@ async function addWorkspacePrompt() {
   await loadWorkspaces()
 }
 
+async function addWorkspaceFromPanel(payload) {
+  await addWorkspace(payload?.name || '', payload?.path || '')
+}
+
 async function removeWorkspace(id) {
   await deleteWorkspace(id)
-  await loadWorkspaces()
-  if (activeWorkspace.value?.id) await sessionStore.load(activeWorkspace.value.id)
+  if (activeWorkspace.value?.id) {
+    await sessionStore.load(activeWorkspace.value.id)
+    if (sessionStore.items.value[0]) await sessionStore.open(sessionStore.items.value[0].id)
+    else await createSession(activeWorkspace.value.id)
+  }
 }
 
 async function saveActiveSessionState(state) {
@@ -362,7 +378,13 @@ watch(currentView, (v) => {
         <div class="shell__crumbs">
           <span>StratumCode</span>
           <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="m9 18 6-6-6-6"/></svg>
+          <strong>{{ workspaceLabel }}</strong>
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="m9 18 6-6-6-6"/></svg>
           <strong>{{ currentTitle }}</strong>
+          <template v-if="sessionLabel">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="m9 18 6-6-6-6"/></svg>
+            <span class="shell__session">{{ sessionLabel }}</span>
+          </template>
         </div>
         <div class="shell__runtime"><span></span>Local runtime</div>
       </header>
@@ -553,7 +575,18 @@ watch(currentView, (v) => {
           v-if="currentView === 'home'"
           :session="activeSession"
           :mcp-servers="mcpServers"
+          :workspaces="workspaces"
+          :active-workspace="activeWorkspace"
+          :workspace-error="workspaceError"
+          :sessions="sessionItems"
           @save-session-state="saveActiveSessionState"
+          @add-workspace="addWorkspaceFromPanel"
+          @activate-workspace="activateWorkspaceAndSession"
+          @delete-workspace="removeWorkspace"
+          @create-session="createSession"
+          @open-session="openSession"
+          @rename-session="renameSession"
+          @delete-session="removeSession"
         />
       </KeepAlive>
       <McpPage
@@ -886,13 +919,26 @@ watch(currentView, (v) => {
 
 .shell__crumbs {
   gap: 7px;
+  min-width: 0;
+  overflow: hidden;
   color: var(--text-muted);
   font-size: 11px;
 }
 
 .shell__crumbs strong {
+  min-width: 0;
+  overflow: hidden;
   color: var(--text-h);
   font-weight: 550;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.shell__session {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .shell__runtime {
