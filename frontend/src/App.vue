@@ -389,7 +389,7 @@ watch(currentView, (v) => {
         <div class="shell__runtime"><span></span>Local runtime</div>
       </header>
 
-      <main class="main">
+      <main class="main" :class="{ 'main--home': currentView === 'home' }">
       <!-- Providers view -->
       <div v-if="currentView === 'providers'" class="pm">
         <div class="pm__top">
@@ -962,6 +962,11 @@ watch(currentView, (v) => {
     linear-gradient(rgba(23, 86, 209, 0.035) 1px, transparent 1px),
     var(--bg);
   background-size: 100% 48px;
+}
+
+.main--home {
+  display: flex;
+  overflow: hidden;
 }
 
 .pm {

@@ -4,6 +4,7 @@ import ToolEvent from './ToolEvent.vue'
 import SubagentEvent from './SubagentEvent.vue'
 import DiffEvent from './DiffEvent.vue'
 import OutputEvent from './OutputEvent.vue'
+import TaskAnalysisEvent from './TaskAnalysisEvent.vue'
 import StageEvent from './StageEvent.vue'
 import HypothesisEvent from './HypothesisEvent.vue'
 import EvidenceEvent from './EvidenceEvent.vue'
@@ -19,6 +20,7 @@ const eventComponents = {
   subagent: SubagentEvent,
   diff: DiffEvent,
   output: OutputEvent,
+  task_analysis: TaskAnalysisEvent,
   stage: StageEvent,
   hypothesis: HypothesisEvent,
   evidence: EvidenceEvent,

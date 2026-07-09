@@ -70,8 +70,9 @@ const emptyEvidenceRun = reactive({
 })
 const evidenceRuns = reactive([])
 const activeRunId = ref('')
+const taskAnalyses = reactive([])
 const subagentRuns = reactive([])
-const availableSubagents = [
+const availableSubagents = reactive([
   {
     id: 'available-mcp-installer',
     name: '@mcp-installer',
@@ -79,9 +80,22 @@ const availableSubagents = [
     status: 'ready',
     result: 'Available from the MCP page and the subagent tool.',
   },
-]
+  {
+    id: 'available-hypothesis-verifier',
+    name: '@hypothesis-verifier',
+    task: 'Verify code hypotheses by gathering and recording grounded evidence.',
+    status: 'ready',
+    result: 'Runs after task analysis and is available through the subagent tool.',
+  },
+])
 const evidenceRun = computed(() => evidenceRuns.find(run => run.id === activeRunId.value) || emptyEvidenceRun)
-const visibleSubagents = computed(() => [...availableSubagents, ...subagentRuns])
+const activeTaskAnalysis = computed(() => taskAnalyses[taskAnalyses.length - 1] || null)
+const visibleSubagents = computed(() => {
+  const byName = new Map()
+  for (const agent of availableSubagents) byName.set(agent.name, agent)
+  for (const agent of subagentRuns) if (!byName.has(agent.name)) byName.set(agent.name, agent)
+  return [...byName.values()]
+})
 const sessionName = computed(() => props.session?.name || 'New session')
 const sessionUsage = reactive({
   input_tokens: 0,
@@ -160,6 +174,7 @@ function snapshotState() {
     messages: plain(messages),
     evidenceRuns: plain(evidenceRuns),
     activeRunId: activeRunId.value,
+    taskAnalyses: plain(taskAnalyses),
     subagentRuns: plain(subagentRuns),
     fileContext: plain(fileContext),
     usage: plain(sessionUsage),
@@ -178,6 +193,7 @@ function restoreState(state = {}) {
     events: (message.events || []).map(event => ({ ...event, data: reactive(event.data || {}) })),
   })))
   evidenceRuns.splice(0, evidenceRuns.length, ...(state.evidenceRuns || []).map(run => reactive(run)))
+  taskAnalyses.splice(0, taskAnalyses.length, ...(state.taskAnalyses || []).map(analysis => reactive(analysis)))
   subagentRuns.splice(0, subagentRuns.length, ...(state.subagentRuns || []).map(run => reactive(run)))
   activeRunId.value = state.activeRunId || ''
   fileContext.splice(0, fileContext.length, ...((state.fileContext && state.fileContext.length) ? state.fileContext : defaultFileContext()))
@@ -247,6 +263,17 @@ function onKeydown(e) {
 
 function scrollBottom() { if (msgList.value) msgList.value.scrollTop = msgList.value.scrollHeight }
 
+function upsertSubagent(data) {
+  const existing = [...availableSubagents, ...subagentRuns].find(agent =>
+    (data.id && agent.id === data.id) || (data.name && agent.name === data.name)
+  )
+  if (existing) {
+    Object.assign(existing, data)
+    return
+  }
+  subagentRuns.push(reactive({ ...data }))
+}
+
 function onAgentPacket(packet, type, data) {
   if (packet.op === 'start' && type === 'hypothesis') {
     const run = reactive({
@@ -262,6 +289,9 @@ function onAgentPacket(packet, type, data) {
     })
     evidenceRuns.push(run)
     activeRunId.value = run.id
+  } else if (packet.op === 'start' && type === 'task_analysis') {
+    taskAnalyses.push(data)
+    inspectorTab.value = 'tasks'
   } else if (packet.op === 'start' && type === 'evidence') {
     const run = currentEvidenceRun()
     if (!run) return
@@ -282,7 +312,9 @@ function onAgentPacket(packet, type, data) {
     addUsage(data.delta)
     agentStatus.contextUsed = data.delta?.input_tokens || agentStatus.contextUsed
   } else if (packet.op === 'start' && type === 'subagent') {
-    subagentRuns.push(data)
+    upsertSubagent(data)
+  } else if (packet.op === 'update' && type === 'subagent') {
+    upsertSubagent(data)
   } else if (packet.op === 'update' && type === 'stage' && data?.phase) {
     const run = currentEvidenceRun()
     if (run) run.phase = data.phase
@@ -439,6 +471,7 @@ watch(() => props.session?.id, () => {
           :tab="inspectorTab"
           :run="evidenceRun"
           :runs="evidenceRuns"
+          :task-analysis="activeTaskAnalysis"
           :usage="sessionUsage"
           :todos="todos"
           :tools="toolCatalog"
@@ -584,7 +617,13 @@ watch(() => props.session?.id, () => {
 }
 
 /* ---- body ---- */
-.chat__body { display: flex; flex: 1; overflow: hidden; }
+.chat__body {
+  position: relative;
+  z-index: 2;
+  display: flex;
+  flex: 1;
+  overflow: visible;
+}
 .chat__main { flex: 1; display: flex; flex-direction: column; overflow: hidden; max-width: 820px; margin: 0 auto; width: 100%; padding: 0 32px; }
 
 /* ---- empty ---- */
@@ -756,7 +795,13 @@ watch(() => props.session?.id, () => {
 .chat__file-chip-x:hover { background: var(--err-bg); color: var(--err); }
 
 /* ---- foot ---- */
-.chat__foot { flex-shrink: 0; border-top: 1px solid var(--border); background: var(--bg); }
+.chat__foot {
+  position: relative;
+  z-index: 1;
+  flex-shrink: 0;
+  border-top: 1px solid var(--border);
+  background: var(--bg);
+}
 .chat__input-row { display: flex; align-items: flex-end; gap: 8px; padding: 8px 32px 14px; }
 .chat__input {
   flex: 1; min-height: 36px; max-height: 120px;
@@ -791,6 +836,7 @@ watch(() => props.session?.id, () => {
 /* workspace redesign */
 .chat {
   height: 100%;
+  flex: 1;
   min-height: 0;
   background: transparent;
 }
@@ -876,13 +922,21 @@ watch(() => props.session?.id, () => {
 
 .chat__body {
   position: relative;
+  z-index: 2;
   min-height: 0;
+  overflow: visible;
 }
 
 .chat__main {
   max-width: none;
   margin: 0;
   padding: 0;
+}
+
+@media (min-width: 981px) {
+  .chat__body--has-panel .chat__main {
+    margin-right: min(360px, calc(100% - 24px));
+  }
 }
 
 .chat__empty {
@@ -1015,11 +1069,24 @@ watch(() => props.session?.id, () => {
 }
 
 .chat__msg--user .chat__bubble {
-  padding: 11px 14px;
-  border: 1px solid var(--accent-border);
-  border-radius: var(--radius);
+  padding: 12px 16px;
+  border: 1px solid color-mix(in srgb, var(--accent) 24%, #cfddf5);
+  border-radius: 16px 16px 5px 16px;
   color: var(--text-h);
-  background: var(--accent-bg);
+  background: linear-gradient(135deg, rgba(23,86,209,.08), rgba(23,86,209,.035));
+  box-shadow: 0 2px 10px rgba(23,86,209,.07);
+  font-size: 14px;
+  line-height: 1.6;
+  position: relative;
+}
+
+.chat__msg--user .chat__time {
+  margin-top: 3px;
+  margin-bottom: 0;
+  text-align: right;
+  color: color-mix(in srgb, var(--accent) 30%, var(--text-muted));
+  font-size: 8.5px;
+  letter-spacing: .02em;
 }
 
 .chat__msg--assistant .chat__bubble {
@@ -1157,6 +1224,8 @@ watch(() => props.session?.id, () => {
 }
 
 .chat__foot {
+  position: relative;
+  z-index: 1;
   padding: 12px 24px 18px;
   border-top: 0;
   background: linear-gradient(transparent, var(--bg) 28%);

@@ -26,20 +26,23 @@ WORKSPACE_SECTION = """\
 - Date: {current_date}
 - Platform: {platform}
 - Model: {model}
-- Stage: evidence
+- Stage: {stage}
 - Workspace root: {directory}
 - User-selected context: {context}"""
 
 EVIDENCE_STAGE = """\
 ## Current stage: gather and evaluate evidence
 
-The user's message is the hypothesis. Do not generate a replacement hypothesis
-in this version of the agent.
+The task analyzer has already converted the user's message into the current
+hypothesis plus contextual constraints, clues, and unknowns. Do not replace the
+hypothesis; investigate it.
 
 Use only the tools that fit the hypothesis. Tool names and descriptions are the
 source of truth for what each tool can do; choose between built-in and MCP tools
 based on the current claim. Do not survey the whole project when one or two entry
 points or manifests can decide the claim.
+If the task analyzer context includes suggested first tool calls or clues, verify
+those pointers before broad search unless they are clearly irrelevant.
 
 There is no fixed discovery-call budget. Keep searching when the verdict still
 depends on missing evidence, but do not keep searching after you already have a
@@ -96,10 +99,140 @@ HYPOTHESIS_SECTION = """\
 
 You have at most {max_rounds} model rounds."""
 
+TASK_ANALYZER = """\
+You are StratumCode's Task Analyzer. Convert a free-form user request into one
+JSON object. Do not call tools. Do not include Markdown.
+
+Required JSON schema:
+{
+  "intent": {
+    "type": "feature|bugfix|refactor|question|investigation|other",
+    "summary": "one sentence describing the result the user wants"
+  },
+  "constraints": ["explicit hard requirements from the user"],
+  "hypotheses": [
+    {"text": "claim or assumption to verify", "certainty": "certain|uncertain|guess"}
+  ],
+  "clues": [
+    {
+      "kind": "file|line|symbol|route|other",
+      "value": "literal clue from the user",
+      "path": "optional workspace-relative path",
+      "line": 0,
+      "symbol": "optional function/class/route name",
+      "note": "optional short note"
+    }
+  ],
+  "unknowns": ["initial facts that must be investigated"]
+}
+
+Rules:
+- Preserve explicit constraints exactly enough that later code work cannot
+  violate them.
+- Clues are pointers to verify, not requirements and not evidence.
+- If the user states no hypothesis, keep hypotheses empty; do not invent one.
+- Unknowns should be concrete facts needed to satisfy the intent.
+- Use empty arrays when a section has no items.
+- Output JSON only."""
+
+TASK_ANALYZER_USER = """\
+Workspace root: {directory}
+User-selected context: {context}
+
+User request:
+{message}"""
+
+INVESTIGATION_STAGE = """\
+## Current stage: investigate before patch planning
+
+You are the main agent loop. Your job is to understand enough of the current
+project to enter patch planning, not to edit files.
+
+Maintain multiple beliefs, not one global hypothesis. For each unknown from the
+task analysis, choose the cheapest next action that reduces uncertainty:
+- use glob/grep/read to inspect project structure and existing patterns.
+- if Suggested first tool calls contains entries, run the first applicable one
+  before choosing a different starter.
+- you may call multiple independent tools in one turn when their inputs are
+  already known, such as reading several files found by a previous glob.
+- do not batch dependent actions. If a tool result decides the next file,
+  symbol, or search query, wait for that result before choosing the next action.
+- use subagent with agent="hypothesis-verifier" only when a specific belief needs
+  support/opposition evidence, for example "Character.HP represents health".
+- every hypothesis-verifier call must contain exactly one atomic belief. Do not
+  send numbered lists, multiple clauses, or "verify all of these" batches; verify
+  one belief, read the result, then decide the next belief.
+- if a belief is contradicted or insufficient, form a better belief and keep
+  investigating instead of stopping.
+
+Prefer project facts over framework defaults. Framework knowledge can suggest
+where to look, but current project code/config wins.
+
+Stop only by calling finish_investigation when you have enough grounded context
+for patch planning, or when the remaining ambiguity cannot be resolved from the
+project and must be asked of the user. Do not call finish_investigation just
+because one hypothesis verifier run ended."""
+
+INVESTIGATION_CONTEXT = """\
+## Task analysis
+Intent: {intent_type} - {intent_summary}
+Constraints:
+{constraints}
+
+Initial hypotheses from user:
+{hypotheses}
+
+Clues to verify first when useful:
+{clues}
+
+Initial unknowns:
+{unknowns}
+
+Suggested first tool calls:
+{suggested_tools}
+
+User request:
+{message}
+
+You have at most {max_rounds} model rounds."""
+
+INVESTIGATION_FINALIZE = """\
+Investigation step limit reached. Do not call discovery tools now.
+
+Use only the tool results already present in this conversation. Call
+finish_investigation with:
+- grounded beliefs from observed files, commands, documents, or verifier results.
+- open_questions for facts still unresolved.
+- patch_planning_context for concrete facts a later patch planner can rely on.
+
+If the observed facts are enough to plan a patch, set ready_for_patch_planning
+to true. Otherwise set it to false and explain the blocking gaps concretely."""
+
 
 def build_evidence_static() -> str:
     """Stable first message. Keep dynamic run data out to improve prefix-cache hits."""
     return "\n\n".join(section.strip() for section in (PERSONA, RULES, EVIDENCE_STAGE))
+
+
+def build_task_analyzer() -> str:
+    return "\n\n".join(section.strip() for section in (PERSONA, TASK_ANALYZER))
+
+
+def build_task_analyzer_user(
+    *,
+    message: str,
+    directory: str,
+    context: list[str] | None = None,
+    error: str = "",
+) -> str:
+    body = TASK_ANALYZER_USER.format(
+        directory=directory,
+        context=", ".join(context or []) or "(none)",
+        message=message,
+    )
+    if error:
+        body += f"\n\nPrevious output failed validation: {error}\nReturn corrected JSON only."
+    return body
 
 
 def build_evidence_context(
@@ -116,11 +249,62 @@ def build_evidence_context(
             current_date=date.today().isoformat(),
             platform=platform or "unknown",
             model=model,
+            stage="evidence",
             directory=directory,
             context=", ".join(context or []) or "(none)",
         ),
         HYPOTHESIS_SECTION.format(hypothesis=hypothesis, max_rounds=max_rounds),
     ))
+
+
+def build_investigation_static() -> str:
+    return "\n\n".join(section.strip() for section in (PERSONA, RULES, INVESTIGATION_STAGE))
+
+
+def build_investigation_context(
+    *,
+    analysis: dict,
+    message: str,
+    directory: str,
+    platform: str,
+    model: str,
+    context: list[str] | None = None,
+    max_rounds: int = 10,
+) -> str:
+    return "\n\n".join((
+        WORKSPACE_SECTION.format(
+            current_date=date.today().isoformat(),
+            platform=platform or "unknown",
+            model=model,
+            stage="investigation",
+            directory=directory,
+            context=", ".join(context or []) or "(none)",
+        ),
+        INVESTIGATION_CONTEXT.format(
+            intent_type=analysis.get("intent", {}).get("type", "other"),
+            intent_summary=analysis.get("intent", {}).get("summary", ""),
+            constraints="\n".join(f"- {item}" for item in analysis.get("constraints", [])) or "- (none)",
+            hypotheses="\n".join(
+                f"- ({item.get('certainty', 'uncertain')}) {item.get('text', '')}"
+                for item in analysis.get("hypotheses", [])
+            ) or "- (none)",
+            clues="\n".join(
+                f"- {item.get('kind', 'other')}: {item.get('value', '')}"
+                for item in analysis.get("clues", [])
+            ) or "- (none)",
+            unknowns="\n".join(f"- {item}" for item in analysis.get("unknowns", [])) or "- (none)",
+            suggested_tools="\n".join(
+                f"- {item.get('tool')}: {item.get('arguments')}"
+                for item in analysis.get("suggested_first_tools", [])
+            ) or "- (none)",
+            message=message,
+            max_rounds=max_rounds,
+        ),
+    ))
+
+
+def build_investigation_finalize() -> str:
+    return INVESTIGATION_FINALIZE.strip()
 
 
 def build_evidence(

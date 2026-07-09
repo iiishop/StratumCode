@@ -25,16 +25,25 @@ async def _subagent(params: dict, ctx: dict) -> ToolResult:
         return ToolResult.err("subagent", done["error"])
     server = done.get("server") or {}
     display_name = agent_info.get("display_name") or f"@{agent_name}"
-    output = (
-        f"{display_name} completed. Installed {server.get('name')} MCP server with "
-        f"{len(server.get('tools') or [])} tools. Status: {server.get('status')}."
-    )
-    return ToolResult.ok(output, output, subagent=agent_name, server=server)
+    if server:
+        output = (
+            f"{display_name} completed. Installed {server.get('name')} MCP server with "
+            f"{len(server.get('tools') or [])} tools. Status: {server.get('status')}."
+        )
+        return ToolResult.ok(output, output, subagent=agent_name, server=server)
+
+    run = done.get("run") or {}
+    output = run.get("summary") or f"{display_name} completed."
+    return ToolResult.ok(output, output, subagent=agent_name, run=run)
 
 
 subagent_tool = ToolDef(
     name="subagent",
-    description="Delegate a task to one focused subagent. Available agents: mcp-installer.",
+    description=(
+        "Delegate a task to one focused subagent. Available agents: "
+        + ", ".join(AVAILABLE_SUBAGENTS)
+        + "."
+    ),
     parameters={
         "type": "object",
         "properties": {

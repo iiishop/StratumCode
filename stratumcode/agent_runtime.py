@@ -28,7 +28,7 @@ def call_model(
     payload = {
         "model": model,
         "messages": messages,
-        "tools": tools or agent_tools(DISCOVERY_TOOLS),
+        "tools": agent_tools(DISCOVERY_TOOLS) if tools is None else tools,
         "temperature": 0.1,
         "max_tokens": MAX_MODEL_OUTPUT_TOKENS,
     }

@@ -7,6 +7,7 @@ const props = defineProps({
   tab: { type: String, default: 'evidence' },
   run: { type: Object, required: true },
   runs: { type: Array, default: () => [] },
+  taskAnalysis: { type: Object, default: null },
   usage: { type: Object, default: () => ({}) },
   todos: { type: Array, required: true },
   tools: { type: Array, required: true },
@@ -46,6 +47,17 @@ const phases = [
   ['evaluate', 'Evaluate'],
 ]
 const tabs = ['evidence', 'sessions', 'workspace', 'mcp', 'subagents', 'tasks', 'tools']
+const analysisRows = computed(() => {
+  const analysis = props.taskAnalysis
+  if (!analysis) return []
+  return [
+    { kind: 'goal', text: analysis.intent?.summary },
+    ...(analysis.constraints || []).map(text => ({ kind: 'constraint', text })),
+    ...(analysis.hypotheses || []).map(item => ({ kind: item.certainty || 'hypothesis', text: item.text })),
+    ...(analysis.clues || []).map(item => ({ kind: item.kind || 'clue', text: item.path ? `${item.path}${item.line ? `:${item.line}` : ''}` : item.value })),
+    ...(analysis.unknowns || []).map(text => ({ kind: 'unknown', text })),
+  ].filter(item => item.text)
+})
 
 onMounted(() => {
   if (!matchMedia('(prefers-reduced-motion: reduce)').matches) {
@@ -323,6 +335,17 @@ function addWorkspace() {
 
       <template v-else-if="tab === 'tasks'">
         <div class="inspector__section-head"><strong>Tasks</strong><span>{{ todos.filter(item => !item.done).length }} remaining</span></div>
+        <section v-if="taskAnalysis" class="analysis-card">
+          <small>Task analyzer</small>
+          <strong>{{ taskAnalysis.intent?.summary }}</strong>
+          <p>{{ taskAnalysis.intent?.type || 'other' }} / {{ taskAnalysis.provider || 'model' }} / {{ taskAnalysis.model || 'unknown' }}</p>
+        </section>
+        <div v-if="analysisRows.length" class="analysis-task-list">
+          <div v-for="item in analysisRows" :key="`${item.kind}:${item.text}`" class="analysis-task-row">
+            <b>{{ item.kind }}</b>
+            <span>{{ item.text }}</span>
+          </div>
+        </div>
         <button v-for="item in todos" :key="item.id" class="task-row" :class="{ done: item.done }" @click="emit('toggle-todo', item.id)">
           <i>{{ item.done ? '✓' : '' }}</i><span>{{ item.content }}</span>
         </button>
@@ -424,6 +447,11 @@ function addWorkspace() {
 .inspector__section-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin: 2px 2px 10px; }.inspector__section-head strong { font-size: 12px; }.inspector__section-head span { color: #8294aa; font: 9px/1 var(--mono); }
 .section-action { height: 24px; padding: 0 8px; border: 1px solid #bfd0ea; border-radius: 6px; color: #1756d1; background: #eef4ff; font: 700 9px/1 var(--mono); cursor: pointer; }
 .task-row { display: flex; width: 100%; align-items: center; gap: 8px; padding: 9px; border: 0; border-radius: 8px; color: #37516f; background: transparent; text-align: left; cursor: pointer; }.task-row:hover { background: #eaf1fb; }.task-row i { display: grid; width: 17px; height: 17px; place-items: center; border: 1px solid #a9bad0; border-radius: 5px; color: #11866f; font-style: normal; }.task-row.done span { color: #91a0b2; text-decoration: line-through; }
+.analysis-card { display: grid; gap: 5px; margin-bottom: 9px; padding: 11px; border: 1px solid #cfdced; border-radius: 10px; background: #fff; }.analysis-card small { color: #6658c7; font: 800 8px/1 var(--mono); text-transform: uppercase; letter-spacing: .06em; }.analysis-card strong { color: #294564; font-size: 11.5px; line-height: 1.4; }.analysis-card p { margin: 0; color: #7188a3; font: 8.5px/1.35 var(--mono); }
+.analysis-task-list { display: grid; gap: 5px; margin-bottom: 10px; }
+.analysis-task-row { display: grid; grid-template-columns: 72px minmax(0, 1fr); gap: 7px; padding: 8px; border: 1px solid #d9e4f1; border-radius: 8px; background: #fff; }
+.analysis-task-row b { overflow: hidden; color: #6658c7; font: 800 8px/1.35 var(--mono); text-overflow: ellipsis; text-transform: uppercase; }
+.analysis-task-row span { min-width: 0; color: #37516f; font-size: 10px; line-height: 1.4; overflow-wrap: anywhere; }
 .inspector-tool { display: grid; grid-template-columns: 28px 1fr auto; align-items: center; gap: 9px; margin-bottom: 6px; padding: 9px; border: 1px solid #d7e2ef; border-radius: 9px; background: #fff; }.inspector-tool > b { display: grid; width: 27px; height: 27px; place-items: center; border-radius: 7px; color: #1756d1; background: #e8f0ff; font: 800 10px/1 var(--mono); }.inspector-tool div { display: grid; gap: 3px; }.inspector-tool strong { font: 700 10px/1 var(--mono); }.inspector-tool small { color: #778ba4; font-size: 9px; line-height: 1.35; }.inspector-tool > span { color: #8da0b6; font: 800 9px/1 var(--mono); }
 .mcp-row { margin-bottom: 7px; padding: 10px; border: 1px solid #d7e2ef; border-radius: 10px; background: #fff; }
 .subagent-row {

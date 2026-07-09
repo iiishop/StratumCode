@@ -118,6 +118,7 @@ function collapseLeave(el, done) {
 .event-frame--subagent { --event: #6658c7; }
 .event-frame--diff { --event: #e56b2f; }
 .event-frame--output { --event: #1756d1; }
+.event-frame--task-analysis { --event: #6658c7; }
 .event-frame--stage { --event: #1756d1; }
 .event-frame--hypothesis { --event: #1756d1; }
 .event-frame--evidence { --event: #0f7d65; }

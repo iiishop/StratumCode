@@ -7,6 +7,11 @@ AVAILABLE_SUBAGENTS = {
         "display_name": "@mcp-installer",
         "task": "Install MCP servers from docs, URLs, or config hints.",
     },
+    "hypothesis-verifier": {
+        "name": "hypothesis-verifier",
+        "display_name": "@hypothesis-verifier",
+        "task": "Verify code hypotheses by gathering and recording grounded evidence.",
+    },
 }
 
 

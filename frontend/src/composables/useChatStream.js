@@ -11,6 +11,7 @@ export function useChatStream(onRender, onPacket) {
       subagent: timeline.showSubagent,
       diff: timeline.showDiff,
       output: timeline.showOutput,
+      task_analysis: timeline.showTaskAnalysis,
       stage: timeline.showStage,
       hypothesis: timeline.showHypothesis,
       evidence: timeline.showEvidence,

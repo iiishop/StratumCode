@@ -7,7 +7,7 @@ import re
 from collections.abc import Iterator
 from uuid import uuid4
 
-from . import mcp, model_settings, providers
+from . import hypothesis_verifier, mcp, model_settings, providers
 from .agent.tools import openai_tool_schema
 from .agent_runtime import (
     add_usage as _add_usage,
@@ -18,7 +18,7 @@ from .agent_runtime import (
     tool_error_json,
     usage_delta as _usage_delta,
 )
-from .subagent_catalog import list_available, normalize_agent_name
+from .subagent_catalog import normalize_agent_name
 from .tools import registry
 from .tools.spec import ToolResult
 
@@ -31,7 +31,65 @@ def run_stream(agent: str, task: str, workspace_dir: str = ".") -> Iterator[dict
     if name == "mcp-installer":
         yield from mcp_install_stream(task, workspace_dir)
         return
+    if name == "hypothesis-verifier":
+        yield from hypothesis_verify_stream(task, workspace_dir)
+        return
     raise ValueError(f"unknown subagent: {agent}")
+
+
+def hypothesis_verify_stream(task: str, workspace_dir: str = ".") -> Iterator[dict]:
+    payload = _task_payload(task)
+    hypothesis = str(payload.get("hypothesis") or payload.get("task") or task or "").strip()
+    if not hypothesis:
+        yield {"op": "done", "error": "hypothesis is required"}
+        return
+
+    context = payload.get("context")
+    if not isinstance(context, list):
+        context = []
+    context = [str(item) for item in context if str(item).strip()]
+    max_rounds = payload.get("max_rounds")
+    try:
+        max_rounds = int(max_rounds) if max_rounds not in (None, "") else None
+    except (TypeError, ValueError):
+        max_rounds = None
+
+    run_id = uuid4().hex[:10]
+    agent_id = f"{run_id}-agent"
+    yield start_event(agent_id, "subagent", {
+        "name": "@hypothesis-verifier",
+        "task": f"Verify hypothesis: {_short(hypothesis, 140)}",
+        "status": "running",
+        "open": True,
+    })
+
+    try:
+        done = {}
+        for packet in hypothesis_verifier.evidence_stream(
+            hypothesis,
+            context,
+            workspace_dir,
+            max_rounds=max_rounds,
+        ):
+            if packet.get("op") == "done":
+                done = packet
+            else:
+                yield packet
+
+        run = done.get("run") or {}
+        result = run.get("summary") or "Hypothesis verification completed."
+        yield {"op": "update", "id": agent_id, "patch": {
+            "status": "done",
+            "result": result,
+        }}
+        yield done or {"op": "done", "run": run}
+    except Exception as exc:
+        yield {"op": "update", "id": agent_id, "patch": {
+            "status": "error",
+            "result": str(exc),
+        }}
+        yield {"op": "error", "message": str(exc)}
+        yield {"op": "done", "error": str(exc)}
 
 
 def mcp_install_stream(hint: str, workspace_dir: str = ".") -> Iterator[dict]:
@@ -81,6 +139,17 @@ def mcp_install_stream(hint: str, workspace_dir: str = ".") -> Iterator[dict]:
         }}
         yield {"op": "error", "message": str(exc)}
         yield {"op": "done", "error": str(exc)}
+
+
+def _task_payload(task: str) -> dict:
+    text = (task or "").strip()
+    if not text.startswith("{"):
+        return {"task": text}
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError:
+        return {"task": text}
+    return payload if isinstance(payload, dict) else {"task": text}
 
 
 def _installer_setting() -> dict | None:

@@ -1,40 +1,254 @@
 from __future__ import annotations
 
-import asyncio
 import json
-import platform
 import re
 import time
 from collections.abc import Iterator
-from dataclasses import asdict
 from urllib.request import Request, urlopen
 from uuid import uuid4
 
-from . import model_settings, prompt, providers
-from .agent import EvidencePolicy, EvidenceRun, RunState
-from .agent.policy import DISCOVERY_TOOLS, EvidencePhase
-from .agent.tools import agent_tools
+from . import hypothesis_verifier, investigator, model_settings, prompt, providers
 from .agent_runtime import (
     MAX_MODEL_OUTPUT_TOKENS,
-    add_usage as _add_usage,
     call_model as _call_model,
     content_text as _content_text,
-    empty_usage as _empty_usage,
     start_event,
-    tool_error_json,
     usage_delta as _usage_delta,
 )
 from .tools import registry
 
-MAX_AGENT_ROUNDS = 14
-MAX_EMPTY_TOOL_ROUNDS = 2
+MAX_AGENT_ROUNDS = hypothesis_verifier.MAX_AGENT_ROUNDS
+MAX_EMPTY_TOOL_ROUNDS = hypothesis_verifier.MAX_EMPTY_TOOL_ROUNDS
+MAX_ANALYZER_ATTEMPTS = 3
+TASK_INTENT_TYPES = {"feature", "bugfix", "refactor", "question", "investigation", "other"}
+TASK_CERTAINTIES = {"certain", "uncertain", "guess"}
+TASK_CLUE_KINDS = {"file", "line", "symbol", "route", "other"}
 
 
-def _execute_tool(name: str, params: dict, workspace_dir: str):
-    tool = registry.get(name)
-    if not tool:
-        raise ValueError(f"unknown tool: {name}")
-    return tool, asyncio.run(tool.execute(params, {"directory": workspace_dir}))
+def analyze_task(message: str, context: list[str], workspace_dir: str) -> dict:
+    setting = (
+        model_settings.resolve(model_settings.DEFAULT_STAGE)
+        or model_settings.resolve(model_settings.EVIDENCE_STAGE)
+    )
+    if setting is None:
+        raise ValueError(
+            "No model configured for task analysis. Configure a default or evidence model in Providers."
+        )
+
+    provider = setting["provider"]
+    model = setting["model_id"]
+    last_error = ""
+    for _ in range(MAX_ANALYZER_ATTEMPTS):
+        assistant = _call_model(
+            provider,
+            model,
+            [
+                {"role": "system", "content": prompt.build_task_analyzer()},
+                {
+                    "role": "user",
+                    "content": prompt.build_task_analyzer_user(
+                        message=message,
+                        directory=workspace_dir,
+                        context=context,
+                        error=last_error,
+                    ),
+                },
+            ],
+            tools=[],
+        )
+        try:
+            if assistant.get("tool_calls"):
+                raise ValueError("tool calls are not allowed")
+            analysis = _validate_task_analysis(_json_object(_content_text(assistant.get("content"))))
+            analysis["model"] = model
+            analysis["provider"] = provider["name"]
+            analysis["suggested_first_tools"] = _suggested_first_tools(analysis)
+            analysis["evidence_hypothesis"] = _analysis_hypothesis(message, analysis)
+            return analysis
+        except ValueError as exc:
+            last_error = str(exc)
+    raise ValueError(f"task analyzer returned invalid JSON after {MAX_ANALYZER_ATTEMPTS} attempts: {last_error}")
+
+
+def _json_object(raw: str) -> dict:
+    text = (raw or "").strip()
+    if text.startswith("```"):
+        text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text, flags=re.IGNORECASE).strip()
+    if not text.startswith("{"):
+        start = text.find("{")
+        end = text.rfind("}")
+        if start == -1 or end == -1 or end <= start:
+            raise ValueError("response is not a JSON object")
+        text = text[start:end + 1]
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"invalid JSON: {exc}") from exc
+    if not isinstance(data, dict):
+        raise ValueError("top-level JSON must be an object")
+    return data
+
+
+def _validate_task_analysis(data: dict) -> dict:
+    intent = data.get("intent")
+    if not isinstance(intent, dict):
+        raise ValueError("intent must be an object")
+    intent_type = str(intent.get("type") or "other").strip().casefold()
+    summary = str(intent.get("summary") or "").strip()
+    if intent_type not in TASK_INTENT_TYPES:
+        intent_type = "other"
+    if not summary:
+        raise ValueError("intent.summary is required")
+
+    return {
+        "intent": {"type": intent_type, "summary": summary},
+        "constraints": _string_list(data.get("constraints"), "constraints"),
+        "hypotheses": _hypotheses(data.get("hypotheses")),
+        "clues": _clues(data.get("clues")),
+        "unknowns": _string_list(data.get("unknowns"), "unknowns"),
+    }
+
+
+def _string_list(value, field: str) -> list[str]:
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise ValueError(f"{field} must be an array")
+    return [str(item).strip() for item in value if str(item).strip()]
+
+
+def _hypotheses(value) -> list[dict]:
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise ValueError("hypotheses must be an array")
+    items = []
+    for raw in value:
+        if not isinstance(raw, dict):
+            raise ValueError("hypotheses items must be objects")
+        text = str(raw.get("text") or "").strip()
+        if not text:
+            continue
+        certainty = str(raw.get("certainty") or "uncertain").strip().casefold()
+        if certainty not in TASK_CERTAINTIES:
+            certainty = "uncertain"
+        items.append({"text": text, "certainty": certainty})
+    return items
+
+
+def _clues(value) -> list[dict]:
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise ValueError("clues must be an array")
+    items = []
+    for raw in value:
+        if not isinstance(raw, dict):
+            raise ValueError("clues items must be objects")
+        value_text = str(raw.get("value") or raw.get("path") or raw.get("symbol") or "").strip()
+        if not value_text:
+            continue
+        kind = str(raw.get("kind") or "other").strip().casefold()
+        if kind not in TASK_CLUE_KINDS:
+            kind = "other"
+        line = raw.get("line")
+        try:
+            line = int(line) if line not in (None, "") else None
+        except (TypeError, ValueError):
+            line = None
+        items.append({
+            "kind": kind,
+            "value": value_text,
+            "path": str(raw.get("path") or "").strip(),
+            "line": line if line and line > 0 else None,
+            "symbol": str(raw.get("symbol") or "").strip(),
+            "note": str(raw.get("note") or "").strip(),
+        })
+    return items
+
+
+def _analysis_hypothesis(message: str, analysis: dict) -> str:
+    if analysis["hypotheses"]:
+        return analysis["hypotheses"][0]["text"]
+    return f"The workspace contains enough implementation context to satisfy: {analysis['intent']['summary'] or message}"
+
+
+def _suggested_first_tools(analysis: dict) -> list[dict]:
+    calls = []
+    seen = set()
+    for clue in analysis["clues"]:
+        path = clue.get("path") or _path_from_text(clue.get("value", ""))
+        if path:
+            line = clue.get("line") or _line_from_text(clue.get("value", "")) or 1
+            args = {
+                "path": path,
+                "start_line": max(1, line),
+                "end_line": max(80, line + 80),
+            }
+            call = {"tool": "read", "arguments": args}
+        else:
+            pattern = clue.get("symbol") or clue.get("value", "")
+            if not pattern:
+                continue
+            call = {"tool": "grep", "arguments": {"pattern": pattern}}
+        key = json.dumps(call, sort_keys=True)
+        if key not in seen:
+            seen.add(key)
+            calls.append(call)
+        if len(calls) >= 4:
+            break
+    if not calls:
+        calls.append({"tool": "glob", "arguments": {"pattern": "*"}})
+    return calls
+
+
+def _path_from_text(value: str) -> str:
+    match = re.search(r"[\w./\\-]+\.[A-Za-z0-9_]+", value or "")
+    return match.group(0).replace("\\", "/") if match else ""
+
+
+def _line_from_text(value: str) -> int | None:
+    match = re.search(r"(?:line|L|:)\s*(\d+)", value or "", re.IGNORECASE)
+    return int(match.group(1)) if match else None
+
+
+def _analysis_context(analysis: dict) -> list[str]:
+    lines = [f"Task intent ({analysis['intent']['type']}): {analysis['intent']['summary']}"]
+    lines.extend(f"Constraint: {item}" for item in analysis["constraints"])
+    lines.extend(
+        f"Assumption to verify ({item['certainty']}): {item['text']}"
+        for item in analysis["hypotheses"]
+    )
+    for clue in analysis["clues"]:
+        parts = [clue["kind"], clue["value"]]
+        if clue.get("path"):
+            parts.append(f"path={clue['path']}")
+        if clue.get("line"):
+            parts.append(f"line={clue['line']}")
+        if clue.get("symbol"):
+            parts.append(f"symbol={clue['symbol']}")
+        lines.append("Clue to verify: " + " ".join(str(part) for part in parts if part))
+    for call in analysis["suggested_first_tools"]:
+        lines.append("Suggested first tool call: " + json.dumps(call, ensure_ascii=False))
+    lines.extend(f"Initial unknown: {item}" for item in analysis["unknowns"])
+    return lines
+
+
+def analyzed_stream(
+    message: str,
+    context: list[str],
+    workspace_dir: str,
+    max_rounds: int | None = None,
+) -> Iterator[dict]:
+    analysis = analyze_task(message, context, workspace_dir)
+    yield start_event(f"task-analysis-{uuid4().hex[:8]}", "task_analysis", analysis)
+    yield from investigator.investigation_stream(
+        message=message,
+        analysis=analysis,
+        context=context + _analysis_context(analysis),
+        workspace_dir=workspace_dir,
+        max_rounds=max_rounds,
+    )
 
 
 def evidence_stream(
@@ -43,456 +257,32 @@ def evidence_stream(
     workspace_dir: str,
     max_rounds: int | None = None,
 ) -> Iterator[dict]:
-    setting = model_settings.resolve(model_settings.EVIDENCE_STAGE)
-    if setting is None:
-        raise ValueError(
-            "No model configured for evidence gathering. Configure a default or evidence model in Providers."
+    original_call_model = hypothesis_verifier._call_model
+    hypothesis_verifier._call_model = _call_model
+    try:
+        yield from hypothesis_verifier.evidence_stream(
+            hypothesis,
+            context,
+            workspace_dir,
+            max_rounds=max_rounds,
         )
-
-    provider = setting["provider"]
-    model = setting["model_id"]
-    pricing_rules = providers.get_model_pricing(provider["id"], model)
-    run = EvidenceRun(hypothesis)
-    run.transition(RunState.GATHERING)
-    discovery_tools = _discovery_tools(hypothesis, context)
-    policy = EvidencePolicy(
-        discovery_tools=discovery_tools,
-        max_rounds=max_rounds or MAX_AGENT_ROUNDS,
-    )
-    run_id = uuid4().hex[:10]
-    stage_id = f"{run_id}-stage"
-    hypothesis_id = f"{run_id}-hypothesis"
-    yield start_event(stage_id, "stage", {
-        "name": "evidence",
-        "label": "Gather evidence",
-        "state": run.state.value,
-        "phase": policy.phase.value,
-        "model": model,
-        "context_length": providers.model_context_length(provider["base_url"], provider["api_key"], model),
-        "provider": provider["name"],
-        "inherited": setting["inherited"],
-    })
-    yield start_event(hypothesis_id, "hypothesis", {
-        "text": hypothesis,
-        "confidence": run.confidence,
-        "status": run.state.value,
-    })
-
-    messages = [
-        {
-            "role": "system",
-            "content": prompt.build_evidence_static(),
-        },
-        {
-            "role": "system",
-            "content": prompt.build_evidence_context(
-                hypothesis=hypothesis,
-                directory=workspace_dir,
-                platform=platform.system(),
-                model=model,
-                context=context,
-                max_rounds=policy.max_rounds,
-            ),
-        },
-        {"role": "user", "content": hypothesis},
-    ]
-    observed_calls: dict[str, dict] = {}
-    empty_tool_rounds = 0
-    usage_total = _empty_usage(pricing_rules)
-
-    for round_index in range(policy.max_rounds):
-        allowed_tools, _, _ = policy.next_request(run)
-        phase_before = policy.phase
-        thinking_id = f"{run_id}-thinking-{round_index}"
-        yield start_event(thinking_id, "thinking", {
-            "text": "",
-            "done": False,
-            "open": True,
-        })
-        assistant = _call_model(
-            provider,
-            model,
-            messages,
-            tools=agent_tools(discovery_tools),
-        )
-        if usage := _usage_delta(pricing_rules, assistant.pop("_usage", {})):
-            _add_usage(usage_total, usage)
-            yield start_event(f"{run_id}-usage-{round_index}", "usage", {
-                "delta": usage,
-                "total": usage_total,
-            })
-        content = _content_text(assistant.get("content"))
-        tool_calls = assistant.get("tool_calls") or []
-        messages.append({
-            "role": "assistant",
-            "content": assistant.get("content"),
-            **({"tool_calls": tool_calls} if tool_calls else {}),
-        })
-
-        if content:
-            yield {"op": "update", "id": thinking_id, "patch": {
-                "text": content,
-                "done": True,
-                "open": bool(tool_calls),
-            }}
-        else:
-            yield {"op": "update", "id": thinking_id, "patch": {
-                "done": True,
-            }}
-
-        if not tool_calls:
-            empty_tool_rounds += 1
-            if empty_tool_rounds >= MAX_EMPTY_TOOL_ROUNDS:
-                policy.request_checkpoint()
-                if not run.evidence:
-                    break
-                continue
-            if policy.phase != EvidencePhase.EVALUATE and (run.evidence or observed_calls):
-                continue
-            if not run.evidence and observed_calls:
-                policy.request_checkpoint()
-                continue
-            break
-
-        empty_tool_rounds = 0
-        concluded = False
-        compaction_messages: list[dict] = []
-        for raw_call in tool_calls:
-            call_id = raw_call.get("id") or f"call-{uuid4().hex[:8]}"
-            function = raw_call.get("function") or {}
-            name = function.get("name", "")
-            try:
-                arguments = json.loads(function.get("arguments") or "{}")
-                if not isinstance(arguments, dict):
-                    raise ValueError("tool arguments must be an object")
-                if name not in set(allowed_tools):
-                    raise ValueError(f"unknown agent tool: {name or 'tool'}")
-                gen = _handle_agent_tool(
-                    name=name,
-                    call_id=call_id,
-                    arguments=arguments,
-                    run=run,
-                    observed_calls=observed_calls,
-                    workspace_dir=workspace_dir,
-                    hypothesis_id=hypothesis_id,
-                    stage_id=stage_id,
-                    run_id=run_id,
-                    policy=policy,
-                )
-                try:
-                    while True:
-                        yield next(gen)
-                except StopIteration as e:
-                    output, concluded = e.value
-                if name == "record_evidence":
-                    if compact_message := _compact_tool_message(arguments):
-                        compaction_messages.append(compact_message)
-                if policy.phase != phase_before:
-                    yield {"op": "update", "id": stage_id, "patch": {
-                        "phase": policy.phase.value,
-                    }}
-                    phase_before = policy.phase
-            except Exception as exc:
-                output = tool_error_json(exc, name)
-                if name == "record_evidence":
-                    policy.note_checkpoint_failure()
-                yield start_event(call_id, "tool", {
-                    "name": name or "invalid",
-                    "description": (
-                        registry.get(name).description
-                        if registry.get(name)
-                        else "Agent control tool"
-                    ),
-                    "status": "error",
-                    "open": False,
-                    "input": function.get("arguments") or "{}",
-                    "output": output,
-                })
-            messages.append({
-                "role": "tool",
-                "tool_call_id": call_id,
-                "content": output,
-            })
-            if concluded:
-                break
-        messages.extend(compaction_messages)
-        if concluded:
-            break
-
-    if run.state == RunState.GATHERING:
-        if run.evidence:
-            if policy.phase != EvidencePhase.EVALUATE:
-                policy.phase = EvidencePhase.EVALUATE
-                yield {"op": "update", "id": stage_id, "patch": {
-                    "phase": policy.phase.value,
-                }}
-            summary = _fallback_summary(run)
-        else:
-            summary = _no_evidence_summary(observed_calls)
-        run.conclude(summary)
-        yield {"op": "update", "id": stage_id, "patch": {"state": run.state.value}}
-        yield {"op": "update", "id": hypothesis_id, "patch": {
-            "confidence": run.confidence,
-            "status": run.state.value,
-        }}
-        yield start_event(f"{run_id}-verdict", "verdict", {
-            "verdict": run.state.value,
-            "confidence": run.confidence,
-            "summary": run.summary,
-            "findings": _build_findings(run),
-            "support_count": sum(1 for e in run.evidence.values() if e.stance == "support"),
-            "oppose_count": sum(1 for e in run.evidence.values() if e.stance == "oppose"),
-        })
-
-    if run.summary.strip():
-        yield start_event(f"{run_id}-output", "output", {
-            "content": run.summary,
-            "streaming": False,
-        })
-    yield {"op": "done", "run": run.snapshot()}
+    finally:
+        hypothesis_verifier._call_model = original_call_model
 
 
-def _fallback_summary(run: EvidenceRun) -> str:
-    findings = []
-    for item in run.evidence.values():
-        stance = "supports" if item.stance == "support" else "opposes"
-        findings.append(f"{item.id} {stance}: {item.claim} ({item.source_uri})")
-    return "Verdict computed from recorded evidence: " + "; ".join(findings)
+_discovery_tools = hypothesis_verifier._discovery_tools
+_execute_tool = hypothesis_verifier._execute_tool
 
 
-def _build_findings(run: EvidenceRun) -> list[dict]:
-    return [
-        {
-            "id": item.id,
-            "stance": item.stance,
-            "claim": item.claim,
-            "weight": round(item.strength * 100),
-            "source_type": item.source_type,
-            "source_uri": item.source_uri,
-            "excerpt": item.excerpt[:200],
-        }
-        for item in run.evidence.values()
-    ]
-
-
-def _discovery_tools(hypothesis: str = "", context: list[str] | None = None) -> tuple[str, ...]:
-    mcp_tools = tuple(tool.name for tool in registry.list_all() if tool.name.startswith("mcp_"))
-    return DISCOVERY_TOOLS + tuple(name for name in mcp_tools if name not in DISCOVERY_TOOLS)
-
-
-def _compact_tool_message(evidence_args: dict) -> dict | None:
-    source_call_id = evidence_args.get("source_tool_call_id")
-    if not source_call_id:
-        return None
-    compact = {
-        "tool_call_id": source_call_id,
-        "compacted": True,
-        "summary": (
-            "The referenced tool output has been recorded as evidence. "
-            "For future reasoning, use the recorded excerpt instead of re-reading the full output."
-        ),
-        "recorded_evidence": {
-            "id": evidence_args.get("evidence_id"),
-            "source_uri": evidence_args.get("source_uri"),
-            "excerpt": evidence_args.get("excerpt"),
-        },
-    }
-    return {
-        "role": "user",
-        "content": json.dumps(compact, ensure_ascii=False),
-    }
-
-
-def _no_evidence_summary(observed_calls: dict[str, dict]) -> str:
-    summary = (
-        "Evidence gathering ended without a valid evidence record. "
-        "Tool observations were not converted into grounded evidence."
-    )
-    observations = _observed_call_summary(observed_calls)
-    return summary + ("\n\nRecent observations:\n" + observations if observations else "")
-
-
-def _observed_call_summary(observed_calls: dict[str, dict]) -> str:
-    lines = []
-    for call_id, observed in list(observed_calls.items())[-4:]:
-        result = observed["result"]
-        excerpt = next(
-            (line.strip() for line in result.output.splitlines() if _useful_excerpt_candidate(line)),
-            result.output.strip(),
-        )[:200]
-        lines.append(f"- {call_id} {observed['name']}: {result.title} :: {excerpt}")
-    return "\n".join(line for line in lines if line.strip())
-
-
-def _useful_excerpt_candidate(line: str) -> bool:
-    text = line.strip()
-    if len(text) < 8:
-        return False
-    lowered = text.casefold()
-    if lowered in {"(no matches)", "(no results)", "<!doctype html>"}:
-        return False
-    return any(ch.isalnum() for ch in text)
-
-
-def _best_excerpt_candidate(output: str, claim: str) -> str:
-    claim_tokens = _excerpt_tokens(claim)
-    best = ("", 0)
-    for line in output.splitlines():
-        candidate = line.strip()
-        if not _useful_excerpt_candidate(candidate):
-            continue
-        score = len(claim_tokens & _excerpt_tokens(candidate))
-        if score > best[1]:
-            best = (candidate, score)
-    return best[0] if best[1] > 0 else ""
-
-
-def _excerpt_tokens(value: str) -> set[str]:
-    return set(re.findall(
-        r"[a-zA-Z_][a-zA-Z0-9_]{2,}|[\u4e00-\u9fff]{2,}",
-        value.casefold(),
-    ))
-
-
-def _handle_agent_tool(
-    *,
-    name: str,
-    call_id: str,
-    arguments: dict,
-    run: EvidenceRun,
-    observed_calls: dict[str, dict],
-    workspace_dir: str,
-    hypothesis_id: str,
-    stage_id: str,
-    run_id: str,
-    policy: EvidencePolicy | None = None,
-):
-    """Yields stream packets directly. Returns (model_output, concluded) via StopIteration."""
-    discovery_tools = policy.available_discovery_tools() if policy else DISCOVERY_TOOLS
-    if name in discovery_tools:
-        if policy:
-            arguments = policy.prepare_discovery(name, arguments)
-        tool = registry.get(name)
-        yield start_event(call_id, "tool", {
-            "name": name,
-            "description": tool.description,
-            "status": "running",
-            "open": False,
-            "input": json.dumps(arguments, ensure_ascii=False, indent=2),
-            "output": "",
-        })
-        _, result = _execute_tool(name, arguments, workspace_dir)
-        observed_calls[call_id] = {
-            "name": name,
-            "arguments": arguments,
-            "result": result,
-        }
-        if policy:
-            useful = not result.title.startswith("[error]")
-            policy.note_discovery(name, arguments, useful=useful)
-        yield {"op": "update", "id": call_id, "patch": {
-            "status": "error" if result.title.startswith("[error]") else "done",
-            "title": result.title,
-            "output": result.output,
-            "metadata": result.metadata,
-        }}
-        model_output = {
-            "tool_call_id": call_id,
-            "title": result.title,
-            "output": result.output,
-            "metadata": result.metadata,
-        }
-        return json.dumps(model_output, ensure_ascii=False), False
-
-    if name == "record_evidence":
-        source_call_id = arguments.get("source_tool_call_id")
-        observed = observed_calls.get(source_call_id)
-        if observed is None:
-            raise ValueError("source_tool_call_id must reference a completed discovery tool")
-        record_args = dict(arguments)
-        record_args.pop("source_tool_call_id", None)
-        excerpt = arguments.get("excerpt", "")
-        if _normalized(excerpt) in {"(no matches)", "(no results)"}:
-            raise ValueError("empty search results cannot be recorded as evidence excerpt")
-        observed_output = observed["result"].output
-        if not excerpt or _normalized(excerpt) not in _normalized(observed_output):
-            replacement = _best_excerpt_candidate(
-                observed_output,
-                arguments.get("claim", ""),
-            )
-            if replacement:
-                arguments["excerpt"] = replacement
-                record_args["excerpt"] = replacement
-            else:
-                sample = next(
-                    (
-                        line.strip()
-                        for line in observed_output.splitlines()
-                        if _useful_excerpt_candidate(line)
-                    ),
-                    observed_output.strip(),
-                )[:300]
-                raise ValueError(
-                    "evidence excerpt must be copied from the cited tool output "
-                    f"(whitespace differences are allowed). Try an exact excerpt like: {sample!r}"
-                )
-        item = run.add_evidence(**record_args, tool_call_id=source_call_id)
-        if policy:
-            policy.note_evidence(item.stance)
-        data = {
-            **asdict(item),
-            "confidence": run.confidence,
-        }
-        yield start_event(f"{run_id}-evidence-{item.id}", "evidence", data)
-        yield {"op": "update", "id": hypothesis_id, "patch": {
-            "confidence": run.confidence,
-        }}
-        return json.dumps(data, ensure_ascii=False), False
-
-    if name == "link_evidence":
-        if "relation" not in arguments and "relationship" in arguments:
-            arguments["relation"] = arguments.pop("relationship")
-        edge = run.link_evidence(**arguments)
-        if policy:
-            policy.note_audit()
-        data = {**asdict(edge), "confidence": run.confidence}
-        yield start_event(
-            f"{run_id}-relation-{len(run.relations)}",
-            "evidence_relation",
-            data,
-        )
-        yield {"op": "update", "id": hypothesis_id, "patch": {
-            "confidence": run.confidence,
-        }}
-        return json.dumps(data, ensure_ascii=False), False
-
-    if name == "conclude":
-        if not run.evidence:
-            raise ValueError("at least one grounded evidence item is required before concluding")
-        verdict = run.conclude(arguments["summary"])
-        yield {"op": "update", "id": stage_id, "patch": {
-            "state": verdict.value,
-        }}
-        yield {"op": "update", "id": hypothesis_id, "patch": {
-            "confidence": run.confidence,
-            "status": verdict.value,
-        }}
-        data = {
-            "verdict": verdict.value,
-            "confidence": run.confidence,
-            "summary": run.summary,
-            "findings": _build_findings(run),
-            "support_count": sum(1 for e in run.evidence.values() if e.stance == "support"),
-            "oppose_count": sum(1 for e in run.evidence.values() if e.stance == "oppose"),
-        }
-        yield start_event(f"{run_id}-verdict", "verdict", data)
-        return json.dumps(data, ensure_ascii=False), True
-
-    raise ValueError(f"unknown agent tool: {name}")
-
-
-def _normalized(value: str) -> str:
-    return " ".join(value.split()).casefold()
+def _handle_agent_tool(**kwargs):
+    events = []
+    gen = hypothesis_verifier._handle_agent_tool(**kwargs)
+    try:
+        while True:
+            events.append(next(gen))
+    except StopIteration as exc:
+        output, concluded = exc.value
+    return output, events, concluded
 
 
 def test_stream(
@@ -513,6 +303,18 @@ def test_stream(
         pause()
         yield {"op": "delta", "id": thinking, "field": "text", "value": thought[index:index + 12]}
     yield {"op": "update", "id": thinking, "patch": {"done": True}}
+
+    yield start_event("test-analysis", "task_analysis", {
+        "intent": {"type": "investigation", "summary": "Inspect the server tools and chat integration points."},
+        "constraints": [],
+        "hypotheses": [{"text": message, "certainty": "uncertain"}],
+        "clues": [{"kind": "file", "value": "stratumcode/server.py", "path": "stratumcode/server.py", "line": 1, "symbol": "", "note": ""}],
+        "unknowns": ["Which backend routes connect tool execution to chat streaming."],
+        "suggested_first_tools": [{"tool": "read", "arguments": {"path": "stratumcode/server.py", "start_line": 1, "end_line": 90}}],
+        "evidence_hypothesis": message,
+        "model": "test",
+        "provider": "test",
+    })
 
     for call_id, name, params in (
         ("test-read", "read", {"path": "stratumcode/server.py", "start_line": 1, "end_line": 90}),
@@ -609,4 +411,4 @@ def stream(request: dict, workspace_dir: str = ".") -> Iterator[dict]:
     max_rounds = request.get("max_rounds")
     if max_rounds is not None:
         max_rounds = min(50, max(1, int(max_rounds)))
-    return evidence_stream(message, context, workspace_dir, max_rounds=max_rounds)
+    return analyzed_stream(message, context, workspace_dir, max_rounds=max_rounds)
