@@ -42,6 +42,7 @@ class Evidence:
     source_uri: str
     excerpt: str
     tool_call_id: str = ""
+    observation_id: str = ""
 
 
 @dataclass(slots=True)
@@ -53,12 +54,51 @@ class EvidenceRelation:
     explanation: str
 
 
+@dataclass(slots=True)
+class Observation:
+    id: str
+    tool: str
+    title: str
+    summary: str
+
+
+@dataclass(slots=True)
+class Belief:
+    id: str
+    statement: str
+    status: str
+    evidence_ids: list[str] = field(default_factory=list)
+    observation_ids: list[str] = field(default_factory=list)
+    resolves_unknown_ids: list[str] = field(default_factory=list)
+
+
+@dataclass(slots=True)
+class Unknown:
+    id: str
+    question: str
+    blocking: bool
+    resolution_strategy: str
+    resolved_by_evidence_ids: list[str] = field(default_factory=list)
+    resolved_by_belief_ids: list[str] = field(default_factory=list)
+
+
+@dataclass(slots=True)
+class StepResult:
+    next_step: str
+    continue_reason: str
+    target_unknown_ids: list[str] = field(default_factory=list)
+
+
 @dataclass
 class EvidenceRun:
     hypothesis: str
     state: RunState = RunState.INITIALIZING
     evidence: dict[str, Evidence] = field(default_factory=dict)
     relations: list[EvidenceRelation] = field(default_factory=list)
+    observations: dict[str, Observation] = field(default_factory=dict)
+    beliefs: dict[str, Belief] = field(default_factory=dict)
+    unknowns: dict[str, Unknown] = field(default_factory=dict)
+    step_results: list[StepResult] = field(default_factory=list)
     summary: str = ""
 
     def transition(self, next_state: RunState) -> None:
@@ -77,6 +117,7 @@ class EvidenceRun:
         source_uri: str,
         excerpt: str,
         tool_call_id: str = "",
+        observation_id: str = "",
     ) -> Evidence:
         if self.state != RunState.GATHERING:
             raise ValueError(f"cannot add evidence in state {self.state}")
@@ -100,10 +141,111 @@ class EvidenceRun:
             source_uri=source_uri.strip(),
             excerpt=excerpt.strip(),
             tool_call_id=tool_call_id,
+            observation_id=observation_id or tool_call_id,
         )
         if not item.claim or not item.source_uri or not item.excerpt:
             raise ValueError("claim, source_uri, and excerpt are required")
         self.evidence[item.id] = item
+        return item
+
+    def add_observation(self, *, observation_id: str, tool: str, title: str, summary: str) -> Observation:
+        item = Observation(
+            id=observation_id,
+            tool=tool.strip(),
+            title=title.strip(),
+            summary=summary.strip(),
+        )
+        self.observations[item.id] = item
+        return item
+
+    def upsert_unknown(
+        self,
+        *,
+        unknown_id: str,
+        question: str,
+        blocking: bool,
+        resolution_strategy: str,
+        resolved_by_evidence_ids: list[str] | None = None,
+        resolved_by_belief_ids: list[str] | None = None,
+    ) -> Unknown:
+        if resolution_strategy not in {"investigate_project", "ask_user", "deferred"}:
+            raise ValueError("resolution_strategy must be investigate_project, ask_user, or deferred")
+        item = Unknown(
+            id=unknown_id,
+            question=question.strip(),
+            blocking=bool(blocking),
+            resolution_strategy=resolution_strategy,
+            resolved_by_evidence_ids=list(resolved_by_evidence_ids or []),
+            resolved_by_belief_ids=list(resolved_by_belief_ids or []),
+        )
+        if not item.id or not item.question:
+            raise ValueError("unknown id and question are required")
+        self.unknowns[item.id] = item
+        return item
+
+    def upsert_belief(
+        self,
+        *,
+        belief_id: str,
+        statement: str,
+        status: str,
+        evidence_ids: list[str] | None = None,
+        observation_ids: list[str] | None = None,
+        resolves_unknown_ids: list[str] | None = None,
+    ) -> Belief:
+        if status not in {
+            "unverified",
+            "plausible",
+            "supported",
+            "strongly_supported",
+            "runtime_confirmed",
+            "contradicted",
+            "invalidated",
+        }:
+            raise ValueError("invalid belief status")
+        item = Belief(
+            id=belief_id,
+            statement=statement.strip(),
+            status=status,
+            evidence_ids=list(evidence_ids or []),
+            observation_ids=list(observation_ids or []),
+            resolves_unknown_ids=list(resolves_unknown_ids or []),
+        )
+        if not item.id or not item.statement:
+            raise ValueError("belief id and statement are required")
+        self.beliefs[item.id] = item
+        return item
+
+    def report_step(
+        self,
+        *,
+        next_step: str,
+        continue_reason: str,
+        target_unknown_ids: list[str] | None = None,
+    ) -> StepResult:
+        if next_step not in {"continue_investigation", "ask_user", "write_code", "failed"}:
+            raise ValueError("next_step must be continue_investigation, ask_user, write_code, or failed")
+        targets = list(target_unknown_ids or [])
+        if next_step == "continue_investigation" and not targets:
+            raise ValueError("continue_investigation requires target_unknown_ids")
+        if next_step != "continue_investigation" and targets:
+            raise ValueError("target_unknown_ids are only allowed when continuing investigation")
+        blockers = [
+            item.id for item in self.unknowns.values()
+            if item.blocking
+            and item.resolution_strategy == "investigate_project"
+            and not item.resolved_by_evidence_ids
+            and not item.resolved_by_belief_ids
+        ]
+        if next_step == "write_code" and blockers:
+            raise ValueError(
+                "write_code is blocked by unresolved investigate_project unknowns: "
+                + ", ".join(blockers)
+            )
+        if not continue_reason.strip():
+            raise ValueError("continue_reason is required")
+        item = StepResult(next_step=next_step, continue_reason=continue_reason.strip(), target_unknown_ids=targets)
+        self.step_results.append(item)
         return item
 
     def link_evidence(
@@ -119,8 +261,8 @@ class EvidenceRun:
             raise ValueError("both evidence ids must exist before linking")
         if source_id == target_id:
             raise ValueError("evidence cannot link to itself")
-        if relation not in {"corroborates", "contradicts", "qualifies"}:
-            raise ValueError("relation must be corroborates, contradicts, or qualifies")
+        if relation not in {"corroborates", "contradicts", "qualifies", "unrelated"}:
+            raise ValueError("relation must be corroborates, contradicts, qualifies, or unrelated")
         edge = EvidenceRelation(
             source_id=source_id,
             target_id=target_id,
@@ -142,7 +284,7 @@ class EvidenceRun:
                 modifiers[edge.target_id] += influence * 0.35
             elif edge.relation == "contradicts":
                 modifiers[edge.target_id] -= influence * 0.75
-            else:
+            elif edge.relation == "qualifies":
                 modifiers[edge.target_id] -= influence * 0.35
 
         log_odds = 0.0
@@ -188,6 +330,10 @@ class EvidenceRun:
             "confidence": self.confidence,
             "evidence": [asdict(item) for item in self.evidence.values()],
             "relations": [asdict(edge) for edge in self.relations],
+            "observations": [asdict(item) for item in self.observations.values()],
+            "beliefs": [asdict(item) for item in self.beliefs.values()],
+            "unknowns": [asdict(item) for item in self.unknowns.values()],
+            "step_results": [asdict(item) for item in self.step_results],
             "summary": self.summary,
         }
 

@@ -281,7 +281,7 @@ def _handle_agent_tool(**kwargs):
         while True:
             events.append(next(gen))
     except StopIteration as exc:
-        output, concluded = exc.value
+        output, concluded, _ = exc.value
     return output, events, concluded
 
 

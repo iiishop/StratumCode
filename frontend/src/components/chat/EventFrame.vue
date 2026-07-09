@@ -128,6 +128,8 @@ function collapseLeave(el, done) {
 .event-frame--verdict.event-frame--supported { --event: #0f7d65; }
 .event-frame--verdict.event-frame--refuted { --event: #c44747; }
 .event-frame--verdict.event-frame--inconclusive { --event: #c48b00; }
+.event-frame--step-result { --event: #6658c7; }
+.event-frame--safety-stop { --event: #c44747; }
 .event-frame--accepted { --event: #00a878; }
 .event-frame--rejected { --event: #e11d74; }
 .event-frame--error { --event: #c44747; }

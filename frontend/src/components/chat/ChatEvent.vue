@@ -11,6 +11,8 @@ import EvidenceEvent from './EvidenceEvent.vue'
 import EvidenceRelationEvent from './EvidenceRelationEvent.vue'
 import VerdictEvent from './VerdictEvent.vue'
 import UsageEvent from './UsageEvent.vue'
+import StepResultEvent from './StepResultEvent.vue'
+import SafetyStopEvent from './SafetyStopEvent.vue'
 
 defineProps({ event: { type: Object, required: true } })
 
@@ -26,6 +28,8 @@ const eventComponents = {
   evidence: EvidenceEvent,
   evidence_relation: EvidenceRelationEvent,
   verdict: VerdictEvent,
+  step_result: StepResultEvent,
+  safety_stop: SafetyStopEvent,
   usage: UsageEvent,
 }
 </script>

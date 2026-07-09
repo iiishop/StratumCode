@@ -24,13 +24,14 @@ def call_model(
     messages: list[dict],
     *,
     tools: list[dict] | None = None,
+    max_tokens: int = MAX_MODEL_OUTPUT_TOKENS,
 ) -> dict:
     payload = {
         "model": model,
         "messages": messages,
         "tools": agent_tools(DISCOVERY_TOOLS) if tools is None else tools,
         "temperature": 0.1,
-        "max_tokens": MAX_MODEL_OUTPUT_TOKENS,
+        "max_tokens": max_tokens,
     }
     body = json.dumps(payload).encode()
     url = f"{provider['base_url'].rstrip('/')}/v1/chat/completions"

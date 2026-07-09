@@ -21,6 +21,7 @@ from .tools import registry
 
 MAX_INVESTIGATION_ROUNDS = 10
 MAX_FINALIZATION_ATTEMPTS = 2
+FINALIZATION_OUTPUT_TOKENS = 4096
 INVESTIGATION_TOOLS = ("glob", "grep", "read", "websearch", "webfetch", "subagent")
 
 
@@ -159,6 +160,7 @@ def investigation_stream(
         "state": "done",
         "phase": "patch_planning_ready" if final.get("ready_for_patch_planning") else "needs_more_info",
     }}
+    yield start_event(f"{run_id}-step-result", "step_result", _step_result(final))
     yield start_event(f"{run_id}-output", "output", {
         "content": _summary(final),
         "streaming": False,
@@ -209,6 +211,22 @@ def _finish_tool_schema() -> dict:
                     },
                 },
                 "open_questions": {"type": "array", "items": {"type": "string"}},
+                "unknowns": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "id": {"type": "string"},
+                            "question": {"type": "string"},
+                            "blocking": {"type": "boolean"},
+                            "resolution_strategy": {
+                                "type": "string",
+                                "enum": ["investigate_project", "ask_user", "deferred"],
+                            },
+                        },
+                        "required": ["id", "question", "blocking", "resolution_strategy"],
+                    },
+                },
                 "patch_planning_context": {"type": "array", "items": {"type": "string"}},
             },
             "required": ["summary", "ready_for_patch_planning"],
@@ -236,7 +254,13 @@ def _finalize_investigation(
             "done": False,
             "open": True,
         })
-        assistant = _call_model(provider, model, messages, tools=[_finish_tool_schema()])
+        assistant = _call_model(
+            provider,
+            model,
+            messages,
+            tools=[_finish_tool_schema()],
+            max_tokens=FINALIZATION_OUTPUT_TOKENS,
+        )
         if usage := _usage_delta(pricing_rules, assistant.pop("_usage", {})):
             _add_usage(usage_total, usage)
             yield start_event(f"{run_id}-usage-final-{attempt}", "usage", {
@@ -381,17 +405,75 @@ def _tool_arguments(raw: str | None) -> dict:
 
 
 def _finish_payload(arguments: dict) -> dict:
+    unknowns = _unknowns(arguments.get("unknowns"))
+    ready = bool(arguments.get("ready_for_patch_planning"))
+    if any(item["blocking"] for item in unknowns):
+        ready = False
     return {
         "summary": str(arguments.get("summary") or "").strip(),
-        "ready_for_patch_planning": bool(arguments.get("ready_for_patch_planning")),
+        "ready_for_patch_planning": ready,
         "beliefs": arguments.get("beliefs") if isinstance(arguments.get("beliefs"), list) else [],
         "open_questions": arguments.get("open_questions") if isinstance(arguments.get("open_questions"), list) else [],
+        "unknowns": unknowns,
         "patch_planning_context": (
             arguments.get("patch_planning_context")
             if isinstance(arguments.get("patch_planning_context"), list)
             else []
         ),
     }
+
+
+def _step_result(final: dict) -> dict:
+    blockers = [item for item in final.get("unknowns", []) if item.get("blocking")]
+    investigate = [item for item in blockers if item.get("resolution_strategy") == "investigate_project"]
+    ask_user = [item for item in blockers if item.get("resolution_strategy") == "ask_user"]
+    if investigate:
+        return {
+            "next_step": "continue_investigation",
+            "continue_reason": "; ".join(item["question"] for item in investigate[:3]),
+            "target_unknown_ids": [item["id"] for item in investigate],
+        }
+    if ask_user:
+        return {
+            "next_step": "ask_user",
+            "continue_reason": "; ".join(item["question"] for item in ask_user[:3]),
+            "target_unknown_ids": [],
+        }
+    if final.get("ready_for_patch_planning"):
+        return {
+            "next_step": "write_code",
+            "continue_reason": final.get("summary") or "Investigation is ready for patch planning.",
+            "target_unknown_ids": [],
+        }
+    open_questions = final.get("open_questions") or []
+    return {
+        "next_step": "ask_user" if open_questions else "failed",
+        "continue_reason": "; ".join(str(item) for item in open_questions[:3])
+        or final.get("summary")
+        or "Investigation did not reach patch planning readiness.",
+        "target_unknown_ids": [],
+    }
+
+
+def _unknowns(value) -> list[dict]:
+    if not isinstance(value, list):
+        return []
+    items = []
+    for raw in value:
+        if not isinstance(raw, dict):
+            continue
+        strategy = str(raw.get("resolution_strategy") or "").strip()
+        if strategy not in {"investigate_project", "ask_user", "deferred"}:
+            continue
+        item = {
+            "id": str(raw.get("id") or "").strip(),
+            "question": str(raw.get("question") or "").strip(),
+            "blocking": bool(raw.get("blocking")),
+            "resolution_strategy": strategy,
+        }
+        if item["id"] and item["question"]:
+            items.append(item)
+    return items
 
 
 def _summary(final: dict) -> str:

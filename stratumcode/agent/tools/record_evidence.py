@@ -21,6 +21,10 @@ PARAMETERS = {
             "type": "string",
             "description": "The id of the tool call that produced this excerpt",
         },
+        "observation_id": {
+            "type": "string",
+            "description": "Observation id; defaults to source_tool_call_id.",
+        },
     },
     "required": [
         "evidence_id",

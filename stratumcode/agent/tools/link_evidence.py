@@ -6,10 +6,10 @@ PARAMETERS = {
     "properties": {
         "source_id": {"type": "string"},
         "target_id": {"type": "string"},
-        "relation": {"type": "string", "enum": ["corroborates", "contradicts", "qualifies"]},
+        "relation": {"type": "string", "enum": ["corroborates", "contradicts", "qualifies", "unrelated"]},
         "relationship": {
             "type": "string",
-            "enum": ["corroborates", "contradicts", "qualifies"],
+            "enum": ["corroborates", "contradicts", "qualifies", "unrelated"],
             "description": "Alias for relation.",
         },
         "impact": {"type": "number", "minimum": 0, "maximum": 1},

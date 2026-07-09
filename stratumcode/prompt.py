@@ -63,6 +63,22 @@ When a tool result contains a material finding, capture it with record_evidence
 before continuing the search. Tool results include their tool_call_id; copy it
 into source_tool_call_id.
 
+End each reasoning step with report_step. The runtime follows report_step.next_step
+as the structured decision:
+- continue_investigation: keep investigating the listed target_unknown_ids.
+- ask_user: stop and ask the user because the blocking unknown needs user input.
+- write_code: stop investigation because remaining unknowns are non-blocking or
+  resolved well enough for patch planning.
+- failed: stop because investigation cannot make progress.
+
+Do not rely on natural language to signal intent. report_step.next_step is the
+decision. Its continue_reason must agree with the next_step field.
+
+Unknowns must use exactly one resolution_strategy:
+- investigate_project: blocking facts that can be resolved by code/project investigation.
+- ask_user: facts that require user preference or external intent.
+- deferred: non-blocking facts that can wait until packaging, polish, or later planning.
+
 Every material finding must be captured with record_evidence:
 - stance: support or oppose
 - strength: 0..1, based on how directly the source bears on the hypothesis
@@ -80,9 +96,10 @@ During the oppose target, prefer searching for scope and architecture evidence:
 whether the hypothesis is too narrow, too broad, or misses another major project
 purpose.
 
-Use link_evidence when one recorded item corroborates, contradicts, or qualifies
-another. Relationships change the target evidence's weight; they do not create a
-new fact.
+Use link_evidence when one recorded item corroborates, contradicts, qualifies,
+or is unrelated to another. Corroborates/contradicts/qualifies can change the
+target evidence's weight; unrelated records a parallel finding without changing
+weight. Relationships do not create a new fact.
 
 Call conclude only after checking plausible counter-evidence and auditing the
 recorded evidence. A single cluster of supporting evidence is not enough for a
@@ -203,10 +220,17 @@ Use only the tool results already present in this conversation. Call
 finish_investigation with:
 - grounded beliefs from observed files, commands, documents, or verifier results.
 - open_questions for facts still unresolved.
+- unknowns with blocking and resolution_strategy for every unresolved fact.
 - patch_planning_context for concrete facts a later patch planner can rely on.
 
+Keep the JSON compact: at most 6 beliefs, 5 open_questions, and 10
+patch_planning_context entries. Each string should be one short sentence.
+
 If the observed facts are enough to plan a patch, set ready_for_patch_planning
-to true. Otherwise set it to false and explain the blocking gaps concretely."""
+to true. If any unresolved unknown blocks choosing the implementation path, set
+blocking=true and resolution_strategy=investigate_project or ask_user; that means
+ready_for_patch_planning must be false. Use deferred only for packaging or polish
+questions that do not block the next code patch."""
 
 
 def build_evidence_static() -> str:

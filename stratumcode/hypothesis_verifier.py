@@ -100,6 +100,7 @@ def evidence_stream(
     for round_index in range(policy.max_rounds):
         allowed_tools, _, _ = policy.next_request(run)
         phase_before = policy.phase
+        step_result = None
         thinking_id = f"{run_id}-thinking-{round_index}"
         yield start_event(thinking_id, "thinking", {
             "text": "",
@@ -140,6 +141,10 @@ def evidence_stream(
         if not tool_calls:
             empty_tool_rounds += 1
             if empty_tool_rounds >= MAX_EMPTY_TOOL_ROUNDS:
+                yield start_event(f"{run_id}-safety-empty-{round_index}", "safety_stop", {
+                    "reason": "empty_tool_rounds",
+                    "message": "Safety net triggered: the agent stopped producing tool calls.",
+                })
                 policy.request_checkpoint()
                 if not run.evidence:
                     break
@@ -158,6 +163,7 @@ def evidence_stream(
             call_id = raw_call.get("id") or f"call-{uuid4().hex[:8]}"
             function = raw_call.get("function") or {}
             name = function.get("name", "")
+            maybe_step = None
             try:
                 arguments = json.loads(function.get("arguments") or "{}")
                 if not isinstance(arguments, dict):
@@ -180,7 +186,9 @@ def evidence_stream(
                     while True:
                         yield next(gen)
                 except StopIteration as e:
-                    output, concluded = e.value
+                    output, concluded, maybe_step = e.value
+                if maybe_step is not None:
+                    step_result = maybe_step
                 if name == "record_evidence":
                     if compact_message := _compact_tool_message(arguments):
                         compaction_messages.append(compact_message)
@@ -215,6 +223,17 @@ def evidence_stream(
         messages.extend(compaction_messages)
         if concluded:
             break
+        if step_result is not None:
+            next_step = step_result["next_step"]
+            if next_step == "continue_investigation":
+                continue
+            break
+
+    if run.state == RunState.GATHERING and len(run.step_results) and run.step_results[-1].next_step == "continue_investigation":
+        yield start_event(f"{run_id}-safety-round-limit", "safety_stop", {
+            "reason": "max_rounds",
+            "message": "Safety net triggered: the agent still wanted to continue when max_rounds was reached.",
+        })
 
     if run.state == RunState.GATHERING:
         if run.evidence:
@@ -364,7 +383,7 @@ def _handle_agent_tool(
     run_id: str,
     policy: EvidencePolicy | None = None,
 ):
-    """Yields stream packets directly. Returns (model_output, concluded) via StopIteration."""
+    """Yields stream packets directly. Returns (model_output, concluded, step_result) via StopIteration."""
     discovery_tools = policy.available_discovery_tools() if policy else DISCOVERY_TOOLS
     if name in discovery_tools:
         if policy:
@@ -384,6 +403,12 @@ def _handle_agent_tool(
             "arguments": arguments,
             "result": result,
         }
+        run.add_observation(
+            observation_id=call_id,
+            tool=name,
+            title=result.title,
+            summary=_best_observation_summary(result.output),
+        )
         if policy:
             useful = not result.title.startswith("[error]")
             policy.note_discovery(name, arguments, useful=useful)
@@ -399,7 +424,7 @@ def _handle_agent_tool(
             "output": result.output,
             "metadata": result.metadata,
         }
-        return json.dumps(model_output, ensure_ascii=False), False
+        return json.dumps(model_output, ensure_ascii=False), False, None
 
     if name == "record_evidence":
         source_call_id = arguments.get("source_tool_call_id")
@@ -444,7 +469,7 @@ def _handle_agent_tool(
         yield {"op": "update", "id": hypothesis_id, "patch": {
             "confidence": run.confidence,
         }}
-        return json.dumps(data, ensure_ascii=False), False
+        return json.dumps(data, ensure_ascii=False), False, None
 
     if name == "link_evidence":
         if "relation" not in arguments and "relationship" in arguments:
@@ -461,7 +486,35 @@ def _handle_agent_tool(
         yield {"op": "update", "id": hypothesis_id, "patch": {
             "confidence": run.confidence,
         }}
-        return json.dumps(data, ensure_ascii=False), False
+        return json.dumps(data, ensure_ascii=False), False, None
+
+    if name == "report_step":
+        for item in arguments.get("unknowns") or []:
+            run.upsert_unknown(
+                unknown_id=str(item.get("id") or ""),
+                question=str(item.get("question") or ""),
+                blocking=bool(item.get("blocking")),
+                resolution_strategy=str(item.get("resolution_strategy") or ""),
+                resolved_by_evidence_ids=_string_list(item.get("resolved_by_evidence_ids")),
+                resolved_by_belief_ids=_string_list(item.get("resolved_by_belief_ids")),
+            )
+        for item in arguments.get("beliefs") or []:
+            run.upsert_belief(
+                belief_id=str(item.get("id") or ""),
+                statement=str(item.get("statement") or ""),
+                status=str(item.get("status") or ""),
+                evidence_ids=_string_list(item.get("evidence_ids")),
+                observation_ids=_string_list(item.get("observation_ids")),
+                resolves_unknown_ids=_string_list(item.get("resolves_unknown_ids")),
+            )
+        step = run.report_step(
+            next_step=str(arguments.get("next_step") or ""),
+            continue_reason=str(arguments.get("continue_reason") or ""),
+            target_unknown_ids=_string_list(arguments.get("target_unknown_ids")),
+        )
+        data = asdict(step)
+        yield start_event(f"{run_id}-step-{len(run.step_results)}", "step_result", data)
+        return json.dumps(data, ensure_ascii=False), step.next_step != "continue_investigation", data
 
     if name == "conclude":
         if not run.evidence:
@@ -483,10 +536,23 @@ def _handle_agent_tool(
             "oppose_count": sum(1 for e in run.evidence.values() if e.stance == "oppose"),
         }
         yield start_event(f"{run_id}-verdict", "verdict", data)
-        return json.dumps(data, ensure_ascii=False), True
+        return json.dumps(data, ensure_ascii=False), True, None
 
     raise ValueError(f"unknown agent tool: {name}")
 
 
 def _normalized(value: str) -> str:
     return " ".join(value.split()).casefold()
+
+
+def _string_list(value) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [str(item).strip() for item in value if str(item).strip()]
+
+
+def _best_observation_summary(output: str) -> str:
+    return next(
+        (line.strip() for line in output.splitlines() if _useful_excerpt_candidate(line)),
+        output.strip(),
+    )[:240]
