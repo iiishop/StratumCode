@@ -18,6 +18,19 @@ defineProps({ event: { type: Object, required: true } })
 </template>
 
 <style scoped>
-.verdict__score { float: right; margin: 0 0 8px 12px; color: #1756d1; font: 800 21px/1 var(--mono); }
-p { margin: 0; color: #304a69; font-size: 12px; line-height: 1.65; }
+.verdict__score {
+  display: flex;
+  justify-content: flex-end;
+  margin-bottom: 8px;
+  color: var(--event, #1756d1);
+  font: 800 22px/1 var(--mono, monospace);
+}
+
+p {
+  margin: 0;
+  padding: 4px 0 0;
+  color: var(--text, #3f5274);
+  font-size: 12.5px;
+  line-height: 1.65;
+}
 </style>

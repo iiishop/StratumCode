@@ -24,7 +24,35 @@ const open = ref(true)
 </template>
 
 <style scoped>
-.evidence__claim { margin: 0 0 8px; color: #233d5c; font-size: 12px; line-height: 1.55; overflow-wrap: anywhere; }
-blockquote { margin: 0; padding: 8px 10px; border-left: 2px solid #8ca7cc; border-radius: 0 7px 7px 0; color: #536a86; background: rgba(235, 242, 252, .75); font: 10.5px/1.55 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; }
-.evidence__source { display: block; margin-top: 7px; color: #8a9bb1; font: 700 9px/1 var(--mono); text-transform: uppercase; overflow-wrap: anywhere; }
+.evidence__claim {
+  margin: 0 0 10px;
+  padding: 6px 0 0;
+  color: var(--text-h, #102a5c);
+  font-size: 12.5px;
+  line-height: 1.6;
+  font-weight: 550;
+  overflow-wrap: anywhere;
+}
+
+blockquote {
+  margin: 0;
+  padding: 10px 12px;
+  border-left: 3px solid var(--event, #11866f);
+  border-radius: 0 7px 7px 0;
+  color: var(--text, #3f5274);
+  background: color-mix(in srgb, var(--event, #11866f) 5%, #f9fbfe);
+  font: 10.5px/1.6 var(--mono, monospace);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.evidence__source {
+  display: block;
+  margin-top: 9px;
+  color: var(--text-muted, #71809c);
+  font: 700 8.5px/1 var(--mono, monospace);
+  letter-spacing: .05em;
+  text-transform: uppercase;
+  overflow-wrap: anywhere;
+}
 </style>

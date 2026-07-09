@@ -129,17 +129,111 @@ onUnmounted(() => decisionTimeline?.revert())
 </template>
 
 <style scoped>
-.event-diff__stats { display: flex; min-height: 20px; align-items: center; justify-content: flex-end; gap: 8px; margin: 0 2px 6px; padding-top: 1px; font: 700 10px/16px var(--mono, monospace); }
-.event-diff__add { color: #00a878; }.event-diff__remove { color: #e11d74; }
-.event-diff__code { margin: 0; padding: 8px 0; overflow: auto; border: 1px solid #dae3ef; border-radius: 8px; background: rgba(247, 249, 253, .86); color: #304863; font: var(--font-code, 12px)/1.6 var(--mono, monospace); }
-.event-diff__line { display: block; padding: 0 10px; white-space: pre; }.event-diff__line--add { background: #e7fff7; }.event-diff__line--remove { background: #ffeaf3; }.event-diff__marker { display: inline-block; width: 16px; color: #8291a5; user-select: none; }
-.event-diff__footer { display: flex; min-height: 31px; align-items: center; justify-content: flex-end; gap: 7px; padding-top: 8px; }
-.event-diff__footer button { padding: 5px 10px; border-radius: 6px; font: 650 10px/1 inherit; cursor: pointer; transition: filter .18s ease, transform .18s ease; }
-.event-diff__footer button:hover { filter: brightness(1.08); transform: translateY(-1px); }
-.event-diff__accept { border: 1px solid #00a878; color: #fff; background: #00a878; box-shadow: 0 4px 12px rgba(0,168,120,.2); }
-.event-diff__reject { border: 1px solid #efa8c8; color: #d41468; background: #fff; }
-.is-accepted,.is-rejected { display: inline-flex; min-height: 23px; align-items: center; padding: 0 8px; border-radius: 6px; font: 750 9px/1 var(--mono, monospace); letter-spacing: .07em; text-transform: uppercase; animation: decision-in .34s cubic-bezier(.22,1,.36,1); }
-.is-accepted { color: #007b59; background: #dcfff4; }.is-rejected { color: #bd145d; background: #ffe6f1; }
+.event-diff__stats {
+  display: flex;
+  min-height: 20px;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  margin: 0 2px 6px;
+  padding-top: 2px;
+  font: 700 10px/16px var(--mono, monospace);
+}
+
+.event-diff__add { color: #00a878; }
+.event-diff__remove { color: #e11d74; }
+
+.event-diff__code {
+  margin: 0;
+  padding: 8px 0;
+  overflow: auto;
+  border: 1px solid rgba(23, 86, 209, .1);
+  border-radius: 9px;
+  background: #f8fafd;
+  color: #304863;
+  font: var(--font-code, 12px)/1.6 var(--mono, monospace);
+}
+
+.event-diff__line {
+  display: block;
+  padding: 0 12px;
+  white-space: pre;
+  transition: background .12s ease;
+}
+
+.event-diff__line--add {
+  background: linear-gradient(90deg, rgba(0, 168, 120, .08), rgba(0, 168, 120, .04));
+}
+
+.event-diff__line--remove {
+  background: linear-gradient(90deg, rgba(225, 29, 116, .07), rgba(225, 29, 116, .03));
+}
+
+.event-diff__marker {
+  display: inline-block;
+  width: 18px;
+  color: #8291a5;
+  user-select: none;
+}
+
+.event-diff__footer {
+  display: flex;
+  min-height: 34px;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  padding-top: 10px;
+}
+
+.event-diff__footer button {
+  padding: 6px 14px;
+  border-radius: 7px;
+  font: 650 10.5px/1 var(--mono, monospace);
+  cursor: pointer;
+  transition: filter .18s ease, transform .18s ease, box-shadow .18s ease;
+}
+
+.event-diff__footer button:hover {
+  filter: brightness(1.06);
+  transform: translateY(-1px);
+}
+
+.event-diff__accept {
+  border: 1px solid #00a878;
+  color: #fff;
+  background: #00a878;
+  box-shadow: 0 4px 14px rgba(0, 168, 120, .22);
+}
+
+.event-diff__reject {
+  border: 1px solid #e8a0c4;
+  color: #d41468;
+  background: #fff;
+}
+
+.event-diff__reject:hover {
+  box-shadow: 0 4px 14px rgba(225, 29, 116, .12);
+}
+
+.is-accepted,
+.is-rejected {
+  display: inline-flex;
+  min-height: 24px;
+  align-items: center;
+  padding: 0 10px;
+  border-radius: 6px;
+  font: 750 9px/1 var(--mono, monospace);
+  letter-spacing: .07em;
+  text-transform: uppercase;
+  animation: decision-in .34s cubic-bezier(.22, 1, .36, 1);
+}
+
+.is-accepted { color: #007b59; background: #dcfff4; }
+.is-rejected { color: #bd145d; background: #ffe6f1; }
+
 @keyframes decision-in { from { opacity: 0; transform: translateY(5px) scale(.9); } }
-@media (prefers-reduced-motion: reduce) { .is-accepted,.is-rejected { animation: none; } }
+
+@media (prefers-reduced-motion: reduce) {
+  .is-accepted, .is-rejected { animation: none; }
+}
 </style>

@@ -78,8 +78,8 @@ const parts = computed(() => {
   font: 650 .91em/1.45 var(--mono, monospace);
   white-space: nowrap;
 }
-.semantic-token--tool { border-color: #ead37d; color: #785b00; background: #fff8d9; }
-.semantic-token--agent { border-color: #d2cdf3; color: #5548ae; background: #f2f0ff; }
-.semantic-token--code { border-color: #d8e0ec; color: #42566f; background: #f1f4f8; }
+.semantic-token--tool { border-color: rgba(245, 200, 66, .4); color: #5c4200; background: rgba(245, 200, 66, .14); }
+.semantic-token--agent { border-color: rgba(102, 88, 199, .3); color: #4c3fc3; background: rgba(102, 88, 199, .08); }
+.semantic-token--code { border-color: rgba(23, 86, 209, .15); color: var(--text, #3f5274); background: rgba(23, 86, 209, .05); }
 .semantic-token__mark { color: currentColor; font-size: .85em; opacity: .72; }
 </style>

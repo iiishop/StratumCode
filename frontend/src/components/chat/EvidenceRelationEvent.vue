@@ -17,5 +17,12 @@ defineProps({ event: { type: Object, required: true } })
 </template>
 
 <style scoped>
-.relation__text { margin: 0; color: #4f6480; font-size: 11.5px; line-height: 1.55; }
+.relation__text {
+  margin: 0;
+  padding: 4px 0 0;
+  color: var(--text, #3f5274);
+  font-size: 12px;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
 </style>

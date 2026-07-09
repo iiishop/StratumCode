@@ -23,8 +23,39 @@ defineProps({ event: { type: Object, required: true } })
 </template>
 
 <style scoped>
-.tool-io { display: grid; gap: 7px; }
-.tool-io div { display: grid; grid-template-columns: 43px minmax(0, 1fr); gap: 7px; align-items: start; min-width: 0; }
-.tool-io span { padding-top: 8px; color: #8a9bb0; font: 700 9px/1 var(--mono, monospace); letter-spacing: .08em; }
-.tool-io pre { min-width: 0; margin: 0; padding: 8px 10px; overflow: auto; border-radius: 7px; color: #39516d; background: rgba(224, 233, 247, .52); font: var(--font-code, 12px)/1.55 var(--mono, monospace); white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word; }
+.tool-io {
+  display: grid;
+  gap: 9px;
+}
+
+.tool-io div {
+  display: grid;
+  grid-template-columns: 48px minmax(0, 1fr);
+  gap: 8px;
+  align-items: start;
+  min-width: 0;
+}
+
+.tool-io span {
+  padding-top: 9px;
+  color: var(--text-muted, #71809c);
+  font: 700 8.5px/1 var(--mono, monospace);
+  letter-spacing: .09em;
+  text-align: right;
+}
+
+.tool-io pre {
+  min-width: 0;
+  margin: 0;
+  padding: 9px 12px;
+  overflow: auto;
+  border: 1px solid rgba(23, 86, 209, .1);
+  border-radius: 8px;
+  color: var(--text, #3f5274);
+  background: color-mix(in srgb, var(--event, #1756d1) 4%, #f7f9fd);
+  font: var(--font-code, 12px)/1.55 var(--mono, monospace);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
 </style>
