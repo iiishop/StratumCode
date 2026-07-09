@@ -158,6 +158,12 @@ def evidence_stream(
     for round_index in range(policy.max_rounds):
         allowed_tools, _, _ = policy.next_request(run)
         phase_before = policy.phase
+        thinking_id = f"{run_id}-thinking-{round_index}"
+        yield _start(thinking_id, "thinking", {
+            "text": "",
+            "done": False,
+            "open": True,
+        })
         assistant = _call_model(
             provider,
             model,
@@ -179,11 +185,15 @@ def evidence_stream(
         })
 
         if content:
-            yield _start(f"{run_id}-thinking-{round_index}", "thinking", {
+            yield {"op": "update", "id": thinking_id, "patch": {
                 "text": content,
                 "done": True,
                 "open": bool(tool_calls),
-        })
+            }}
+        else:
+            yield {"op": "update", "id": thinking_id, "patch": {
+                "done": True,
+            }}
 
         if not tool_calls:
             empty_tool_rounds += 1
@@ -212,7 +222,7 @@ def evidence_stream(
                     raise ValueError("tool arguments must be an object")
                 if name not in set(allowed_tools):
                     raise ValueError(f"unknown agent tool: {name or 'tool'}")
-                output, emitted, concluded = _handle_agent_tool(
+                gen = _handle_agent_tool(
                     name=name,
                     call_id=call_id,
                     arguments=arguments,
@@ -224,7 +234,11 @@ def evidence_stream(
                     run_id=run_id,
                     policy=policy,
                 )
-                yield from emitted
+                try:
+                    while True:
+                        yield next(gen)
+                except StopIteration as e:
+                    output, concluded = e.value
                 if name == "record_evidence":
                     if compact_message := _compact_tool_message(arguments):
                         compaction_messages.append(compact_message)
@@ -495,21 +509,21 @@ def _handle_agent_tool(
     stage_id: str,
     run_id: str,
     policy: EvidencePolicy | None = None,
-) -> tuple[str, list[dict], bool]:
-    events: list[dict] = []
+):
+    """Yields stream packets directly. Returns (model_output, concluded) via StopIteration."""
     discovery_tools = policy.available_discovery_tools() if policy else DISCOVERY_TOOLS
     if name in discovery_tools:
         if policy:
             arguments = policy.prepare_discovery(name, arguments)
         tool = registry.get(name)
-        events.append(_start(call_id, "tool", {
+        yield _start(call_id, "tool", {
             "name": name,
             "description": tool.description,
             "status": "running",
             "open": False,
             "input": json.dumps(arguments, ensure_ascii=False, indent=2),
             "output": "",
-        }))
+        })
         _, result = _execute_tool(name, arguments, workspace_dir)
         observed_calls[call_id] = {
             "name": name,
@@ -519,19 +533,19 @@ def _handle_agent_tool(
         if policy:
             useful = not result.title.startswith("[error]")
             policy.note_discovery(name, arguments, useful=useful)
-        events.append({"op": "update", "id": call_id, "patch": {
+        yield {"op": "update", "id": call_id, "patch": {
             "status": "error" if result.title.startswith("[error]") else "done",
             "title": result.title,
             "output": result.output,
             "metadata": result.metadata,
-        }})
+        }}
         model_output = {
             "tool_call_id": call_id,
             "title": result.title,
             "output": result.output,
             "metadata": result.metadata,
         }
-        return json.dumps(model_output, ensure_ascii=False), events, False
+        return json.dumps(model_output, ensure_ascii=False), False
 
     if name == "record_evidence":
         source_call_id = arguments.get("source_tool_call_id")
@@ -572,11 +586,11 @@ def _handle_agent_tool(
             **asdict(item),
             "confidence": run.confidence,
         }
-        events.append(_start(f"{run_id}-evidence-{item.id}", "evidence", data))
-        events.append({"op": "update", "id": hypothesis_id, "patch": {
+        yield _start(f"{run_id}-evidence-{item.id}", "evidence", data)
+        yield {"op": "update", "id": hypothesis_id, "patch": {
             "confidence": run.confidence,
-        }})
-        return json.dumps(data, ensure_ascii=False), events, False
+        }}
+        return json.dumps(data, ensure_ascii=False), False
 
     if name == "link_evidence":
         if "relation" not in arguments and "relationship" in arguments:
@@ -585,34 +599,34 @@ def _handle_agent_tool(
         if policy:
             policy.note_audit()
         data = {**asdict(edge), "confidence": run.confidence}
-        events.append(_start(
+        yield _start(
             f"{run_id}-relation-{len(run.relations)}",
             "evidence_relation",
             data,
-        ))
-        events.append({"op": "update", "id": hypothesis_id, "patch": {
+        )
+        yield {"op": "update", "id": hypothesis_id, "patch": {
             "confidence": run.confidence,
-        }})
-        return json.dumps(data, ensure_ascii=False), events, False
+        }}
+        return json.dumps(data, ensure_ascii=False), False
 
     if name == "conclude":
         if not run.evidence:
             raise ValueError("at least one grounded evidence item is required before concluding")
         verdict = run.conclude(arguments["summary"])
-        events.append({"op": "update", "id": stage_id, "patch": {
+        yield {"op": "update", "id": stage_id, "patch": {
             "state": verdict.value,
-        }})
-        events.append({"op": "update", "id": hypothesis_id, "patch": {
+        }}
+        yield {"op": "update", "id": hypothesis_id, "patch": {
             "confidence": run.confidence,
             "status": verdict.value,
-        }})
+        }}
         data = {
             "verdict": verdict.value,
             "confidence": run.confidence,
             "summary": run.summary,
         }
-        events.append(_start(f"{run_id}-verdict", "verdict", data))
-        return json.dumps(data, ensure_ascii=False), events, True
+        yield _start(f"{run_id}-verdict", "verdict", data)
+        return json.dumps(data, ensure_ascii=False), True
 
     raise ValueError(f"unknown agent tool: {name}")
 

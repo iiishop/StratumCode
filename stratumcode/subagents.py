@@ -103,6 +103,12 @@ def _react_install(
     ]
 
     for round_index in range(MAX_INSTALLER_ROUNDS):
+        thinking_id = f"{run_id}-thinking-{round_index}"
+        yield _start(thinking_id, "thinking", {
+            "text": "",
+            "done": False,
+            "open": True,
+        })
         assistant = _call_model(provider, model, messages, tools=_installer_tools())
         if usage := _usage_delta(pricing_rules, assistant.pop("_usage", {})):
             _add_usage(usage_total, usage)
@@ -114,7 +120,15 @@ def _react_install(
         content = _content_text(assistant.get("content"))
         tool_calls = assistant.get("tool_calls") or []
         if content:
-            yield _thinking(run_id, round_index, content, open_=bool(tool_calls))
+            yield {"op": "update", "id": thinking_id, "patch": {
+                "text": content,
+                "done": True,
+                "open": bool(tool_calls),
+            }}
+        else:
+            yield {"op": "update", "id": thinking_id, "patch": {
+                "done": True,
+            }}
         messages.append({
             "role": "assistant",
             "content": assistant.get("content") or "",
@@ -130,7 +144,7 @@ def _react_install(
             name = function.get("name") or ""
             try:
                 arguments = _tool_arguments(function.get("arguments"))
-                output, emitted, server = _handle_installer_tool(
+                gen = _handle_installer_tool(
                     name=name,
                     call_id=call_id,
                     arguments=arguments,
@@ -138,6 +152,11 @@ def _react_install(
                     observations=observations,
                     workspace_dir=workspace_dir,
                 )
+                try:
+                    while True:
+                        yield next(gen)
+                except StopIteration as e:
+                    output, server = e.value
             except Exception as exc:
                 output = json.dumps({
                     "error": {
@@ -146,16 +165,15 @@ def _react_install(
                         "retryable": _tool_error_retryable(exc),
                     }
                 }, ensure_ascii=False)
-                emitted = [_start(call_id, "tool", {
+                yield _start(call_id, "tool", {
                     "name": name or "invalid",
                     "description": "MCP installer tool",
                     "status": "error",
                     "open": False,
                     "input": function.get("arguments") or "{}",
                     "output": output,
-                })]
+                })
                 server = None
-            yield from emitted
             observations.append(output)
             messages.append({
                 "role": "tool",
@@ -258,18 +276,19 @@ def _handle_installer_tool(
     hint: str,
     observations: list[str],
     workspace_dir: str,
-) -> tuple[str, list[dict], dict | None]:
+):
+    """Yields stream packets directly. Returns (output, server) via StopIteration."""
     if name not in {"websearch", "webfetch", "install_mcp"}:
         raise ValueError(f"unknown installer tool: {name or 'tool'}")
 
-    events = [_start(call_id, "tool", {
+    yield _start(call_id, "tool", {
         "name": name,
         "description": _tool_description(name),
         "status": "running",
         "open": name == "install_mcp",
         "input": json.dumps(arguments, ensure_ascii=False, indent=2),
         "output": "",
-    })]
+    })
 
     server = None
     if name == "install_mcp":
@@ -283,19 +302,19 @@ def _handle_installer_tool(
         result = _run_registry_tool(name, arguments, workspace_dir)
 
     status = "error" if result.title.startswith("[error]") else "done"
-    events.append({"op": "update", "id": call_id, "patch": {
+    yield {"op": "update", "id": call_id, "patch": {
         "status": status,
         "title": result.title,
         "output": result.output,
         "metadata": result.metadata,
-    }})
+    }}
     output = json.dumps({
         "tool_call_id": call_id,
         "title": result.title,
         "output": result.output,
         "metadata": result.metadata,
     }, ensure_ascii=False)
-    return output, events, server
+    return output, server
 
 
 def _run_registry_tool(name: str, arguments: dict, workspace_dir: str) -> ToolResult:
