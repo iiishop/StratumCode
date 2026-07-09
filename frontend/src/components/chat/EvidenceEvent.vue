@@ -1,6 +1,8 @@
 <script setup>
+import { ref } from 'vue'
 import EventFrame from './EventFrame.vue'
 defineProps({ event: { type: Object, required: true } })
+const open = ref(true)
 </script>
 
 <template>
@@ -11,7 +13,9 @@ defineProps({ event: { type: Object, required: true } })
     :label="event.stance === 'support' ? 'Supporting evidence' : 'Opposing evidence'"
     :detail="event.source_uri"
     :status="`${Math.round(event.strength * 100)}% weight`"
-    open
+    :open="open"
+    collapsible
+    @toggle="open = !open"
   >
     <p class="evidence__claim">{{ event.claim }}</p>
     <blockquote>{{ event.excerpt }}</blockquote>

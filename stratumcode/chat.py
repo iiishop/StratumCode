@@ -97,7 +97,11 @@ def evidence_stream(
     pricing_rules = providers.get_model_pricing(provider["id"], model)
     run = EvidenceRun(hypothesis)
     run.transition(RunState.GATHERING)
-    policy = EvidencePolicy(max_rounds=max_rounds or MAX_AGENT_ROUNDS)
+    discovery_tools = _discovery_tools(hypothesis, context)
+    policy = EvidencePolicy(
+        discovery_tools=discovery_tools,
+        max_rounds=max_rounds or MAX_AGENT_ROUNDS,
+    )
     run_id = uuid4().hex[:10]
     stage_id = f"{run_id}-stage"
     hypothesis_id = f"{run_id}-hypothesis"
@@ -137,34 +141,15 @@ def evidence_stream(
     observed_calls: dict[str, dict] = {}
     empty_tool_rounds = 0
     usage_total = _empty_usage(pricing_rules)
-    next_system_hint = ""
 
     for round_index in range(policy.max_rounds):
-        allowed_tools, _, checkpoint_instruction = policy.next_request(run)
+        allowed_tools, _, _ = policy.next_request(run)
         phase_before = policy.phase
-        system_parts = []
-        if next_system_hint:
-            system_parts.append(next_system_hint)
-            next_system_hint = ""
-        if checkpoint_instruction:
-            system_parts.extend(
-                part for part in (
-                    checkpoint_instruction,
-                    _checkpoint_observations(observed_calls),
-                )
-                if part
-            )
-        request_messages = messages
-        if system_parts:
-            request_messages = messages + [{
-                "role": "system",
-                "content": "\n\n".join(system_parts),
-            }]
         assistant = _call_model(
             provider,
             model,
-            request_messages,
-            tools=agent_tools(DISCOVERY_TOOLS),
+            messages,
+            tools=agent_tools(discovery_tools, allowed_tools),
         )
         if usage := _usage_delta(pricing_rules, assistant.pop("_usage", {})):
             _add_usage(usage_total, usage)
@@ -191,25 +176,13 @@ def evidence_stream(
             empty_tool_rounds += 1
             if empty_tool_rounds >= MAX_EMPTY_TOOL_ROUNDS:
                 policy.request_checkpoint()
-                next_system_hint = (
-                    "You have stopped without tool calls twice. Record evidence "
-                    "from existing observations or conclude if enough evidence is recorded."
-                )
                 if not run.evidence:
                     break
                 continue
             if policy.phase != EvidencePhase.EVALUATE and (run.evidence or observed_calls):
-                next_system_hint = (
-                    "Continue the current evidence phase. Use one of the tools "
-                    "available in this phase rather than stopping."
-                )
                 continue
             if not run.evidence and observed_calls:
                 policy.request_checkpoint()
-                next_system_hint = (
-                    "You have tool observations but no recorded evidence. "
-                    "The next turn must call record_evidence."
-                )
                 continue
             break
 
@@ -307,6 +280,11 @@ def _fallback_summary(run: EvidenceRun) -> str:
         stance = "supports" if item.stance == "support" else "opposes"
         findings.append(f"{item.id} {stance}: {item.claim} ({item.source_uri})")
     return "Verdict computed from recorded evidence: " + "; ".join(findings)
+
+
+def _discovery_tools(hypothesis: str = "", context: list[str] | None = None) -> tuple[str, ...]:
+    mcp_tools = tuple(tool.name for tool in registry.list_all() if tool.name.startswith("mcp_"))
+    return DISCOVERY_TOOLS + tuple(name for name in mcp_tools if name not in DISCOVERY_TOOLS)
 
 
 def _compact_tool_message(messages: list[dict], evidence_args: dict) -> None:
@@ -436,31 +414,6 @@ def _tool_error_json(exc: Exception, tool_name: str) -> str:
     }, ensure_ascii=False)
 
 
-def _checkpoint_observations(observed_calls: dict[str, dict]) -> str:
-    if not observed_calls:
-        return ""
-    blocks = []
-    for call_id, observed in list(observed_calls.items())[-6:]:
-        lines = [
-            line.strip()
-            for line in observed["result"].output.splitlines()
-            if _useful_excerpt_candidate(line)
-        ][:4]
-        if not lines:
-            continue
-        blocks.append(
-            f"- source_tool_call_id={call_id} ({observed['name']}):\n"
-            + "\n".join(f"  excerpt candidate: {line}" for line in lines)
-        )
-    if not blocks:
-        return ""
-    return (
-        "Recent exact excerpt candidates. Copy one candidate verbatim into "
-        "record_evidence.excerpt; do not paraphrase it:\n"
-        + "\n".join(blocks)
-    )
-
-
 def _useful_excerpt_candidate(line: str) -> bool:
     text = line.strip()
     if len(text) < 8:
@@ -509,7 +462,8 @@ def _handle_agent_tool(
     policy: EvidencePolicy | None = None,
 ) -> tuple[str, list[dict], bool]:
     events: list[dict] = []
-    if name in DISCOVERY_TOOLS:
+    discovery_tools = policy.available_discovery_tools() if policy else DISCOVERY_TOOLS
+    if name in discovery_tools:
         if policy:
             arguments = policy.prepare_discovery(name, arguments)
         tool = registry.get(name)

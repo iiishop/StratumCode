@@ -4,8 +4,24 @@ import { gsap } from 'gsap'
 import { animate, stagger } from 'animejs'
 import ShuffleText from './ShuffleText.vue'
 
-defineProps({ active: { type: String, default: 'home' } })
-const emit = defineEmits(['navigate'])
+const props = defineProps({
+  active: { type: String, default: 'home' },
+  workspaces: { type: Array, default: () => [] },
+  activeWorkspace: { type: Object, default: null },
+  sessions: { type: Array, default: () => [] },
+  activeSession: { type: Object, default: null },
+  workspaceError: { type: String, default: '' },
+})
+const emit = defineEmits([
+  'navigate',
+  'add-workspace',
+  'create-session',
+  'workspace-session',
+  'open-session',
+  'rename-session',
+  'delete-session',
+  'delete-workspace',
+])
 
 const sidebarRef = ref(null)
 const collapseIconRef = ref(null)
@@ -29,6 +45,12 @@ const nav = [
     detail: 'Models and endpoints',
     icon: 'M5 7h14 M5 12h14 M5 17h14 M8 5v4 M16 10v4 M11 15v4',
   },
+  {
+    id: 'mcp',
+    label: 'MCP',
+    detail: 'External tools',
+    icon: 'M7 8h10M7 12h10M7 16h10M4 5h16v14H4z',
+  },
 ]
 
 function navigate(id) {
@@ -36,7 +58,17 @@ function navigate(id) {
 }
 
 function startSession() {
-  emit('navigate', 'home')
+  emit('create-session', props.activeWorkspace?.id)
+}
+
+function workspaceInitials(workspace) {
+  const name = (workspace?.name || workspace?.path || 'WS').split(/[\\/]/).filter(Boolean).pop() || 'WS'
+  return name.slice(0, 2).toUpperCase()
+}
+
+function sessionDetail(session) {
+  const total = session?.usage?.total_tokens || 0
+  return total ? `${total} tokens` : 'empty'
 }
 
 function handleShortcut(event) {
@@ -187,40 +219,79 @@ onUnmounted(() => {
 
     <section class="sb__group sb__reveal">
       <Transition name="sb-copy">
-        <div v-if="showContent" class="sb__group-label">Project</div>
+        <div v-if="showContent" class="sb__group-head">
+          <span class="sb__group-label">Workspaces</span>
+          <button type="button" title="Add workspace" @click="emit('add-workspace')">+</button>
+        </div>
       </Transition>
-      <div class="sb__project" title="StratumCode repository">
+      <button
+        v-for="workspace in workspaces"
+        :key="workspace.id"
+        class="sb__project"
+        :class="{ 'is-active': activeWorkspace?.id === workspace.id }"
+        :title="collapsed ? workspace.name : workspace.path"
+        type="button"
+        @click="emit('workspace-session', workspace)"
+      >
         <span class="sb__project-icon sb__rail-icon">
-          <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.55" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M3 7h7l2 2h9v10H3z M3 7V5h7l2 2"/>
-          </svg>
+          {{ workspaceInitials(workspace) }}
         </span>
         <Transition name="sb-copy">
           <span v-if="showContent" class="sb__project-content">
             <span class="sb__project-copy">
-              <strong>StratumCode</strong>
-              <small>main</small>
+              <strong>{{ workspace.name }}</strong>
+              <small>{{ workspace.path }}</small>
             </span>
-            <span class="sb__project-state">open</span>
+            <span class="sb__project-state">{{ workspace.is_active ? 'open' : 'new' }}</span>
           </span>
         </Transition>
-      </div>
+      </button>
+      <Transition name="sb-copy">
+        <small v-if="showContent && workspaceError" class="sb__error">{{ workspaceError }}</small>
+      </Transition>
     </section>
 
     <section class="sb__group sb__sessions sb__reveal">
       <Transition name="sb-copy">
-        <div v-if="showContent" class="sb__group-label">Current session</div>
+        <div v-if="showContent" class="sb__group-label">Sessions</div>
       </Transition>
-      <button class="sb__session" type="button" title="New session" @click="navigate('home')">
-        <span class="sb__session-icon sb__rail-icon">
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.55" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M5 5h14v11H9l-4 3z"/>
-          </svg>
-        </span>
+      <div
+        v-for="session in sessions"
+        :key="session.id"
+        class="sb__session-row"
+        :class="{ 'is-active': activeSession?.id === session.id }"
+      >
+        <button
+          class="sb__session"
+          type="button"
+          :title="collapsed ? session.name : 'Open session'"
+          @click="emit('open-session', session.id)"
+        >
+          <span class="sb__session-icon sb__rail-icon">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.55" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M5 5h14v11H9l-4 3z"/>
+            </svg>
+          </span>
+          <Transition name="sb-copy">
+            <span v-if="showContent" class="sb__session-copy">
+              <strong>{{ session.name }}</strong>
+              <small>{{ sessionDetail(session) }}</small>
+            </span>
+          </Transition>
+        </button>
+        <Transition name="sb-copy">
+          <span v-if="showContent" class="sb__session-actions">
+            <button type="button" title="Rename" @click.stop="emit('rename-session', session.id)">R</button>
+            <button type="button" title="Delete" @click.stop="emit('delete-session', session.id)">D</button>
+          </span>
+        </Transition>
+      </div>
+      <button v-if="!sessions.length" class="sb__session" type="button" @click="startSession">
+        <span class="sb__session-icon sb__rail-icon">+</span>
         <Transition name="sb-copy">
           <span v-if="showContent" class="sb__session-copy">
-            <strong>New session</strong>
-            <small>0 changes</small>
+            <strong>No sessions</strong>
+            <small>Create one</small>
           </span>
         </Transition>
       </button>
@@ -424,6 +495,36 @@ onUnmounted(() => {
   transition: opacity 120ms ease;
 }
 
+.sb__group-head {
+  display: flex;
+  height: 18px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.sb__group-head .sb__group-label {
+  padding-right: 0;
+}
+
+.sb__group-head > button {
+  display: grid;
+  width: 18px;
+  height: 18px;
+  place-items: center;
+  border: 1px solid rgba(255, 255, 255, .22);
+  border-radius: 5px;
+  color: #dbe8ff;
+  background: transparent;
+  font: 700 12px/1 var(--mono);
+  cursor: pointer;
+}
+
+.sb__group-head > button:hover {
+  color: #123f9d;
+  background: #ffffff;
+}
+
 .sb__nav {
   display: flex;
   flex-direction: column;
@@ -512,12 +613,18 @@ onUnmounted(() => {
 }
 
 .sb__project {
+  width: 100%;
   border-color: rgba(255, 255, 255, 0.16);
   background: rgba(6, 37, 111, 0.24);
+  cursor: pointer;
+  text-align: left;
 }
 
 .sb__project-icon {
+  border: 1px solid rgba(245, 198, 66, .45);
+  border-radius: 7px;
   color: var(--yellow);
+  font: 800 8px/1 var(--mono);
 }
 
 .sb__project-copy {
@@ -538,6 +645,18 @@ onUnmounted(() => {
   font: 8px/1 var(--mono);
 }
 
+.sb__project.is-active {
+  border-color: rgba(255, 255, 255, .36);
+  background: rgba(255, 255, 255, .12);
+}
+
+.sb__error {
+  display: block;
+  margin: 7px;
+  color: #ffd7de;
+  font: 8.5px/1.35 var(--mono);
+}
+
 .sb__sessions {
   min-height: 0;
   flex: 1;
@@ -550,10 +669,53 @@ onUnmounted(() => {
   text-align: left;
 }
 
-.sb__session:hover {
+.sb__session-row {
+  display: flex;
+  align-items: center;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+}
+
+.sb__session-row:hover,
+.sb__session-row.is-active {
   color: #ffffff;
   border-color: rgba(255, 255, 255, 0.16);
   background: rgba(255, 255, 255, 0.08);
+}
+
+.sb__session-row.is-active {
+  border-color: rgba(245, 198, 66, .42);
+}
+
+.sb__session-row .sb__session {
+  border: 0;
+  background: transparent;
+}
+
+.sb__session-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding-right: 5px;
+}
+
+.sb__session-actions button {
+  display: grid;
+  width: 20px;
+  height: 20px;
+  place-items: center;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  color: #9dbcf4;
+  background: transparent;
+  font: 700 8px/1 var(--mono);
+  cursor: pointer;
+}
+
+.sb__session-actions button:hover {
+  border-color: rgba(255, 255, 255, .2);
+  color: #ffffff;
+  background: rgba(255, 255, 255, .08);
 }
 
 .sb__footer {
@@ -625,7 +787,8 @@ onUnmounted(() => {
 
 .is-compact .sb__nav-item,
 .is-compact .sb__project,
-.is-compact .sb__session {
+.is-compact .sb__session,
+.is-compact .sb__session-row {
   width: 42px;
   padding-inline: 8px;
 }
@@ -701,7 +864,8 @@ onUnmounted(() => {
 
   .sb__nav-item,
   .sb__project,
-  .sb__session {
+  .sb__session,
+  .sb__session-row {
     width: 42px;
     padding-inline: 8px;
   }

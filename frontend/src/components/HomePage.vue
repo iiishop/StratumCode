@@ -1,11 +1,16 @@
 <script setup>
-import { ref, reactive, computed, onMounted, onUnmounted, nextTick } from 'vue'
+import { ref, reactive, computed, onMounted, onUnmounted, nextTick, watch } from 'vue'
 import { gsap } from 'gsap'
 import ChatEvent from './chat/ChatEvent.vue'
 import { useChatStream } from '../composables/useChatStream'
-import { useWorkspaces } from '../composables/useWorkspaces'
 import FileReference from './FileReference.vue'
 import InspectorPanel from './inspector/InspectorPanel.vue'
+
+const props = defineProps({
+  session: { type: Object, default: null },
+  mcpServers: { type: Array, default: () => [] },
+})
+const emit = defineEmits(['save-session-state'])
 
 /* ── todos ── */
 const inspectorTab = ref(null)
@@ -17,10 +22,11 @@ const todos = reactive([
 ])
 
 /* ── file context ── */
-const fileContext = reactive([
+const defaultFileContext = () => [
   { path: 'stratumcode/providers.py', lang: 'python' },
   { path: 'stratumcode/server.py',    lang: 'python' },
-])
+]
+const fileContext = reactive(defaultFileContext())
 
 const suggestions = [
   { label: 'Run the tool workflow', detail: 'See read and grep calls in action', prompt: 'Inspect the server tools and show me how they work' },
@@ -57,7 +63,19 @@ const emptyEvidenceRun = reactive({
 })
 const evidenceRuns = reactive([])
 const activeRunId = ref('')
+const subagentRuns = reactive([])
+const availableSubagents = [
+  {
+    id: 'available-mcp-installer',
+    name: '@mcp-installer',
+    task: 'Install MCP servers from docs, URLs, or config hints.',
+    status: 'ready',
+    result: 'Available from the MCP page and the subagent_mcp_install tool.',
+  },
+]
 const evidenceRun = computed(() => evidenceRuns.find(run => run.id === activeRunId.value) || emptyEvidenceRun)
+const visibleSubagents = computed(() => [...availableSubagents, ...subagentRuns])
+const sessionName = computed(() => props.session?.name || 'New session')
 const sessionUsage = reactive({
   input_tokens: 0,
   output_tokens: 0,
@@ -66,16 +84,8 @@ const sessionUsage = reactive({
   cost: 0,
   currency: 'USD',
 })
-const {
-  items: workspaces,
-  active: activeWorkspace,
-  error: workspaceError,
-  load: loadWorkspaces,
-  add: addWorkspace,
-  activate: activateWorkspace,
-  remove: deleteWorkspace,
-} = useWorkspaces()
 let gsapCtx
+let saveTimer
 
 function setMsgRef(id, el) { if (el) msgRefs[id] = el }
 
@@ -103,6 +113,51 @@ function addUsage(delta = {}) {
   sessionUsage.total_tokens += delta.total_tokens || 0
   sessionUsage.cost = Number((sessionUsage.cost + (delta.cost || 0)).toFixed(6))
   sessionUsage.currency = delta.currency || sessionUsage.currency
+}
+
+function usageDefaults() {
+  return {
+    input_tokens: 0,
+    output_tokens: 0,
+    cached_tokens: 0,
+    total_tokens: 0,
+    cost: 0,
+    currency: 'USD',
+  }
+}
+
+function plain(value) {
+  return JSON.parse(JSON.stringify(value))
+}
+
+function snapshotState() {
+  return {
+    messages: plain(messages),
+    evidenceRuns: plain(evidenceRuns),
+    activeRunId: activeRunId.value,
+    subagentRuns: plain(subagentRuns),
+    fileContext: plain(fileContext),
+    usage: plain(sessionUsage),
+  }
+}
+
+function scheduleSave() {
+  if (!props.session?.id) return
+  clearTimeout(saveTimer)
+  saveTimer = setTimeout(() => emit('save-session-state', snapshotState()), 220)
+}
+
+function restoreState(state = {}) {
+  messages.splice(0, messages.length, ...(state.messages || []).map(message => reactive({
+    ...message,
+    events: (message.events || []).map(event => ({ ...event, data: reactive(event.data || {}) })),
+  })))
+  evidenceRuns.splice(0, evidenceRuns.length, ...(state.evidenceRuns || []).map(run => reactive(run)))
+  subagentRuns.splice(0, subagentRuns.length, ...(state.subagentRuns || []).map(run => reactive(run)))
+  activeRunId.value = state.activeRunId || ''
+  fileContext.splice(0, fileContext.length, ...((state.fileContext && state.fileContext.length) ? state.fileContext : defaultFileContext()))
+  Object.assign(sessionUsage, usageDefaults(), state.usage || {})
+  nextTick(scrollBottom)
 }
 
 async function loadTools() {
@@ -146,6 +201,7 @@ async function send() {
     }
   } finally {
     isStreaming.value = false
+    scheduleSave()
     nextTick(scrollBottom)
   }
 }
@@ -196,6 +252,8 @@ function onAgentPacket(packet, type, data) {
     run.confidence = data.confidence
   } else if (packet.op === 'start' && type === 'usage') {
     addUsage(data.delta)
+  } else if (packet.op === 'start' && type === 'subagent') {
+    subagentRuns.push(data)
   } else if (packet.op === 'update' && type === 'stage' && data?.phase) {
     const run = currentEvidenceRun()
     if (run) run.phase = data.phase
@@ -221,7 +279,6 @@ function animateLast() {
 
 onMounted(() => {
   loadTools()
-  loadWorkspaces()
   gsapCtx = gsap.context(() => {
     if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) return
     gsap.fromTo(
@@ -237,7 +294,11 @@ onMounted(() => {
     gsap.fromTo('.chat__composer', { y: 12, autoAlpha: 0 }, { y: 0, autoAlpha: 1, duration: 0.46, ease: 'power2.out', delay: 0.16 })
   }, chatRef.value)
 })
-onUnmounted(() => { abortChat(); gsapCtx?.revert() })
+onUnmounted(() => { abortChat(); gsapCtx?.revert(); clearTimeout(saveTimer) })
+
+watch(() => props.session?.id, () => {
+  restoreState(props.session?.state || {})
+}, { immediate: true })
 </script>
 
 <template>
@@ -247,7 +308,7 @@ onUnmounted(() => { abortChat(); gsapCtx?.revert() })
       <div class="chat__session">
         <span class="chat__session-mark">&gt;_</span>
         <div>
-          <strong>New session</strong>
+          <strong>{{ sessionName }}</strong>
           <small>↑ {{ sessionUsage.input_tokens }} ↓ {{ sessionUsage.output_tokens }} · {{ sessionUsage.currency }} {{ sessionUsage.cost.toFixed(6) }}</small>
         </div>
       </div>
@@ -262,6 +323,16 @@ onUnmounted(() => { abortChat(); gsapCtx?.revert() })
           <span class="chat__tool-grid" aria-hidden="true"><i></i><i></i><i></i><i></i></span>
           <span class="chat__topbtn-label">Tools</span>
           <span class="chat__topbtn-badge chat__topbtn-badge--yellow">{{ toolCatalog.length }}</span>
+        </button>
+        <button class="chat__topbtn" :class="{ 'is-on': inspectorTab === 'mcp' }" @click="toggleInspector('mcp')" title="MCP">
+          <span aria-hidden="true">M</span>
+          <span class="chat__topbtn-label">MCP</span>
+          <span class="chat__topbtn-badge">{{ mcpServers.length }}</span>
+        </button>
+        <button class="chat__topbtn" :class="{ 'is-on': inspectorTab === 'subagents' }" @click="toggleInspector('subagents')" title="Subagents">
+          <span aria-hidden="true">@</span>
+          <span class="chat__topbtn-label">Agents</span>
+          <span class="chat__topbtn-badge">{{ visibleSubagents.length }}</span>
         </button>
         <button class="chat__topbtn" :class="{ 'is-on': inspectorTab === 'tasks' }" @click="toggleInspector('tasks')" title="Tasks">
           <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"/></svg>
@@ -333,6 +404,8 @@ onUnmounted(() => { abortChat(); gsapCtx?.revert() })
           :usage="sessionUsage"
           :todos="todos"
           :tools="toolCatalog"
+          :mcp-servers="mcpServers"
+          :subagents="visibleSubagents"
           :workspaces="workspaces"
           :active-workspace="activeWorkspace"
           :workspace-error="workspaceError"
@@ -437,6 +510,7 @@ onUnmounted(() => { abortChat(); gsapCtx?.revert() })
 }
 .chat__topbtn:hover { border-color: var(--accent-border); color: var(--text-h); }
 .chat__topbtn.is-on { border-color: var(--accent-border); background: var(--accent-bg); color: var(--accent-text); }
+.chat__topbtn[title="Workspace"] { display: none; }
 .chat__topbtn-badge {
   position: absolute; top: -4px; right: -4px;
   min-width: 14px; height: 14px; padding: 0 3px;

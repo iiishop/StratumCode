@@ -4,7 +4,7 @@ import logging
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from . import chat, model_settings, providers, workspaces
+from . import chat, mcp, model_settings, providers, sessions, subagents, workspaces
 from .tools import registry
 
 
@@ -38,7 +38,11 @@ class _Handler(SimpleHTTPRequestHandler):
                 "items": workspaces.list_all(self.workspace_dir),
                 "active": workspaces.active(self.workspace_dir),
             })
+        elif self.path == "/api/mcp":
+            mcp.load_enabled()
+            self._json({"items": mcp.list_all()})
         elif self.path == "/api/tools":
+            mcp.load_enabled()
             self._json([t.to_json() for t in registry.list_all()])
         else:
             super().do_GET()
@@ -117,11 +121,38 @@ class _Handler(SimpleHTTPRequestHandler):
         elif path == "/api/workspaces/delete":
             workspaces.delete(int(body["id"]), self.workspace_dir)
             self._json({"ok": True})
+        elif path == "/api/sessions/list":
+            self._json({"items": sessions.list_by_workspace(int(body["workspace_id"]))})
+        elif path == "/api/sessions/create":
+            self._json({"session": sessions.create(int(body["workspace_id"]))})
+        elif path == "/api/sessions/get":
+            self._json({"session": sessions.get(int(body["id"]))})
+        elif path == "/api/sessions/rename":
+            sessions.rename(int(body["id"]), body["name"])
+            self._json({"ok": True})
+        elif path == "/api/sessions/save-state":
+            sessions.save_state(int(body["id"]), body.get("state", {}))
+            self._json({"ok": True})
+        elif path == "/api/sessions/delete":
+            sessions.delete(int(body["id"]))
+            self._json({"ok": True})
+        elif path == "/api/mcp/save":
+            server_id = mcp.save_server(body)
+            self._json({"server": mcp.start_server(server_id)})
+        elif path == "/api/mcp/start":
+            self._json({"server": mcp.start_server(int(body["id"]))})
+        elif path == "/api/mcp/configure":
+            self._json({"server": mcp.configure(int(body["id"]), body.get("env", {}))})
+        elif path == "/api/mcp/delete":
+            mcp.delete_server(int(body["id"]))
+            self._json({"ok": True})
 
         elif path == "/api/tools/run":
             self._handle_run(body)
         elif path == "/api/chat":
             self._handle_chat(body)
+        elif path == "/api/subagents/mcp-install":
+            self._handle_mcp_install(body)
         elif path == "/api/files/preview":
             self._handle_file_preview(body)
 
@@ -181,6 +212,25 @@ class _Handler(SimpleHTTPRequestHandler):
             error = {"op": "error", "message": str(exc)}
             try:
                 self.wfile.write(json.dumps(error, ensure_ascii=False).encode() + b"\n")
+                self.wfile.flush()
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+
+    def _handle_mcp_install(self, body: dict):
+        hint = body.get("hint", "")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/x-ndjson; charset=utf-8")
+        self.send_header("Cache-Control", "no-cache, no-transform")
+        self.send_header("Connection", "close")
+        self.end_headers()
+        try:
+            for event in subagents.mcp_install_stream(hint, self._workspace_path()):
+                self.wfile.write(json.dumps(event, ensure_ascii=False).encode() + b"\n")
+                self.wfile.flush()
+        except Exception as exc:
+            _logger.exception("mcp installer stream failed")
+            try:
+                self.wfile.write(json.dumps({"op": "error", "message": str(exc)}, ensure_ascii=False).encode() + b"\n")
                 self.wfile.flush()
             except (BrokenPipeError, ConnectionResetError):
                 pass

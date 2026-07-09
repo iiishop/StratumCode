@@ -36,11 +36,10 @@ EVIDENCE_STAGE = """\
 The user's message is the hypothesis. Do not generate a replacement hypothesis
 in this version of the agent.
 
-Use only the tools that fit the hypothesis. For a claim about this workspace,
-glob/grep/read are normally sufficient; web tools add no value unless the claim
-depends on external or current information. Start with glob/grep for local
-discovery, then read only the exact range needed. Do not survey the whole project
-when one or two entry points or manifests can decide the claim.
+Use only the tools that fit the hypothesis. Tool names and descriptions are the
+source of truth for what each tool can do; choose between built-in and MCP tools
+based on the current claim. Do not survey the whole project when one or two entry
+points or manifests can decide the claim.
 
 There is no fixed discovery-call budget. Keep searching when the verdict still
 depends on missing evidence, but do not keep searching after you already have a

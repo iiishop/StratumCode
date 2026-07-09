@@ -5,7 +5,7 @@ from enum import StrEnum
 
 from .evidence import EvidenceRun
 
-DISCOVERY_TOOLS = ("glob", "grep", "read", "websearch", "webfetch")
+DISCOVERY_TOOLS = ("glob", "grep", "read", "websearch", "webfetch", "subagent_mcp_install")
 EVIDENCE_TOOLS = ("record_evidence", "link_evidence", "conclude")
 
 
@@ -55,6 +55,7 @@ CHECKPOINT_INSTRUCTION = (
 class EvidencePolicy:
     """Phase hints and checkpoints for one evidence-gathering run."""
 
+    discovery_tools: tuple[str, ...] = DISCOVERY_TOOLS
     phase: EvidencePhase = EvidencePhase.SUPPORT
     max_rounds: int = 10
     max_read_lines: int = 80
@@ -104,7 +105,7 @@ class EvidencePolicy:
         return self.force_checkpoint or self.calls_since_evidence >= self.checkpoint_every
 
     def available_discovery_tools(self) -> tuple[str, ...]:
-        return DISCOVERY_TOOLS
+        return self.discovery_tools
 
     def prepare_discovery(self, name: str, arguments: dict) -> dict:
         prepared = dict(arguments)
@@ -123,6 +124,8 @@ class EvidencePolicy:
             prepared["pattern"] = prepared.get("pattern") or "**/*"
         elif name == "websearch":
             prepared["query"] = prepared.get("query") or ""
+        elif name == "subagent_mcp_install":
+            prepared["hint"] = prepared.get("hint") or prepared.get("url") or ""
         return prepared
 
     def note_discovery(self, name: str, arguments: dict, *, useful: bool) -> None:

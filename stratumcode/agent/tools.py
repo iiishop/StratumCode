@@ -11,6 +11,7 @@ COMPACT_DESCRIPTIONS = {
     "grep": "Search workspace files with regex.",
     "webfetch": "Fetch URL text.",
     "websearch": "Search the public web.",
+    "subagent_mcp_install": "Install MCP server via a focused subagent.",
 }
 
 

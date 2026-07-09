@@ -305,6 +305,7 @@ async def _websearch(params: dict, ctx: dict) -> ToolResult:
     if not query:
         return ToolResult.err("websearch", "query is required")
     url = "https://html.duckduckgo.com/html/?" + urlencode({"q": query})
+    failure = ""
     try:
         request = urllib.request.Request(
             url,
@@ -317,11 +318,16 @@ async def _websearch(params: dict, ctx: dict) -> ToolResult:
         parser.close()
         results = parser.results[:limit]
     except Exception as exc:
-        return ToolResult.err("websearch", str(exc))
+        results = []
+        failure = str(exc)
     if not results:
+        fallback = await _mcp_websearch(query, limit, failure or "search provider returned no results")
+        if fallback:
+            return fallback
         return ToolResult.err(
             f"search {query}",
-            "search provider returned no results; treat websearch as unavailable, not as evidence",
+            (failure or "search provider returned no results")
+            + "; websearch is unavailable and no MCP search fallback is available",
         )
     output = "\n\n".join(
         f"{index}. {item['title']}\n{item['url']}\n{item['snippet']}"
@@ -347,6 +353,64 @@ websearch_tool = ToolDef(
         "required": ["query"],
     },
     execute=_websearch,
+)
+
+
+async def _mcp_websearch(query: str, limit: int, reason: str) -> ToolResult | None:
+    from .. import registry as tool_registry
+
+    for tool in tool_registry.list_all():
+        if not tool.name.startswith("mcp_") or "search" not in tool.name:
+            continue
+        props = tool.parameters.get("properties", {}) if isinstance(tool.parameters, dict) else {}
+        tool_params = {"query": query}
+        for name in ("numResults", "num_results", "limit", "maxResults"):
+            if name in props:
+                tool_params[name] = limit
+        try:
+            result = await tool.execute(tool_params, {"directory": "."})
+        except Exception:
+            continue
+        if not result.title.startswith("[error]") and result.output.strip():
+            return ToolResult.ok(
+                f"search {query}",
+                result.output,
+                provider="mcp",
+                source_tool=tool.name,
+                fallback_reason=reason,
+            )
+    return None
+
+
+async def _subagent_mcp_install(params: dict, ctx: dict) -> ToolResult:
+    hint = (params.get("hint") or params.get("url") or "").strip()
+    if not hint:
+        return ToolResult.err("subagent_mcp_install", "hint is required")
+    from ... import subagents
+
+    packets = list(subagents.mcp_install_stream(hint, ctx.get("directory", ".")))
+    done = next((packet for packet in reversed(packets) if packet.get("op") == "done"), {})
+    if done.get("error"):
+        return ToolResult.err("subagent_mcp_install", done["error"])
+    server = done.get("server") or {}
+    output = (
+        f"Installed {server.get('name')} MCP server with "
+        f"{len(server.get('tools') or [])} tools. Status: {server.get('status')}."
+    )
+    return ToolResult.ok(output, output, events=packets, server=server)
+
+
+subagent_mcp_install_tool = ToolDef(
+    name="subagent_mcp_install",
+    description="Run the MCP installer subagent on a URL, docs page, or MCP config hint.",
+    parameters={
+        "type": "object",
+        "properties": {
+            "hint": {"type": "string", "description": "MCP docs URL, raw URL, or config information"},
+        },
+        "required": ["hint"],
+    },
+    execute=_subagent_mcp_install,
 )
 
 
@@ -394,6 +458,7 @@ BUILTIN: list[ToolDef] = [
     grep_tool,
     webfetch_tool,
     websearch_tool,
+    subagent_mcp_install_tool,
     todo_read_tool,
     invalid_tool,
 ]

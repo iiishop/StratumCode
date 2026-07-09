@@ -1,9 +1,10 @@
 <script setup>
-import { ref, onMounted } from 'vue'
+import { computed, ref, onMounted } from 'vue'
 import { gsap } from 'gsap'
+import { animate } from 'animejs'
 import HighlightedText from './HighlightedText.vue'
 
-defineProps({
+const props = defineProps({
   kind: { type: String, required: true },
   label: { type: String, required: true },
   detail: { type: String, default: '' },
@@ -16,6 +17,7 @@ defineProps({
 
 const emit = defineEmits(['toggle'])
 const surface = ref(null)
+const expanded = computed(() => props.collapsible ? props.open : true)
 
 onMounted(() => {
   if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) return
@@ -31,6 +33,45 @@ function moveSpotlight(event) {
   if (!bounds) return
   surface.value.style.setProperty('--spot-x', `${event.clientX - bounds.left}px`)
   surface.value.style.setProperty('--spot-y', `${event.clientY - bounds.top}px`)
+}
+
+function expandEnter(el, done) {
+  if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+    done()
+    return
+  }
+  el.style.overflow = 'hidden'
+  gsap.fromTo(el, { height: 0, autoAlpha: 0 }, {
+    height: el.scrollHeight,
+    autoAlpha: 1,
+    duration: .3,
+    ease: 'power3.out',
+    onComplete: () => {
+      gsap.set(el, { height: 'auto', clearProps: 'overflow' })
+      done()
+    },
+  })
+  animate(el.querySelector('.event-frame__body'), {
+    translateY: [-6, 0],
+    opacity: [0, 1],
+    duration: 260,
+    ease: 'outCubic',
+  })
+}
+
+function collapseLeave(el, done) {
+  if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+    done()
+    return
+  }
+  el.style.overflow = 'hidden'
+  gsap.fromTo(el, { height: el.scrollHeight, autoAlpha: 1 }, {
+    height: 0,
+    autoAlpha: 0,
+    duration: .24,
+    ease: 'power2.inOut',
+    onComplete: done,
+  })
 }
 </script>
 
@@ -54,11 +95,13 @@ function moveSpotlight(event) {
         <span v-if="status" class="event-frame__status" :class="{ 'is-running': status === 'running' }">{{ status }}</span>
         <span v-if="collapsible" class="event-frame__chevron" :class="{ 'is-open': open }">⌄</span>
       </button>
-      <div class="event-frame__expand" :class="{ 'is-open': open }">
-        <div class="event-frame__clip">
-          <div class="event-frame__body"><slot /></div>
+      <Transition @enter="expandEnter" @leave="collapseLeave">
+        <div v-show="expanded" class="event-frame__expand">
+          <div class="event-frame__clip">
+            <div class="event-frame__body"><slot /></div>
+          </div>
         </div>
-      </div>
+      </Transition>
     </div>
   </article>
 </template>
@@ -172,21 +215,12 @@ function moveSpotlight(event) {
 }
 .event-frame__chevron { color: #7f91a7; transition: transform .24s cubic-bezier(.22, 1, .36, 1); }.event-frame__chevron.is-open { transform: rotate(180deg); }
 .event-frame__expand {
-  display: grid;
-  grid-template-rows: 0fr;
-  opacity: 0;
-  transition:
-    grid-template-rows .34s cubic-bezier(.22, 1, .36, 1),
-    opacity .2s ease;
+  opacity: 1;
 }
-.event-frame__expand.is-open { grid-template-rows: 1fr; opacity: 1; }
 .event-frame__clip { min-height: 0; overflow: hidden; }
 .event-frame__body {
   padding: 0 11px 11px;
-  transform: translateY(-5px);
-  transition: transform .34s cubic-bezier(.22, 1, .36, 1);
 }
-.event-frame__expand.is-open .event-frame__body { transform: translateY(0); }
 @keyframes shiny { to { background-position: -220% 0; } }
 @keyframes node-pulse { 50% { box-shadow: 0 0 0 6px color-mix(in srgb, var(--event) 17%, transparent), 0 0 16px color-mix(in srgb, var(--event) 35%, transparent); } }
 @media (prefers-reduced-motion: reduce) {

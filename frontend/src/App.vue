@@ -1,12 +1,37 @@
 <script setup>
-import { ref, reactive, onMounted, onUnmounted, nextTick, watch } from 'vue'
+import { computed, ref, reactive, onMounted, onUnmounted, nextTick, watch } from 'vue'
 import { gsap } from 'gsap'
 import { animate, stagger as animeStagger } from 'animejs'
 import Sidebar from './components/Sidebar.vue'
 import HomePage from './components/HomePage.vue'
 import StageModelSettings from './components/providers/StageModelSettings.vue'
+import McpPage from './components/mcp/McpPage.vue'
+import { useMcp } from './composables/useMcp'
+import { useSessions } from './composables/useSessions'
+import { useWorkspaces } from './composables/useWorkspaces'
 
 const currentView = ref('home')
+const {
+  items: workspaces,
+  active: activeWorkspace,
+  error: workspaceError,
+  load: loadWorkspaces,
+  add: addWorkspace,
+  activate: activateWorkspace,
+  remove: deleteWorkspace,
+} = useWorkspaces()
+const sessionStore = useSessions()
+const mcpStore = useMcp()
+const activeSession = computed(() => sessionStore.active.value)
+const sessionItems = computed(() => sessionStore.items.value)
+const mcpServers = computed(() => mcpStore.items.value)
+const mcpLoading = computed(() => mcpStore.loading.value)
+const mcpError = computed(() => mcpStore.error.value)
+const currentTitle = computed(() => ({
+  home: 'Workspace',
+  providers: 'Providers',
+  mcp: 'MCP',
+})[currentView.value] || 'Workspace')
 const providers = ref([])
 const showForm = ref(false)
 const defaultPricingRule = () => ({
@@ -39,6 +64,68 @@ const presets = [
   { name: 'Mistral',      url: 'https://api.mistral.ai',       color: '#f59e0b' },
   { name: 'Ollama',       url: 'http://localhost:11434',        color: '#84cc16' },
 ]
+
+async function bootstrap() {
+  await Promise.all([loadWorkspaces(), mcpStore.load()])
+  if (activeWorkspace.value?.id) {
+    await sessionStore.load(activeWorkspace.value.id)
+    if (sessionStore.items.value[0]) await sessionStore.open(sessionStore.items.value[0].id)
+    else await createSession(activeWorkspace.value.id)
+  }
+}
+
+async function createSession(workspaceId = activeWorkspace.value?.id) {
+  if (!workspaceId) return
+  const session = await sessionStore.create(workspaceId)
+  currentView.value = 'home'
+  return session
+}
+
+async function openSession(id) {
+  await sessionStore.open(id)
+  currentView.value = 'home'
+}
+
+async function renameSession(id) {
+  const current = sessionStore.items.value.find(item => item.id === id) || activeSession.value
+  const name = window.prompt('Session name', current?.name || '')
+  if (!name) return
+  await sessionStore.rename(id, name, activeWorkspace.value?.id)
+}
+
+async function removeSession(id) {
+  if (!window.confirm('Delete this session?')) return
+  await sessionStore.remove(id, activeWorkspace.value?.id)
+  if (!sessionStore.active.value && activeWorkspace.value?.id) await createSession(activeWorkspace.value.id)
+}
+
+async function createSessionForWorkspace(workspace) {
+  await activateWorkspace(workspace.id)
+  await loadWorkspaces()
+  await sessionStore.load(workspace.id)
+  await createSession(workspace.id)
+}
+
+async function addWorkspacePrompt() {
+  const path = window.prompt('Local workspace path')
+  if (!path) return
+  await addWorkspace('', path)
+  await loadWorkspaces()
+}
+
+async function removeWorkspace(id) {
+  await deleteWorkspace(id)
+  await loadWorkspaces()
+  if (activeWorkspace.value?.id) await sessionStore.load(activeWorkspace.value.id)
+}
+
+async function saveActiveSessionState(state) {
+  if (!activeSession.value?.id) return
+  await sessionStore.saveState(activeSession.value.id, state)
+  const item = sessionStore.items.value.find(item => item.id === activeSession.value.id)
+  if (item) item.usage = state.usage
+  activeSession.value.usage = state.usage
+}
 
 function dedupName(name) {
   const existing = providers.value.map(p => p.name)
@@ -239,22 +326,43 @@ function statusLabel(s) {
   return ''
 }
 
-onMounted(() => { gsapCtx = gsap.context(() => {}, undefined) })
+onMounted(() => {
+  bootstrap()
+  gsapCtx = gsap.context(() => {}, undefined)
+})
 onUnmounted(() => { gsapCtx?.revert() })
 
-watch(currentView, (v) => { if (v === 'providers' && !providers.value.length) load() })
+watch(currentView, (v) => {
+  if (v === 'providers' && !providers.value.length) load()
+  if (v === 'mcp') mcpStore.load()
+})
 </script>
 
 <template>
   <div class="layout">
-    <Sidebar :active="currentView" @navigate="currentView = $event" />
+    <Sidebar
+      :active="currentView"
+      :workspaces="workspaces"
+      :active-workspace="activeWorkspace"
+      :sessions="sessionItems"
+      :active-session="activeSession"
+      :workspace-error="workspaceError"
+      @navigate="currentView = $event"
+      @add-workspace="addWorkspacePrompt"
+      @create-session="createSession"
+      @workspace-session="createSessionForWorkspace"
+      @open-session="openSession"
+      @rename-session="renameSession"
+      @delete-session="removeSession"
+      @delete-workspace="removeWorkspace"
+    />
 
     <section class="shell">
       <header class="shell__bar">
         <div class="shell__crumbs">
           <span>StratumCode</span>
           <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="m9 18 6-6-6-6"/></svg>
-          <strong>{{ currentView === 'home' ? 'Workspace' : 'Providers' }}</strong>
+          <strong>{{ currentTitle }}</strong>
         </div>
         <div class="shell__runtime"><span></span>Local runtime</div>
       </header>
@@ -441,8 +549,23 @@ watch(currentView, (v) => { if (v === 'providers' && !providers.value.length) lo
 
       <!-- Home view -->
       <KeepAlive>
-        <HomePage v-if="currentView === 'home'" />
+        <HomePage
+          v-if="currentView === 'home'"
+          :session="activeSession"
+          :mcp-servers="mcpServers"
+          @save-session-state="saveActiveSessionState"
+        />
       </KeepAlive>
+      <McpPage
+        v-if="currentView === 'mcp'"
+        :servers="mcpServers"
+        :loading="mcpLoading"
+        :error="mcpError"
+        @refresh="mcpStore.load"
+        @start="mcpStore.start"
+        @delete="mcpStore.remove"
+        @configure="mcpStore.configure"
+      />
       </main>
     </section>
   </div>
