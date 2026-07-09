@@ -19,6 +19,19 @@ function escapeRegExp(value) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 }
 
+function looksLikeURL(text, matchIndex, matchLength) {
+  const charBefore = text[matchIndex - 1] || ''
+  const after = text.slice(matchIndex + matchLength)
+  // domain segment: preceded by dot, followed by path-like continuation
+  if (charBefore === '.' && /^\w+(?:\/|#|\?|$)/.test(after)) return true
+  // URL path segment: preceded by / or ., protocol somewhere before
+  if (/[/.]/.test(charBefore)) {
+    const beforeAll = text.slice(0, matchIndex)
+    if (/https?:\/\/|ftp:\/\//.test(beforeAll)) return true
+  }
+  return false
+}
+
 const toolNames = computed(() => new Set(
   (providedToolNames?.value || []).map(name => String(name).toLowerCase()),
 ))
@@ -26,7 +39,7 @@ const toolNames = computed(() => new Set(
 const tokenPattern = computed(() => {
   const tools = [...toolNames.value].map(escapeRegExp).join('|')
   const agentPattern = '(@[\\w-]+)'
-  const filePattern = `((?:(?:[A-Za-z]:)?[\\w.-]*[\\\\/])?[\\w.-]+\\.(?:${fileExtensions}))`
+  const filePattern = `((?:(?:[A-Za-z]:)?[\\w.-]*[\\\\/])?[\\w-]+\\.(?:${fileExtensions}))`
   const codePattern = '(`[^`\\n]+`)'
   return new RegExp(`${agentPattern}|${filePattern}|${codePattern}${tools ? `|(\\b(?:${tools})\\b)` : ''}`, 'gi')
 })
@@ -40,7 +53,7 @@ const parts = computed(() => {
     const value = match[0]
     let type = 'code'
     if (value.startsWith('@')) type = props.context === 'prose' ? 'agent' : 'text'
-    else if (match[2]) type = 'file'
+    else if (match[2]) type = looksLikeURL(props.text, match.index, value.length) ? 'text' : 'file'
     else if (match[4] && toolNames.value.has(value.toLowerCase())) type = props.context === 'prose' && props.highlightTools ? 'tool' : 'text'
     else if (props.context === 'tool-data') type = 'text'
     result.push({ type, value: value.replace(/^`|`$/g, '') })
