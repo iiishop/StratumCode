@@ -14,25 +14,35 @@ async function request(path, body) {
 export function useSessions() {
   const items = ref([])
   const active = ref(null)
+  const scopeId = ref(null)
   const loading = ref(false)
   const error = ref('')
+  let loadVersion = 0
 
   async function load(workspaceId) {
+    const version = ++loadVersion
     if (!workspaceId) {
       items.value = []
       active.value = null
+      scopeId.value = null
       return
     }
+    if (scopeId.value !== workspaceId) {
+      active.value = null
+      items.value = []
+    }
+    scopeId.value = workspaceId
     loading.value = true
     error.value = ''
     try {
       const data = await request('/sessions/list', { workspace_id: workspaceId })
+      if (scopeId.value !== workspaceId || version !== loadVersion) return
       items.value = data.items || []
       if (active.value && !items.value.some(item => item.id === active.value.id)) active.value = null
     } catch (reason) {
-      error.value = reason.message
+      if (scopeId.value === workspaceId && version === loadVersion) error.value = reason.message
     } finally {
-      loading.value = false
+      if (scopeId.value === workspaceId && version === loadVersion) loading.value = false
     }
   }
 
@@ -46,6 +56,9 @@ export function useSessions() {
 
   async function open(id) {
     const data = await request('/sessions/get', { id })
+    if (scopeId.value && data.session.workspace_id !== scopeId.value) {
+      throw new Error('Session does not belong to the active workspace')
+    }
     active.value = data.session
     return data.session
   }
@@ -56,10 +69,17 @@ export function useSessions() {
     if (active.value?.id === id) active.value = await open(id)
   }
 
-  async function remove(id, workspaceId) {
+  async function remove(id) {
+    const wasActive = active.value?.id === id
     await request('/sessions/delete', { id })
-    await load(workspaceId)
-    if (active.value?.id === id) active.value = items.value[0] ? await open(items.value[0].id) : null
+    loadVersion += 1
+    loading.value = false
+    items.value = items.value.filter(item => item.id !== id)
+    if (wasActive) active.value = null
+  }
+
+  function clear() {
+    active.value = null
   }
 
   async function saveState(id, state) {
@@ -67,5 +87,5 @@ export function useSessions() {
     await request('/sessions/save-state', { id, state })
   }
 
-  return { items, active, loading, error, load, create, open, rename, remove, saveState }
+  return { items, active, loading, error, load, create, open, rename, remove, saveState, clear }
 }
