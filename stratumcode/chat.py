@@ -240,12 +240,15 @@ def analyzed_stream(
     workspace_dir: str,
     max_rounds: int | None = None,
     answer: dict | None = None,
+    analysis: dict | None = None,
 ) -> Iterator[dict]:
     answer_context = _answer_context(answer)
     if answer_context:
         context = context + answer_context
-    analysis = analyze_task(message, context, workspace_dir)
-    yield start_event(f"task-analysis-{uuid4().hex[:8]}", "task_analysis", analysis)
+    if analysis is None:
+        analysis = analyze_task(message, context, workspace_dir)
+        analysis["origin_message"] = message
+        yield start_event(f"task-analysis-{uuid4().hex[:8]}", "task_analysis", analysis)
     yield from investigator.investigation_stream(
         message=message,
         analysis=analysis,
@@ -416,9 +419,10 @@ def stream(request: dict, workspace_dir: str = ".") -> Iterator[dict]:
     if max_rounds is not None:
         max_rounds = min(50, max(1, int(max_rounds)))
     answer = request.get("answer") if isinstance(request.get("answer"), dict) else None
+    analysis = request.get("analysis") if answer and isinstance(request.get("analysis"), dict) else None
     if answer and str(answer.get("origin_message") or "").strip():
         message = str(answer["origin_message"]).strip()
-    return analyzed_stream(message, context, workspace_dir, max_rounds=max_rounds, answer=answer)
+    return analyzed_stream(message, context, workspace_dir, max_rounds=max_rounds, answer=answer, analysis=analysis)
 
 
 def _answer_context(answer: dict | None) -> list[str]:
@@ -430,12 +434,12 @@ def _answer_context(answer: dict | None) -> list[str]:
     response = str(answer.get("response") or answer.get("text") or "").strip()
     if not response:
         return []
-    lines = ["User answered a pending agent question."]
+    lines = [app_settings.text("answer_context")]
     if question_id:
-        lines.append(f"Answered question id: {question_id}")
+        lines.append(app_settings.text("answered_question_id", id=question_id))
     if question:
-        lines.append(f"Question: {question}")
+        lines.append(app_settings.text("question", question=question))
     if selected:
-        lines.append(f"Selected option: {selected}")
-    lines.append(f"User answer: {response}")
+        lines.append(app_settings.text("selected_option", option=selected))
+    lines.append(app_settings.text("user_answer", answer=response))
     return lines

@@ -256,11 +256,15 @@ async function send(answer = null) {
   nextTick(() => { scrollBottom(); animateLast() })
   try {
     const structuredAnswer = answer || answerPayloadFromPending(text)
+    const origin = structuredAnswer?.origin_message || activeTaskAnalysis.value?.origin_message || text
     const request = {
-      message: structuredAnswer?.origin_message || text,
+      message: origin,
       context: fileContext.map(file => file.path),
     }
-    if (structuredAnswer) request.answer = structuredAnswer
+    if (structuredAnswer) {
+      request.answer = { ...structuredAnswer, origin_message: origin }
+      if (activeTaskAnalysis.value) request.analysis = plain(activeTaskAnalysis.value)
+    }
     await chatStream(message, request)
     if (structuredAnswer) pendingQuestion.value = null
   } catch (error) {
@@ -305,6 +309,28 @@ function answerQuestion(answer) {
   })
 }
 
+function applyTaskUpdate(update) {
+  const analysis = activeTaskAnalysis.value
+  if (!analysis || !Array.isArray(update?.items)) return
+  if (!Array.isArray(analysis.task_updates)) analysis.task_updates = []
+  for (const item of update.items) {
+    const text = String(item?.text || '').trim()
+    if (!text) continue
+    const id = item.id || `${item.kind || 'unknown'}:${text}`
+    const existing = analysis.task_updates.find(row => (row.id && row.id === id) || row.text === text)
+    const next = {
+      id,
+      kind: item.kind || 'unknown',
+      text,
+      status: item.status || 'updated',
+      reason: item.reason || '',
+      trace: Array.isArray(item.trace) ? item.trace : [],
+    }
+    if (existing) Object.assign(existing, next)
+    else analysis.task_updates.push(next)
+  }
+}
+
 /* ── animation helpers ──────────────────────────────────── */
 
 function animSmoothScroll() {
@@ -345,9 +371,14 @@ function onAgentPacket(packet, type, data) {
     evidenceRuns.push(run)
     activeRunId.value = run.id
   } else if (packet.op === 'start' && type === 'task_analysis') {
+    data.origin_message ||= messages[messages.length - 2]?.content || ''
     taskAnalyses.push(data)
     inspectorTab.value = 'tasks'
+  } else if (packet.op === 'start' && type === 'task_update') {
+    applyTaskUpdate(data)
+    inspectorTab.value = 'tasks'
   } else if (packet.op === 'start' && type === 'user_question') {
+    data.origin_message ||= activeTaskAnalysis.value?.origin_message || ''
     pendingQuestion.value = plain(data)
   } else if (packet.op === 'start' && type === 'evidence') {
     const run = currentEvidenceRun()

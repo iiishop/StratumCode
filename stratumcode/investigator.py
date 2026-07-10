@@ -163,6 +163,8 @@ def investigation_stream(
     }}
     step = _step_result(final)
     yield start_event(f"{run_id}-step-result", "step_result", step)
+    if final.get("task_updates"):
+        yield start_event(f"{run_id}-task-update", "task_update", {"items": final["task_updates"]})
     if step["next_step"] == "ask_user":
         yield start_event(f"{run_id}-user-question", "user_question", _user_question(final, step, message))
         yield {"op": "done", "investigation": final}
@@ -234,6 +236,27 @@ def _finish_tool_schema() -> dict:
                     },
                 },
                 "patch_planning_context": {"type": "array", "items": {"type": "string"}},
+                "task_updates": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "id": {"type": "string"},
+                            "kind": {
+                                "type": "string",
+                                "enum": ["goal", "constraint", "hypothesis", "clue", "unknown", "work"],
+                            },
+                            "text": {"type": "string"},
+                            "status": {
+                                "type": "string",
+                                "enum": ["unknown", "known", "deferred", "blocked", "added", "updated"],
+                            },
+                            "reason": {"type": "string"},
+                            "trace": {"type": "array", "items": {"type": "string"}},
+                        },
+                        "required": ["text", "status"],
+                    },
+                },
             },
             "required": ["summary", "ready_for_patch_planning"],
         },
@@ -432,6 +455,7 @@ def _finish_payload(arguments: dict) -> dict:
         "beliefs": arguments.get("beliefs") if isinstance(arguments.get("beliefs"), list) else [],
         "open_questions": open_questions,
         "unknowns": unknowns,
+        "task_updates": _task_updates(arguments.get("task_updates"), arguments.get("beliefs"), unknowns),
         "patch_planning_context": (
             arguments.get("patch_planning_context")
             if isinstance(arguments.get("patch_planning_context"), list)
@@ -442,6 +466,55 @@ def _finish_payload(arguments: dict) -> dict:
 
 def _clean_questions(value: list) -> list[str]:
     return [text for item in value if (text := str(item).strip())]
+
+
+def _task_updates(value, beliefs, unknowns: list[dict]) -> list[dict]:
+    updates = []
+    if isinstance(value, list):
+        for raw in value:
+            if not isinstance(raw, dict):
+                continue
+            text = str(raw.get("text") or "").strip()
+            status = str(raw.get("status") or "").strip()
+            if not text or status not in {"unknown", "known", "deferred", "blocked", "added", "updated"}:
+                continue
+            trace = raw.get("trace") if isinstance(raw.get("trace"), list) else []
+            updates.append({
+                "id": str(raw.get("id") or "").strip(),
+                "kind": str(raw.get("kind") or "unknown").strip() or "unknown",
+                "text": text,
+                "status": status,
+                "reason": str(raw.get("reason") or "").strip(),
+                "trace": [str(item).strip() for item in trace if str(item).strip()][:6],
+            })
+    known_texts = {item["text"] for item in updates if item["status"] == "known"}
+    for item in beliefs if isinstance(beliefs, list) else []:
+        if not isinstance(item, dict):
+            continue
+        statement = str(item.get("statement") or "").strip()
+        if not statement or statement in known_texts:
+            continue
+        status = str(item.get("status") or "")
+        if status in {"supported", "strongly_supported", "runtime_confirmed"}:
+            evidence = item.get("evidence") if isinstance(item.get("evidence"), list) else []
+            updates.append({
+                "id": "",
+                "kind": "unknown",
+                "text": statement,
+                "status": "known",
+                "reason": app_settings.text("belief_is", status=status),
+                "trace": [str(entry) for entry in evidence[:6]],
+            })
+    for item in unknowns:
+        updates.append({
+            "id": item.get("id", ""),
+            "kind": "unknown",
+            "text": item["question"],
+            "status": "blocked" if item.get("blocking") else "deferred",
+            "reason": item.get("resolution_strategy", ""),
+            "trace": [],
+        })
+    return updates[:8]
 
 
 def _step_result(final: dict) -> dict:
@@ -463,7 +536,7 @@ def _step_result(final: dict) -> dict:
     if final.get("ready_for_patch_planning"):
         return {
             "next_step": "write_code",
-            "continue_reason": final.get("summary") or "Investigation is ready for patch planning.",
+            "continue_reason": final.get("summary") or app_settings.text("ready_patch"),
             "target_unknown_ids": [],
         }
     open_questions = final.get("open_questions") or []
@@ -471,7 +544,7 @@ def _step_result(final: dict) -> dict:
         "next_step": "ask_user" if open_questions else "failed",
         "continue_reason": "; ".join(str(item) for item in open_questions[:3])
         or final.get("summary")
-        or "Investigation did not reach patch planning readiness.",
+        or app_settings.text("not_ready_patch"),
         "target_unknown_ids": [],
     }
 
@@ -493,9 +566,9 @@ def _user_question(final: dict, step: dict, origin_message: str = "") -> dict:
         "origin_message": origin_message,
         "reason": step["continue_reason"],
         "why_it_matters": (
-            f"This answer resolves blocking unknown {unknown_id} before patch planning."
+            app_settings.text("resolves_unknown", id=unknown_id)
             if unknown_id
-            else "This answer resolves an open decision before patch planning."
+            else app_settings.text("resolves_open")
         ),
         "blocks_next_step": "patch_planning",
         "target_unknown_ids": [unknown_id] if unknown_id else list(step.get("target_unknown_ids") or []),
@@ -556,70 +629,70 @@ def _question_options(question: str) -> list[dict]:
         return [
             {
                 "id": "any_key",
-                "label": "Any key",
-                "value": "Allow users to set any keyboard key as the trigger.",
+                "label": app_settings.text("any_key_label"),
+                "value": app_settings.text("any_key_value"),
             },
             {
                 "id": "modifiers_only",
-                "label": "Modifiers only",
-                "value": "Only allow modifier keys such as Alt/Ctrl/Shift/Win as triggers.",
+                "label": app_settings.text("modifiers_only_label"),
+                "value": app_settings.text("modifiers_only_value"),
                 "recommended": True,
             },
             {
                 "id": "continue_research",
-                "label": "Research more",
-                "value": "Continue investigating the existing hotkey design before deciding.",
+                "label": app_settings.text("research_more_label"),
+                "value": app_settings.text("research_hotkey_value"),
             },
         ]
     if any(word in text for word in ("pyobjc", "quartz", "applescript", "window manipulation")):
         return [
             {
                 "id": "pyobjc_quartz",
-                "label": "Use PyObjC/Quartz",
-                "value": "Use PyObjC/Quartz Accessibility API for macOS window manipulation.",
+                "label": app_settings.text("pyobjc_label"),
+                "value": app_settings.text("pyobjc_value"),
                 "recommended": True,
             },
             {
                 "id": "applescript",
-                "label": "Use AppleScript",
-                "value": "Use AppleScript/osascript for macOS window manipulation.",
+                "label": app_settings.text("applescript_label"),
+                "value": app_settings.text("applescript_value"),
             },
             {
                 "id": "research_more",
-                "label": "Research more",
-                "value": "Continue researching macOS window manipulation before editing code.",
+                "label": app_settings.text("research_more_label"),
+                "value": app_settings.text("research_window_value"),
             },
         ]
     if any(word in text for word in ("password", "hash")):
         return [
             {
                 "id": "hash_passwords",
-                "label": "Hash passwords",
-                "value": "Passwords must be hashed; implement the project default securely.",
+                "label": app_settings.text("hash_passwords_label"),
+                "value": app_settings.text("hash_passwords_value"),
                 "recommended": True,
             },
             {
                 "id": "prototype_only",
-                "label": "Prototype only",
-                "value": "This is only a prototype; do not add password hashing yet.",
+                "label": app_settings.text("prototype_only_label"),
+                "value": app_settings.text("prototype_only_value"),
             },
             {
                 "id": "ask_details",
-                "label": "Ask me details",
-                "value": "Ask for more password storage and authentication policy details first.",
+                "label": app_settings.text("ask_details_label"),
+                "value": app_settings.text("ask_details_value"),
             },
         ]
     return [
         {
             "id": "best_practice",
-            "label": "Use best practice",
-            "value": f"Use standard engineering best practice for this decision: {question}",
+            "label": app_settings.text("best_practice_label"),
+            "value": app_settings.text("best_practice_value", question=question),
             "recommended": True,
         },
         {
             "id": "continue_research",
-            "label": "Research more",
-            "value": f"Continue investigating this decision before choosing: {question}",
+            "label": app_settings.text("research_more_label"),
+            "value": app_settings.text("research_decision_value", question=question),
         },
     ]
 
@@ -648,15 +721,15 @@ def _unknowns(value) -> list[dict]:
 def _summary(final: dict) -> str:
     lines = [final.get("summary") or "Investigation complete."]
     if final.get("beliefs"):
-        lines.append("\nBeliefs:")
+        lines.append(f"\n{app_settings.text('summary_beliefs')}")
         lines.extend(
             f"- {item.get('status', 'unverified')}: {item.get('statement', '')}"
             for item in final["beliefs"][:8]
         )
     if final.get("open_questions"):
-        lines.append("\nOpen questions:")
+        lines.append(f"\n{app_settings.text('summary_open_questions')}")
         lines.extend(f"- {item}" for item in final["open_questions"][:5])
     if final.get("patch_planning_context"):
-        lines.append("\nPatch planning context:")
+        lines.append(f"\n{app_settings.text('summary_patch_context')}")
         lines.extend(f"- {item}" for item in final["patch_planning_context"][:8])
     return "\n".join(lines)

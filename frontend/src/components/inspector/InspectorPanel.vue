@@ -50,13 +50,23 @@ const tabs = ['evidence', 'sessions', 'workspace', 'mcp', 'subagents', 'tasks', 
 const analysisRows = computed(() => {
   const analysis = props.taskAnalysis
   if (!analysis) return []
-  return [
-    { kind: 'goal', text: analysis.intent?.summary },
-    ...(analysis.constraints || []).map(text => ({ kind: 'constraint', text })),
-    ...(analysis.hypotheses || []).map(item => ({ kind: item.certainty || 'hypothesis', text: item.text })),
-    ...(analysis.clues || []).map(item => ({ kind: item.kind || 'clue', text: item.path ? `${item.path}${item.line ? `:${item.line}` : ''}` : item.value })),
-    ...(analysis.unknowns || []).map(text => ({ kind: 'unknown', text })),
+  const updates = Array.isArray(analysis.task_updates) ? analysis.task_updates : []
+  const updateFor = (text) => updates.find(item => item.text === text)
+  const used = new Set()
+  const withUpdate = (row) => {
+    const update = updateFor(row.text)
+    if (update) used.add(update)
+    return update ? { ...row, ...update, kind: update.kind || row.kind } : row
+  }
+  const rows = [
+    withUpdate({ kind: 'goal', text: analysis.intent?.summary, status: 'goal' }),
+    ...(analysis.constraints || []).map(text => withUpdate({ kind: 'constraint', text, status: 'constraint' })),
+    ...(analysis.hypotheses || []).map(item => withUpdate({ kind: item.certainty || 'hypothesis', text: item.text, status: 'unknown' })),
+    ...(analysis.clues || []).map(item => withUpdate({ kind: item.kind || 'clue', text: item.path ? `${item.path}${item.line ? `:${item.line}` : ''}` : item.value, status: 'clue' })),
+    ...(analysis.unknowns || []).map(text => withUpdate({ kind: 'unknown', text, status: 'unknown' })),
   ].filter(item => item.text)
+  rows.push(...updates.filter(item => !used.has(item) && item.text))
+  return rows
 })
 
 onMounted(() => {
@@ -341,9 +351,13 @@ function addWorkspace() {
           <p>{{ taskAnalysis.intent?.type || 'other' }} / {{ taskAnalysis.provider || 'model' }} / {{ taskAnalysis.model || 'unknown' }}</p>
         </section>
         <div v-if="analysisRows.length" class="analysis-task-list">
-          <div v-for="item in analysisRows" :key="`${item.kind}:${item.text}`" class="analysis-task-row">
-            <b>{{ item.kind }}</b>
-            <span>{{ item.text }}</span>
+          <div v-for="item in analysisRows" :key="`${item.kind}:${item.text}`" class="analysis-task-row" :class="`is-${item.status || 'unknown'}`">
+            <b>{{ item.status || item.kind }}</b>
+            <span>
+              <strong>{{ item.text }}</strong>
+              <small v-if="item.reason">{{ item.reason }}</small>
+              <em v-if="item.trace?.length">{{ item.trace.join(' -> ') }}</em>
+            </span>
           </div>
         </div>
         <button v-for="item in todos" :key="item.id" class="task-row" :class="{ done: item.done }" @click="emit('toggle-todo', item.id)">
@@ -449,8 +463,17 @@ function addWorkspace() {
 .analysis-card { display: grid; gap: 5px; margin-bottom: 9px; padding: 11px; border: 1px solid #cfdced; border-radius: 10px; background: #fff; }.analysis-card small { color: #6658c7; font: 800 8px/1 var(--mono); text-transform: uppercase; letter-spacing: .06em; }.analysis-card strong { color: #294564; font-size: 11.5px; line-height: 1.4; }.analysis-card p { margin: 0; color: #7188a3; font: 8.5px/1.35 var(--mono); }
 .analysis-task-list { display: grid; gap: 5px; margin-bottom: 10px; }
 .analysis-task-row { display: grid; grid-template-columns: 72px minmax(0, 1fr); gap: 7px; padding: 8px; border: 1px solid #d9e4f1; border-radius: 8px; background: #fff; }
+.analysis-task-row.is-goal,
+.analysis-task-row.is-constraint,
+.analysis-task-row.is-clue { border-color: #d9e4f1; background: #fff; }
+.analysis-task-row.is-known { border-color: #bddfce; background: #f3fbf7; }
+.analysis-task-row.is-blocked { border-color: #ead08a; background: #fff9e6; }
+.analysis-task-row.is-deferred { border-color: #d5dce7; background: #f7f9fc; }
 .analysis-task-row b { overflow: hidden; color: #6658c7; font: 800 8px/1.35 var(--mono); text-overflow: ellipsis; text-transform: uppercase; }
-.analysis-task-row span { min-width: 0; color: #37516f; font-size: 10px; line-height: 1.4; overflow-wrap: anywhere; }
+.analysis-task-row span { display: grid; gap: 3px; min-width: 0; color: #37516f; font-size: 10px; line-height: 1.4; overflow-wrap: anywhere; }
+.analysis-task-row strong { font-size: 10px; font-weight: 600; }
+.analysis-task-row small { color: #5d7188; font-size: 9px; line-height: 1.35; }
+.analysis-task-row em { color: #8798ac; font: 8.5px/1.35 var(--mono); font-style: normal; }
 .inspector-tool { display: grid; grid-template-columns: 28px 1fr auto; align-items: center; gap: 9px; margin-bottom: 6px; padding: 9px; border: 1px solid #d7e2ef; border-radius: 9px; background: #fff; }.inspector-tool > b { display: grid; width: 27px; height: 27px; place-items: center; border-radius: 7px; color: #1756d1; background: #e8f0ff; font: 800 10px/1 var(--mono); }.inspector-tool div { display: grid; gap: 3px; }.inspector-tool strong { font: 700 10px/1 var(--mono); }.inspector-tool small { color: #778ba4; font-size: 9px; line-height: 1.35; }.inspector-tool > span { color: #8da0b6; font: 800 9px/1 var(--mono); }
 .mcp-row { margin-bottom: 7px; padding: 10px; border: 1px solid #d7e2ef; border-radius: 10px; background: #fff; }
 .subagent-row {

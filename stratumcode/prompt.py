@@ -13,6 +13,9 @@ OUTPUT_LANGUAGE = """\
 ## Output language
 Write user-visible prose in {language}. This applies to summaries, questions,
 belief statements, open questions, reasoning notes, and option text.
+When returning JSON, user-visible string values such as summaries, questions,
+belief statements, reasons, task_updates.text, task_updates.reason, and
+patch_planning_context must also use {language}.
 Do not translate tool names, JSON field names, code, file paths, identifiers,
 commands, URLs, quoted evidence excerpts, tool arguments, or tool outputs."""
 
@@ -232,9 +235,16 @@ finish_investigation with:
 - open_questions for facts still unresolved.
 - unknowns with blocking and resolution_strategy for every unresolved fact.
 - patch_planning_context for concrete facts a later patch planner can rely on.
+- task_updates for task panel progress:
+  - mark initial unknowns as status=known when evidence or beliefs resolve them.
+  - keep unresolved unknowns as status=unknown or status=deferred.
+  - add newly discovered important work or questions when investigation reveals them.
+  - include a short reason and trace references such as file paths, line ranges,
+    tool call ids, belief statements, or evidence ids.
 
 Keep the JSON compact: at most 6 beliefs, 5 open_questions, and 10
-patch_planning_context entries. Each string should be one short sentence.
+patch_planning_context entries. Each string should be one short sentence. Keep
+task_updates to at most 8 items.
 
 If the observed facts are enough to plan a patch, set ready_for_patch_planning
 to true. If any unresolved unknown blocks choosing the implementation path, set
