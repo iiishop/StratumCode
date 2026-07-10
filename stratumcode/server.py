@@ -12,6 +12,7 @@ _logger = logging.getLogger(__name__)
 _MAX_BODY_SIZE = 1_000_000
 _FILE_PREVIEW_LINES = 120
 _FILE_PREVIEW_BYTES = 64_000
+_IGNORED_DIRS = {".git", ".venv", "venv", "node_modules", "dist", "__pycache__", ".pytest_cache"}
 
 
 class _Handler(SimpleHTTPRequestHandler):
@@ -46,6 +47,8 @@ class _Handler(SimpleHTTPRequestHandler):
         elif self.path == "/api/mcp":
             mcp.load_enabled()
             self._json({"items": mcp.list_all()})
+        elif self.path == "/api/files/list":
+            self._handle_file_list()
         elif self.path == "/api/tools":
             mcp.load_enabled()
             self._json([t.to_json() for t in registry.list_all()])
@@ -248,6 +251,23 @@ class _Handler(SimpleHTTPRequestHandler):
                 self.wfile.flush()
             except (BrokenPipeError, ConnectionResetError):
                 pass
+
+    def _handle_file_list(self):
+        root = Path(self._workspace_path()).resolve()
+        items = []
+        for p in root.rglob("*"):
+            try:
+                rel = p.relative_to(root)
+            except ValueError:
+                continue
+            if any(part.startswith(".") or part in _IGNORED_DIRS for part in rel.parts):
+                continue
+            items.append({
+                "path": rel.as_posix(),
+                "type": "dir" if p.is_dir() else "file",
+            })
+        items.sort(key=lambda x: (0 if x["type"] == "dir" else 1, x["path"].casefold()))
+        self._json({"files": items})
 
     def _handle_file_preview(self, body: dict):
         path = body.get("path")

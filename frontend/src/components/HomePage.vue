@@ -4,6 +4,7 @@ import { gsap } from 'gsap'
 import ChatEvent from './chat/ChatEvent.vue'
 import { useChatStream } from '../composables/useChatStream'
 import FileReference from './FileReference.vue'
+import FileMentionDropdown from './FileMentionDropdown.vue'
 import InspectorPanel from './inspector/InspectorPanel.vue'
 
 const props = defineProps({
@@ -35,11 +36,7 @@ const todos = reactive([
 ])
 
 /* ── file context ── */
-const defaultFileContext = () => [
-  { path: 'stratumcode/providers.py', lang: 'python' },
-  { path: 'stratumcode/server.py',    lang: 'python' },
-]
-const fileContext = reactive(defaultFileContext())
+const fileContext = reactive([])
 
 const suggestions = [
   { label: 'Run the tool workflow', detail: 'See read and grep calls in action', prompt: 'Inspect the server tools and show me how they work' },
@@ -59,6 +56,96 @@ const messages = reactive([])
 const msgRefs = reactive({})
 const isStreaming = ref(false)
 const pendingQuestion = ref(null)
+const textareaRef = ref(null)
+
+/* ── mention state ── */
+const mentionFiles = ref([])
+const mentionFilesLoaded = ref(false)
+const mentionActive = ref(false)
+const mentionSearch = ref('')
+const mentionStartPos = ref(-1)
+const mentionDropdownTop = ref(0)
+const mentionDropdownLeft = ref(0)
+
+async function loadMentionFiles() {
+  if (mentionFilesLoaded.value) return
+  try {
+    const res = await fetch('/api/files/list')
+    if (!res.ok) throw new Error(`Failed to load file list (${res.status})`)
+    const data = await res.json()
+    mentionFiles.value = data.files || []
+    mentionFilesLoaded.value = true
+  } catch {
+    mentionFiles.value = []
+  }
+}
+
+function mentionInsert(path) {
+  if (!textareaRef.value) return
+  const ta = textareaRef.value
+  const before = ta.value.substring(0, mentionStartPos.value)
+  const after = ta.value.substring(ta.selectionStart)
+  input.value = before + after
+  mentionActive.value = false
+  mentionSearch.value = ''
+  mentionStartPos.value = -1
+  addToFileContext(path)
+  nextTick(() => {
+    const pos = before.length
+    ta.setSelectionRange(pos, pos)
+    ta.focus()
+  })
+}
+
+function addToFileContext(path) {
+  if (fileContext.find(f => f.path === path)) return
+  const ext = path.includes('.') ? path.split('.').pop().toLowerCase() : ''
+  fileContext.push({ path, lang: ext || 'text' })
+}
+
+function onTextareaInput() {
+  const ta = textareaRef.value
+  if (!ta) return
+  const cursor = ta.selectionStart
+  const text = ta.value
+  const atPos = text.lastIndexOf('@', cursor)
+  if (atPos < 0 || (atPos > 0 && /\w/.test(text[atPos - 1]))) {
+    mentionActive.value = false
+    return
+  }
+  const between = text.substring(atPos + 1, cursor)
+  if (/\s/.test(between)) {
+    mentionActive.value = false
+    return
+  }
+  mentionStartPos.value = atPos
+  mentionSearch.value = between
+  mentionActive.value = true
+  const rect = ta.getBoundingClientRect()
+  const ddHeight = 324
+  const ddWidth = 300
+  if (rect.bottom + ddHeight + 8 > window.innerHeight) {
+    mentionDropdownTop.value = Math.max(4, rect.top - ddHeight - 4)
+  } else {
+    mentionDropdownTop.value = rect.bottom + 4
+  }
+  mentionDropdownLeft.value = Math.min(rect.left, window.innerWidth - ddWidth - 8)
+  loadMentionFiles()
+}
+
+function onTextareaKeydown(e) {
+  if (e.defaultPrevented) return
+  if (mentionActive.value && (e.key === 'ArrowDown' || e.key === 'ArrowUp' || e.key === 'Enter' || e.key === 'Tab' || e.key === 'Escape')) {
+    return
+  }
+  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send() }
+}
+
+function closeMention() {
+  mentionActive.value = false
+  mentionSearch.value = ''
+  mentionStartPos.value = -1
+}
 const emptyEvidenceRun = reactive({
   id: '',
   hypothesis: '',
@@ -199,7 +286,7 @@ function restoreState(state = {}) {
   subagentRuns.splice(0, subagentRuns.length, ...(state.subagentRuns || []).map(run => reactive(run)))
   pendingQuestion.value = state.pendingQuestion || null
   activeRunId.value = state.activeRunId || ''
-  fileContext.splice(0, fileContext.length, ...((state.fileContext && state.fileContext.length) ? state.fileContext : defaultFileContext()))
+  fileContext.splice(0, fileContext.length, ...(state.fileContext || []))
   Object.assign(sessionUsage, usageDefaults(), state.usage || {})
   Object.assign(agentStatus, { state: 'idle', phase: '', provider: '', model: '', contextLength: null, contextUsed: 0 })
   nextTick(scrollBottom)
@@ -358,10 +445,6 @@ function animSmoothScroll() {
   gsap.to(msgList.value, { scrollTop: msgList.value.scrollHeight, duration: 0.25, ease: 'power2.out' })
 }
 
-function onKeydown(e) {
-  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send() }
-}
-
 function scrollBottom() { if (msgList.value) msgList.value.scrollTop = msgList.value.scrollHeight }
 
 function upsertSubagent(data) {
@@ -480,6 +563,11 @@ onUnmounted(() => { abortChat(); gsapCtx?.revert(); clearTimeout(saveTimer) })
 watch(() => props.session?.id, () => {
   restoreState(props.session?.state || {})
 }, { immediate: true })
+
+watch(() => props.activeWorkspace?.id, () => {
+  mentionFiles.value = []
+  mentionFilesLoaded.value = false
+})
 </script>
 
 <template>
@@ -654,11 +742,13 @@ watch(() => props.session?.id, () => {
 
         <div class="chat__input-row">
           <textarea
+            ref="textareaRef"
             v-model="input"
             class="chat__input"
             placeholder="Ask StratumCode to inspect or change the project"
             rows="1"
-            @keydown="onKeydown"
+            @keydown="onTextareaKeydown"
+            @input="onTextareaInput"
             :disabled="isStreaming"
           ></textarea>
           <button class="chat__send" type="button" @click="send" :disabled="!input.trim() || isStreaming" aria-label="Send message">
@@ -671,6 +761,16 @@ watch(() => props.session?.id, () => {
         <div class="chat__composer-meta">
           <span>Enter to send</span>
         </div>
+
+        <FileMentionDropdown
+          :files="mentionFiles"
+          :search-text="mentionSearch"
+          :visible="mentionActive"
+          :top="mentionDropdownTop"
+          :left="mentionDropdownLeft"
+          @select="mentionInsert"
+          @close="closeMention"
+        />
       </div>
     </div>
 
