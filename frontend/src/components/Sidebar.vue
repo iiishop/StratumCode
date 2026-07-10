@@ -52,6 +52,12 @@ const nav = [
     icon: 'M7 8h10M7 12h10M7 16h10M4 5h16v14H4z',
   },
   {
+    id: 'lsp',
+    label: 'LSP',
+    detail: 'Language intelligence',
+    icon: 'M6 5h12v14H6z M9 9h6 M9 13h4 M3 8h3 M18 8h3 M3 16h3 M18 16h3',
+  },
+  {
     id: 'settings',
     label: 'Settings',
     detail: 'Agent behavior',

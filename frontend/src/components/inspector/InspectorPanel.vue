@@ -51,10 +51,10 @@ const analysisRows = computed(() => {
   const analysis = props.taskAnalysis
   if (!analysis) return []
   const updates = Array.isArray(analysis.task_updates) ? analysis.task_updates : []
-  const updateFor = (text) => updates.find(item => item.text === text)
+  const updateFor = (row) => updates.find(item => sameTaskItem(item, row))
   const used = new Set()
   const withUpdate = (row) => {
-    const update = updateFor(row.text)
+    const update = updateFor(row)
     if (update) used.add(update)
     return update ? { ...row, ...update, kind: update.kind || row.kind } : row
   }
@@ -68,6 +68,24 @@ const analysisRows = computed(() => {
   rows.push(...updates.filter(item => !used.has(item) && item.text))
   return rows
 })
+
+function normalizedTaskText(value) {
+  return String(value || '')
+    .replace(/[（(][^）)]*[）)]/g, '')
+    .replace(/[^\p{L}\p{N}]+/gu, '')
+    .toLowerCase()
+}
+
+function sameTaskItem(left, right) {
+  if (!left || !right) return false
+  if (left.id && right.id && left.id === right.id) return true
+  const leftTrace = Array.isArray(left.trace) ? left.trace : []
+  const rightTrace = Array.isArray(right.trace) ? right.trace : []
+  if ((left.id && rightTrace.includes(left.id)) || (right.id && leftTrace.includes(right.id))) return true
+  const a = normalizedTaskText(left.text)
+  const b = normalizedTaskText(right.text)
+  return Boolean(a && b && (a === b || a.includes(b) || b.includes(a)))
+}
 
 onMounted(() => {
   if (!matchMedia('(prefers-reduced-motion: reduce)').matches) {

@@ -34,6 +34,8 @@ def investigation_stream(
     workspace_dir: str,
     max_rounds: int | None = None,
     findings: list[str] | None = None,
+    previous_observations: list[dict] | None = None,
+    previous_knowledge: list[dict] | None = None,
 ) -> Iterator[dict]:
     setting = (
         model_settings.resolve(model_settings.DEFAULT_STAGE)
@@ -80,6 +82,9 @@ def investigation_stream(
     ]
     if findings:
         messages.insert(2, {"role": "system", "content": "\n".join(findings)})
+    prior_lines = _previous_context(previous_observations, previous_knowledge)
+    if prior_lines:
+        messages.insert(2, {"role": "system", "content": "\n".join(prior_lines)})
     tools = _investigation_tools()
     final = None
 
@@ -190,6 +195,19 @@ def _investigation_tools() -> list[dict]:
     ]
     tools.append(_finish_tool_schema())
     return tools
+
+
+def _previous_context(observations: list[dict] | None, knowledge: list[dict] | None) -> list[str]:
+    lines = []
+    fresh_knowledge = [item for item in knowledge or [] if item.get("fresh", True)]
+    fresh_observations = [item for item in observations or [] if item.get("fresh")]
+    if fresh_knowledge:
+        lines.append("PREVIOUS SUPPORTED KNOWLEDGE:")
+        lines.extend(f"- {item.get('id', '')}: {item.get('statement', '')}" for item in fresh_knowledge[:12])
+    if fresh_observations:
+        lines.append("PREVIOUS OBSERVATIONS:")
+        lines.extend(f"- {item.get('id', '')}: {item.get('summary') or item.get('title') or item.get('tool', '')}" for item in fresh_observations[:20])
+    return lines
 
 
 def _finish_tool_schema() -> dict:

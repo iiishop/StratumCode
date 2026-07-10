@@ -237,6 +237,7 @@ finish_investigation with:
 - patch_planning_context for concrete facts a later patch planner can rely on.
 - task_updates for task panel progress:
   - mark initial unknowns as status=known when evidence or beliefs resolve them.
+  - when updating an existing unknown, reuse that unknown's id even if the text is rewritten.
   - keep unresolved unknowns as status=unknown or status=deferred.
   - add newly discovered important work or questions when investigation reveals them.
   - include a short reason and trace references such as file paths, line ranges,

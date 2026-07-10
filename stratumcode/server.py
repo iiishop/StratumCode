@@ -4,7 +4,7 @@ import logging
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from . import app_settings, chat, mcp, model_settings, providers, sessions, subagents, workspaces
+from . import app_settings, chat, lsp, mcp, model_settings, providers, sessions, subagents, workspaces
 from .tools import registry
 
 
@@ -49,6 +49,8 @@ class _Handler(SimpleHTTPRequestHandler):
             self._json({"items": mcp.list_all()})
         elif self.path == "/api/files/list":
             self._handle_file_list()
+        elif self.path.startswith("/api/lsp"):
+            self._handle_lsp_get()
         elif self.path == "/api/tools":
             mcp.load_enabled()
             self._json([t.to_json() for t in registry.list_all()])
@@ -172,6 +174,8 @@ class _Handler(SimpleHTTPRequestHandler):
             self._handle_mcp_install(body)
         elif path == "/api/files/preview":
             self._handle_file_preview(body)
+        elif path.startswith("/api/lsp"):
+            self._handle_lsp_post(body)
 
         else:
             self._json({"error": "not found"}, 404)
@@ -251,6 +255,35 @@ class _Handler(SimpleHTTPRequestHandler):
                 self.wfile.flush()
             except (BrokenPipeError, ConnectionResetError):
                 pass
+
+    def _handle_lsp_get(self):
+        language = (self.path.split("language=")[1].split("&")[0] if "language=" in self.path else None)
+        query = (self.path.split("query=")[1].split("&")[0] if "query=" in self.path else None)
+        self._json({"items": lsp.list_all(language=language, query=query), "languages": lsp.languages()})
+
+    def _handle_lsp_post(self, body: dict):
+        action = body.get("action", "")
+        name = body.get("name", "").strip()
+        if not name:
+            self._json({"error": "name is required"}, 400)
+            return
+        try:
+            if action == "install":
+                self._json({"server": lsp.install(name)})
+            elif action == "uninstall":
+                self._json({"server": lsp.uninstall(name)})
+            elif action == "enable":
+                self._json({"server": lsp.enable(name, bool(body.get("value", True)))})
+            elif action == "configure":
+                self._json({"server": lsp.configure(name, body.get("env", {}))})
+            elif action == "probe":
+                self._json(lsp.probe(name))
+            elif action == "sync":
+                self._json(lsp.sync_now())
+            else:
+                self._json({"error": f"unknown action: {action}"}, 400)
+        except ValueError as exc:
+            self._json({"error": str(exc)}, 400)
 
     def _handle_file_list(self):
         root = Path(self._workspace_path()).resolve()

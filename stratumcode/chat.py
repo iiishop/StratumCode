@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import time
 from collections.abc import Iterator
 from urllib.request import Request, urlopen
 from uuid import uuid4
 
-from . import app_settings, hypothesis_verifier, investigator, model_settings, prompt, providers
+from . import app_settings, hypothesis_verifier, investigator, model_settings, prompt, providers, sessions
 from .agent_runtime import (
     MAX_MODEL_OUTPUT_TOKENS,
     call_model as _call_model,
@@ -25,7 +26,7 @@ TASK_CERTAINTIES = {"certain", "uncertain", "guess"}
 TASK_CLUE_KINDS = {"file", "line", "symbol", "route", "other"}
 
 
-def analyze_task(message: str, context: list[str], workspace_dir: str) -> dict:
+def analyze_task(message: str, context: list[str], workspace_dir: str, session_context: dict | None = None) -> dict:
     setting = (
         model_settings.resolve(model_settings.DEFAULT_STAGE)
         or model_settings.resolve(model_settings.EVIDENCE_STAGE)
@@ -49,7 +50,7 @@ def analyze_task(message: str, context: list[str], workspace_dir: str) -> dict:
                     "content": prompt.build_task_analyzer_user(
                         message=message,
                         directory=workspace_dir,
-                        context=context,
+                        context=context + _session_context_lines(session_context),
                         error=last_error,
                     ),
                 },
@@ -105,8 +106,15 @@ def _validate_task_analysis(data: dict) -> dict:
         "constraints": _string_list(data.get("constraints"), "constraints"),
         "hypotheses": _hypotheses(data.get("hypotheses")),
         "clues": _clues(data.get("clues")),
-        "unknowns": _string_list(data.get("unknowns"), "unknowns"),
+        "unknowns": _limited_unknowns(data.get("unknowns")),
     }
+
+
+def _limited_unknowns(value) -> list[str]:
+    unknowns = _string_list(value, "unknowns")
+    if len(unknowns) > 5:
+        raise ValueError("unknowns must contain at most 5 items")
+    return unknowns
 
 
 def _string_list(value, field: str) -> list[str]:
@@ -242,25 +250,61 @@ def analyzed_stream(
     answer: dict | None = None,
     analysis: dict | None = None,
     prior_analysis: dict | None = None,
+    session_id: int | None = None,
 ) -> Iterator[dict]:
+    try:
+        state = sessions.get(session_id)["state"] if session_id else {}
+    except ValueError:
+        state = {}
+    session_context = _session_context(state)
     answer_context = _answer_context(answer)
     if answer_context:
         context = context + answer_context
     if analysis is None:
-        analysis = analyze_task(message, context, workspace_dir)
+        analysis = analyze_task(message, context, workspace_dir, session_context=session_context)
     analysis.setdefault("id", f"task-{uuid4().hex[:8]}")
     analysis.setdefault("origin_message", message)
+    _attach_session_relationship(analysis, session_context.get("tasks", []))
+    seeded_tasks = _seed_task_updates(analysis, session_context.get("tasks", []))
+    analysis["task_updates"] = _normalize_task_updates(analysis["id"], analysis.get("task_updates", []) + seeded_tasks, session_context.get("tasks", []))
     if not answer:
         yield start_event(f"task-analysis-{uuid4().hex[:8]}", "task_analysis", analysis)
     findings = _prior_findings(prior_analysis, answer)
-    yield from investigator.investigation_stream(
+    last_investigation = None
+    for event in investigator.investigation_stream(
         message=message,
         analysis=analysis,
         context=context + _analysis_context(analysis),
         workspace_dir=workspace_dir,
         max_rounds=max_rounds,
         findings=findings,
-    )
+        previous_observations=session_context.get("observations", []),
+        previous_knowledge=session_context.get("knowledge", []),
+    ):
+        if event.get("event") == "task_update":
+            event["data"]["items"] = _normalize_task_updates(analysis["id"], event["data"].get("items", []), analysis["task_updates"])
+            analysis["task_updates"] = event["data"]["items"]
+        if event.get("op") == "done" and isinstance(event.get("investigation"), dict):
+            last_investigation = event["investigation"]
+            last_investigation["task_updates"] = _normalize_task_updates(
+                analysis["id"],
+                analysis.get("task_updates", []) + last_investigation.get("task_updates", []),
+                session_context.get("tasks", []),
+            )
+            last_investigation["observations"] = _scoped_items(analysis["id"], last_investigation.get("observations", []))
+        yield event
+    if session_id and last_investigation:
+        sessions.merge_investigation(
+            session_id,
+            last_investigation.get("task_updates", []),
+            last_investigation.get("observations", []),
+            investigation={
+                "id": analysis["id"],
+                "request": message,
+                "summary": last_investigation.get("summary", ""),
+            },
+            knowledge=_beliefs_as_knowledge(analysis["id"], last_investigation.get("beliefs", [])),
+        )
 
 
 def evidence_stream(
@@ -436,6 +480,7 @@ def stream(request: dict, workspace_dir: str = ".") -> Iterator[dict]:
         answer=answer,
         analysis=analysis,
         prior_analysis=prior_analysis,
+        session_id=request.get("session_id"),
     )
 
 
@@ -476,3 +521,187 @@ def _prior_findings(prior_analysis: dict | None, answer: dict | None) -> list[st
     if prior_analysis.get("intent"):
         lines.append(f"Original intent: {prior_analysis['intent'].get('summary', '')}")
     return lines
+
+
+def _seed_task_updates(analysis: dict, existing: list[dict] | None = None) -> list[dict]:
+    task_id = analysis["id"]
+    root_goal = analysis.get("root_goal_id") or f"{task_id}:goal"
+    items = []
+    if not analysis.get("root_goal_id"):
+        items.append(_task_item(f"{task_id}:goal", "goal", analysis["intent"]["summary"], "active"))
+    elif analysis["intent"].get("summary"):
+        items.append(_task_item(f"{task_id}:work", "work", analysis["intent"]["summary"], "added", parent_id=root_goal, trace=analysis.get("reused_context_ids", [])))
+    items.extend(
+        _task_item(f"{task_id}:C{index}", "constraint", text, "known", parent_id=root_goal)
+        for index, text in enumerate(analysis.get("constraints", []), start=1)
+    )
+    items.extend(
+        _task_item(f"{task_id}:H{index}", "hypothesis", item["text"], "unknown", parent_id=root_goal)
+        for index, item in enumerate(analysis.get("hypotheses", []), start=1)
+    )
+    items.extend(
+        _task_item(f"{task_id}:L{index}", "clue", clue.get("path") or clue.get("value"), "pending", parent_id=root_goal)
+        for index, clue in enumerate(analysis.get("clues", []), start=1)
+    )
+    parent = f"{task_id}:work" if analysis.get("root_goal_id") else root_goal
+    items.extend(
+        _task_item(f"{task_id}:U{index}", "unknown", text, "unknown", parent_id=parent)
+        for index, text in enumerate(analysis.get("unknowns", []), start=1)
+    )
+    return _normalize_task_updates(task_id, items, existing or [])
+
+
+def _task_item(item_id: str, kind: str, text: str, status: str, *, parent_id: str = "", trace: list[str] | None = None) -> dict:
+    return {
+        "id": item_id,
+        "kind": kind,
+        "text": text,
+        "status": status,
+        "parent_id": parent_id,
+        "reason": "",
+        "trace": trace or [],
+    }
+
+
+def _normalize_task_updates(analysis_id: str, updates: list[dict], existing: list[dict] | None = None) -> list[dict]:
+    result = []
+    prior = [dict(item) for item in existing or [] if isinstance(item, dict)]
+    for raw in updates or []:
+        if not isinstance(raw, dict) or not str(raw.get("text") or "").strip():
+            continue
+        item = dict(raw)
+        item["id"] = _scoped_id(analysis_id, str(item.get("id") or ""))
+        item.setdefault("kind", "unknown")
+        item.setdefault("status", "updated")
+        item.setdefault("reason", "")
+        item["trace"] = [str(entry) for entry in item.get("trace", [])] if isinstance(item.get("trace"), list) else []
+        matched = next((row for row in prior + result if _same_task(row, item)), None)
+        if matched:
+            if matched.get("kind") == "goal":
+                item = dict(matched)
+                item["trace"] = [str(entry) for entry in item.get("trace", [])] if isinstance(item.get("trace"), list) else []
+                result.append(item)
+                continue
+            item["id"] = matched.get("id") or item["id"]
+        index = next((i for i, row in enumerate(result) if _same_task(row, item)), None)
+        if index is None:
+            result.append(item)
+        elif result[index].get("kind") != "goal":
+            result[index] = {**result[index], **item, "id": result[index].get("id") or item["id"]}
+    return result
+
+
+def _same_task(left: dict, right: dict) -> bool:
+    if left.get("id") and right.get("id") and left["id"] == right["id"]:
+        return True
+    left_trace = left.get("trace") if isinstance(left.get("trace"), list) else []
+    right_trace = right.get("trace") if isinstance(right.get("trace"), list) else []
+    if (left.get("id") and left["id"] in right_trace) or (right.get("id") and right["id"] in left_trace):
+        return True
+    a = _task_key(left.get("text"))
+    b = _task_key(right.get("text"))
+    return bool(a and b and (a == b or a in b or b in a))
+
+
+def _task_key(value: str | None) -> str:
+    return re.sub(r"\W+", "", re.sub(r"[（(][^）)]*[）)]", "", value or "")).casefold()
+
+
+def _scoped_id(analysis_id: str, item_id: str) -> str:
+    if not item_id:
+        return ""
+    return item_id if ":" in item_id else f"{analysis_id}:{item_id}"
+
+
+def _scoped_items(analysis_id: str, items: list[dict]) -> list[dict]:
+    scoped = []
+    for item in items or []:
+        if isinstance(item, dict):
+            next_item = dict(item)
+            next_item["id"] = _scoped_id(analysis_id, str(next_item.get("id") or ""))
+            scoped.append(next_item)
+    return scoped
+
+
+def _attach_session_relationship(analysis: dict, existing_tasks: list[dict]) -> None:
+    parent = str(analysis.get("parent_goal_id") or "").strip()
+    if parent and any(item.get("id") == parent for item in existing_tasks):
+        analysis["root_goal_id"] = parent
+
+
+def _session_context(state: dict) -> dict:
+    observations = _observations_freshness(state)
+    knowledge = _knowledge_freshness({**state, "observations": observations})
+    return {
+        "tasks": state.get("taskItems", []),
+        "goals": [item for item in state.get("taskItems", []) if item.get("kind") == "goal"],
+        "recent_user_messages": [item.get("content", "") for item in state.get("messages", []) if item.get("role") == "user"][-5:],
+        "observations": observations,
+        "knowledge": knowledge,
+    }
+
+
+def _session_context_lines(session_context: dict | None) -> list[str]:
+    if not session_context:
+        return []
+    lines = []
+    lines.extend(f"Session goal: {item.get('text')}" for item in session_context.get("goals", [])[:3])
+    lines.extend(f"Known: {item.get('statement')}" for item in session_context.get("knowledge", [])[:8] if item.get("fresh", True))
+    return lines
+
+
+def _observations_freshness(state: dict) -> list[dict]:
+    items = []
+    for raw in state.get("observations", []):
+        item = dict(raw)
+        path = item.get("path")
+        fresh = False
+        if path and os.path.exists(path):
+            stat = os.stat(path)
+            fresh = item.get("mtime_ns") == stat.st_mtime_ns and item.get("size") == stat.st_size
+        item["fresh"] = fresh
+        items.append(item)
+    return items
+
+
+def _knowledge_freshness(state: dict) -> list[dict]:
+    observations = state.get("observations", [])
+    by_id = {item.get("id"): item for item in observations}
+    by_call = {_call_key(item.get("id")): item for item in observations if _call_key(item.get("id"))}
+    result = []
+    for raw in state.get("knowledge", []):
+        item = dict(raw)
+        ids = []
+        fresh = True
+        for obs_id in item.get("observation_ids", []):
+            observation = by_id.get(obs_id) or by_call.get(_call_key(obs_id))
+            if observation:
+                ids.append(observation["id"])
+                fresh = fresh and observation.get("fresh", True)
+            else:
+                ids.append(obs_id)
+                fresh = False
+        item["observation_ids"] = ids
+        item["fresh"] = fresh
+        result.append(item)
+    return result
+
+
+def _call_key(value: str | None) -> str:
+    text = str(value or "").split(":")[-1]
+    return re.sub(r"call_\d+_", "call_", text)
+
+
+def _beliefs_as_knowledge(analysis_id: str, beliefs: list[dict]) -> list[dict]:
+    items = []
+    for index, belief in enumerate(beliefs or [], start=1):
+        if isinstance(belief, dict) and belief.get("statement"):
+            evidence = belief.get("evidence") if isinstance(belief.get("evidence"), list) else []
+            items.append({
+                "id": f"{analysis_id}:B{index}",
+                "turn_id": analysis_id,
+                "statement": belief["statement"],
+                "status": belief.get("status", "supported"),
+                "observation_ids": [_scoped_id(analysis_id, str(item)) for item in evidence],
+            })
+    return items

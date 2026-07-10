@@ -100,6 +100,10 @@ def _default_state() -> dict:
         "messages": [],
         "evidenceRuns": [],
         "activeRunId": "",
+        "taskItems": [],
+        "observations": [],
+        "investigations": [],
+        "knowledge": [],
         "fileContext": [],
         "usage": {
             "input_tokens": 0,
@@ -198,6 +202,19 @@ def rename(session_id: int, name: str) -> None:
 def save_state(session_id: int, state: dict) -> None:
     if not isinstance(state, dict):
         raise ValueError("state must be an object")
+    current = get(session_id)["state"]
+    state = {**current, **state}
+    state["taskItems"] = _merge_by_task(current.get("taskItems", []), state.get("taskItems", []))
+    state["knowledge"] = _merge_by_id(current.get("knowledge", []), state.get("knowledge", []))
+    state["investigations"] = _merge_by_id(current.get("investigations", []), state.get("investigations", []))
+    state["observations"] = _cap_observations(
+        _merge_by_id(current.get("observations", []), state.get("observations", [])),
+        state["knowledge"],
+    )
+    _write_state(session_id, state)
+
+
+def _write_state(session_id: int, state: dict) -> None:
     usage = state.get("usage") if isinstance(state.get("usage"), dict) else {}
     _ensure_table()
     with db_session() as db:
@@ -221,3 +238,89 @@ def delete(session_id: int) -> None:
         cursor = db.execute("DELETE FROM sessions WHERE id = ?", (int(session_id),))
         if cursor.rowcount == 0:
             raise ValueError("session not found")
+
+
+def merge_investigation(
+    session_id: int,
+    task_items: list[dict],
+    observations: list[dict],
+    *,
+    investigation: dict | None = None,
+    knowledge: list[dict] | None = None,
+) -> None:
+    state = get(session_id)["state"]
+    state["taskItems"] = _merge_by_task(state.get("taskItems", []), task_items or [])
+    state["observations"] = _cap_observations(_merge_by_id(state.get("observations", []), observations or []), state.get("knowledge", []) + (knowledge or []))
+    if investigation:
+        state["investigations"] = _merge_by_id(state.get("investigations", []), [investigation])
+    if knowledge:
+        state["knowledge"] = _merge_by_id(state.get("knowledge", []), knowledge)
+        state["observations"] = _cap_observations(state["observations"], state["knowledge"])
+    _write_state(session_id, state)
+
+
+def _merge_by_id(old: list[dict], new: list[dict]) -> list[dict]:
+    merged = [item for item in old if isinstance(item, dict)]
+    by_id = {item.get("id"): index for index, item in enumerate(merged) if item.get("id")}
+    for item in new:
+        if not isinstance(item, dict):
+            continue
+        item_id = item.get("id")
+        if item_id and item_id in by_id:
+            merged[by_id[item_id]] = {**merged[by_id[item_id]], **item}
+        else:
+            if item_id:
+                by_id[item_id] = len(merged)
+            merged.append(item)
+    return merged
+
+
+def _merge_by_task(old: list[dict], new: list[dict]) -> list[dict]:
+    merged = [item for item in old if isinstance(item, dict)]
+    for item in new:
+        if not isinstance(item, dict) or not item.get("text"):
+            continue
+        index = next((i for i, row in enumerate(merged) if _same_task(row, item)), None)
+        if index is None:
+            merged.append(item)
+            continue
+        if merged[index].get("kind") == "goal":
+            continue
+        if _status_rank(item.get("status")) < _status_rank(merged[index].get("status")):
+            item = {**item, "status": merged[index].get("status")}
+        merged[index] = {**merged[index], **item, "id": merged[index].get("id") or item.get("id")}
+    return merged
+
+
+def _same_task(left: dict, right: dict) -> bool:
+    if left.get("id") and right.get("id") and left["id"] == right["id"]:
+        return True
+    left_trace = left.get("trace") if isinstance(left.get("trace"), list) else []
+    right_trace = right.get("trace") if isinstance(right.get("trace"), list) else []
+    if (left.get("id") and left["id"] in right_trace) or (right.get("id") and right["id"] in left_trace):
+        return True
+    a = _task_key(left.get("text"))
+    b = _task_key(right.get("text"))
+    return bool(a and b and (a == b or a in b or b in a))
+
+
+def _task_key(value: str | None) -> str:
+    import re
+    return re.sub(r"\W+", "", re.sub(r"[（(][^）)]*[）)]", "", value or "")).casefold()
+
+
+def _status_rank(status: str | None) -> int:
+    return {"unknown": 0, "pending": 0, "added": 1, "updated": 1, "deferred": 2, "blocked": 2, "active": 2, "known": 3}.get(status or "", 0)
+
+
+def _cap_observations(observations: list[dict], knowledge: list[dict]) -> list[dict]:
+    pinned = {
+        obs_id
+        for item in knowledge
+        if isinstance(item, dict)
+        for obs_id in item.get("observation_ids", [])
+    }
+    tail = observations[-40:]
+    tail_ids = {item.get("id") for item in tail}
+    extras = [item for item in observations if item.get("id") in pinned and item.get("id") not in tail_ids]
+    return extras + tail

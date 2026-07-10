@@ -6,8 +6,10 @@ import Sidebar from './components/Sidebar.vue'
 import HomePage from './components/HomePage.vue'
 import StageModelSettings from './components/providers/StageModelSettings.vue'
 import McpPage from './components/mcp/McpPage.vue'
+import LspPage from './components/lsp/LspPage.vue'
 import SettingsPage from './components/settings/SettingsPage.vue'
 import { useMcp } from './composables/useMcp'
+import { useLsp } from './composables/useLsp'
 import { useSessions } from './composables/useSessions'
 import { useWorkspaces } from './composables/useWorkspaces'
 
@@ -23,15 +25,22 @@ const {
 } = useWorkspaces()
 const sessionStore = useSessions()
 const mcpStore = useMcp()
+const lspStore = useLsp()
 const activeSession = computed(() => sessionStore.active.value)
 const sessionItems = computed(() => sessionStore.items.value)
 const mcpServers = computed(() => mcpStore.items.value)
 const mcpLoading = computed(() => mcpStore.loading.value)
 const mcpError = computed(() => mcpStore.error.value)
+const lspServers = computed(() => lspStore.items.value)
+const lspLanguages = computed(() => lspStore.languages.value)
+const lspLoading = computed(() => lspStore.loading.value)
+const lspBusyId = computed(() => lspStore.busyId.value)
+const lspError = computed(() => lspStore.error.value)
 const currentTitle = computed(() => ({
   home: 'Workspace',
   providers: 'Providers',
   mcp: 'MCP',
+  lsp: 'LSP',
   settings: 'Settings',
 })[currentView.value] || 'Workspace')
 const workspaceLabel = computed(() => activeWorkspace.value?.name || 'No workspace')
@@ -72,7 +81,7 @@ const presets = [
 ]
 
 async function bootstrap() {
-  await Promise.all([loadWorkspaces(), mcpStore.load(), loadAppSettings()])
+  await Promise.all([loadWorkspaces(), mcpStore.load(), lspStore.load(), loadAppSettings()])
   if (activeWorkspace.value?.id) {
     await sessionStore.load(activeWorkspace.value.id)
     if (sessionStore.items.value[0]) await sessionStore.open(sessionStore.items.value[0].id)
@@ -370,6 +379,7 @@ onUnmounted(() => { gsapCtx?.revert() })
 watch(currentView, (v) => {
   if (v === 'providers' && !providers.value.length) load()
   if (v === 'mcp') mcpStore.load()
+  if (v === 'lsp') lspStore.load()
 })
 </script>
 
@@ -617,6 +627,20 @@ watch(currentView, (v) => {
         @start="mcpStore.start"
         @delete="mcpStore.remove"
         @configure="mcpStore.configure"
+      />
+      <LspPage
+        v-if="currentView === 'lsp'"
+        :servers="lspServers"
+        :languages="lspLanguages"
+        :loading="lspLoading"
+        :busy-id="lspBusyId"
+        :error="lspError"
+        :on-probe="lspStore.probe"
+        @refresh="lspStore.load"
+        @install="lspStore.install"
+        @uninstall="lspStore.uninstall"
+        @enable="lspStore.enable"
+        @configure="lspStore.configure"
       />
       <SettingsPage
         v-if="currentView === 'settings'"
