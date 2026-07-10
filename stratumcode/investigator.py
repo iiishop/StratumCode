@@ -33,6 +33,7 @@ def investigation_stream(
     context: list[str],
     workspace_dir: str,
     max_rounds: int | None = None,
+    findings: list[str] | None = None,
 ) -> Iterator[dict]:
     setting = (
         model_settings.resolve(model_settings.DEFAULT_STAGE)
@@ -77,6 +78,8 @@ def investigation_stream(
         },
         {"role": "user", "content": message},
     ]
+    if findings:
+        messages.insert(2, {"role": "system", "content": "\n".join(findings)})
     tools = _investigation_tools()
     final = None
 
@@ -164,9 +167,12 @@ def investigation_stream(
     step = _step_result(final)
     yield start_event(f"{run_id}-step-result", "step_result", step)
     if final.get("task_updates"):
-        yield start_event(f"{run_id}-task-update", "task_update", {"items": final["task_updates"]})
+        yield start_event(f"{run_id}-task-update", "task_update", {
+            "analysis_id": analysis.get("id", ""),
+            "items": final["task_updates"],
+        })
     if step["next_step"] == "ask_user":
-        yield start_event(f"{run_id}-user-question", "user_question", _user_question(final, step, message))
+        yield start_event(f"{run_id}-user-question", "user_question", _user_question(final, step, message, analysis.get("id", "")))
         yield {"op": "done", "investigation": final}
         return
     yield start_event(f"{run_id}-output", "output", {
@@ -549,7 +555,7 @@ def _step_result(final: dict) -> dict:
     }
 
 
-def _user_question(final: dict, step: dict, origin_message: str = "") -> dict:
+def _user_question(final: dict, step: dict, origin_message: str = "", analysis_id: str = "") -> dict:
     unknown = next(
         (
             item for item in final.get("unknowns", [])
@@ -562,6 +568,7 @@ def _user_question(final: dict, step: dict, origin_message: str = "") -> dict:
     unknown_id = (unknown or {}).get("id", "")
     return {
         "id": unknown_id or "question",
+        "analysis_id": analysis_id,
         "question": question,
         "origin_message": origin_message,
         "reason": step["continue_reason"],

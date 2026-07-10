@@ -24,6 +24,7 @@ const emit = defineEmits(['answer'])
           :class="{ 'is-recommended': option.recommended }"
           @click="emit('answer', {
             question_id: event.id,
+            analysis_id: event.analysis_id,
             unknown_id: event.unknown_id,
             linked_unknown_id: event.linked_unknown?.id,
             blocks_next_step: event.blocks_next_step,
@@ -43,6 +44,7 @@ const emit = defineEmits(['answer'])
           type="button"
           @click="emit('answer', {
             question_id: event.id,
+            analysis_id: event.analysis_id,
             unknown_id: event.unknown_id,
             linked_unknown_id: event.linked_unknown?.id,
             blocks_next_step: event.blocks_next_step,

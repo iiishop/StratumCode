@@ -223,14 +223,23 @@ function removeContextFile(p) {
 
 function answerPayloadFromPending(text) {
   if (!pendingQuestion.value) return null
+  let response = text
+  const question = pendingQuestion.value.question
+  if (question) {
+    const templatePrefix = `Question: ${question}\nMy answer: `
+    if (response.startsWith(templatePrefix)) {
+      response = response.substring(templatePrefix.length).trim()
+    }
+  }
   return {
     question_id: pendingQuestion.value.id,
+    analysis_id: pendingQuestion.value.analysis_id,
     unknown_id: pendingQuestion.value.unknown_id,
     linked_unknown_id: pendingQuestion.value.linked_unknown_id,
     blocks_next_step: pendingQuestion.value.blocks_next_step,
     origin_message: pendingQuestion.value.origin_message,
     question: pendingQuestion.value.question,
-    response: text,
+    response,
     custom: true,
   }
 }
@@ -256,14 +265,15 @@ async function send(answer = null) {
   nextTick(() => { scrollBottom(); animateLast() })
   try {
     const structuredAnswer = answer || answerPayloadFromPending(text)
-    const origin = structuredAnswer?.origin_message || activeTaskAnalysis.value?.origin_message || text
+    const taskAnalysis = structuredAnswer ? analysisForQuestion(structuredAnswer) : null
+    const origin = structuredAnswer?.origin_message || taskAnalysis?.origin_message || text
     const request = {
       message: origin,
       context: fileContext.map(file => file.path),
     }
     if (structuredAnswer) {
       request.answer = { ...structuredAnswer, origin_message: origin }
-      if (activeTaskAnalysis.value) request.analysis = plain(activeTaskAnalysis.value)
+      if (taskAnalysis) request.analysis = plain(taskAnalysis)
     }
     await chatStream(message, request)
     if (structuredAnswer) pendingQuestion.value = null
@@ -287,6 +297,7 @@ function answerQuestion(answer) {
   if (!answer) return
   pendingQuestion.value = {
     id: answer.question_id,
+    analysis_id: answer.analysis_id,
     unknown_id: answer.unknown_id,
     linked_unknown_id: answer.linked_unknown_id,
     blocks_next_step: answer.blocks_next_step,
@@ -297,6 +308,7 @@ function answerQuestion(answer) {
   nextTick(() => {
     if (answer.send) send({
       question_id: answer.question_id,
+      analysis_id: answer.analysis_id,
       unknown_id: answer.unknown_id,
       linked_unknown_id: answer.linked_unknown_id,
       blocks_next_step: answer.blocks_next_step,
@@ -310,7 +322,7 @@ function answerQuestion(answer) {
 }
 
 function applyTaskUpdate(update) {
-  const analysis = activeTaskAnalysis.value
+  const analysis = analysisForId(update?.analysis_id) || activeTaskAnalysis.value
   if (!analysis || !Array.isArray(update?.items)) return
   if (!Array.isArray(analysis.task_updates)) analysis.task_updates = []
   for (const item of update.items) {
@@ -329,6 +341,14 @@ function applyTaskUpdate(update) {
     if (existing) Object.assign(existing, next)
     else analysis.task_updates.push(next)
   }
+}
+
+function analysisForId(id) {
+  return id ? taskAnalyses.find(analysis => analysis.id === id) : null
+}
+
+function analysisForQuestion(question) {
+  return analysisForId(question?.analysis_id) || activeTaskAnalysis.value
 }
 
 /* ── animation helpers ──────────────────────────────────── */
@@ -371,6 +391,7 @@ function onAgentPacket(packet, type, data) {
     evidenceRuns.push(run)
     activeRunId.value = run.id
   } else if (packet.op === 'start' && type === 'task_analysis') {
+    data.id ||= packet.id
     data.origin_message ||= messages[messages.length - 2]?.content || ''
     taskAnalyses.push(data)
     inspectorTab.value = 'tasks'
@@ -378,7 +399,9 @@ function onAgentPacket(packet, type, data) {
     applyTaskUpdate(data)
     inspectorTab.value = 'tasks'
   } else if (packet.op === 'start' && type === 'user_question') {
-    data.origin_message ||= activeTaskAnalysis.value?.origin_message || ''
+    const analysis = analysisForId(data.analysis_id) || activeTaskAnalysis.value
+    data.analysis_id ||= analysis?.id || ''
+    data.origin_message ||= analysis?.origin_message || ''
     pendingQuestion.value = plain(data)
   } else if (packet.op === 'start' && type === 'evidence') {
     const run = currentEvidenceRun()

@@ -241,20 +241,25 @@ def analyzed_stream(
     max_rounds: int | None = None,
     answer: dict | None = None,
     analysis: dict | None = None,
+    prior_analysis: dict | None = None,
 ) -> Iterator[dict]:
     answer_context = _answer_context(answer)
     if answer_context:
         context = context + answer_context
     if analysis is None:
         analysis = analyze_task(message, context, workspace_dir)
-        analysis["origin_message"] = message
+    analysis.setdefault("id", f"task-{uuid4().hex[:8]}")
+    analysis.setdefault("origin_message", message)
+    if not answer:
         yield start_event(f"task-analysis-{uuid4().hex[:8]}", "task_analysis", analysis)
+    findings = _prior_findings(prior_analysis, answer)
     yield from investigator.investigation_stream(
         message=message,
         analysis=analysis,
         context=context + _analysis_context(analysis),
         workspace_dir=workspace_dir,
         max_rounds=max_rounds,
+        findings=findings,
     )
 
 
@@ -419,10 +424,19 @@ def stream(request: dict, workspace_dir: str = ".") -> Iterator[dict]:
     if max_rounds is not None:
         max_rounds = min(50, max(1, int(max_rounds)))
     answer = request.get("answer") if isinstance(request.get("answer"), dict) else None
-    analysis = request.get("analysis") if answer and isinstance(request.get("analysis"), dict) else None
+    prior_analysis = request.get("analysis") if answer and isinstance(request.get("analysis"), dict) else None
+    analysis = prior_analysis if answer else None
     if answer and str(answer.get("origin_message") or "").strip():
         message = str(answer["origin_message"]).strip()
-    return analyzed_stream(message, context, workspace_dir, max_rounds=max_rounds, answer=answer, analysis=analysis)
+    return analyzed_stream(
+        message,
+        context,
+        workspace_dir,
+        max_rounds=max_rounds,
+        answer=answer,
+        analysis=analysis,
+        prior_analysis=prior_analysis,
+    )
 
 
 def _answer_context(answer: dict | None) -> list[str]:
@@ -442,4 +456,23 @@ def _answer_context(answer: dict | None) -> list[str]:
     if selected:
         lines.append(app_settings.text("selected_option", option=selected))
     lines.append(app_settings.text("user_answer", answer=response))
+    return lines
+
+
+def _prior_findings(prior_analysis: dict | None, answer: dict | None) -> list[str]:
+    """Extract prior investigation findings so the follow-up doesn't repeat work."""
+    if not prior_analysis:
+        return []
+    lines = ["PRIOR INVESTIGATION FINDINGS (do not repeat any of this work):"]
+    updates = prior_analysis.get("task_updates") if isinstance(prior_analysis.get("task_updates"), list) else []
+    known = [item for item in updates if item.get("status") == "known"]
+    if known:
+        lines.append("Already confirmed:")
+        lines.extend(f"  - {item['text']}" for item in known[:10] if item.get("text"))
+    blocked = [item for item in updates if item.get("status") == "blocked"]
+    if blocked:
+        lines.append("Previously unresolved:")
+        lines.extend(f"  - {item['text']}" for item in blocked[:5] if item.get("text"))
+    if prior_analysis.get("intent"):
+        lines.append(f"Original intent: {prior_analysis['intent'].get('summary', '')}")
     return lines
