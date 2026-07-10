@@ -36,6 +36,9 @@ const lspLanguages = computed(() => lspStore.languages.value)
 const lspLoading = computed(() => lspStore.loading.value)
 const lspBusyId = computed(() => lspStore.busyId.value)
 const lspError = computed(() => lspStore.error.value)
+const lspMason = computed(() => lspStore.mason.value)
+const lspBootstrap = computed(() => lspStore.bootstrap.value)
+const lspBootstrapSteps = computed(() => lspStore.bootstrapSteps.value)
 const currentTitle = computed(() => ({
   home: 'Workspace',
   providers: 'Providers',
@@ -635,8 +638,12 @@ watch(currentView, (v) => {
         :loading="lspLoading"
         :busy-id="lspBusyId"
         :error="lspError"
+        :mason="lspMason"
+        :bootstrap="lspBootstrap"
+        :bootstrap-steps="lspBootstrapSteps"
         :on-probe="lspStore.probe"
         @refresh="lspStore.load"
+        @install-mason="lspStore.bootstrapMason"
         @install="lspStore.install"
         @uninstall="lspStore.uninstall"
         @enable="lspStore.enable"

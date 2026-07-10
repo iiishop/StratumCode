@@ -342,7 +342,7 @@ function pendingQuestionLabel(question) {
 async function send(answer = null) {
   const text = input.value.trim()
   if (!text || isStreaming.value) return
-  messages.push({ id: Date.now(), role: 'user', content: text, time: timeNow() })
+  messages.push({ id: Date.now(), role: 'user', content: text, time: timeNow(), files: plain(fileContext) })
   const message = reactive({ id: Date.now() + 1, role: 'assistant', time: timeNow(), events: [] })
   messages.push(message)
   input.value = ''
@@ -410,8 +410,9 @@ function answerQuestion(answer) {
 
 function applyTaskUpdate(update) {
   const analysis = analysisForId(update?.analysis_id) || activeTaskAnalysis.value
-  if (!analysis || !Array.isArray(update?.items)) return
+  if (!analysis || !Array.isArray(update?.items)) return []
   if (!Array.isArray(analysis.task_updates)) analysis.task_updates = []
+  const changes = []
   for (const item of update.items) {
     const text = String(item?.text || '').trim()
     if (!text) continue
@@ -426,9 +427,19 @@ function applyTaskUpdate(update) {
       reason: item.reason || '',
       trace,
     }
+    const before = existing ? { ...existing } : null
+    const action = !existing
+      ? 'add'
+      : existing.status !== next.status
+        ? 'status'
+        : existing.text !== next.text || existing.kind !== next.kind || existing.reason !== next.reason
+          ? 'update'
+          : 'noop'
     if (existing) Object.assign(existing, next)
     else analysis.task_updates.push(next)
+    changes.push({ action, before, item: next })
   }
+  return changes.filter(change => change.action !== 'noop')
 }
 
 function normalizedTaskText(value) {
@@ -498,7 +509,7 @@ function onAgentPacket(packet, type, data) {
     taskAnalyses.push(data)
     inspectorTab.value = 'tasks'
   } else if (packet.op === 'start' && type === 'task_update') {
-    applyTaskUpdate(data)
+    data.changes = applyTaskUpdate(data)
     inspectorTab.value = 'tasks'
   } else if (packet.op === 'start' && type === 'user_question') {
     const analysis = analysisForId(data.analysis_id) || activeTaskAnalysis.value
@@ -672,7 +683,17 @@ watch(() => props.activeWorkspace?.id, () => {
             <div class="chat__bubble">
               <div class="chat__time">{{ m.time }}</div>
 
-              <div v-if="m.role === 'user'" class="chat__content">{{ m.content }}</div>
+              <div v-if="m.role === 'user'" class="chat__content">
+                <div v-if="m.files?.length" class="chat__msg-files">
+                  <FileReference
+                    v-for="f in m.files"
+                    :key="f.path"
+                    :path="f.path"
+                    :language="f.lang"
+                  />
+                </div>
+                {{ m.content }}
+              </div>
               <TransitionGroup v-else name="timeline-event" tag="div" class="chat__timeline">
                 <ChatEvent
                   v-for="event in m.events"
@@ -896,6 +917,7 @@ watch(() => props.activeWorkspace?.id, () => {
 .chat__msg--user .chat__bubble { background: var(--accent-bg); border: 1px solid var(--accent-border); }
 .chat__msg--assistant .chat__bubble { background: var(--bg-raised); border: 1px solid var(--border); }
 .chat__content { margin-top: 4px; }
+.chat__msg-files { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 6px; }
 
 /* ---- time ---- */
 .chat__time { font-size: 10px; color: var(--text-muted); font-family: var(--mono); margin-bottom: 4px; }

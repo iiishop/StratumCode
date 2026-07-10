@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from ... import lsp
 from ..spec import ToolDef, ToolResult
 from .common import _resolve
 
@@ -13,12 +14,31 @@ async def _read(params: dict, ctx: dict) -> ToolResult:
     start = max(0, params.get("start_line", 1) - 1)
     end = params.get("end_line") or len(lines)
     selection = lines[start:end]
+    lsp_status = lsp.touch_file(str(p.relative_to(_resolve(".", ctx))), str(ctx.get("directory", ".")))
+    diagnostics = _format_diagnostics(p, lsp.diagnostics_for(p))
+    output = "\n".join(selection)
+    if diagnostics:
+        output += "\n\n<lsp-diagnostics>\n" + diagnostics + "\n</lsp-diagnostics>"
     return ToolResult.ok(
         f"read {params['path']} L{start+1}-{min(end, len(lines))}",
-        "\n".join(selection),
+        output,
         path=str(p),
         total_lines=len(lines),
+        diagnostics=len(lsp.diagnostics_for(p)),
+        lsp_checked=bool(lsp_status.get("checked")),
+        lsp_server=lsp_status.get("server", ""),
+        lsp_error=lsp_status.get("error", ""),
     )
+
+
+def _format_diagnostics(path, diagnostics: list[dict]) -> str:
+    labels = {1: "ERROR", 2: "WARNING", 3: "INFO", 4: "HINT"}
+    rows = []
+    for item in diagnostics[:20]:
+        line = int(item.get("range", {}).get("start", {}).get("line", 0)) + 1
+        severity = labels.get(item.get("severity"), "DIAGNOSTIC")
+        rows.append(f"{path.name} (line {line}): {severity} - {item.get('message', '')}")
+    return "\n".join(rows)
 
 
 read_tool = ToolDef(

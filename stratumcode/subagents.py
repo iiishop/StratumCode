@@ -12,6 +12,8 @@ from .agent.tools import openai_tool_schema
 from .agent_runtime import (
     add_usage as _add_usage,
     call_model as _call_model,
+    assistant_message as _assistant_message,
+    assistant_visible_text as _assistant_visible_text,
     content_text as _content_text,
     empty_usage as _empty_usage,
     start_event,
@@ -190,7 +192,7 @@ def _react_install(
                 "total": usage_total,
             })
 
-        content = _content_text(assistant.get("content"))
+        content = _assistant_visible_text(assistant)
         tool_calls = assistant.get("tool_calls") or []
         if content:
             yield {"op": "update", "id": thinking_id, "patch": {
@@ -202,11 +204,7 @@ def _react_install(
             yield {"op": "update", "id": thinking_id, "patch": {
                 "done": True,
             }}
-        messages.append({
-            "role": "assistant",
-            "content": assistant.get("content") or "",
-            **({"tool_calls": tool_calls} if tool_calls else {}),
-        })
+        messages.append(_assistant_message(assistant))
 
         if not tool_calls:
             continue

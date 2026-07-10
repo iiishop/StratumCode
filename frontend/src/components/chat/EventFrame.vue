@@ -115,6 +115,7 @@ function collapseLeave(el, done) {
   min-width: 0;
 }
 .event-frame--thinking { --event: #c48b00; }
+.event-frame--code-nav { --event: #6658c7; }
 .event-frame--subagent { --event: #6658c7; }
 .event-frame--diff { --event: #e56b2f; }
 .event-frame--output { --event: #1756d1; }
@@ -171,6 +172,7 @@ function collapseLeave(el, done) {
 }
 
 .event-frame--thinking .event-frame__node,
+.event-frame--code-nav .event-frame__node,
 .event-frame--tool .event-frame__node,
 .event-frame--subagent .event-frame__node {
   color: #fff;

@@ -8,6 +8,7 @@ export function useChatStream(onRender, onPacket) {
     const handlers = {
       thinking: timeline.showThinking,
       tool: timeline.showTool,
+      code_nav: timeline.showCodeNav,
       subagent: timeline.showSubagent,
       diff: timeline.showDiff,
       output: timeline.showOutput,

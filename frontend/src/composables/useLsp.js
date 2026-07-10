@@ -16,6 +16,9 @@ export function useLsp() {
   const loading = ref(false)
   const error = ref('')
   const busyId = ref('')
+  const mason = ref({ available: false, command: '' })
+  const bootstrap = ref({})
+  const bootstrapSteps = ref([])
 
   async function load() {
     loading.value = true
@@ -24,6 +27,8 @@ export function useLsp() {
       const data = await request('/lsp')
       items.value = data.items || []
       languages.value = data.languages || []
+      mason.value = data.mason || { available: false, command: '' }
+      bootstrap.value = data.bootstrap || {}
     } catch (reason) {
       error.value = reason.message
     } finally {
@@ -41,6 +46,65 @@ export function useLsp() {
       error.value = reason.message
     } finally {
       busyId.value = ''
+    }
+  }
+
+  async function installMason() {
+    busyId.value = 'mason'
+    error.value = ''
+    try {
+      const data = await request('/lsp', { action: 'install_mason' })
+      mason.value = data.mason || { available: false, command: '' }
+      await load()
+    } catch (reason) {
+      error.value = reason.message
+    } finally {
+      busyId.value = ''
+    }
+  }
+
+  async function bootstrapMason() {
+    busyId.value = 'mason'
+    error.value = ''
+    bootstrapSteps.value = []
+    try {
+      const response = await fetch('/api/lsp', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'bootstrap_mason' }),
+      })
+      if (!response.ok || !response.body) throw new Error(`LSP request failed (${response.status})`)
+      const reader = response.body.getReader()
+      const decoder = new TextDecoder()
+      let buffer = ''
+      while (true) {
+        const { value, done } = await reader.read()
+        if (done) break
+        buffer += decoder.decode(value, { stream: true })
+        const lines = buffer.split('\n')
+        buffer = lines.pop() || ''
+        for (const line of lines) handleBootstrapEvent(JSON.parse(line))
+      }
+      if (buffer.trim()) handleBootstrapEvent(JSON.parse(buffer))
+      await load()
+    } catch (reason) {
+      error.value = reason.message
+    } finally {
+      busyId.value = ''
+    }
+  }
+
+  function handleBootstrapEvent(event) {
+    if (event.op === 'status' || event.op === 'done') {
+      bootstrap.value = event.status || {}
+      mason.value = bootstrap.value.mason || mason.value
+    } else if (event.op === 'step') {
+      bootstrapSteps.value = [
+        ...bootstrapSteps.value.filter(step => step.name !== event.name),
+        event,
+      ]
+    } else if (event.op === 'error') {
+      error.value = event.message || 'Install failed'
     }
   }
 
@@ -91,5 +155,5 @@ export function useLsp() {
     }
   }
 
-  return { items, languages, loading, error, busyId, load, install, uninstall, enable, configure, probe }
+  return { items, languages, loading, error, busyId, mason, bootstrap, bootstrapSteps, load, install, installMason, bootstrapMason, uninstall, enable, configure, probe }
 }

@@ -259,11 +259,25 @@ class _Handler(SimpleHTTPRequestHandler):
     def _handle_lsp_get(self):
         language = (self.path.split("language=")[1].split("&")[0] if "language=" in self.path else None)
         query = (self.path.split("query=")[1].split("&")[0] if "query=" in self.path else None)
-        self._json({"items": lsp.list_all(language=language, query=query), "languages": lsp.languages()})
+        self._json({
+            "items": lsp.list_all(language=language, query=query),
+            "languages": lsp.languages(),
+            "mason": lsp.mason_status(),
+            "bootstrap": lsp.bootstrap_status(),
+        })
 
     def _handle_lsp_post(self, body: dict):
         action = body.get("action", "")
         name = body.get("name", "").strip()
+        if action == "bootstrap_mason":
+            self._handle_lsp_bootstrap()
+            return
+        if action == "install_mason":
+            try:
+                self._json({"mason": lsp.install_mason()})
+            except ValueError as exc:
+                self._json({"error": str(exc)}, 400)
+            return
         if not name:
             self._json({"error": "name is required"}, 400)
             return
@@ -275,7 +289,10 @@ class _Handler(SimpleHTTPRequestHandler):
             elif action == "enable":
                 self._json({"server": lsp.enable(name, bool(body.get("value", True)))})
             elif action == "configure":
-                self._json({"server": lsp.configure(name, body.get("env", {}))})
+                if "executable" in body:
+                    self._json({"server": lsp.configure(name, body.get("executable", ""), body.get("args") or [], True)})
+                else:
+                    self._json({"server": lsp.configure(name, body.get("env", {}))})
             elif action == "probe":
                 self._json(lsp.probe(name))
             elif action == "sync":
@@ -284,6 +301,24 @@ class _Handler(SimpleHTTPRequestHandler):
                 self._json({"error": f"unknown action: {action}"}, 400)
         except ValueError as exc:
             self._json({"error": str(exc)}, 400)
+
+    def _handle_lsp_bootstrap(self):
+        self.send_response(200)
+        self.send_header("Content-Type", "application/x-ndjson; charset=utf-8")
+        self.send_header("Cache-Control", "no-cache, no-transform")
+        self.send_header("Connection", "close")
+        self.end_headers()
+        try:
+            for event in lsp.bootstrap_mason_events():
+                self.wfile.write(json.dumps(event, ensure_ascii=False).encode() + b"\n")
+                self.wfile.flush()
+        except Exception as exc:
+            _logger.exception("lsp bootstrap failed")
+            try:
+                self.wfile.write(json.dumps({"op": "error", "message": str(exc)}, ensure_ascii=False).encode() + b"\n")
+                self.wfile.flush()
+            except (BrokenPipeError, ConnectionResetError):
+                pass
 
     def _handle_file_list(self):
         root = Path(self._workspace_path()).resolve()

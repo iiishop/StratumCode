@@ -1,6 +1,7 @@
 <script setup>
 import ThinkingEvent from './ThinkingEvent.vue'
 import ToolEvent from './ToolEvent.vue'
+import CodeNavEvent from './CodeNavEvent.vue'
 import SubagentEvent from './SubagentEvent.vue'
 import DiffEvent from './DiffEvent.vue'
 import OutputEvent from './OutputEvent.vue'
@@ -22,6 +23,7 @@ defineEmits(['answer'])
 const eventComponents = {
   thinking: ThinkingEvent,
   tool: ToolEvent,
+  code_nav: CodeNavEvent,
   subagent: SubagentEvent,
   diff: DiffEvent,
   output: OutputEvent,

@@ -181,6 +181,8 @@ project to enter patch planning, not to edit files.
 Maintain multiple beliefs, not one global hypothesis. For each unknown from the
 task analysis, choose the cheapest next action that reduces uncertainty:
 - use glob/grep/read to inspect project structure and existing patterns.
+- read results may include LSP diagnostics; use those diagnostics as semantic
+  evidence instead of calling a separate LSP tool.
 - if Suggested first tool calls contains entries, run the first applicable one
   before choosing a different starter.
 - you may call multiple independent tools in one turn when their inputs are

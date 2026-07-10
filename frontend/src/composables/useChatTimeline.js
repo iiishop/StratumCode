@@ -19,6 +19,7 @@ export function useChatTimeline(onAppend) {
     appendEvent,
     showThinking: (message, payload) => appendEvent(message, 'thinking', payload),
     showTool: (message, payload) => appendEvent(message, 'tool', payload),
+    showCodeNav: (message, payload) => appendEvent(message, 'code_nav', payload),
     showSubagent: (message, payload) => appendEvent(message, 'subagent', payload),
     showDiff: (message, payload) => appendEvent(message, 'diff', payload),
     showOutput: (message, payload) => appendEvent(message, 'output', payload),

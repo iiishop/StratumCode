@@ -7,17 +7,44 @@ const props = defineProps({
   loading: { type: Boolean, default: false },
   busyId: { type: String, default: '' },
   error: { type: String, default: '' },
+  mason: { type: Object, default: () => ({ available: false, command: '' }) },
+  bootstrap: { type: Object, default: () => ({}) },
+  bootstrapSteps: { type: Array, default: () => [] },
   onProbe: { type: Function, default: null },
 })
-const emit = defineEmits(['refresh', 'install', 'uninstall', 'enable', 'configure', 'probe'])
+const emit = defineEmits(['refresh', 'install-mason', 'install', 'uninstall', 'enable', 'configure', 'probe'])
 
 const search = ref('')
 const selectedLang = ref('')
+const installFilter = ref('all')
 const expandedId = ref('')
 const probeResults = ref({})
+const showMasonModal = ref(false)
+const bootstrapNames = ['git', 'nvim', 'mason']
+
+const bootstrapRows = computed(() => bootstrapNames.map(name => {
+  const step = props.bootstrapSteps.find(item => item.name === name)
+  const current = props.bootstrap?.[name] || {}
+  const status = step?.status || (current.available ? 'done' : 'missing')
+  return {
+    name,
+    status,
+    message: step?.message || current.command || (current.available ? 'installed' : 'not installed'),
+  }
+}))
+
+const bootstrapProgress = computed(() => {
+  const done = bootstrapRows.value.filter(row => row.status === 'done').length
+  return Math.round((done / bootstrapRows.value.length) * 100)
+})
 
 const filtered = computed(() => {
   let items = props.servers
+  if (installFilter.value === 'installed') {
+    items = items.filter(s => s.installed)
+  } else if (installFilter.value === 'not_installed') {
+    items = items.filter(s => !s.installed)
+  }
   if (selectedLang.value) {
     items = items.filter(s => s.languages.includes(selectedLang.value))
   }
@@ -84,17 +111,34 @@ function toggleEnabled(server) {
     <section class="lsp-page__head">
       <div>
         <h1>LSP</h1>
-        <p>Language servers from the Mason registry. Install to enable intelligent code features.</p>
+        <p>Language servers from Mason. Installed servers are used by read diagnostics automatically.</p>
       </div>
-      <button type="button" :disabled="loading" @click="emit('refresh')">
-        {{ loading ? 'Loading' : 'Refresh' }}
-      </button>
+      <div class="lsp-page__head-actions">
+        <button
+          v-if="!mason.available"
+          type="button"
+          :disabled="busyId === 'mason'"
+          @click="showMasonModal = true"
+        >
+          {{ busyId === 'mason' ? 'Installing' : 'Install Mason' }}
+        </button>
+        <button type="button" :disabled="loading" @click="emit('refresh')">
+          {{ loading ? 'Loading' : 'Refresh' }}
+        </button>
+      </div>
     </section>
 
     <div class="lsp-page__controls">
-      <div class="lsp-page__search">
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
-        <input v-model="search" placeholder="Search servers or languages..." />
+      <div class="lsp-page__controls-row">
+        <div class="lsp-page__search">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+          <input v-model="search" placeholder="Search servers or languages..." />
+        </div>
+        <div class="lsp-page__segment">
+          <button :class="{ active: installFilter === 'all' }" @click="installFilter = 'all'">All</button>
+          <button :class="{ active: installFilter === 'installed' }" @click="installFilter = 'installed'">Installed</button>
+          <button :class="{ active: installFilter === 'not_installed' }" @click="installFilter = 'not_installed'">Not installed</button>
+        </div>
       </div>
       <div class="lsp-page__lang-tabs">
         <button :class="{ active: !selectedLang }" @click="selectedLang = ''">All</button>
@@ -225,6 +269,31 @@ function toggleEnabled(server) {
     </template>
 
     <p v-if="!filtered.length && !loading" class="lsp-page__empty">No LSP servers match your criteria.</p>
+
+    <div v-if="showMasonModal" class="lsp-modal">
+      <div class="lsp-modal__panel">
+        <div class="lsp-modal__head">
+          <div>
+            <h2>Install Mason</h2>
+            <p>Git and Neovim are required before Mason can manage LSP servers.</p>
+          </div>
+          <button type="button" :disabled="busyId === 'mason'" @click="showMasonModal = false">Close</button>
+        </div>
+        <div class="lsp-modal__bar"><span :style="{ width: `${bootstrapProgress}%` }"></span></div>
+        <div class="lsp-modal__steps">
+          <div v-for="row in bootstrapRows" :key="row.name" class="lsp-modal__step" :class="`is-${row.status}`">
+            <strong>{{ row.name }}</strong>
+            <span>{{ row.message }}</span>
+          </div>
+        </div>
+        <div class="lsp-modal__actions">
+          <button type="button" :disabled="busyId === 'mason'" @click="showMasonModal = false">Cancel</button>
+          <button type="button" :disabled="busyId === 'mason'" @click="emit('install-mason')">
+            {{ busyId === 'mason' ? 'Installing' : 'Confirm install' }}
+          </button>
+        </div>
+      </div>
+    </div>
   </main>
 </template>
 
@@ -241,6 +310,11 @@ function toggleEnabled(server) {
   gap: 20px;
   justify-content: space-between;
   margin-bottom: 28px;
+}
+
+.lsp-page__head-actions {
+  display: flex;
+  gap: 8px;
 }
 
 .lsp-page h1 {
@@ -279,7 +353,15 @@ function toggleEnabled(server) {
   margin-bottom: 24px;
 }
 
+.lsp-page__controls-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
 .lsp-page__search {
+  flex: 1;
+  min-width: 0;
   display: flex;
   align-items: center;
   gap: 8px;
@@ -290,6 +372,29 @@ function toggleEnabled(server) {
   background: #fff;
   color: var(--text-muted);
 }
+
+.lsp-page__segment {
+  display: flex;
+  flex-shrink: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+
+.lsp-page__segment button {
+  height: 36px;
+  padding: 0 14px;
+  border: 0;
+  border-right: 1px solid var(--border);
+  border-radius: 0;
+  color: var(--text-muted);
+  background: #fff;
+  font: 650 10px/1 var(--mono);
+}
+
+.lsp-page__segment button:last-child { border-right: 0; }
+.lsp-page__segment button:hover { color: var(--text-h); background: var(--accent-bg); }
+.lsp-page__segment button.active { color: #fff; background: var(--accent); }
 
 .lsp-page__search input {
   width: 100%;
@@ -495,6 +600,82 @@ function toggleEnabled(server) {
   padding: 40px 0;
   text-align: center;
   color: var(--text-muted);
+}
+
+.lsp-modal {
+  position: fixed;
+  inset: 0;
+  z-index: 30;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgba(15, 23, 42, .32);
+}
+
+.lsp-modal__panel {
+  width: min(520px, 100%);
+  padding: 18px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: #fff;
+  box-shadow: 0 18px 50px rgba(15, 23, 42, .18);
+}
+
+.lsp-modal__head,
+.lsp-modal__actions,
+.lsp-modal__step {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.lsp-modal__head h2 {
+  margin: 0;
+  color: var(--text-h);
+  font-size: 16px;
+}
+
+.lsp-modal__bar {
+  height: 7px;
+  overflow: hidden;
+  margin: 16px 0;
+  border-radius: 999px;
+  background: var(--code-bg);
+}
+
+.lsp-modal__bar span {
+  display: block;
+  height: 100%;
+  background: var(--accent);
+  transition: width .2s ease;
+}
+
+.lsp-modal__steps {
+  display: grid;
+  gap: 8px;
+}
+
+.lsp-modal__step {
+  padding: 8px 10px;
+  border-radius: var(--radius-sm);
+  background: var(--code-bg);
+  color: var(--text-muted);
+  font: 9px/1.3 var(--mono);
+}
+
+.lsp-modal__step strong {
+  color: var(--text-h);
+  text-transform: uppercase;
+}
+
+.lsp-modal__step.is-running { color: var(--accent-text); background: var(--accent-bg); }
+.lsp-modal__step.is-done { color: var(--ok); background: var(--ok-bg); }
+.lsp-modal__step.is-error { color: var(--err); background: var(--err-bg); }
+
+.lsp-modal__actions {
+  margin-top: 16px;
+  justify-content: flex-end;
 }
 
 @media (max-width: 720px) {

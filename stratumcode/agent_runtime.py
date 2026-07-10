@@ -75,6 +75,22 @@ def content_text(content) -> str:
     return ""
 
 
+def assistant_visible_text(message: dict) -> str:
+    return (
+        content_text(message.get("content"))
+        or content_text(message.get("reasoning_content"))
+        or content_text(message.get("reasoning"))
+    )
+
+
+def assistant_message(message: dict) -> dict:
+    result = {"role": "assistant", "content": message.get("content") or ""}
+    for key in ("reasoning_content", "reasoning", "tool_calls"):
+        if message.get(key):
+            result[key] = message[key]
+    return result
+
+
 def empty_usage(pricing_rules: list[dict]) -> dict:
     return {
         "input_tokens": 0,

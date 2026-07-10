@@ -291,7 +291,13 @@ def analyzed_stream(
                 analysis.get("task_updates", []) + last_investigation.get("task_updates", []),
                 session_context.get("tasks", []),
             )
+            last_investigation["task_updates"] = _finalize_task_statuses(last_investigation["task_updates"], last_investigation)
             last_investigation["observations"] = _scoped_items(analysis["id"], last_investigation.get("observations", []))
+            analysis["task_updates"] = last_investigation["task_updates"]
+            yield start_event(f"{analysis['id']}-task-final", "task_update", {
+                "analysis_id": analysis["id"],
+                "items": analysis["task_updates"],
+            })
         yield event
     if session_id and last_investigation:
         sessions.merge_investigation(
@@ -589,6 +595,24 @@ def _normalize_task_updates(analysis_id: str, updates: list[dict], existing: lis
         elif result[index].get("kind") != "goal":
             result[index] = {**result[index], **item, "id": result[index].get("id") or item["id"]}
     return result
+
+
+def _finalize_task_statuses(items: list[dict], investigation: dict) -> list[dict]:
+    next_step = ((investigation.get("step_result") or {}).get("next_step") or "").strip()
+    if next_step == "ask_user":
+        return items
+    done_status = "known" if investigation.get("ready_for_patch_planning") else "deferred"
+    final = []
+    for item in items:
+        status = item.get("status") or "unknown"
+        if item.get("kind") in {"unknown", "hypothesis", "clue", "work"} and status in {"unknown", "pending", "added", "updated", "active"}:
+            item = {
+                **item,
+                "status": done_status,
+                "reason": item.get("reason") or "Investigation completed without a more specific task update.",
+            }
+        final.append(item)
+    return final
 
 
 def _same_task(left: dict, right: dict) -> bool:

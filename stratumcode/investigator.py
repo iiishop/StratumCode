@@ -12,6 +12,8 @@ from .agent.tools import openai_tool_schema
 from .agent_runtime import (
     add_usage as _add_usage,
     call_model as _call_model,
+    assistant_message as _assistant_message,
+    assistant_visible_text as _assistant_visible_text,
     content_text as _content_text,
     empty_usage as _empty_usage,
     start_event,
@@ -23,7 +25,7 @@ from .tools import registry
 MAX_INVESTIGATION_ROUNDS = 10
 MAX_FINALIZATION_ATTEMPTS = 2
 FINALIZATION_OUTPUT_TOKENS = 4096
-INVESTIGATION_TOOLS = ("glob", "grep", "read", "websearch", "webfetch", "subagent")
+INVESTIGATION_TOOLS = ("glob", "grep", "read", "code_nav", "websearch", "webfetch", "subagent")
 
 
 def investigation_stream(
@@ -99,13 +101,9 @@ def investigation_stream(
                 "total": usage_total,
             })
 
-        content = _content_text(assistant.get("content"))
+        content = _assistant_visible_text(assistant)
         tool_calls = assistant.get("tool_calls") or []
-        messages.append({
-            "role": "assistant",
-            "content": assistant.get("content") or "",
-            **({"tool_calls": tool_calls} if tool_calls else {}),
-        })
+        messages.append(_assistant_message(assistant))
         yield {"op": "update", "id": thinking_id, "patch": {
             "text": content,
             "done": True,
@@ -139,7 +137,7 @@ def investigation_stream(
                 )
             except Exception as exc:
                 output = tool_error_json(exc, name)
-                yield start_event(call_id, "tool", {
+                yield start_event(call_id, _tool_event_type(name), {
                     "name": name or "invalid",
                     "description": "Investigation tool",
                     "status": "error",
@@ -321,7 +319,7 @@ def _finalize_investigation(
                 "total": usage_total,
             })
 
-        content = _content_text(assistant.get("content"))
+        content = _assistant_visible_text(assistant)
         last_content = content or last_content
         tool_calls = assistant.get("tool_calls") or []
         finish_call = next(
@@ -331,11 +329,10 @@ def _finalize_investigation(
             ),
             None,
         )
-        messages.append({
-            "role": "assistant",
-            "content": assistant.get("content") or "",
-            **({"tool_calls": [finish_call]} if finish_call else {}),
-        })
+        replay = dict(assistant)
+        if finish_call:
+            replay["tool_calls"] = [finish_call]
+        messages.append(_assistant_message(replay))
         yield {"op": "update", "id": thinking_id, "patch": {
             "text": content,
             "done": True,
@@ -404,7 +401,7 @@ def _run_tool_stream(name: str, call_id: str, arguments: dict, workspace_dir: st
     tool = registry.get(name)
     if tool is None:
         raise ValueError(f"unknown tool: {name}")
-    yield start_event(call_id, "tool", {
+    yield start_event(call_id, _tool_event_type(name), {
         "name": name,
         "description": tool.description,
         "status": "running",
@@ -425,6 +422,12 @@ def _run_tool_stream(name: str, call_id: str, arguments: dict, workspace_dir: st
         "output": result.output,
         "metadata": result.metadata,
     }, ensure_ascii=False)
+
+
+def _tool_event_type(name: str) -> str:
+    if name == "code_nav":
+        return "code_nav"
+    return "tool"
 
 
 def _reject_batched_hypothesis(task: str) -> None:

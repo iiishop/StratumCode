@@ -15,7 +15,8 @@ from .agent.tools import agent_tools
 from .agent_runtime import (
     add_usage as _add_usage,
     call_model as _call_model,
-    content_text as _content_text,
+    assistant_message as _assistant_message,
+    assistant_visible_text as _assistant_visible_text,
     empty_usage as _empty_usage,
     start_event,
     tool_error_json,
@@ -119,13 +120,9 @@ def evidence_stream(
                 "delta": usage,
                 "total": usage_total,
             })
-        content = _content_text(assistant.get("content"))
+        content = _assistant_visible_text(assistant)
         tool_calls = assistant.get("tool_calls") or []
-        messages.append({
-            "role": "assistant",
-            "content": assistant.get("content"),
-            **({"tool_calls": tool_calls} if tool_calls else {}),
-        })
+        messages.append(_assistant_message(assistant))
 
         if content:
             yield {"op": "update", "id": thinking_id, "patch": {
@@ -201,7 +198,7 @@ def evidence_stream(
                 output = tool_error_json(exc, name)
                 if name == "record_evidence":
                     policy.note_checkpoint_failure()
-                yield start_event(call_id, "tool", {
+                yield start_event(call_id, _tool_event_type(name), {
                     "name": name or "invalid",
                     "description": (
                         registry.get(name).description
@@ -389,7 +386,7 @@ def _handle_agent_tool(
         if policy:
             arguments = policy.prepare_discovery(name, arguments)
         tool = registry.get(name)
-        yield start_event(call_id, "tool", {
+        yield start_event(call_id, _tool_event_type(name), {
             "name": name,
             "description": tool.description,
             "status": "running",
@@ -539,6 +536,12 @@ def _handle_agent_tool(
         return json.dumps(data, ensure_ascii=False), True, None
 
     raise ValueError(f"unknown agent tool: {name}")
+
+
+def _tool_event_type(name: str) -> str:
+    if name == "code_nav":
+        return "code_nav"
+    return "tool"
 
 
 def _normalized(value: str) -> str:
