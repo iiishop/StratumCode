@@ -139,7 +139,15 @@ Required JSON schema:
     "type": "feature|bugfix|refactor|question|investigation|other",
     "summary": "one sentence describing the result the user wants"
   },
+  "acceptance_criteria": [
+    {"id": "AC1", "text": "observable behavior that must be true when done"}
+  ],
   "constraints": ["explicit hard requirements from the user"],
+  "scope": {
+    "in": ["work explicitly required now"],
+    "out": ["work explicitly not required"],
+    "undecided": ["product or user decisions not yet settled"]
+  },
   "hypotheses": [
     {"text": "claim or assumption to verify", "certainty": "certain|uncertain|guess"}
   ],
@@ -153,7 +161,17 @@ Required JSON schema:
       "note": "optional short note"
     }
   ],
-  "unknowns": ["initial facts that must be investigated"]
+  "unknowns": [
+    {
+      "id": "U1",
+      "question": "specific question that must be answered before implementation",
+      "blocking": true,
+      "type": "codebase_fact|user_decision|deferred",
+      "why": "why this question matters",
+      "resolution_strategy": "investigate_project|ask_user|deferred",
+      "acceptance_criteria_ids": ["AC1"]
+    }
+  ]
 }
 
 Rules:
@@ -161,7 +179,10 @@ Rules:
   violate them.
 - Clues are pointers to verify, not requirements and not evidence.
 - If the user states no hypothesis, keep hypotheses empty; do not invent one.
-- Unknowns should be concrete facts needed to satisfy the intent.
+- Do not convert the whole task into a global hypothesis.
+- Unknowns should be concrete facts or decisions needed to satisfy the intent.
+- Prefer codebase_fact + investigate_project for questions the repository can answer.
+- Use user_decision + ask_user only for choices that cannot be inferred from code.
 - Use empty arrays when a section has no items.
 - Output JSON only."""
 
@@ -180,7 +201,12 @@ project to enter patch planning, not to edit files.
 
 Maintain multiple beliefs, not one global hypothesis. For each unknown from the
 task analysis, choose the cheapest next action that reduces uncertainty:
+- before the first discovery call, make a short plan for all blocking unknowns:
+  which unknown is first, and what kind of evidence would resolve it.
 - use glob/grep/read to inspect project structure and existing patterns.
+- every glob/grep/read/code_nav/webfetch/websearch/subagent call must include
+  target_unknown_ids and reason. target_unknown_ids must reference unknown IDs
+  from the task contract unless the call is only broad orientation.
 - read results may include LSP diagnostics; use those diagnostics as semantic
   evidence instead of calling a separate LSP tool.
 - if Suggested first tool calls contains entries, run the first applicable one
@@ -208,8 +234,14 @@ because one hypothesis verifier run ended."""
 INVESTIGATION_CONTEXT = """\
 ## Task analysis
 Intent: {intent_type} - {intent_summary}
+Acceptance criteria:
+{acceptance_criteria}
+
 Constraints:
 {constraints}
+
+Scope:
+{scope}
 
 Initial hypotheses from user:
 {hypotheses}
@@ -234,9 +266,11 @@ Investigation step limit reached. Do not call discovery tools now.
 Use only the tool results already present in this conversation. Call
 finish_investigation with:
 - grounded beliefs from observed files, commands, documents, or verifier results.
-- open_questions for facts still unresolved.
-- unknowns with blocking and resolution_strategy for every unresolved fact.
-- patch_planning_context for concrete facts a later patch planner can rely on.
+- resolutions for every initial unknown, keyed by unknown_id. Use status:
+  resolved, partially_resolved, needs_user, or deferred.
+- user_decisions_required for blocking choices that cannot be inferred from code.
+- new_unknowns only for important questions discovered during investigation.
+- patch_planning_facts for concrete facts a later patch planner can rely on.
 - task_updates for task panel progress:
   - mark initial unknowns as status=known when evidence or beliefs resolve them.
   - when updating an existing unknown, reuse that unknown's id even if the text is rewritten.
@@ -245,15 +279,15 @@ finish_investigation with:
   - include a short reason and trace references such as file paths, line ranges,
     tool call ids, belief statements, or evidence ids.
 
-Keep the JSON compact: at most 6 beliefs, 5 open_questions, and 10
-patch_planning_context entries. Each string should be one short sentence. Keep
+Keep the JSON compact: at most 6 beliefs, 5 user_decisions_required, and 10
+patch_planning_facts entries. Each string should be one short sentence. Keep
 task_updates to at most 8 items.
 
-If the observed facts are enough to plan a patch, set ready_for_patch_planning
-to true. If any unresolved unknown blocks choosing the implementation path, set
-blocking=true and resolution_strategy=investigate_project or ask_user; that means
-ready_for_patch_planning must be false. Use deferred only for packaging or polish
-questions that do not block the next code patch."""
+You may set ready_for_patch_planning as a recommendation, but runtime will
+recompute it from resolutions, evidence, blocking unknowns, and
+patch_planning_facts. If any resolution is partially_resolved or needs_user and
+blocks choosing the implementation path, recommend false. Use deferred only for
+packaging or polish questions that do not block the next code patch."""
 
 
 def output_language_section(language: str = "zh") -> str:
@@ -353,7 +387,12 @@ def build_investigation_context(
         INVESTIGATION_CONTEXT.format(
             intent_type=analysis.get("intent", {}).get("type", "other"),
             intent_summary=analysis.get("intent", {}).get("summary", ""),
+            acceptance_criteria="\n".join(
+                f"- {item.get('id', '')}: {item.get('text', '')}"
+                for item in analysis.get("acceptance_criteria", [])
+            ) or "- (none)",
             constraints="\n".join(f"- {item}" for item in analysis.get("constraints", [])) or "- (none)",
+            scope=_format_scope(analysis.get("scope", {})),
             hypotheses="\n".join(
                 f"- ({item.get('certainty', 'uncertain')}) {item.get('text', '')}"
                 for item in analysis.get("hypotheses", [])
@@ -362,7 +401,7 @@ def build_investigation_context(
                 f"- {item.get('kind', 'other')}: {item.get('value', '')}"
                 for item in analysis.get("clues", [])
             ) or "- (none)",
-            unknowns="\n".join(f"- {item}" for item in analysis.get("unknowns", [])) or "- (none)",
+            unknowns="\n".join(_format_unknown(item) for item in analysis.get("unknowns", [])) or "- (none)",
             suggested_tools="\n".join(
                 f"- {item.get('tool')}: {item.get('arguments')}"
                 for item in analysis.get("suggested_first_tools", [])
@@ -371,6 +410,27 @@ def build_investigation_context(
             max_rounds=max_rounds,
         ),
     ))
+
+
+def _format_scope(scope: dict) -> str:
+    if not isinstance(scope, dict):
+        return "- (none)"
+    lines = []
+    for label, key in (("in", "in"), ("out", "out"), ("undecided", "undecided")):
+        for item in scope.get(key, []) or []:
+            lines.append(f"- {label}: {item}")
+    return "\n".join(lines) or "- (none)"
+
+
+def _format_unknown(item) -> str:
+    if not isinstance(item, dict):
+        return f"- {item}"
+    return (
+        f"- {item.get('id', '')}: {item.get('question', '')} "
+        f"[type={item.get('type', '')}, blocking={bool(item.get('blocking'))}, "
+        f"strategy={item.get('resolution_strategy', '')}, "
+        f"acceptance={','.join(item.get('acceptance_criteria_ids', []) or [])}]"
+    )
 
 
 def build_investigation_finalize() -> str:

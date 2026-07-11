@@ -24,6 +24,8 @@ MAX_ANALYZER_ATTEMPTS = 3
 TASK_INTENT_TYPES = {"feature", "bugfix", "refactor", "question", "investigation", "other"}
 TASK_CERTAINTIES = {"certain", "uncertain", "guess"}
 TASK_CLUE_KINDS = {"file", "line", "symbol", "route", "other"}
+TASK_UNKNOWN_TYPES = {"codebase_fact", "user_decision", "deferred"}
+TASK_UNKNOWN_STRATEGIES = {"investigate_project", "ask_user", "deferred"}
 
 
 def analyze_task(message: str, context: list[str], workspace_dir: str, session_context: dict | None = None) -> dict:
@@ -103,18 +105,95 @@ def _validate_task_analysis(data: dict) -> dict:
 
     return {
         "intent": {"type": intent_type, "summary": summary},
+        "acceptance_criteria": _acceptance_criteria(data.get("acceptance_criteria")),
         "constraints": _string_list(data.get("constraints"), "constraints"),
+        "scope": _scope(data.get("scope")),
         "hypotheses": _hypotheses(data.get("hypotheses")),
         "clues": _clues(data.get("clues")),
-        "unknowns": _limited_unknowns(data.get("unknowns")),
+        "unknowns": _limited_unknowns(data.get("unknowns"), data.get("acceptance_criteria")),
     }
 
 
-def _limited_unknowns(value) -> list[str]:
-    unknowns = _string_list(value, "unknowns")
+def _acceptance_criteria(value) -> list[dict]:
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise ValueError("acceptance_criteria must be an array")
+    items = []
+    for index, raw in enumerate(value, start=1):
+        if isinstance(raw, dict):
+            text = str(raw.get("text") or raw.get("description") or "").strip()
+            item_id = str(raw.get("id") or f"AC{index}").strip()
+        else:
+            text = str(raw).strip()
+            item_id = f"AC{index}"
+        if text:
+            items.append({"id": item_id or f"AC{index}", "text": text})
+    return items
+
+
+def _scope(value) -> dict:
+    if value is None:
+        value = {}
+    if not isinstance(value, dict):
+        raise ValueError("scope must be an object")
+    return {
+        "in": _string_list(value.get("in"), "scope.in"),
+        "out": _string_list(value.get("out"), "scope.out"),
+        "undecided": _string_list(value.get("undecided"), "scope.undecided"),
+    }
+
+
+def _limited_unknowns(value, criteria=None) -> list[dict]:
+    unknowns = _unknowns(value, criteria)
     if len(unknowns) > 5:
         raise ValueError("unknowns must contain at most 5 items")
     return unknowns
+
+
+def _unknowns(value, criteria=None) -> list[dict]:
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise ValueError("unknowns must be an array")
+    criteria_ids = [item["id"] for item in _acceptance_criteria(criteria)]
+    items = []
+    for index, raw in enumerate(value, start=1):
+        if isinstance(raw, dict):
+            question = str(raw.get("question") or raw.get("text") or raw.get("description") or "").strip()
+            item_id = str(raw.get("id") or f"U{index}").strip()
+            unknown_type = str(raw.get("type") or "codebase_fact").strip().casefold()
+            strategy = str(raw.get("resolution_strategy") or "investigate_project").strip().casefold()
+            accepted_ids = raw.get("acceptance_criteria_ids")
+            if not isinstance(accepted_ids, list):
+                accepted_ids = []
+            accepted_ids = [str(item).strip() for item in accepted_ids if str(item).strip()]
+            blocking = bool(raw.get("blocking", True))
+            why = str(raw.get("why") or raw.get("reason") or "").strip()
+        else:
+            question = str(raw).strip()
+            item_id = f"U{index}"
+            unknown_type = "codebase_fact"
+            strategy = "investigate_project"
+            accepted_ids = criteria_ids
+            blocking = True
+            why = ""
+        if not question:
+            continue
+        if unknown_type not in TASK_UNKNOWN_TYPES:
+            unknown_type = "codebase_fact"
+        if strategy not in TASK_UNKNOWN_STRATEGIES:
+            strategy = "investigate_project"
+        items.append({
+            "id": item_id or f"U{index}",
+            "question": question,
+            "blocking": blocking,
+            "type": unknown_type,
+            "why": why,
+            "resolution_strategy": strategy,
+            "acceptance_criteria_ids": accepted_ids,
+        })
+    return items
 
 
 def _string_list(value, field: str) -> list[str]:
@@ -178,7 +257,7 @@ def _clues(value) -> list[dict]:
 def _analysis_hypothesis(message: str, analysis: dict) -> str:
     if analysis["hypotheses"]:
         return analysis["hypotheses"][0]["text"]
-    return f"The workspace contains enough implementation context to satisfy: {analysis['intent']['summary'] or message}"
+    return ""
 
 
 def _suggested_first_tools(analysis: dict) -> list[dict]:
@@ -210,6 +289,19 @@ def _suggested_first_tools(analysis: dict) -> list[dict]:
     return calls
 
 
+def _ensure_task_contract(analysis: dict) -> dict:
+    analysis.setdefault("constraints", [])
+    analysis.setdefault("hypotheses", [])
+    analysis.setdefault("clues", [])
+    analysis.setdefault("suggested_first_tools", [])
+    analysis.setdefault("acceptance_criteria", [])
+    analysis.setdefault("scope", {"in": [], "out": [], "undecided": []})
+    analysis["acceptance_criteria"] = _acceptance_criteria(analysis.get("acceptance_criteria"))
+    analysis["scope"] = _scope(analysis.get("scope"))
+    analysis["unknowns"] = _limited_unknowns(analysis.get("unknowns"), analysis.get("acceptance_criteria"))
+    return analysis
+
+
 def _path_from_text(value: str) -> str:
     match = re.search(r"[\w./\\-]+\.[A-Za-z0-9_]+", value or "")
     return match.group(0).replace("\\", "/") if match else ""
@@ -221,8 +313,17 @@ def _line_from_text(value: str) -> int | None:
 
 
 def _analysis_context(analysis: dict) -> list[str]:
+    analysis = _ensure_task_contract(analysis)
     lines = [f"Task intent ({analysis['intent']['type']}): {analysis['intent']['summary']}"]
+    lines.extend(
+        f"Acceptance criterion {item['id']}: {item['text']}"
+        for item in analysis.get("acceptance_criteria", [])
+    )
     lines.extend(f"Constraint: {item}" for item in analysis["constraints"])
+    scope = analysis.get("scope", {})
+    lines.extend(f"In scope: {item}" for item in scope.get("in", []))
+    lines.extend(f"Out of scope: {item}" for item in scope.get("out", []))
+    lines.extend(f"Undecided scope: {item}" for item in scope.get("undecided", []))
     lines.extend(
         f"Assumption to verify ({item['certainty']}): {item['text']}"
         for item in analysis["hypotheses"]
@@ -238,7 +339,16 @@ def _analysis_context(analysis: dict) -> list[str]:
         lines.append("Clue to verify: " + " ".join(str(part) for part in parts if part))
     for call in analysis["suggested_first_tools"]:
         lines.append("Suggested first tool call: " + json.dumps(call, ensure_ascii=False))
-    lines.extend(f"Initial unknown: {item}" for item in analysis["unknowns"])
+    lines.extend(
+        "Initial unknown {id} [{type}, {strategy}, blocking={blocking}]: {question}".format(
+            id=item.get("id", ""),
+            type=item.get("type", ""),
+            strategy=item.get("resolution_strategy", ""),
+            blocking=bool(item.get("blocking")),
+            question=item.get("question", ""),
+        )
+        for item in analysis["unknowns"]
+    )
     return lines
 
 
@@ -262,6 +372,7 @@ def analyzed_stream(
         context = context + answer_context
     if analysis is None:
         analysis = analyze_task(message, context, workspace_dir, session_context=session_context)
+    analysis = _ensure_task_contract(analysis)
     analysis.setdefault("id", f"task-{uuid4().hex[:8]}")
     analysis.setdefault("origin_message", message)
     _attach_session_relationship(analysis, session_context.get("tasks", []))
@@ -530,6 +641,7 @@ def _prior_findings(prior_analysis: dict | None, answer: dict | None) -> list[st
 
 
 def _seed_task_updates(analysis: dict, existing: list[dict] | None = None) -> list[dict]:
+    analysis = _ensure_task_contract(analysis)
     task_id = analysis["id"]
     root_goal = analysis.get("root_goal_id") or f"{task_id}:goal"
     items = []
@@ -542,6 +654,10 @@ def _seed_task_updates(analysis: dict, existing: list[dict] | None = None) -> li
         for index, text in enumerate(analysis.get("constraints", []), start=1)
     )
     items.extend(
+        _task_item(f"{task_id}:{item['id']}", "work", item["text"], "unknown", parent_id=root_goal)
+        for item in analysis.get("acceptance_criteria", [])
+    )
+    items.extend(
         _task_item(f"{task_id}:H{index}", "hypothesis", item["text"], "unknown", parent_id=root_goal)
         for index, item in enumerate(analysis.get("hypotheses", []), start=1)
     )
@@ -551,8 +667,8 @@ def _seed_task_updates(analysis: dict, existing: list[dict] | None = None) -> li
     )
     parent = f"{task_id}:work" if analysis.get("root_goal_id") else root_goal
     items.extend(
-        _task_item(f"{task_id}:U{index}", "unknown", text, "unknown", parent_id=parent)
-        for index, text in enumerate(analysis.get("unknowns", []), start=1)
+        _task_item(f"{task_id}:{item.get('id') or f'U{index}'}", "unknown", item.get("question", ""), "unknown", parent_id=parent)
+        for index, item in enumerate(analysis.get("unknowns", []), start=1)
     )
     return _normalize_task_updates(task_id, items, existing or [])
 

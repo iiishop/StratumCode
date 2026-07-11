@@ -89,6 +89,7 @@ def investigation_stream(
         messages.insert(2, {"role": "system", "content": "\n".join(prior_lines)})
     tools = _investigation_tools()
     final = None
+    observations = []
 
     for round_index in range(max_rounds):
         thinking_id = f"{run_id}-thinking-{round_index}"
@@ -122,7 +123,7 @@ def investigation_stream(
             try:
                 arguments = _tool_arguments(function.get("arguments"))
                 if name == "finish_investigation":
-                    final = _finish_payload(arguments)
+                    final = _finish_payload(arguments, analysis=analysis)
                     messages.append({
                         "role": "tool",
                         "tool_call_id": call_id,
@@ -135,6 +136,7 @@ def investigation_stream(
                     arguments,
                     workspace_dir,
                 )
+                observations.append(_tool_observation(name, call_id, output))
             except Exception as exc:
                 output = tool_error_json(exc, name)
                 yield start_event(call_id, _tool_event_type(name), {
@@ -162,6 +164,10 @@ def investigation_stream(
             usage_total=usage_total,
             run_id=run_id,
         )
+    final["observations"] = observations + [
+        item for item in final.get("observations", [])
+        if isinstance(item, dict)
+    ]
 
     yield {"op": "update", "id": stage_id, "patch": {
         "state": "done",
@@ -187,12 +193,27 @@ def investigation_stream(
 
 def _investigation_tools() -> list[dict]:
     tools = [
-        openai_tool_schema(tool.name, tool.description, tool.parameters)
+        _investigation_tool_schema(tool.name, tool.description, tool.parameters)
         for name in INVESTIGATION_TOOLS
         if (tool := registry.get(name))
     ]
     tools.append(_finish_tool_schema())
     return tools
+
+
+def _investigation_tool_schema(name: str, description: str, parameters: dict) -> dict:
+    schema = json.loads(json.dumps(parameters))
+    properties = schema.setdefault("properties", {})
+    properties["target_unknown_ids"] = {
+        "type": "array",
+        "items": {"type": "string"},
+        "description": "Task contract unknown IDs this tool call is intended to resolve or reduce.",
+    }
+    properties["reason"] = {
+        "type": "string",
+        "description": "One short sentence explaining why this call helps those unknowns.",
+    }
+    return openai_tool_schema(name, description, schema)
 
 
 def _previous_context(observations: list[dict] | None, knowledge: list[dict] | None) -> list[str]:
@@ -241,6 +262,42 @@ def _finish_tool_schema() -> dict:
                     },
                 },
                 "open_questions": {"type": "array", "items": {"type": "string"}},
+                "resolutions": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "unknown_id": {"type": "string"},
+                            "status": {
+                                "type": "string",
+                                "enum": ["resolved", "partially_resolved", "needs_user", "deferred"],
+                            },
+                            "answer": {"type": "string"},
+                            "evidence": {"type": "array", "items": {"type": "string"}},
+                            "belief_ids": {"type": "array", "items": {"type": "string"}},
+                            "reason": {"type": "string"},
+                        },
+                        "required": ["unknown_id", "status"],
+                    },
+                },
+                "new_unknowns": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "id": {"type": "string"},
+                            "question": {"type": "string"},
+                            "blocking": {"type": "boolean"},
+                            "resolution_strategy": {
+                                "type": "string",
+                                "enum": ["investigate_project", "ask_user", "deferred"],
+                            },
+                        },
+                        "required": ["id", "question", "blocking", "resolution_strategy"],
+                    },
+                },
+                "user_decisions_required": {"type": "array", "items": {"type": "string"}},
+                "patch_planning_facts": {"type": "array", "items": {"type": "string"}},
                 "unknowns": {
                     "type": "array",
                     "items": {
@@ -358,6 +415,18 @@ def _finalize_investigation(
                     "content": json.dumps(final, ensure_ascii=False),
                 })
                 return final
+        elif content:
+            try:
+                final = _finish_payload(_json_content(content))
+            except Exception:
+                last_error = "Investigation step limit reached before finish_investigation was called."
+            else:
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": f"final-{attempt}",
+                    "content": json.dumps(final, ensure_ascii=False),
+                })
+                return final
         else:
             last_error = "Investigation step limit reached before finish_investigation was called."
 
@@ -373,6 +442,7 @@ def _finalize_investigation(
     return {
         "summary": last_content or "Investigation step limit reached before a final summary was produced.",
         "ready_for_patch_planning": False,
+        "runtime_failure": True,
         "beliefs": [],
         "open_questions": [last_error or "finish_investigation did not produce a usable result."],
         "patch_planning_context": [],
@@ -382,6 +452,9 @@ def _finalize_investigation(
 def _run_tool_stream(name: str, call_id: str, arguments: dict, workspace_dir: str) -> Iterator[dict]:
     if name not in INVESTIGATION_TOOLS:
         raise ValueError(f"unknown investigation tool: {name or 'tool'}")
+    target_unknown_ids = _target_unknown_ids(arguments)
+    reason = str(arguments.pop("reason", "") or "").strip()
+    arguments.pop("target_unknown_ids", None)
 
     if name == "subagent" and (arguments.get("agent") or arguments.get("name")):
         agent = str(arguments.get("agent") or arguments.get("name"))
@@ -396,6 +469,8 @@ def _run_tool_stream(name: str, call_id: str, arguments: dict, workspace_dir: st
                     done = packet
                 else:
                     yield packet
+            done["target_unknown_ids"] = target_unknown_ids
+            done["reason"] = reason
             return json.dumps(done, ensure_ascii=False)
 
     tool = registry.get(name)
@@ -408,20 +483,63 @@ def _run_tool_stream(name: str, call_id: str, arguments: dict, workspace_dir: st
         "open": False,
         "input": json.dumps(arguments, ensure_ascii=False, indent=2),
         "output": "",
+        "target_unknown_ids": target_unknown_ids,
+        "reason": reason,
     })
     result = asyncio.run(tool.execute(arguments, {"directory": workspace_dir}))
     yield {"op": "update", "id": call_id, "patch": {
         "status": "error" if result.title.startswith("[error]") else "done",
         "title": result.title,
         "output": result.output,
-        "metadata": result.metadata,
+        "metadata": {
+            **result.metadata,
+            "target_unknown_ids": target_unknown_ids,
+            "reason": reason,
+        },
     }}
     return json.dumps({
         "tool_call_id": call_id,
+        "target_unknown_ids": target_unknown_ids,
+        "reason": reason,
         "title": result.title,
         "output": result.output,
-        "metadata": result.metadata,
+        "metadata": {
+            **result.metadata,
+            "target_unknown_ids": target_unknown_ids,
+            "reason": reason,
+        },
     }, ensure_ascii=False)
+
+
+def _target_unknown_ids(arguments: dict) -> list[str]:
+    raw = arguments.get("target_unknown_ids")
+    if isinstance(raw, str):
+        raw = [raw]
+    if not isinstance(raw, list):
+        return []
+    return [item for value in raw if (item := str(value).strip())]
+
+
+def _tool_observation(name: str, call_id: str, output: str) -> dict:
+    try:
+        data = json.loads(output)
+    except json.JSONDecodeError:
+        data = {}
+    metadata = data.get("metadata") if isinstance(data.get("metadata"), dict) else {}
+    return {
+        "id": call_id,
+        "tool": name,
+        "title": str(data.get("title") or name),
+        "summary": _short_observation(data.get("output") or output),
+        "target_unknown_ids": data.get("target_unknown_ids") or metadata.get("target_unknown_ids") or [],
+        "reason": data.get("reason") or metadata.get("reason") or "",
+        "path": metadata.get("path", ""),
+    }
+
+
+def _short_observation(value) -> str:
+    text = " ".join(str(value or "").split())
+    return text[:240]
 
 
 def _tool_event_type(name: str) -> str:
@@ -460,8 +578,28 @@ def _tool_arguments(raw: str | None) -> dict:
     return arguments
 
 
-def _finish_payload(arguments: dict) -> dict:
-    unknowns = _unknowns(arguments.get("unknowns"))
+def _json_content(raw: str) -> dict:
+    text = (raw or "").strip()
+    if text.startswith("```"):
+        text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text, flags=re.IGNORECASE).strip()
+    data = json.loads(text)
+    if not isinstance(data, dict):
+        raise ValueError("final JSON must be an object")
+    return data
+
+
+def _finish_payload(
+    arguments: dict,
+    *,
+    analysis: dict | None = None,
+    expected_step: dict | None = None,
+    required_items: list[dict] | None = None,
+    repair_conflicts: bool = False,
+) -> dict:
+    repairs: list[str] = []
+    explicit_unknowns = _unknowns(arguments.get("unknowns"))
+    unknowns = list(explicit_unknowns)
+    new_unknowns = _unknowns(arguments.get("new_unknowns"))
     open_questions = arguments.get("open_questions") if isinstance(arguments.get("open_questions"), list) else []
     if open_questions and not unknowns:
         unknowns = [
@@ -473,21 +611,58 @@ def _finish_payload(arguments: dict) -> dict:
             }
             for index, question in enumerate(_clean_questions(open_questions), start=1)
         ]
-    ready = bool(arguments.get("ready_for_patch_planning"))
+    resolutions = _resolutions(arguments.get("resolutions"))
+    initial_unknowns = _initial_unknowns(analysis)
+    resolutions = _complete_resolutions(resolutions, initial_unknowns, unknowns)
+    resolutions = _enforce_resolution_evidence(resolutions, initial_unknowns)
+    unresolved = _unresolved_from_resolutions(resolutions, initial_unknowns)
+    unknowns = _merge_unknowns(unresolved + unknowns + new_unknowns)
+    user_decisions = _string_list(arguments.get("user_decisions_required"))
+    patch_context = _patch_context(arguments.get("patch_planning_facts"), repairs, repair_conflicts)
+    if not patch_context:
+        patch_context = _patch_context(arguments.get("patch_planning_context"), repairs, repair_conflicts)
+    model_ready = bool(arguments.get("ready_for_patch_planning"))
+    ready = model_ready
+    if expected_step and expected_step.get("next_step") == "write_code" and not ready:
+        if not repair_conflicts:
+            raise ValueError("finish_investigation conflicts with accepted write_code checkpoint")
+        ready = True
+        for item in unknowns:
+            item["blocking"] = False
+            item["resolution_strategy"] = "deferred"
+        repairs.append("Deferred blockers that conflicted with accepted write_code checkpoint")
     if any(item["blocking"] for item in unknowns):
+        if model_ready and any(item["blocking"] for item in explicit_unknowns) and not repair_conflicts:
+            raise ValueError("ready_for_patch_planning conflicts with blocking unknowns")
         ready = False
+    _require_items_accounted(required_items, arguments.get("task_updates"), resolutions, repair_conflicts)
+    unknowns = _resolve_task_update_conflicts(unknowns, arguments.get("task_updates"), repairs, repair_conflicts)
+    if not unknowns and repair_conflicts:
+        ready = True
+    readiness = _runtime_readiness(
+        model_ready=model_ready,
+        analysis=analysis,
+        initial_unknowns=initial_unknowns,
+        resolutions=resolutions,
+        unknowns=unknowns,
+        patch_context=patch_context,
+    )
+    ready = readiness["ready"]
     return {
         "summary": str(arguments.get("summary") or "").strip(),
         "ready_for_patch_planning": ready,
         "beliefs": arguments.get("beliefs") if isinstance(arguments.get("beliefs"), list) else [],
         "open_questions": open_questions,
+        "resolutions": resolutions,
+        "new_unknowns": new_unknowns,
+        "user_decisions_required": user_decisions,
         "unknowns": unknowns,
-        "task_updates": _task_updates(arguments.get("task_updates"), arguments.get("beliefs"), unknowns),
-        "patch_planning_context": (
-            arguments.get("patch_planning_context")
-            if isinstance(arguments.get("patch_planning_context"), list)
-            else []
-        ),
+        "task_updates": _task_updates(arguments.get("task_updates"), arguments.get("beliefs"), unknowns, resolutions),
+        "patch_planning_context": patch_context,
+        "patch_planning_facts": patch_context,
+        "recommended_next_step": str(arguments.get("recommended_next_step") or "").strip(),
+        "readiness": readiness,
+        "protocol_repairs": repairs,
     }
 
 
@@ -495,7 +670,214 @@ def _clean_questions(value: list) -> list[str]:
     return [text for item in value if (text := str(item).strip())]
 
 
-def _task_updates(value, beliefs, unknowns: list[dict]) -> list[dict]:
+def _string_list(value) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [item for raw in value if (item := str(raw).strip())]
+
+
+def _resolutions(value) -> list[dict]:
+    if not isinstance(value, list):
+        return []
+    items = []
+    for raw in value:
+        if not isinstance(raw, dict):
+            continue
+        unknown_id = str(raw.get("unknown_id") or raw.get("id") or "").strip()
+        status = str(raw.get("status") or "").strip()
+        if status not in {"resolved", "partially_resolved", "needs_user", "deferred"}:
+            continue
+        if not unknown_id:
+            continue
+        items.append({
+            "unknown_id": unknown_id,
+            "status": status,
+            "answer": str(raw.get("answer") or "").strip(),
+            "evidence": _string_list(raw.get("evidence")),
+            "belief_ids": _string_list(raw.get("belief_ids")),
+            "reason": str(raw.get("reason") or "").strip(),
+        })
+    return items
+
+
+def _runtime_readiness(
+    *,
+    model_ready: bool,
+    analysis: dict | None,
+    initial_unknowns: list[dict],
+    resolutions: list[dict],
+    unknowns: list[dict],
+    patch_context: list[str],
+) -> dict:
+    blockers = [item for item in unknowns if item.get("blocking")]
+    reasons = []
+    if blockers:
+        reasons.append("blocking_unknowns_remain")
+    by_id = {item["unknown_id"]: item for item in resolutions}
+    for item in initial_unknowns:
+        if not item.get("blocking"):
+            continue
+        resolution = by_id.get(item["id"])
+        if not resolution or resolution.get("status") != "resolved":
+            reasons.append(f"{item['id']}:not_resolved")
+            continue
+        if item.get("resolution_strategy") == "investigate_project" and not (
+            resolution.get("evidence") or resolution.get("belief_ids")
+        ):
+            reasons.append(f"{item['id']}:missing_evidence")
+    if isinstance(analysis, dict) and analysis.get("acceptance_criteria") and not patch_context:
+        reasons.append("missing_patch_planning_facts")
+    ready = bool(model_ready and not reasons)
+    return {
+        "ready": ready,
+        "model_ready": model_ready,
+        "reasons": reasons,
+    }
+
+
+def _initial_unknowns(analysis: dict | None) -> list[dict]:
+    if not isinstance(analysis, dict):
+        return []
+    value = analysis.get("unknowns")
+    if not isinstance(value, list) or not all(isinstance(item, dict) for item in value):
+        return []
+    return _unknowns(value)
+
+
+def _complete_resolutions(resolutions: list[dict], initial_unknowns: list[dict], unknowns: list[dict]) -> list[dict]:
+    by_id = {item["unknown_id"]: item for item in resolutions}
+    unresolved_ids = {item["id"] for item in unknowns}
+    for item in initial_unknowns:
+        if item["id"] in by_id:
+            continue
+        status = "partially_resolved"
+        if item.get("resolution_strategy") == "ask_user":
+            status = "needs_user"
+        elif item.get("resolution_strategy") == "deferred" or not item.get("blocking"):
+            status = "deferred"
+        if item["id"] in unresolved_ids or item.get("blocking"):
+            resolutions.append({
+                "unknown_id": item["id"],
+                "status": status,
+                "answer": "",
+                "evidence": [],
+                "belief_ids": [],
+                "reason": "No explicit resolution was supplied for this task-contract unknown.",
+            })
+    return resolutions
+
+
+def _enforce_resolution_evidence(resolutions: list[dict], initial_unknowns: list[dict]) -> list[dict]:
+    by_id = {item["id"]: item for item in initial_unknowns}
+    for resolution in resolutions:
+        source = by_id.get(resolution["unknown_id"])
+        if not source:
+            continue
+        if (
+            source.get("blocking")
+            and source.get("resolution_strategy") == "investigate_project"
+            and resolution.get("status") == "resolved"
+            and not (resolution.get("evidence") or resolution.get("belief_ids"))
+        ):
+            resolution["status"] = "partially_resolved"
+            resolution["reason"] = resolution.get("reason") or "Resolved codebase facts require evidence or belief references."
+    return resolutions
+
+
+def _unresolved_from_resolutions(resolutions: list[dict], initial_unknowns: list[dict]) -> list[dict]:
+    by_id = {item["id"]: item for item in initial_unknowns}
+    unresolved = []
+    for resolution in resolutions:
+        if resolution["status"] == "resolved":
+            continue
+        source = by_id.get(resolution["unknown_id"], {})
+        strategy = "investigate_project"
+        if resolution["status"] == "needs_user":
+            strategy = "ask_user"
+        elif resolution["status"] == "deferred":
+            strategy = "deferred"
+        unresolved.append({
+            "id": resolution["unknown_id"],
+            "question": source.get("question") or resolution.get("answer") or resolution["unknown_id"],
+            "blocking": resolution["status"] in {"partially_resolved", "needs_user"} and bool(source.get("blocking", True)),
+            "resolution_strategy": strategy,
+        })
+    return unresolved
+
+
+def _merge_unknowns(items: list[dict]) -> list[dict]:
+    merged = {}
+    for item in items:
+        if item.get("id") and item.get("question"):
+            merged[item["id"]] = item
+    return list(merged.values())
+
+
+def _patch_context(value, repairs: list[str], repair_conflicts: bool) -> list[str]:
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        if repair_conflicts:
+            repairs.append("Dropped non-array patch planning facts")
+            return []
+        raise ValueError("patch_planning_context must be an array of strings")
+    items = []
+    normalized_object = False
+    for raw in value:
+        if isinstance(raw, dict):
+            if not repair_conflicts:
+                raise ValueError("patch_planning_context must be an array of strings")
+            fact = str(raw.get("fact") or raw.get("text") or raw.get("statement") or "").strip()
+            source = str(raw.get("source") or raw.get("evidence") or "").strip()
+            if fact:
+                items.append(f"{fact} ({source})" if source else fact)
+                normalized_object = True
+        elif text := str(raw).strip():
+            items.append(text)
+    if normalized_object:
+        repairs.append("Normalized patch_planning_context objects to strings")
+    return items
+
+
+def _require_items_accounted(required_items, task_updates, resolutions, repair_conflicts: bool) -> None:
+    if not required_items:
+        return
+    update_ids = {
+        str(item.get("id") or "").strip()
+        for item in task_updates or []
+        if isinstance(item, dict) and str(item.get("status") or "") in {"known", "deferred", "blocked"}
+    }
+    resolution_ids = {item["unknown_id"] for item in resolutions}
+    missing = [
+        str(item.get("id") or "").strip()
+        for item in required_items
+        if isinstance(item, dict) and str(item.get("id") or "").strip() not in update_ids | resolution_ids
+    ]
+    if missing and not repair_conflicts:
+        raise ValueError("finish_investigation must account for every initial hypothesis/unknown")
+
+
+def _resolve_task_update_conflicts(
+    unknowns: list[dict],
+    task_updates,
+    repairs: list[str],
+    repair_conflicts: bool,
+) -> list[dict]:
+    known_ids = {
+        str(item.get("id") or "").strip()
+        for item in task_updates or []
+        if isinstance(item, dict) and str(item.get("status") or "").strip() == "known"
+    }
+    conflicts = [item for item in unknowns if item.get("id") in known_ids]
+    if not conflicts:
+        return unknowns
+    if not repair_conflicts:
+        raise ValueError("unknowns should contain only unresolved items")
+    repairs.append("Removed unknowns already marked known by task_updates")
+    return [item for item in unknowns if item.get("id") not in known_ids]
+
+
+def _task_updates(value, beliefs, unknowns: list[dict], resolutions: list[dict] | None = None) -> list[dict]:
     updates = []
     if isinstance(value, list):
         for raw in value:
@@ -515,6 +897,27 @@ def _task_updates(value, beliefs, unknowns: list[dict]) -> list[dict]:
                 "trace": [str(item).strip() for item in trace if str(item).strip()][:6],
             })
     known_texts = {item["text"] for item in updates if item["status"] == "known"}
+    known_ids = {item["id"] for item in updates if item["status"] == "known" and item.get("id")}
+    for resolution in resolutions or []:
+        unknown_id = resolution.get("unknown_id", "")
+        if not unknown_id or unknown_id in known_ids:
+            continue
+        status = {
+            "resolved": "known",
+            "partially_resolved": "unknown",
+            "needs_user": "blocked",
+            "deferred": "deferred",
+        }.get(resolution.get("status"), "unknown")
+        updates.append({
+            "id": unknown_id,
+            "kind": "unknown",
+            "text": resolution.get("answer") or unknown_id,
+            "status": status,
+            "reason": resolution.get("reason", ""),
+            "trace": resolution.get("evidence", [])[:6],
+        })
+        if status == "known":
+            known_ids.add(unknown_id)
     for item in beliefs if isinstance(beliefs, list) else []:
         if not isinstance(item, dict):
             continue
@@ -533,6 +936,8 @@ def _task_updates(value, beliefs, unknowns: list[dict]) -> list[dict]:
                 "trace": [str(entry) for entry in evidence[:6]],
             })
     for item in unknowns:
+        if item.get("id") in {update.get("id") for update in updates if update.get("id")}:
+            continue
         updates.append({
             "id": item.get("id", ""),
             "kind": "unknown",
@@ -545,6 +950,12 @@ def _task_updates(value, beliefs, unknowns: list[dict]) -> list[dict]:
 
 
 def _step_result(final: dict) -> dict:
+    if final.get("runtime_failure"):
+        return {
+            "next_step": "failed",
+            "continue_reason": final.get("summary") or "Investigation failed before producing a valid final result.",
+            "target_unknown_ids": [],
+        }
     blockers = [item for item in final.get("unknowns", []) if item.get("blocking")]
     investigate = [item for item in blockers if item.get("resolution_strategy") == "investigate_project"]
     ask_user = [item for item in blockers if item.get("resolution_strategy") == "ask_user"]
@@ -729,7 +1140,17 @@ def _unknowns(value) -> list[dict]:
     if not isinstance(value, list):
         return []
     items = []
-    for raw in value:
+    for index, raw in enumerate(value, start=1):
+        if isinstance(raw, str):
+            text = raw.strip()
+            if text:
+                items.append({
+                    "id": f"U{index}",
+                    "question": text,
+                    "blocking": True,
+                    "resolution_strategy": "investigate_project",
+                })
+            continue
         if not isinstance(raw, dict):
             continue
         strategy = str(raw.get("resolution_strategy") or "").strip()
@@ -740,6 +1161,7 @@ def _unknowns(value) -> list[dict]:
             "question": str(raw.get("question") or "").strip(),
             "blocking": bool(raw.get("blocking")),
             "resolution_strategy": strategy,
+            "type": str(raw.get("type") or "codebase_fact").strip() or "codebase_fact",
         }
         if item["id"] and item["question"]:
             items.append(item)
