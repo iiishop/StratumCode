@@ -1064,6 +1064,12 @@ def _step_result(final: dict) -> dict:
             "next_step": "failed",
             "continue_reason": final.get("summary") or "Investigation failed before producing a valid final result.",
             "target_unknown_ids": [],
+            "summary": "",
+            "beliefs": [],
+            "ready_for_patch_planning": False,
+            "patch_planning_context": [],
+            "resolutions": [],
+            "unknowns": [],
         }
     blockers = [item for item in final.get("unknowns", []) if item.get("blocking")]
     investigate = [item for item in blockers if item.get("resolution_strategy") == "investigate_project"]
@@ -1073,6 +1079,12 @@ def _step_result(final: dict) -> dict:
             "next_step": "continue_investigation",
             "continue_reason": "; ".join(item["question"] for item in investigate[:3]),
             "target_unknown_ids": [item["id"] for item in investigate],
+            "summary": final.get("summary", ""),
+            "beliefs": final.get("beliefs", []),
+            "ready_for_patch_planning": False,
+            "patch_planning_context": final.get("patch_planning_context", []),
+            "resolutions": final.get("resolutions", []),
+            "unknowns": final.get("unknowns", []),
         }
     if ask_user:
         item = _best_ask_user_unknown(final) or ask_user[0]
@@ -1090,12 +1102,24 @@ def _step_result(final: dict) -> dict:
             "next_step": "ask_user",
             "continue_reason": question,
             "target_unknown_ids": [item["id"]],
+            "summary": final.get("summary", ""),
+            "beliefs": final.get("beliefs", []),
+            "ready_for_patch_planning": False,
+            "patch_planning_context": final.get("patch_planning_context", []),
+            "resolutions": final.get("resolutions", []),
+            "unknowns": final.get("unknowns", []),
         }
     if final.get("ready_for_patch_planning"):
         return {
             "next_step": "write_code",
             "continue_reason": final.get("summary") or app_settings.text("ready_patch"),
             "target_unknown_ids": [],
+            "summary": final.get("summary", ""),
+            "beliefs": final.get("beliefs", []),
+            "ready_for_patch_planning": True,
+            "patch_planning_context": final.get("patch_planning_context", []),
+            "resolutions": final.get("resolutions", []),
+            "unknowns": [],
         }
     open_questions = final.get("open_questions") or []
     question = str(open_questions[0]) if open_questions else ""
@@ -1105,6 +1129,12 @@ def _step_result(final: dict) -> dict:
         or final.get("summary")
         or app_settings.text("not_ready_patch"),
         "target_unknown_ids": [],
+        "summary": final.get("summary", ""),
+        "beliefs": final.get("beliefs", []),
+        "ready_for_patch_planning": False,
+        "patch_planning_context": final.get("patch_planning_context", []),
+        "resolutions": final.get("resolutions", []),
+        "unknowns": final.get("unknowns", []),
     }
 
 
