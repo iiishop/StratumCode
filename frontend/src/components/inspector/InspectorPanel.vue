@@ -58,7 +58,7 @@ const analysisRows = computed(() => {
   }
   const rows = [
     withUpdate({ kind: 'goal', text: analysis.intent?.summary, status: 'goal' }),
-    ...(analysis.acceptance_criteria || []).map(item => withUpdate({ id: item.id, kind: 'acceptance', text: item.text, status: 'unknown' })),
+    ...(analysis.acceptance_criteria || []).map(item => withUpdate({ id: item.id, kind: 'acceptance', text: item.text, status: 'pending' })),
     ...(analysis.constraints || []).map(text => withUpdate({ kind: 'constraint', text, status: 'constraint' })),
     ...(analysis.unknowns || []).map(item => withUpdate({
       id: item.id,
