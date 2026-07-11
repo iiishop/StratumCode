@@ -51,23 +51,54 @@ const analysisRows = computed(() => {
   const analysis = props.taskAnalysis
   if (!analysis) return []
   const updates = Array.isArray(analysis.task_updates) ? analysis.task_updates : []
-  const updateFor = (row) => updates.find(item => sameTaskItem(item, row))
-  const used = new Set()
+  const updateFor = (row) => bestTaskUpdate(updates.filter(item => sameTaskItem(item, row)))
   const withUpdate = (row) => {
     const update = updateFor(row)
-    if (update) used.add(update)
     return update ? { ...row, ...update, kind: update.kind || row.kind } : row
   }
   const rows = [
     withUpdate({ kind: 'goal', text: analysis.intent?.summary, status: 'goal' }),
+    ...(analysis.acceptance_criteria || []).map(item => withUpdate({ id: item.id, kind: 'acceptance', text: item.text, status: 'unknown' })),
     ...(analysis.constraints || []).map(text => withUpdate({ kind: 'constraint', text, status: 'constraint' })),
-    ...(analysis.hypotheses || []).map(item => withUpdate({ kind: item.certainty || 'hypothesis', text: item.text, status: 'unknown' })),
-    ...(analysis.clues || []).map(item => withUpdate({ kind: item.kind || 'clue', text: item.path ? `${item.path}${item.line ? `:${item.line}` : ''}` : item.value, status: 'clue' })),
-    ...(analysis.unknowns || []).map(text => withUpdate({ kind: 'unknown', text, status: 'unknown' })),
+    ...(analysis.unknowns || []).map(item => withUpdate({
+      id: item.id,
+      kind: 'unknown',
+      text: typeof item === 'string' ? item : item.question || item.text,
+      status: item.blocking === false ? 'deferred' : 'unknown',
+    })),
   ].filter(item => item.text)
-  rows.push(...updates.filter(item => !used.has(item) && item.text))
-  return rows
+  return dedupeTaskRows(rows)
 })
+const remainingTaskCount = computed(() => analysisRows.value.filter(item =>
+  ['unknown', 'pending', 'blocked', 'added', 'updated'].includes(item.status || '')
+).length)
+
+function bestTaskUpdate(items) {
+  return items.reduce((best, item) => preferredTaskRow(best, item), null)
+}
+
+function dedupeTaskRows(rows) {
+  const result = []
+  const seen = new Map()
+  for (const row of rows) {
+    const textKey = `${row.kind}:${normalizedTaskText(row.text)}`
+    const key = row.kind === 'unknown' ? textKey : (row.id || textKey)
+    if (!seen.has(key)) {
+      seen.set(key, result.length)
+      result.push(row)
+      continue
+    }
+    const index = seen.get(key)
+    result[index] = preferredTaskRow(result[index], row)
+  }
+  return result
+}
+
+function preferredTaskRow(left, right) {
+  if (!left) return right
+  const rank = { known: 4, blocked: 3, deferred: 2, updated: 1, added: 1, unknown: 0 }
+  return (rank[right.status] ?? 0) >= (rank[left.status] ?? 0) ? { ...left, ...right, id: left.id || right.id } : left
+}
 
 function normalizedTaskText(value) {
   return String(value || '')
@@ -78,13 +109,26 @@ function normalizedTaskText(value) {
 
 function sameTaskItem(left, right) {
   if (!left || !right) return false
-  if (left.id && right.id && left.id === right.id) return true
+  if (sameTaskId(left.id, right.id)) return true
   const leftTrace = Array.isArray(left.trace) ? left.trace : []
   const rightTrace = Array.isArray(right.trace) ? right.trace : []
-  if ((left.id && rightTrace.includes(left.id)) || (right.id && leftTrace.includes(right.id))) return true
+  if ([left.id, ...leftTrace].some(leftId => [right.id, ...rightTrace].some(rightId => sameTaskId(leftId, rightId)))) return true
   const a = normalizedTaskText(left.text)
   const b = normalizedTaskText(right.text)
   return Boolean(a && b && (a === b || a.includes(b) || b.includes(a)))
+}
+
+function sameTaskId(left, right) {
+  left = String(left || '')
+  right = String(right || '')
+  if (!left || !right) return false
+  if (left === right) return true
+  if (left.includes(':') && right.includes(':')) return false
+  return taskIdTail(left) === taskIdTail(right)
+}
+
+function taskIdTail(value) {
+  return String(value || '').split(':').pop()
 }
 
 onMounted(() => {
@@ -191,6 +235,26 @@ function addWorkspace() {
   emit('add-workspace', { name: workspaceName.value.trim(), path })
   workspaceName.value = ''
   workspacePath.value = ''
+}
+
+function onRowEnter(el) {
+  if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) return
+  gsap.to(el, { scale: 1.012, backgroundColor: '#f0f5ff', borderColor: '#a3c2ef', duration: 0.16, ease: 'power2.out', overwrite: 'auto' })
+}
+
+function onRowLeave(el) {
+  if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) return
+  gsap.to(el, { scale: 1, backgroundColor: '#ffffff', borderColor: '#d7e2ef', duration: 0.2, ease: 'power2.out', overwrite: 'auto' })
+}
+
+function onWsRowEnter(el) {
+  if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) return
+  gsap.to(el, { scale: 1.012, backgroundColor: '#f0f5ff', borderColor: '#a3c2ef', duration: 0.16, ease: 'power2.out', overwrite: 'auto' })
+}
+
+function onWsRowLeave(el) {
+  if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) return
+  gsap.to(el, { scale: 1, backgroundColor: '#ffffff', borderColor: '#d8e2ef', duration: 0.2, ease: 'power2.out', overwrite: 'auto' })
 }
 </script>
 
@@ -317,7 +381,10 @@ function addWorkspace() {
           <strong>Sessions</strong>
           <button type="button" class="section-action" @click="emit('create-session')">New</button>
         </div>
-        <article v-for="session in sessions" :key="session.id" class="session-row" :class="{ active: activeSession?.id === session.id }">
+        <article v-for="session in sessions" :key="session.id" class="session-row" :class="{ active: activeSession?.id === session.id }"
+          @pointerenter="onRowEnter($event.currentTarget)"
+          @pointerleave="onRowLeave($event.currentTarget)"
+        >
           <button type="button" @click="emit('open-session', session.id)">
             <strong>{{ session.name }}</strong>
             <small>{{ session.usage?.total_tokens || 0 }} tokens · {{ session.updated_at || session.created_at }}</small>
@@ -362,14 +429,14 @@ function addWorkspace() {
       </template>
 
       <template v-else-if="tab === 'tasks'">
-        <div class="inspector__section-head"><strong>Tasks</strong><span>{{ todos.filter(item => !item.done).length }} remaining</span></div>
+        <div class="inspector__section-head"><strong>Tasks</strong><span>{{ remainingTaskCount }} remaining</span></div>
         <section v-if="taskAnalysis" class="analysis-card">
           <small>Task analyzer</small>
           <strong>{{ taskAnalysis.intent?.summary }}</strong>
           <p>{{ taskAnalysis.intent?.type || 'other' }} / {{ taskAnalysis.provider || 'model' }} / {{ taskAnalysis.model || 'unknown' }}</p>
         </section>
         <div v-if="analysisRows.length" class="analysis-task-list">
-          <div v-for="item in analysisRows" :key="`${item.kind}:${item.text}`" class="analysis-task-row" :class="`is-${item.status || 'unknown'}`">
+          <div v-for="item in analysisRows" :key="item.id || `${item.kind}:${item.text}`" class="analysis-task-row" :class="`is-${item.status || 'unknown'}`">
             <b>{{ item.status || item.kind }}</b>
             <span>
               <strong>{{ item.text }}</strong>
@@ -396,11 +463,15 @@ function addWorkspace() {
         <div class="inspector__section-head"><strong>Workspaces</strong><span>Agent scope</span></div>
         <p class="workspace-note">All local discovery and file previews are constrained to the active root.</p>
         <p v-if="workspaceError" class="workspace-error">{{ workspaceError }}</p>
-        <article v-for="workspace in workspaces" :key="workspace.id" class="workspace-row" :class="{ active: activeWorkspace?.id === workspace.id }">
+        <article v-for="workspace in workspaces" :key="workspace.id" class="workspace-row" :class="{ active: activeWorkspace?.id === workspace.id }"
+          @pointerenter="onWsRowEnter($event.currentTarget)"
+          @pointerleave="onWsRowLeave($event.currentTarget)"
+        >
           <button @click="emit('activate-workspace', workspace.id)">
             <i></i>
             <span><strong>{{ workspace.name }}</strong><small>{{ workspace.path }}</small></span>
           </button>
+          <button v-if="workspace.is_active && workspaces.length > 1" class="workspace-row__delete" title="Delete workspace" @click="emit('delete-workspace', workspace.id)">D</button>
           <button v-if="!workspace.is_active" class="workspace-row__delete" @click="emit('delete-workspace', workspace.id)">×</button>
         </article>
         <form class="workspace-form" @submit.prevent="addWorkspace">

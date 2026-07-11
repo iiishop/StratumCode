@@ -55,7 +55,6 @@ const msgList = ref(null)
 const messages = reactive([])
 const msgRefs = reactive({})
 const isStreaming = ref(false)
-const pendingQuestion = ref(null)
 const textareaRef = ref(null)
 
 /* ── mention state ── */
@@ -264,7 +263,6 @@ function snapshotState() {
     activeRunId: activeRunId.value,
     taskAnalyses: plain(taskAnalyses),
     subagentRuns: plain(subagentRuns),
-    pendingQuestion: plain(pendingQuestion.value),
     fileContext: plain(fileContext),
     usage: plain(sessionUsage),
   }
@@ -284,7 +282,6 @@ function restoreState(state = {}) {
   evidenceRuns.splice(0, evidenceRuns.length, ...(state.evidenceRuns || []).map(run => reactive(run)))
   taskAnalyses.splice(0, taskAnalyses.length, ...(state.taskAnalyses || []).map(analysis => reactive(analysis)))
   subagentRuns.splice(0, subagentRuns.length, ...(state.subagentRuns || []).map(run => reactive(run)))
-  pendingQuestion.value = state.pendingQuestion || null
   activeRunId.value = state.activeRunId || ''
   fileContext.splice(0, fileContext.length, ...(state.fileContext || []))
   Object.assign(sessionUsage, usageDefaults(), state.usage || {})
@@ -308,38 +305,22 @@ function removeContextFile(p) {
   if (i !== -1) fileContext.splice(i, 1)
 }
 
-function answerPayloadFromPending(text) {
-  if (!pendingQuestion.value) return null
-  let response = text
-  const question = pendingQuestion.value.question
-  if (question) {
-    const templatePrefix = `Question: ${question}\nMy answer: `
-    if (response.startsWith(templatePrefix)) {
-      response = response.substring(templatePrefix.length).trim()
-    }
+function questionEventFor(answer) {
+  for (const message of messages) {
+    const event = message.events?.find(item => item.type === 'user_question' && item.data?.id === answer.question_id)
+    if (event) return { message, event }
   }
-  return {
-    question_id: pendingQuestion.value.id,
-    analysis_id: pendingQuestion.value.analysis_id,
-    unknown_id: pendingQuestion.value.unknown_id,
-    linked_unknown_id: pendingQuestion.value.linked_unknown_id,
-    blocks_next_step: pendingQuestion.value.blocks_next_step,
-    origin_message: pendingQuestion.value.origin_message,
-    question: pendingQuestion.value.question,
-    response,
-    custom: true,
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    if (messages[i].role === 'assistant') return { message: messages[i], event: null }
   }
-}
-
-function pendingQuestionLabel(question) {
-  const id = question?.unknown_id || question?.linked_unknown_id || question?.id
-  const blocked = question?.blocks_next_step
-  if (id && blocked) return `Answering ${id} -> ${blocked}`
-  if (id) return `Answering ${id}`
-  return 'Answering'
+  return { message: null, event: null }
 }
 
 async function send(answer = null) {
+  if (answer) {
+    await continueAfterAnswer(answer)
+    return
+  }
   const text = input.value.trim()
   if (!text || isStreaming.value) return
   messages.push({ id: Date.now(), role: 'user', content: text, time: timeNow(), files: plain(fileContext) })
@@ -351,19 +332,19 @@ async function send(answer = null) {
   inspectorTab.value = 'evidence'
   nextTick(() => { scrollBottom(); animateLast() })
   try {
-    const structuredAnswer = answer || answerPayloadFromPending(text)
+    const structuredAnswer = answer
     const taskAnalysis = structuredAnswer ? analysisForQuestion(structuredAnswer) : null
     const origin = structuredAnswer?.origin_message || taskAnalysis?.origin_message || text
     const request = {
       message: origin,
       context: fileContext.map(file => file.path),
+      session_id: props.session?.id,
     }
     if (structuredAnswer) {
       request.answer = { ...structuredAnswer, origin_message: origin }
       if (taskAnalysis) request.analysis = plain(taskAnalysis)
     }
     await chatStream(message, request)
-    if (structuredAnswer) pendingQuestion.value = null
   } catch (error) {
     if (error.name !== 'AbortError') {
       message.events.push({
@@ -380,32 +361,48 @@ async function send(answer = null) {
   }
 }
 
-function answerQuestion(answer) {
+async function continueAfterAnswer(answer) {
   if (!answer) return
-  pendingQuestion.value = {
-    id: answer.question_id,
-    analysis_id: answer.analysis_id,
-    unknown_id: answer.unknown_id,
-    linked_unknown_id: answer.linked_unknown_id,
-    blocks_next_step: answer.blocks_next_step,
-    origin_message: answer.origin_message,
-    question: answer.question,
-  }
-  input.value = answer.response || ''
-  nextTick(() => {
-    if (answer.send) send({
-      question_id: answer.question_id,
-      analysis_id: answer.analysis_id,
-      unknown_id: answer.unknown_id,
-      linked_unknown_id: answer.linked_unknown_id,
-      blocks_next_step: answer.blocks_next_step,
-      origin_message: answer.origin_message,
-      question: answer.question,
-      selected_option_id: answer.selected_option_id,
-      selected_option_label: answer.selected_option_label,
-      response: answer.response,
-    })
+  const { message, event } = questionEventFor(answer)
+  if (!message || isStreaming.value) return
+  if (event?.data) Object.assign(event.data, {
+    answer_status: 'submitted',
+    selected_option_id: answer.selected_option_id,
+    selected_option_label: answer.selected_option_label,
+    response: answer.response,
   })
+  isStreaming.value = true
+  Object.assign(agentStatus, { state: 'running', phase: 'continuing', contextUsed: 0 })
+  inspectorTab.value = 'evidence'
+  try {
+    const taskAnalysis = analysisForQuestion(answer)
+    const origin = answer.origin_message || taskAnalysis?.origin_message || answer.question || ''
+    const request = {
+      message: origin,
+      context: fileContext.map(file => file.path),
+      session_id: props.session?.id,
+      answer: { ...answer, origin_message: origin },
+    }
+    if (taskAnalysis) request.analysis = plain(taskAnalysis)
+    await chatStream(message, request)
+  } catch (error) {
+    if (error.name !== 'AbortError') {
+      message.events.push({
+        id: `${message.id}-answer-error`,
+        type: 'output',
+        data: reactive({ content: `Chat failed: ${error.message}`, streaming: false }),
+      })
+    }
+  } finally {
+    isStreaming.value = false
+    agentStatus.state = 'idle'
+    scheduleSave()
+    nextTick(scrollBottom)
+  }
+}
+
+function answerQuestion(answer) {
+  continueAfterAnswer(answer)
 }
 
 function applyTaskUpdate(update) {
@@ -451,13 +448,26 @@ function normalizedTaskText(value) {
 
 function sameTaskItem(left, right) {
   if (!left || !right) return false
-  if (left.id && right.id && left.id === right.id) return true
+  if (sameTaskId(left.id, right.id)) return true
   const leftTrace = Array.isArray(left.trace) ? left.trace : []
   const rightTrace = Array.isArray(right.trace) ? right.trace : []
-  if ((left.id && rightTrace.includes(left.id)) || (right.id && leftTrace.includes(right.id))) return true
+  if ([left.id, ...leftTrace].some(leftId => [right.id, ...rightTrace].some(rightId => sameTaskId(leftId, rightId)))) return true
   const a = normalizedTaskText(left.text)
   const b = normalizedTaskText(right.text)
   return Boolean(a && b && (a === b || a.includes(b) || b.includes(a)))
+}
+
+function sameTaskId(left, right) {
+  left = String(left || '')
+  right = String(right || '')
+  if (!left || !right) return false
+  if (left === right) return true
+  if (left.includes(':') && right.includes(':')) return false
+  return taskIdTail(left) === taskIdTail(right)
+}
+
+function taskIdTail(value) {
+  return String(value || '').split(':').pop()
 }
 
 function analysisForId(id) {
@@ -515,7 +525,7 @@ function onAgentPacket(packet, type, data) {
     const analysis = analysisForId(data.analysis_id) || activeTaskAnalysis.value
     data.analysis_id ||= analysis?.id || ''
     data.origin_message ||= analysis?.origin_message || ''
-    pendingQuestion.value = plain(data)
+    data.answer_status ||= 'waiting'
   } else if (packet.op === 'start' && type === 'evidence') {
     const run = currentEvidenceRun()
     if (!run) return
@@ -774,12 +784,6 @@ watch(() => props.activeWorkspace?.id, () => {
             @remove="removeContextFile(f.path)"
           />
         </div>
-        <div v-if="pendingQuestion" class="chat__pending-question">
-          <span>{{ pendingQuestionLabel(pendingQuestion) }}</span>
-          <strong>{{ pendingQuestion.question }}</strong>
-          <button type="button" @click="pendingQuestion = null">Clear</button>
-        </div>
-
         <div class="chat__input-row">
           <textarea
             ref="textareaRef"
@@ -1685,42 +1689,6 @@ watch(() => props.activeWorkspace?.id, () => {
 .chat__files {
   padding: 7px 11px 0;
   gap: 6px;
-}
-
-.chat__pending-question {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  min-width: 0;
-  margin: 7px 11px 0;
-  padding: 7px 8px;
-  border: 1px solid #e2d28a;
-  border-radius: 7px;
-  background: #fff9db;
-}
-
-.chat__pending-question span {
-  color: #7a5a00;
-  font: 800 8px/1 var(--mono);
-  text-transform: uppercase;
-}
-
-.chat__pending-question strong {
-  min-width: 0;
-  flex: 1;
-  overflow: hidden;
-  color: #4d3a00;
-  font-size: 10px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.chat__pending-question button {
-  border: 0;
-  color: #1756d1;
-  background: transparent;
-  font: 700 9px/1 var(--mono);
-  cursor: pointer;
 }
 
 .chat__files-label {

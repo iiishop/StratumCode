@@ -11,7 +11,7 @@ COMPACT_DESCRIPTIONS = {
     "read": "Read a workspace file.",
     "glob": "List workspace files by glob.",
     "grep": "Search workspace files with regex.",
-    "code_nav": "Use LSP symbols, definition, references, or hover.",
+    "code_nav": "Use LSP semantic symbols, inspect, definition, references, or hover.",
     "webfetch": "Fetch URL text.",
     "websearch": "Search the public web.",
     "subagent": "Delegate to a focused subagent.",

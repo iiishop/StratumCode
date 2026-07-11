@@ -293,11 +293,13 @@ def _merge_by_task(old: list[dict], new: list[dict]) -> list[dict]:
 
 
 def _same_task(left: dict, right: dict) -> bool:
-    if left.get("id") and right.get("id") and left["id"] == right["id"]:
+    if _same_task_id(left.get("id"), right.get("id")):
         return True
     left_trace = left.get("trace") if isinstance(left.get("trace"), list) else []
     right_trace = right.get("trace") if isinstance(right.get("trace"), list) else []
-    if (left.get("id") and left["id"] in right_trace) or (right.get("id") and right["id"] in left_trace):
+    left_ids = [left.get("id"), *left_trace]
+    right_ids = [right.get("id"), *right_trace]
+    if any(_same_task_id(left_id, right_id) for left_id in left_ids for right_id in right_ids):
         return True
     a = _task_key(left.get("text"))
     b = _task_key(right.get("text"))
@@ -307,6 +309,22 @@ def _same_task(left: dict, right: dict) -> bool:
 def _task_key(value: str | None) -> str:
     import re
     return re.sub(r"\W+", "", re.sub(r"[（(][^）)]*[）)]", "", value or "")).casefold()
+
+
+def _task_id_tail(value: str | None) -> str:
+    return str(value or "").rsplit(":", 1)[-1]
+
+
+def _same_task_id(left: str | None, right: str | None) -> bool:
+    left = str(left or "")
+    right = str(right or "")
+    if not left or not right:
+        return False
+    if left == right:
+        return True
+    if ":" in left and ":" in right:
+        return False
+    return _task_id_tail(left) == _task_id_tail(right)
 
 
 def _status_rank(status: str | None) -> int:

@@ -6,9 +6,21 @@ const props = defineProps({ event: { type: Object, required: true } })
 
 const summary = computed(() => props.event.intent?.summary || 'Task analyzed')
 const intentType = computed(() => props.event.intent?.type || 'other')
+const scopeRows = computed(() => {
+  const scope = props.event.scope || {}
+  return [
+    ...(scope.in || []).map(text => ({ label: 'in', text })),
+    ...(scope.out || []).map(text => ({ label: 'out', text })),
+    ...(scope.undecided || []).map(text => ({ label: 'undecided', text })),
+  ]
+})
 
 function count(items) {
   return Array.isArray(items) ? items.length : 0
+}
+
+function unknownText(item) {
+  return typeof item === 'string' ? item : item?.question || item?.text || ''
 }
 </script>
 
@@ -33,6 +45,20 @@ function count(items) {
         <p v-for="item in event.constraints" :key="item">{{ item }}</p>
       </section>
 
+      <section v-if="count(event.acceptance_criteria)">
+        <small>acceptance</small>
+        <p v-for="item in event.acceptance_criteria" :key="item.id || item.text">
+          <b>{{ item.id }}</b>{{ item.text }}
+        </p>
+      </section>
+
+      <section v-if="scopeRows.length">
+        <small>scope</small>
+        <p v-for="item in scopeRows" :key="`${item.label}:${item.text}`">
+          <b>{{ item.label }}</b>{{ item.text }}
+        </p>
+      </section>
+
       <section v-if="count(event.hypotheses)">
         <small>hypotheses</small>
         <p v-for="item in event.hypotheses" :key="item.text">
@@ -49,7 +75,10 @@ function count(items) {
 
       <section v-if="count(event.unknowns)">
         <small>unknowns</small>
-        <p v-for="item in event.unknowns" :key="item">{{ item }}</p>
+        <p v-for="item in event.unknowns" :key="item.id || unknownText(item)">
+          <b v-if="item.id">{{ item.id }}</b>{{ unknownText(item) }}
+          <span v-if="item.blocking === false">deferred</span>
+        </p>
       </section>
     </div>
   </EventFrame>

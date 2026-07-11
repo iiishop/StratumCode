@@ -143,11 +143,18 @@ async function addWorkspaceFromPanel(payload) {
 }
 
 async function removeWorkspace(id) {
-  await deleteWorkspace(id)
-  if (activeWorkspace.value?.id) {
-    await sessionStore.load(activeWorkspace.value.id)
-    if (sessionStore.items.value[0]) await sessionStore.open(sessionStore.items.value[0].id)
-    else await createSession(activeWorkspace.value.id)
+  const workspace = workspaces.value.find(item => item.id === id)
+  const label = workspace?.name || workspace?.path || 'this workspace'
+  if (!window.confirm(`Delete workspace "${label}"? Sessions and files are not deleted.`)) return
+  try {
+    await deleteWorkspace(id)
+    if (activeWorkspace.value?.id) {
+      await sessionStore.load(activeWorkspace.value.id)
+      if (sessionStore.items.value[0]) await sessionStore.open(sessionStore.items.value[0].id)
+      else await createSession(activeWorkspace.value.id)
+    }
+  } catch (reason) {
+    window.alert(reason.message || 'Failed to delete workspace')
   }
 }
 

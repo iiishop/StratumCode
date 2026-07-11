@@ -112,8 +112,6 @@ def investigation_stream(
         }}
 
         if not tool_calls:
-            if content:
-                final = {"summary": content, "ready_for_patch_planning": False}
             break
 
         for raw_call in tool_calls:
@@ -534,6 +532,8 @@ def _tool_observation(name: str, call_id: str, output: str) -> dict:
         "target_unknown_ids": data.get("target_unknown_ids") or metadata.get("target_unknown_ids") or [],
         "reason": data.get("reason") or metadata.get("reason") or "",
         "path": metadata.get("path", ""),
+        "mtime_ns": metadata.get("mtime_ns"),
+        "size": metadata.get("size"),
     }
 
 
@@ -600,8 +600,25 @@ def _finish_payload(
     explicit_unknowns = _unknowns(arguments.get("unknowns"))
     unknowns = list(explicit_unknowns)
     new_unknowns = _unknowns(arguments.get("new_unknowns"))
+    initial_unknowns = _initial_unknowns(analysis)
+    user_decisions = _string_list(arguments.get("user_decisions_required"))
+    decision_questions = [_decision_question(item) for item in user_decisions]
+    known_unknowns = initial_unknowns + unknowns + new_unknowns
+    decision_unknowns = [
+        {
+            "id": _unknown_id_for_question(question, known_unknowns) or f"D{index}",
+            "question": question,
+            "blocking": True,
+            "resolution_strategy": "ask_user",
+        }
+        for index, question in enumerate(decision_questions, start=1)
+    ]
     open_questions = arguments.get("open_questions") if isinstance(arguments.get("open_questions"), list) else []
-    if open_questions and not unknowns:
+    open_questions = [
+        _decision_question(question) for question in _clean_questions(open_questions)
+        if _decision_question(question) not in set(decision_questions)
+    ]
+    if open_questions and not unknowns and not decision_unknowns:
         unknowns = [
             {
                 "id": f"Q{index}",
@@ -612,12 +629,10 @@ def _finish_payload(
             for index, question in enumerate(_clean_questions(open_questions), start=1)
         ]
     resolutions = _resolutions(arguments.get("resolutions"))
-    initial_unknowns = _initial_unknowns(analysis)
     resolutions = _complete_resolutions(resolutions, initial_unknowns, unknowns)
     resolutions = _enforce_resolution_evidence(resolutions, initial_unknowns)
     unresolved = _unresolved_from_resolutions(resolutions, initial_unknowns)
-    unknowns = _merge_unknowns(unresolved + unknowns + new_unknowns)
-    user_decisions = _string_list(arguments.get("user_decisions_required"))
+    unknowns = _merge_unknowns(unresolved + unknowns + decision_unknowns + new_unknowns)
     patch_context = _patch_context(arguments.get("patch_planning_facts"), repairs, repair_conflicts)
     if not patch_context:
         patch_context = _patch_context(arguments.get("patch_planning_context"), repairs, repair_conflicts)
@@ -796,21 +811,131 @@ def _unresolved_from_resolutions(resolutions: list[dict], initial_unknowns: list
             strategy = "ask_user"
         elif resolution["status"] == "deferred":
             strategy = "deferred"
+        question = source.get("question") or _question_from_resolution(resolution)
         unresolved.append({
             "id": resolution["unknown_id"],
-            "question": source.get("question") or resolution.get("answer") or resolution["unknown_id"],
+            "question": question,
             "blocking": resolution["status"] in {"partially_resolved", "needs_user"} and bool(source.get("blocking", True)),
             "resolution_strategy": strategy,
         })
     return unresolved
 
 
+def _question_from_resolution(resolution: dict) -> str:
+    text = str(resolution.get("answer") or resolution.get("reason") or "").strip()
+    if _looks_like_question(text):
+        return text
+    return "请明确这个实现决策？"
+
+
+def _decision_question(value: str) -> str:
+    text = " ".join(str(value or "").split())
+    if not text:
+        return ""
+    if _looks_like_question(text):
+        return text
+    return f"请明确：{text}？"
+
+
+def _looks_like_question(value: str) -> bool:
+    text = str(value or "")
+    return "?" in text or "？" in text
+
+
 def _merge_unknowns(items: list[dict]) -> list[dict]:
     merged = {}
+    by_question = {}
     for item in items:
-        if item.get("id") and item.get("question"):
-            merged[item["id"]] = item
+        if not item.get("id") or not item.get("question"):
+            continue
+        key = _question_key(item["question"])
+        existing_id = by_question.get(key)
+        if existing_id:
+            current = merged[existing_id]
+            merged[existing_id] = {
+                **current,
+                **item,
+                "id": existing_id,
+                "blocking": bool(current.get("blocking") or item.get("blocking")),
+            }
+            continue
+        merged[item["id"]] = item
+        by_question[key] = item["id"]
     return list(merged.values())
+
+
+def _unknown_id_for_question(question: str, unknowns: list[dict]) -> str:
+    key = _question_key(question)
+    for item in unknowns:
+        if item.get("id") and _question_key(item.get("question", "")) == key:
+            return item["id"]
+    return ""
+
+
+def _question_key(value: str) -> str:
+    return re.sub(r"\W+", "", str(value or "")).casefold()
+
+
+def _unknown_id_tail(value: str | None) -> str:
+    text = str(value or "").strip()
+    return text.rsplit(":", 1)[-1] if ":" in text else text
+
+
+def _same_unknown_id(left: str | None, right: str | None) -> bool:
+    left_text = str(left or "").strip()
+    right_text = str(right or "").strip()
+    if not left_text or not right_text:
+        return False
+    return left_text == right_text or _unknown_id_tail(left_text) == _unknown_id_tail(right_text)
+
+
+def _is_placeholder_question(value: str | None, unknown_id: str | None = "") -> bool:
+    text = " ".join(str(value or "").split())
+    if not text:
+        return True
+    if unknown_id and _same_unknown_id(text, unknown_id):
+        return True
+    placeholder = "\u8bf7\u660e\u786e\u8fd9\u4e2a\u5b9e\u73b0\u51b3\u7b56"
+    return text.startswith(placeholder)
+
+
+def _task_update_question(final: dict, unknown_id: str | None) -> str:
+    if not unknown_id:
+        return ""
+    for item in final.get("task_updates") or []:
+        if not isinstance(item, dict) or not _same_unknown_id(item.get("id"), unknown_id):
+            continue
+        text = str(item.get("text") or "").strip()
+        if not _is_placeholder_question(text, unknown_id):
+            return text
+    return ""
+
+
+def _display_question_for_unknown(item: dict | None, final: dict) -> str:
+    if not item:
+        return ""
+    unknown_id = str(item.get("id") or "").strip()
+    question = str(item.get("question") or "").strip()
+    if not _is_placeholder_question(question, unknown_id):
+        return question
+    task_question = _task_update_question(final, unknown_id)
+    return task_question or question
+
+
+def _best_ask_user_unknown(final: dict) -> dict | None:
+    candidates = [
+        item for item in final.get("unknowns", [])
+        if isinstance(item, dict)
+        and item.get("blocking")
+        and item.get("resolution_strategy") == "ask_user"
+    ]
+    if not candidates:
+        return None
+    specific = [
+        item for item in candidates
+        if not _is_placeholder_question(_display_question_for_unknown(item, final), item.get("id"))
+    ]
+    return specific[0] if specific else candidates[0]
 
 
 def _patch_context(value, repairs: list[str], repair_conflicts: bool) -> list[str]:
@@ -896,7 +1021,6 @@ def _task_updates(value, beliefs, unknowns: list[dict], resolutions: list[dict] 
                 "reason": str(raw.get("reason") or "").strip(),
                 "trace": [str(item).strip() for item in trace if str(item).strip()][:6],
             })
-    known_texts = {item["text"] for item in updates if item["status"] == "known"}
     known_ids = {item["id"] for item in updates if item["status"] == "known" and item.get("id")}
     for resolution in resolutions or []:
         unknown_id = resolution.get("unknown_id", "")
@@ -908,6 +1032,8 @@ def _task_updates(value, beliefs, unknowns: list[dict], resolutions: list[dict] 
             "needs_user": "blocked",
             "deferred": "deferred",
         }.get(resolution.get("status"), "unknown")
+        if status != "known":
+            continue
         updates.append({
             "id": unknown_id,
             "kind": "unknown",
@@ -918,23 +1044,6 @@ def _task_updates(value, beliefs, unknowns: list[dict], resolutions: list[dict] 
         })
         if status == "known":
             known_ids.add(unknown_id)
-    for item in beliefs if isinstance(beliefs, list) else []:
-        if not isinstance(item, dict):
-            continue
-        statement = str(item.get("statement") or "").strip()
-        if not statement or statement in known_texts:
-            continue
-        status = str(item.get("status") or "")
-        if status in {"supported", "strongly_supported", "runtime_confirmed"}:
-            evidence = item.get("evidence") if isinstance(item.get("evidence"), list) else []
-            updates.append({
-                "id": "",
-                "kind": "unknown",
-                "text": statement,
-                "status": "known",
-                "reason": app_settings.text("belief_is", status=status),
-                "trace": [str(entry) for entry in evidence[:6]],
-            })
     for item in unknowns:
         if item.get("id") in {update.get("id") for update in updates if update.get("id")}:
             continue
@@ -966,10 +1075,21 @@ def _step_result(final: dict) -> dict:
             "target_unknown_ids": [item["id"] for item in investigate],
         }
     if ask_user:
+        item = _best_ask_user_unknown(final) or ask_user[0]
+        question = _display_question_for_unknown(item, final)
+        if _is_placeholder_question(question, item.get("id")):
+            question = next(
+                (
+                    str(candidate.get("question") or "").strip()
+                    for candidate in ask_user
+                    if not _is_placeholder_question(candidate.get("question"), candidate.get("id"))
+                ),
+                question,
+            )
         return {
             "next_step": "ask_user",
-            "continue_reason": "; ".join(item["question"] for item in ask_user[:3]),
-            "target_unknown_ids": [item["id"] for item in ask_user],
+            "continue_reason": question,
+            "target_unknown_ids": [item["id"]],
         }
     if final.get("ready_for_patch_planning"):
         return {
@@ -978,9 +1098,10 @@ def _step_result(final: dict) -> dict:
             "target_unknown_ids": [],
         }
     open_questions = final.get("open_questions") or []
+    question = str(open_questions[0]) if open_questions else ""
     return {
         "next_step": "ask_user" if open_questions else "failed",
-        "continue_reason": "; ".join(str(item) for item in open_questions[:3])
+        "continue_reason": question
         or final.get("summary")
         or app_settings.text("not_ready_patch"),
         "target_unknown_ids": [],
@@ -988,22 +1109,31 @@ def _step_result(final: dict) -> dict:
 
 
 def _user_question(final: dict, step: dict, origin_message: str = "", analysis_id: str = "") -> dict:
-    unknown = next(
-        (
-            item for item in final.get("unknowns", [])
-            if item.get("blocking") and item.get("resolution_strategy") == "ask_user"
-        ),
-        None,
-    )
-    question = (unknown or {}).get("question") or (final.get("open_questions") or [step["continue_reason"]])[0]
-    options = _question_options(question)
+    unknown = _best_ask_user_unknown(final)
     unknown_id = (unknown or {}).get("id", "")
+    question = _display_question_for_unknown(unknown, final)
+    if not question or question == (unknown or {}).get("id"):
+        question = "请明确这个实现决策？"
+    if _is_placeholder_question(question, unknown_id):
+        fallback_questions = final.get("open_questions") or [step["continue_reason"]]
+        question = next(
+            (
+                str(item).strip()
+                for item in fallback_questions
+                if not _is_placeholder_question(str(item), unknown_id)
+            ),
+            "",
+        )
+    if _is_placeholder_question(question, unknown_id):
+        question = "\u8bf7\u660e\u786e\u4e0b\u9762\u8fd9\u4e2a\u5b9e\u73b0\u51b3\u7b56\uff1f"
+    options = _question_options(question)
+    reason = (unknown or {}).get("why") or ""
     return {
         "id": unknown_id or "question",
         "analysis_id": analysis_id,
         "question": question,
         "origin_message": origin_message,
-        "reason": step["continue_reason"],
+        "reason": reason,
         "why_it_matters": (
             app_settings.text("resolves_unknown", id=unknown_id)
             if unknown_id
@@ -1044,9 +1174,12 @@ def _related_text_items(question: str, items: list, *, limit: int, fallback: boo
     q_tokens = _tokens(question)
     scored: list[tuple[int, int, str]] = []
     normalized: list[str] = []
+    current = " ".join(str(question or "").split()).casefold()
     for index, item in enumerate(items):
         text = str(item).strip()
         if not text:
+            continue
+        if " ".join(text.split()).casefold() == current:
             continue
         normalized.append(text)
         score = len(q_tokens & _tokens(text))

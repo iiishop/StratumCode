@@ -204,11 +204,21 @@ task analysis, choose the cheapest next action that reduces uncertainty:
 - before the first discovery call, make a short plan for all blocking unknowns:
   which unknown is first, and what kind of evidence would resolve it.
 - use glob/grep/read to inspect project structure and existing patterns.
+- use code_nav for semantic structure when the task depends on symbols,
+  functions, classes, definitions, references, or function-level/code-level
+  audit. A common flow is glob to find candidate source files, then code_nav
+  symbols/inspect on the relevant files before reading broad file bodies.
 - every glob/grep/read/code_nav/webfetch/websearch/subagent call must include
   target_unknown_ids and reason. target_unknown_ids must reference unknown IDs
   from the task contract unless the call is only broad orientation.
 - read results may include LSP diagnostics; use those diagnostics as semantic
   evidence instead of calling a separate LSP tool.
+- if PREVIOUS OBSERVATIONS or PREVIOUS SUPPORTED KNOWLEDGE are present, reuse
+  them first. Do not repeat the same glob/read/code_nav call unless the prior
+  observation is stale or the answer requires a narrower position/range.
+- if Workspace snapshot already proves the project is empty or has only a few
+  files, treat it as project evidence. Do not run broad glob/read just to
+  rediscover the same file list.
 - if Suggested first tool calls contains entries, run the first applicable one
   before choosing a different starter.
 - you may call multiple independent tools in one turn when their inputs are
@@ -265,10 +275,15 @@ Investigation step limit reached. Do not call discovery tools now.
 
 Use only the tool results already present in this conversation. Call
 finish_investigation with:
+- required fields: summary and ready_for_patch_planning. All other fields below
+  are optional; include only fields you can fill compactly and correctly.
 - grounded beliefs from observed files, commands, documents, or verifier results.
 - resolutions for every initial unknown, keyed by unknown_id. Use status:
   resolved, partially_resolved, needs_user, or deferred.
-- user_decisions_required for blocking choices that cannot be inferred from code.
+- user_decisions_required for blocking choices that cannot be inferred from code;
+  these will become ask_user prompts. Do not duplicate the same item in
+  open_questions. Each item must be one concrete standalone question the user
+  can answer, not a status phrase like "cannot infer naming strategy".
 - new_unknowns only for important questions discovered during investigation.
 - patch_planning_facts for concrete facts a later patch planner can rely on.
 - task_updates for task panel progress:
@@ -278,6 +293,10 @@ finish_investigation with:
   - add newly discovered important work or questions when investigation reveals them.
   - include a short reason and trace references such as file paths, line ranges,
     tool call ids, belief statements, or evidence ids.
+
+Avoid open_questions unless it is non-blocking background uncertainty. Blocking
+questions should be user_decisions_required or an unknown with
+resolution_strategy="ask_user".
 
 Keep the JSON compact: at most 6 beliefs, 5 user_decisions_required, and 10
 patch_planning_facts entries. Each string should be one short sentence. Keep

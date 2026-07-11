@@ -14,6 +14,7 @@ async def _read(params: dict, ctx: dict) -> ToolResult:
     start = max(0, params.get("start_line", 1) - 1)
     end = params.get("end_line") or len(lines)
     selection = lines[start:end]
+    stat = p.stat()
     lsp_status = lsp.touch_file(str(p.relative_to(_resolve(".", ctx))), str(ctx.get("directory", ".")))
     diagnostics = _format_diagnostics(p, lsp.diagnostics_for(p))
     output = "\n".join(selection)
@@ -23,6 +24,8 @@ async def _read(params: dict, ctx: dict) -> ToolResult:
         f"read {params['path']} L{start+1}-{min(end, len(lines))}",
         output,
         path=str(p),
+        mtime_ns=stat.st_mtime_ns,
+        size=stat.st_size,
         total_lines=len(lines),
         diagnostics=len(lsp.diagnostics_for(p)),
         lsp_checked=bool(lsp_status.get("checked")),

@@ -1,5 +1,5 @@
 <script setup>
-import { ref, onMounted, onUnmounted, nextTick } from 'vue'
+import { ref, reactive, onMounted, onUnmounted, nextTick, watch } from 'vue'
 import { gsap } from 'gsap'
 import { animate, stagger } from 'animejs'
 import ShuffleText from './ShuffleText.vue'
@@ -28,9 +28,14 @@ const collapseIconRef = ref(null)
 const collapsed = ref(false)
 const compactLayout = ref(false)
 const showContent = ref(true)
+const projectRefs = reactive({})
+const sessionRefs = reactive({})
 let transitionTimeline
 let railAnimation
 let motion
+
+function setProjectRef(id, el) { if (el) projectRefs[id] = el; else delete projectRefs[id] }
+function setSessionRef(id, el) { if (el) sessionRefs[id] = el; else delete sessionRefs[id] }
 
 const nav = [
   {
@@ -71,6 +76,52 @@ function navigate(id) {
 
 function startSession() {
   emit('create-session', props.activeWorkspace?.id)
+}
+
+function animateActive(el, active) {
+  if (window.matchMedia('(prefers-reduced-motion: reduce)').matches || !el) return
+  if (active) {
+    gsap.fromTo(el, { boxShadow: 'inset 0 0 0 0 rgba(255,255,255,0)' }, {
+      boxShadow: 'inset 0 0 0 0 rgba(255,255,255,0)',
+      duration: 0.35,
+      ease: 'power2.out',
+    })
+  }
+}
+
+function onProjectEnter(el) {
+  if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) return
+  gsap.to(el, { backgroundColor: 'rgba(255,255,255,0.12)', borderColor: 'rgba(255,255,255,0.32)', duration: 0.18, ease: 'power2.out' })
+}
+
+function onProjectLeave(el) {
+  if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) return
+  gsap.to(el, { backgroundColor: 'rgba(6,37,111,0.24)', borderColor: 'rgba(255,255,255,0.16)', duration: 0.22, ease: 'power2.out' })
+}
+
+function onSessionRowEnter(el) {
+  if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) return
+  gsap.to(el, { backgroundColor: 'rgba(255,255,255,0.12)', borderColor: 'rgba(255,255,255,0.24)', duration: 0.16, ease: 'power2.out' })
+}
+
+function onSessionRowLeave(el) {
+  if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) return
+  gsap.to(el, { backgroundColor: 'transparent', borderColor: 'transparent', duration: 0.2, ease: 'power2.out' })
+}
+
+function sessionBeforeEnter(el) {
+  el.style.opacity = '0'
+  el.style.transform = 'translateX(-12px)'
+}
+
+function sessionEnter(el, done) {
+  if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) { done(); return }
+  gsap.to(el, { opacity: 1, x: 0, duration: 0.35, ease: 'power3.out', onComplete: done })
+}
+
+function sessionLeave(el, done) {
+  if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) { done(); return }
+  gsap.to(el, { opacity: 0, x: -10, duration: 0.2, ease: 'power2.in', onComplete: done })
 }
 
 function workspaceInitials(workspace) {
@@ -157,6 +208,30 @@ onUnmounted(() => {
   railAnimation?.cancel()
   motion?.revert()
 })
+
+watch(() => props.activeSession?.id, (newId, oldId) => {
+  if (oldId && sessionRefs[oldId]) {
+    gsap.to(sessionRefs[oldId], { borderColor: 'transparent', backgroundColor: 'rgba(255,255,255,0)', duration: 0.25, ease: 'power2.out' })
+  }
+  if (newId && sessionRefs[newId]) {
+    gsap.fromTo(sessionRefs[newId],
+      { borderColor: 'rgba(245,198,66,0)', backgroundColor: 'rgba(255,255,255,0)' },
+      { borderColor: 'rgba(245,198,66,0.42)', backgroundColor: 'rgba(255,255,255,0.08)', duration: 0.32, ease: 'power3.out' }
+    )
+  }
+})
+
+watch(() => props.activeWorkspace?.id, (newId, oldId) => {
+  if (oldId && projectRefs[oldId]) {
+    gsap.to(projectRefs[oldId], { borderColor: 'rgba(255,255,255,0.16)', backgroundColor: 'rgba(6,37,111,0.24)', duration: 0.25, ease: 'power2.out' })
+  }
+  if (newId && projectRefs[newId]) {
+    gsap.fromTo(projectRefs[newId],
+      { borderColor: 'rgba(255,255,255,0.16)', backgroundColor: 'rgba(6,37,111,0.24)' },
+      { borderColor: 'rgba(255,255,255,0.36)', backgroundColor: 'rgba(255,255,255,0.12)', duration: 0.32, ease: 'power3.out' }
+    )
+  }
+})
 </script>
 
 <template>
@@ -236,28 +311,40 @@ onUnmounted(() => {
           <button type="button" title="Add workspace" @click="emit('add-workspace')">+</button>
         </div>
       </Transition>
-      <button
+      <div
         v-for="workspace in workspaces"
         :key="workspace.id"
-        class="sb__project"
+        :ref="(el) => setProjectRef(workspace.id, el)"
+        class="sb__project-row"
         :class="{ 'is-active': activeWorkspace?.id === workspace.id }"
         :title="collapsed ? workspace.name : workspace.path"
-        type="button"
-        @click="emit('workspace-session', workspace)"
+        @pointerenter="onProjectEnter($event.currentTarget)"
+        @pointerleave="onProjectLeave($event.currentTarget)"
       >
-        <span class="sb__project-icon sb__rail-icon">
-          {{ workspaceInitials(workspace) }}
-        </span>
-        <Transition name="sb-copy">
-          <span v-if="showContent" class="sb__project-content">
-            <span class="sb__project-copy">
-              <strong>{{ workspace.name }}</strong>
-              <small>{{ workspace.path }}</small>
-            </span>
-            <span class="sb__project-state">{{ workspace.is_active ? 'open' : 'new' }}</span>
+        <button class="sb__project" type="button" @click="emit('workspace-session', workspace)">
+          <span class="sb__project-icon sb__rail-icon">
+            {{ workspaceInitials(workspace) }}
           </span>
+          <Transition name="sb-copy">
+            <span v-if="showContent" class="sb__project-content">
+              <span class="sb__project-copy">
+                <strong>{{ workspace.name }}</strong>
+                <small>{{ workspace.path }}</small>
+              </span>
+              <span class="sb__project-state">{{ workspace.is_active ? 'open' : 'new' }}</span>
+            </span>
+          </Transition>
+        </button>
+        <Transition name="sb-copy">
+          <button
+            v-if="showContent && workspaces.length > 1"
+            class="sb__project-delete"
+            type="button"
+            title="Delete workspace"
+            @click.stop="emit('delete-workspace', workspace.id)"
+          >D</button>
         </Transition>
-      </button>
+      </div>
       <Transition name="sb-copy">
         <small v-if="showContent && workspaceError" class="sb__error">{{ workspaceError }}</small>
       </Transition>
@@ -267,46 +354,57 @@ onUnmounted(() => {
       <Transition name="sb-copy">
         <div v-if="showContent" class="sb__group-label">Sessions</div>
       </Transition>
-      <div
-        v-for="session in sessions"
-        :key="session.id"
-        class="sb__session-row"
-        :class="{ 'is-active': activeSession?.id === session.id }"
+      <TransitionGroup
+        name="sb-sessions"
+        tag="div"
+        @before-enter="sessionBeforeEnter"
+        @enter="sessionEnter"
+        @leave="sessionLeave"
       >
-        <button
-          class="sb__session"
-          type="button"
-          :title="collapsed ? session.name : 'Open session'"
-          @click="emit('open-session', session.id)"
+        <div
+          v-for="session in sessions"
+          :key="session.id"
+          :ref="(el) => setSessionRef(session.id, el)"
+          class="sb__session-row"
+          :class="{ 'is-active': activeSession?.id === session.id }"
+          @pointerenter="onSessionRowEnter($event.currentTarget)"
+          @pointerleave="onSessionRowLeave($event.currentTarget)"
         >
-          <span class="sb__session-icon sb__rail-icon">
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.55" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M5 5h14v11H9l-4 3z"/>
-            </svg>
-          </span>
+          <button
+            class="sb__session"
+            type="button"
+            :title="collapsed ? session.name : 'Open session'"
+            @click="emit('open-session', session.id)"
+          >
+            <span class="sb__session-icon sb__rail-icon">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.55" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M5 5h14v11H9l-4 3z"/>
+              </svg>
+            </span>
+            <Transition name="sb-copy">
+              <span v-if="showContent" class="sb__session-copy">
+                <strong>{{ session.name }}</strong>
+                <small>{{ sessionDetail(session) }}</small>
+              </span>
+            </Transition>
+          </button>
+          <Transition name="sb-copy">
+            <span v-if="showContent" class="sb__session-actions">
+              <button type="button" title="Rename" @click.stop="emit('rename-session', session.id)">R</button>
+              <button type="button" title="Delete" @click.stop="emit('delete-session', session.id)">D</button>
+            </span>
+          </Transition>
+        </div>
+        <button v-if="!sessions.length" key="empty-sessions" class="sb__session" type="button" @click="startSession">
+          <span class="sb__session-icon sb__rail-icon">+</span>
           <Transition name="sb-copy">
             <span v-if="showContent" class="sb__session-copy">
-              <strong>{{ session.name }}</strong>
-              <small>{{ sessionDetail(session) }}</small>
+              <strong>No sessions</strong>
+              <small>Create one</small>
             </span>
           </Transition>
         </button>
-        <Transition name="sb-copy">
-          <span v-if="showContent" class="sb__session-actions">
-            <button type="button" title="Rename" @click.stop="emit('rename-session', session.id)">R</button>
-            <button type="button" title="Delete" @click.stop="emit('delete-session', session.id)">D</button>
-          </span>
-        </Transition>
-      </div>
-      <button v-if="!sessions.length" class="sb__session" type="button" @click="startSession">
-        <span class="sb__session-icon sb__rail-icon">+</span>
-        <Transition name="sb-copy">
-          <span v-if="showContent" class="sb__session-copy">
-            <strong>No sessions</strong>
-            <small>Create one</small>
-          </span>
-        </Transition>
-      </button>
+      </TransitionGroup>
     </section>
 
     <footer class="sb__footer sb__reveal">
@@ -609,7 +707,7 @@ onUnmounted(() => {
   text-overflow: ellipsis;
 }
 
-.sb__project,
+.sb__project-row,
 .sb__session {
   display: flex;
   min-height: 42px;
@@ -624,10 +722,22 @@ onUnmounted(() => {
   white-space: nowrap;
 }
 
-.sb__project {
+.sb__project-row {
   width: 100%;
   border-color: rgba(255, 255, 255, 0.16);
   background: rgba(6, 37, 111, 0.24);
+}
+
+.sb__project {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  align-items: center;
+  gap: 9px;
+  padding: 0;
+  border: 0;
+  color: inherit;
+  background: transparent;
   cursor: pointer;
   text-align: left;
 }
@@ -657,9 +767,21 @@ onUnmounted(() => {
   font: 8px/1 var(--mono);
 }
 
-.sb__project.is-active {
+.sb__project-row.is-active {
   border-color: rgba(255, 255, 255, .36);
   background: rgba(255, 255, 255, .12);
+}
+
+.sb__project-delete {
+  width: 24px;
+  height: 24px;
+  flex: 0 0 auto;
+  border: 1px solid rgba(255, 255, 255, .16);
+  border-radius: 7px;
+  color: #ffd7d7;
+  background: rgba(120, 22, 22, .18);
+  font: 800 8px/1 var(--mono);
+  cursor: pointer;
 }
 
 .sb__error {
@@ -798,14 +920,14 @@ onUnmounted(() => {
 }
 
 .is-compact .sb__nav-item,
-.is-compact .sb__project,
+.is-compact .sb__project-row,
 .is-compact .sb__session,
 .is-compact .sb__session-row {
   width: 42px;
   padding-inline: 8px;
 }
 
-.is-compact .sb__project {
+.is-compact .sb__project-row {
   background: rgba(6, 37, 111, 0.2);
 }
 
@@ -875,14 +997,14 @@ onUnmounted(() => {
   }
 
   .sb__nav-item,
-  .sb__project,
+  .sb__project-row,
   .sb__session,
   .sb__session-row {
     width: 42px;
     padding-inline: 8px;
   }
 
-  .sb__project {
+  .sb__project-row {
     background: transparent;
   }
 

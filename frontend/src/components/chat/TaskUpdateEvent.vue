@@ -48,7 +48,10 @@ function actionLabel(change) {
         :class="`is-${change.action}`"
       >
         <b>{{ actionLabel(change) }}</b>
-        <span>{{ change.item?.text }}</span>
+        <span>
+          <i v-if="change.item?.id">{{ change.item.id }}</i>
+          {{ change.item?.text }}
+        </span>
         <small v-if="change.item?.reason">{{ change.item.reason }}</small>
       </p>
     </div>
@@ -81,6 +84,13 @@ function actionLabel(change) {
 .task-update span {
   min-width: 0;
   overflow-wrap: anywhere;
+}
+.task-update i {
+  display: inline-block;
+  margin-right: 6px;
+  color: var(--text-muted, #71809c);
+  font: 800 8px/1 var(--mono, monospace);
+  font-style: normal;
 }
 .task-update small {
   grid-column: 2;

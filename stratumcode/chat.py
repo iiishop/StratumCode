@@ -367,12 +367,36 @@ def analyzed_stream(
     except ValueError:
         state = {}
     session_context = _session_context(state)
+    workspace_context = _workspace_snapshot(workspace_dir)
+    if workspace_context:
+        context = workspace_context + context
     answer_context = _answer_context(answer)
     if answer_context:
         context = context + answer_context
     if analysis is None:
+        analyze_stage = f"task-analysis-{uuid4().hex[:8]}"
+        yield start_event(analyze_stage, "stage", {
+            "name": "task_analysis",
+            "label": "Analyze task requirements",
+            "state": "running",
+            "phase": "analyzing",
+            "model": "",
+            "context_length": 0,
+            "provider": "",
+            "inherited": False,
+        })
         analysis = analyze_task(message, context, workspace_dir, session_context=session_context)
+        analysis.setdefault("model", "")
+        analysis.setdefault("provider", "")
+        yield {"op": "update", "id": analyze_stage, "patch": {
+            "model": analysis.get("model", ""),
+            "provider": analysis.get("provider", ""),
+            "state": "done",
+            "phase": "analyzed",
+        }}
     analysis = _ensure_task_contract(analysis)
+    if answer:
+        analysis = {**analysis, "suggested_first_tools": []}
     analysis.setdefault("id", f"task-{uuid4().hex[:8]}")
     analysis.setdefault("origin_message", message)
     _attach_session_relationship(analysis, session_context.get("tasks", []))
@@ -381,11 +405,12 @@ def analyzed_stream(
     if not answer:
         yield start_event(f"task-analysis-{uuid4().hex[:8]}", "task_analysis", analysis)
     findings = _prior_findings(prior_analysis, answer)
+    continuation_context = _continuation_context(answer, session_context)
     last_investigation = None
     for event in investigator.investigation_stream(
         message=message,
         analysis=analysis,
-        context=context + _analysis_context(analysis),
+        context=context + _analysis_context(analysis) + continuation_context,
         workspace_dir=workspace_dir,
         max_rounds=max_rounds,
         findings=findings,
@@ -601,6 +626,45 @@ def stream(request: dict, workspace_dir: str = ".") -> Iterator[dict]:
     )
 
 
+def _workspace_snapshot(workspace_dir: str) -> list[str]:
+    root = os.path.abspath(workspace_dir or ".")
+    if not os.path.isdir(root):
+        return []
+    ignored = {".git", ".hg", ".svn", "__pycache__", "node_modules", ".venv", "venv", "dist", "build"}
+    files: list[tuple[str, int]] = []
+    dirs = 0
+    for current, names, filenames in os.walk(root):
+        names[:] = [name for name in names if name not in ignored and not name.startswith(".")]
+        dirs += len(names)
+        for filename in filenames:
+            if filename.startswith("."):
+                continue
+            path = os.path.join(current, filename)
+            try:
+                size = os.path.getsize(path)
+            except OSError:
+                continue
+            rel = os.path.relpath(path, root).replace("\\", "/")
+            files.append((rel, size))
+            if len(files) >= 41:
+                break
+        if len(files) >= 41:
+            break
+    visible = files[:40]
+    lines = [
+        "Workspace snapshot:",
+        f"- root: {root}",
+        f"- visible files: {len(files) if len(files) < 41 else '40+'}",
+        f"- visible directories: {dirs}",
+    ]
+    if visible:
+        lines.append("- files:")
+        lines.extend(f"  - {path} ({size} bytes{' / empty' if size == 0 else ''})" for path, size in visible)
+    else:
+        lines.append("- files: (none)")
+    return lines
+
+
 def _answer_context(answer: dict | None) -> list[str]:
     if not answer:
         return []
@@ -618,6 +682,18 @@ def _answer_context(answer: dict | None) -> list[str]:
     if selected:
         lines.append(app_settings.text("selected_option", option=selected))
     lines.append(app_settings.text("user_answer", answer=response))
+    return lines
+
+
+def _continuation_context(answer: dict | None, session_context: dict) -> list[str]:
+    if not answer:
+        return []
+    lines = [
+        "Continuation after a user answer. Do not restart discovery.",
+        "Do not run suggested starter tools again. Use previous observations and only inspect narrower missing evidence.",
+    ]
+    if session_context.get("observations") or session_context.get("knowledge"):
+        lines.append("Previous observations/knowledge are available in this prompt and should be reused before any broad glob/read/code_nav call.")
     return lines
 
 
@@ -654,7 +730,7 @@ def _seed_task_updates(analysis: dict, existing: list[dict] | None = None) -> li
         for index, text in enumerate(analysis.get("constraints", []), start=1)
     )
     items.extend(
-        _task_item(f"{task_id}:{item['id']}", "work", item["text"], "unknown", parent_id=root_goal)
+        _task_item(f"{task_id}:{item['id']}", "acceptance", item["text"], "unknown", parent_id=root_goal)
         for item in analysis.get("acceptance_criteria", [])
     )
     items.extend(
@@ -715,7 +791,7 @@ def _normalize_task_updates(analysis_id: str, updates: list[dict], existing: lis
 
 def _finalize_task_statuses(items: list[dict], investigation: dict) -> list[dict]:
     next_step = ((investigation.get("step_result") or {}).get("next_step") or "").strip()
-    if next_step == "ask_user":
+    if next_step == "ask_user" or not investigation.get("ready_for_patch_planning"):
         return items
     done_status = "known" if investigation.get("ready_for_patch_planning") else "deferred"
     final = []
@@ -732,11 +808,13 @@ def _finalize_task_statuses(items: list[dict], investigation: dict) -> list[dict
 
 
 def _same_task(left: dict, right: dict) -> bool:
-    if left.get("id") and right.get("id") and left["id"] == right["id"]:
+    if _same_task_id(left.get("id"), right.get("id")):
         return True
     left_trace = left.get("trace") if isinstance(left.get("trace"), list) else []
     right_trace = right.get("trace") if isinstance(right.get("trace"), list) else []
-    if (left.get("id") and left["id"] in right_trace) or (right.get("id") and right["id"] in left_trace):
+    left_ids = [left.get("id"), *left_trace]
+    right_ids = [right.get("id"), *right_trace]
+    if any(_same_task_id(left_id, right_id) for left_id in left_ids for right_id in right_ids):
         return True
     a = _task_key(left.get("text"))
     b = _task_key(right.get("text"))
@@ -745,6 +823,22 @@ def _same_task(left: dict, right: dict) -> bool:
 
 def _task_key(value: str | None) -> str:
     return re.sub(r"\W+", "", re.sub(r"[（(][^）)]*[）)]", "", value or "")).casefold()
+
+
+def _task_id_tail(value: str | None) -> str:
+    return str(value or "").rsplit(":", 1)[-1]
+
+
+def _same_task_id(left: str | None, right: str | None) -> bool:
+    left = str(left or "")
+    right = str(right or "")
+    if not left or not right:
+        return False
+    if left == right:
+        return True
+    if ":" in left and ":" in right:
+        return False
+    return _task_id_tail(left) == _task_id_tail(right)
 
 
 def _scoped_id(analysis_id: str, item_id: str) -> str:
@@ -795,7 +889,7 @@ def _observations_freshness(state: dict) -> list[dict]:
     for raw in state.get("observations", []):
         item = dict(raw)
         path = item.get("path")
-        fresh = False
+        fresh = not bool(path)
         if path and os.path.exists(path):
             stat = os.stat(path)
             fresh = item.get("mtime_ns") == stat.st_mtime_ns and item.get("size") == stat.st_size
