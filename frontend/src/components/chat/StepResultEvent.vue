@@ -1,7 +1,9 @@
 <script setup>
-import { computed } from 'vue'
+import { computed, onMounted, ref } from 'vue'
+import { gsap } from 'gsap'
 
 const props = defineProps({ event: { type: Object, required: true } })
+const rootRef = ref(null)
 
 const stepLabel = computed(() => ({
   write_code: 'Ready for design',
@@ -49,10 +51,22 @@ function beliefColor(status) {
     invalidated: 'var(--err)',
   }[status] || 'var(--text-muted)'
 }
+
+onMounted(() => {
+  if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) return
+  const el = rootRef.value
+  if (!el) return
+  gsap.fromTo(el, { y: 10, autoAlpha: 0 }, { y: 0, autoAlpha: 1, duration: 0.4, ease: 'power3.out' })
+  gsap.fromTo(el.querySelector('.sr__banner'), { x: -6, autoAlpha: 0 }, { x: 0, autoAlpha: 1, duration: 0.35, delay: 0.08, ease: 'power2.out' })
+  const cards = el.querySelectorAll('.sr__section')
+  if (cards.length) {
+    gsap.fromTo(cards, { y: 6, autoAlpha: 0 }, { y: 0, autoAlpha: 1, duration: 0.3, stagger: 0.06, delay: 0.2, ease: 'power2.out' })
+  }
+})
 </script>
 
 <template>
-  <div class="sr" :style="{ '--sr-accent': stepColor }">
+  <div ref="rootRef" class="sr" :style="{ '--sr-accent': stepColor }">
     <div class="sr__banner">
       <span class="sr__banner-icon">
         <template v-if="event.next_step === 'write_code'">
@@ -125,6 +139,7 @@ function beliefColor(status) {
   border: 1px solid color-mix(in srgb, var(--sr-accent) 30%, #d4e0f2);
   border-radius: 10px;
   background: linear-gradient(135deg, color-mix(in srgb, var(--sr-accent) 4%, transparent), transparent);
+  visibility: visible;
 }
 
 .sr__banner {

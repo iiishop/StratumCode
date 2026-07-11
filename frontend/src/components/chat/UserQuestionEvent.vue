@@ -14,6 +14,16 @@ const selectedOptionId = ref('')
 const rootRef = ref(null)
 const optionsRef = ref(null)
 
+function onContextEnter(el, done) {
+  if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) { done(); return }
+  gsap.fromTo(el, { height: 0, autoAlpha: 0 }, { height: el.scrollHeight, autoAlpha: 1, duration: 0.28, ease: 'power2.out', onComplete: () => { gsap.set(el, { height: 'auto' }); done() } })
+}
+
+function onContextLeave(el, done) {
+  if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) { done(); return }
+  gsap.to(el, { height: 0, autoAlpha: 0, duration: 0.2, ease: 'power2.in', onComplete: done })
+}
+
 function submitOption(option) {
   if (submitted.value) return
   selectedLabel.value = option.label
@@ -218,7 +228,8 @@ const hasContext = computed(() =>
           <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polyline points="6 9 12 15 18 9"/></svg>
         </button>
 
-        <div v-if="showContext && hasContext && !submitted" class="uq__context">
+        <Transition name="uq-expand" @enter="onContextEnter" @leave="onContextLeave">
+          <div v-if="showContext && hasContext && !submitted" class="uq__context">
           <div v-if="event.why_it_matters && event.why_it_matters !== event.question" class="uq__context-item">
             <span>Why</span>
             <p>{{ event.why_it_matters }}</p>
@@ -242,6 +253,7 @@ const hasContext = computed(() =>
             </ul>
           </div>
         </div>
+        </Transition>
       </div>
     </EventFrame>
   </div>
@@ -544,5 +556,10 @@ const hasContext = computed(() =>
   .uq__context-toggle svg {
     transition: none;
   }
+}
+
+.uq-expand-enter-active,
+.uq-expand-leave-active {
+  overflow: hidden;
 }
 </style>

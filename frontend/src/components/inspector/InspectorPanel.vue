@@ -74,6 +74,37 @@ const remainingTaskCount = computed(() => analysisRows.value.filter(item =>
   ['unknown', 'blocked', 'added', 'updated'].includes(item.status || '')
 ).length)
 
+const taskCompletedCount = computed(() => analysisRows.value.filter(item =>
+  ['known', 'added', 'updated'].includes(item.status || '') ||
+  item.status === 'pending' && item.text && item.kind !== 'unknown'
+).length)
+
+const taskProgressPercent = computed(() =>
+  analysisRows.value.length ? Math.round((taskCompletedCount.value / analysisRows.value.length) * 100) : 0
+)
+
+const groupedTasks = computed(() => {
+  const groups = { goal: [], acceptance: [], behavior: [], boundary: [], constraint: [], unknown: [] }
+  for (const row of analysisRows.value) {
+    const kind = row.kind || 'unknown'
+    if (groups[kind]) groups[kind].push(row)
+    else groups.unknown.push(row)
+  }
+  return groups
+})
+
+function taskKindLabel(kind) {
+  return { goal: 'Goals', acceptance: 'Acceptance criteria', behavior: 'Behavior contract', boundary: 'Boundaries', constraint: 'Constraints', unknown: 'Unknowns' }[kind] || kind
+}
+
+function taskStatusIcon(status) {
+  if (status === 'known' || status === 'added' || status === 'updated') return 'check'
+  if (status === 'blocked') return 'blocked'
+  if (status === 'deferred') return 'deferred'
+  if (status === 'unknown') return 'unknown'
+  return 'pending'
+}
+
 function bestTaskUpdate(items) {
   return items.reduce((best, item) => preferredTaskRow(best, item), null)
 }
@@ -448,24 +479,92 @@ function onWsRowLeave(el) {
 
       <template v-else-if="tab === 'tasks'">
         <div class="inspector__section-head"><strong>Tasks</strong><span>{{ remainingTaskCount }} remaining</span></div>
-        <section v-if="taskAnalysis" class="analysis-card">
-          <small>Task analyzer</small>
-          <strong>{{ taskAnalysis.intent?.summary }}</strong>
-          <p>{{ taskAnalysis.intent?.type || 'other' }} / {{ taskAnalysis.provider || 'model' }} / {{ taskAnalysis.model || 'unknown' }}</p>
-        </section>
-        <div v-if="analysisRows.length" class="analysis-task-list">
-          <div v-for="item in analysisRows" :key="item.id || `${item.kind}:${item.text}`" class="analysis-task-row" :class="`is-${item.status || 'unknown'}`">
-            <b>{{ item.status || item.kind }}</b>
-            <span>
-              <strong>{{ item.text }}</strong>
-              <small v-if="item.reason">{{ item.reason }}</small>
-              <em v-if="item.trace?.length">{{ item.trace.join(' -> ') }}</em>
-            </span>
-          </div>
+
+        <!-- progress bar -->
+        <div v-if="analysisRows.length" class="tk-progress">
+          <div class="tk-progress-bar"><i :style="{ width: taskProgressPercent + '%' }"></i></div>
+          <span>{{ taskCompletedCount }}/{{ analysisRows.length }} resolved</span>
         </div>
-        <button v-for="item in todos" :key="item.id" class="task-row" :class="{ done: item.done }" @click="emit('toggle-todo', item.id)">
-          <i>{{ item.done ? '✓' : '' }}</i><span>{{ item.content }}</span>
-        </button>
+
+        <!-- goal -->
+        <section v-if="taskAnalysis" class="tk-goal">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="6"/><circle cx="12" cy="12" r="2"/></svg>
+          <div>
+            <strong>{{ taskAnalysis.intent?.summary }}</strong>
+            <small>{{ taskAnalysis.intent?.type || 'other' }} / {{ taskAnalysis.provider || 'model' }} / {{ taskAnalysis.model || 'unknown' }}</small>
+          </div>
+        </section>
+
+        <!-- grouped task rows -->
+        <template v-if="analysisRows.length">
+          <div v-for="(items, kind) in groupedTasks" :key="kind">
+            <div v-if="items.length" class="tk-group">
+              <div class="tk-group-head">
+                <span class="tk-group-icon" :class="`tk-group-icon--${kind}`">
+                  <!-- goal -->
+                  <svg v-if="kind === 'goal'" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="3"/></svg>
+                  <!-- acceptance -->
+                  <svg v-else-if="kind === 'acceptance'" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M9 12l2 2 4-4"/><rect x="3" y="3" width="18" height="18" rx="3"/></svg>
+                  <!-- behavior -->
+                  <svg v-else-if="kind === 'behavior'" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="3"/><path d="M12 2v4M12 18v4M2 12h4M18 12h4"/></svg>
+                  <!-- boundary -->
+                  <svg v-else-if="kind === 'boundary'" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+                  <!-- constraint -->
+                  <svg v-else-if="kind === 'constraint'" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="3" y="3" width="18" height="18" rx="3"/><circle cx="12" cy="12" r="3"/></svg>
+                  <!-- unknown -->
+                  <svg v-else width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3M12 17h.01"/></svg>
+                </span>
+                <span class="tk-group-label">{{ taskKindLabel(kind) }}</span>
+                <span class="tk-group-count">{{ items.length }}</span>
+              </div>
+
+              <div class="tk-items">
+                <div
+                  v-for="item in items"
+                  :key="item.id || `${item.kind}:${item.text}`"
+                  class="tk-item"
+                  :class="`tk-item--${kind} tk-item--${item.status || 'pending'}`"
+                >
+                  <!-- status icon -->
+                  <span class="tk-item-status" :class="`tk-item-status--${taskStatusIcon(item.status)}`">
+                    <svg v-if="taskStatusIcon(item.status) === 'check'" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><path d="M5 13l4 4L19 7"/></svg>
+                    <svg v-else-if="taskStatusIcon(item.status) === 'blocked'" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+                    <svg v-else-if="taskStatusIcon(item.status) === 'deferred'" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+                    <svg v-else-if="taskStatusIcon(item.status) === 'unknown'" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 015.83 1c0 2-3 3-3 3M12 17h.01"/></svg>
+                    <svg v-else width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="10"/></svg>
+                  </span>
+
+                  <div class="tk-item-body">
+                    <p class="tk-item-text">{{ item.text }}</p>
+                    <small v-if="item.reason" class="tk-item-reason">{{ item.reason }}</small>
+                    <div v-if="item.trace?.length" class="tk-item-trace">
+                      <span v-for="(t, i) in item.trace" :key="i" class="tk-trace-step">
+                        {{ t }}
+                        <span v-if="i < item.trace.length - 1" class="tk-trace-arrow">&#8594;</span>
+                      </span>
+                    </div>
+                  </div>
+
+                  <span class="tk-item-badge">{{ item.status }}</span>
+                </div>
+              </div>
+            </div>
+          </div>
+        </template>
+
+        <!-- todos -->
+        <div v-if="todos.length" class="tk-todos">
+          <div class="tk-group-head">
+            <span class="tk-group-label">Personal todos</span>
+            <span class="tk-group-count">{{ todos.filter(t => !t.done).length }} left</span>
+          </div>
+          <button v-for="item in todos" :key="item.id" class="tk-todo" :class="{ done: item.done }" @click="emit('toggle-todo', item.id)">
+            <span class="tk-todo-check">
+              <svg v-if="item.done" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><path d="M5 13l4 4L19 7"/></svg>
+            </span>
+            <span class="tk-todo-text">{{ item.content }}</span>
+          </button>
+        </div>
       </template>
 
       <template v-else-if="tab === 'tools'">
@@ -566,21 +665,260 @@ function onWsRowLeave(el) {
 .verdict-card { border-top: 3px solid #1756d1; }.verdict-card.is-supported { border-top-color: #11866f; }.verdict-card.is-refuted { border-top-color: #c44747; }.verdict-card small { color: #8798ac; font: 700 8px/1 var(--mono); text-transform: uppercase; }.verdict-card strong { display: block; margin: 4px 0; font-size: 16px; text-transform: capitalize; }.verdict-card p { margin: 0; color: #566d88; font-size: 10px; line-height: 1.5; }
 .inspector__section-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin: 2px 2px 10px; }.inspector__section-head strong { font-size: 12px; }.inspector__section-head span { color: #8294aa; font: 9px/1 var(--mono); }
 .section-action { height: 24px; padding: 0 8px; border: 1px solid #bfd0ea; border-radius: 6px; color: #1756d1; background: #eef4ff; font: 700 9px/1 var(--mono); cursor: pointer; }
-.task-row { display: flex; width: 100%; align-items: center; gap: 8px; padding: 9px; border: 0; border-radius: 8px; color: #37516f; background: transparent; text-align: left; cursor: pointer; }.task-row:hover { background: #eaf1fb; }.task-row i { display: grid; width: 17px; height: 17px; place-items: center; border: 1px solid #a9bad0; border-radius: 5px; color: #11866f; font-style: normal; }.task-row.done span { color: #91a0b2; text-decoration: line-through; }
-.analysis-card { display: grid; gap: 5px; margin-bottom: 9px; padding: 11px; border: 1px solid #cfdced; border-radius: 10px; background: #fff; }.analysis-card small { color: #6658c7; font: 800 8px/1 var(--mono); text-transform: uppercase; letter-spacing: .06em; }.analysis-card strong { color: #294564; font-size: 11.5px; line-height: 1.4; }.analysis-card p { margin: 0; color: #7188a3; font: 8.5px/1.35 var(--mono); }
-.analysis-task-list { display: grid; gap: 5px; margin-bottom: 10px; }
-.analysis-task-row { display: grid; grid-template-columns: 72px minmax(0, 1fr); gap: 7px; padding: 8px; border: 1px solid #d9e4f1; border-radius: 8px; background: #fff; }
-.analysis-task-row.is-goal,
-.analysis-task-row.is-constraint,
-.analysis-task-row.is-clue { border-color: #d9e4f1; background: #fff; }
-.analysis-task-row.is-known { border-color: #bddfce; background: #f3fbf7; }
-.analysis-task-row.is-blocked { border-color: #ead08a; background: #fff9e6; }
-.analysis-task-row.is-deferred { border-color: #d5dce7; background: #f7f9fc; }
-.analysis-task-row b { overflow: hidden; color: #6658c7; font: 800 8px/1.35 var(--mono); text-overflow: ellipsis; text-transform: uppercase; }
-.analysis-task-row span { display: grid; gap: 3px; min-width: 0; color: #37516f; font-size: 10px; line-height: 1.4; overflow-wrap: anywhere; }
-.analysis-task-row strong { font-size: 10px; font-weight: 600; }
-.analysis-task-row small { color: #5d7188; font-size: 9px; line-height: 1.35; }
-.analysis-task-row em { color: #8798ac; font: 8.5px/1.35 var(--mono); font-style: normal; }
+/* ---- tasks redesign ---- */
+.tk-progress {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 4px 2px 10px;
+  padding: 7px 9px;
+  border: 1px solid #d8e2ef;
+  border-radius: 8px;
+  background: #fff;
+}
+.tk-progress-bar {
+  flex: 1;
+  height: 5px;
+  overflow: hidden;
+  border-radius: 9px;
+  background: #e2ebf7;
+}
+.tk-progress-bar i {
+  display: block;
+  width: 100%;
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, #1756d1, #38bdf8);
+  transition: width .5s cubic-bezier(.22, 1, .36, 1);
+}
+.tk-progress > span {
+  flex-shrink: 0;
+  color: #7188a3;
+  font: 700 8.5px/1 var(--mono);
+}
+
+.tk-goal {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  margin-bottom: 10px;
+  padding: 11px;
+  border: 1px solid #ccdcf2;
+  border-left: 3px solid #6658c7;
+  border-radius: 9px;
+  background: linear-gradient(135deg, rgba(102,88,199,.05), #fff);
+}
+.tk-goal svg {
+  flex-shrink: 0;
+  margin-top: 1px;
+  color: #6658c7;
+}
+.tk-goal strong {
+  display: block;
+  color: #294564;
+  font-size: 11px;
+  line-height: 1.45;
+}
+.tk-goal small {
+  display: block;
+  margin-top: 4px;
+  color: #7188a3;
+  font: 8.5px/1.35 var(--mono);
+}
+
+/* ---- group ---- */
+.tk-group {
+  margin-bottom: 9px;
+}
+.tk-group-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 5px;
+  padding: 0 1px;
+}
+.tk-group-icon {
+  display: grid;
+  width: 20px;
+  height: 20px;
+  place-items: center;
+  border-radius: 5px;
+  flex-shrink: 0;
+}
+.tk-group-icon--goal       { color: #6658c7; background: rgba(102,88,199,.1); }
+.tk-group-icon--acceptance { color: #11866f; background: rgba(17,134,111,.1); }
+.tk-group-icon--behavior   { color: #3b5998; background: rgba(59,89,152,.1); }
+.tk-group-icon--boundary   { color: #c48b00; background: rgba(196,139,0,.1); }
+.tk-group-icon--constraint { color: #1756d1; background: rgba(23,86,209,.1); }
+.tk-group-icon--unknown    { color: #7c8ba0; background: rgba(124,139,160,.1); }
+.tk-group-label {
+  color: #294564;
+  font: 650 10px/1 var(--sans);
+}
+.tk-group-count {
+  margin-left: auto;
+  color: #94a8c2;
+  font: 700 8px/1 var(--mono);
+}
+
+/* ---- items ---- */
+.tk-items {
+  display: grid;
+  gap: 4px;
+}
+
+.tk-item {
+  display: grid;
+  grid-template-columns: 20px minmax(0, 1fr) auto;
+  gap: 7px;
+  align-items: start;
+  padding: 7px 8px;
+  border: 1px solid #d9e4f1;
+  border-radius: 7px;
+  background: #fff;
+}
+
+/* kind-specific left border */
+.tk-item--goal       { border-left: 3px solid #6658c7; }
+.tk-item--acceptance { border-left: 3px solid #11866f; }
+.tk-item--behavior   { border-left: 3px solid #3b5998; }
+.tk-item--boundary   { border-left: 3px solid #c48b00; }
+.tk-item--constraint { border-left: 3px solid #1756d1; }
+.tk-item--unknown    { border-left: 3px solid #a0aec0; }
+
+/* status backgrounds */
+.tk-item--known,
+.tk-item--added,
+.tk-item--updated { background: #f6fdf9; border-color: #bfdec7; }
+.tk-item--blocked { background: #fffbf0; border-color: #ead08a; }
+.tk-item--deferred { background: #f8fafc; border-color: #d8e1ec; }
+
+.tk-item-status {
+  display: grid;
+  width: 20px;
+  height: 20px;
+  place-items: center;
+  border-radius: 5px;
+  flex-shrink: 0;
+}
+.tk-item-status--check    { color: #11866f; background: rgba(17,134,111,.1); }
+.tk-item-status--blocked  { color: #c48b00; background: rgba(196,139,0,.12); }
+.tk-item-status--deferred { color: #7c8ba0; background: rgba(124,139,160,.1); }
+.tk-item-status--unknown  { color: #7c8ba0; background: rgba(124,139,160,.1); }
+.tk-item-status--pending  { color: #94a8c2; background: rgba(148,168,194,.1); }
+
+.tk-item-body {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.tk-item-text {
+  margin: 0;
+  color: #37516f;
+  font-size: 10px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.tk-item--known .tk-item-text,
+.tk-item--added .tk-item-text,
+.tk-item--updated .tk-item-text { color: #4a7c5c; }
+
+.tk-item-reason {
+  color: #5d7188;
+  font-size: 8.5px;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+.tk-item-trace {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 3px;
+  margin-top: 1px;
+}
+
+.tk-trace-step {
+  padding: 1px 5px;
+  border-radius: 3px;
+  color: #1756d1;
+  background: rgba(23,86,209,.06);
+  font: 8px/1.35 var(--mono);
+}
+
+.tk-trace-arrow {
+  color: #a0b5ce;
+  font-size: 7px;
+  margin: 0 1px;
+}
+
+.tk-item-badge {
+  flex-shrink: 0;
+  padding: 1px 5px;
+  border-radius: 3px;
+  color: #7188a3;
+  background: rgba(113,136,163,.08);
+  font: 700 7.5px/1.3 var(--mono);
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+.tk-item--known .tk-item-badge,
+.tk-item--added .tk-item-badge,
+.tk-item--updated .tk-item-badge { color: #11866f; background: rgba(17,134,111,.1); }
+.tk-item--blocked .tk-item-badge { color: #8a5b00; background: rgba(196,139,0,.12); }
+
+/* ---- todos ---- */
+.tk-todos {
+  margin-top: 4px;
+  padding-top: 10px;
+  border-top: 1px solid #dbe4f0;
+}
+
+.tk-todo {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  gap: 8px;
+  padding: 8px;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  color: #37516f;
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+  transition: background .12s, border-color .12s;
+}
+.tk-todo:hover {
+  border-color: #d8e2ef;
+  background: #f5f8fd;
+}
+.tk-todo.done .tk-todo-text {
+  color: #94a8c2;
+  text-decoration: line-through;
+}
+
+.tk-todo-check {
+  display: grid;
+  width: 18px;
+  height: 18px;
+  place-items: center;
+  border: 1.5px solid #a9bad0;
+  border-radius: 5px;
+  flex-shrink: 0;
+  color: #11866f;
+}
+.tk-todo.done .tk-todo-check {
+  border-color: #a0d8b4;
+  background: rgba(17,134,111,.08);
+}
+
+.tk-todo-text {
+  font-size: 10.5px;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
 .inspector-tool { display: grid; grid-template-columns: 28px 1fr auto; align-items: center; gap: 9px; margin-bottom: 6px; padding: 9px; border: 1px solid #d7e2ef; border-radius: 9px; background: #fff; }.inspector-tool > b { display: grid; width: 27px; height: 27px; place-items: center; border-radius: 7px; color: #1756d1; background: #e8f0ff; font: 800 10px/1 var(--mono); }.inspector-tool div { display: grid; gap: 3px; }.inspector-tool strong { font: 700 10px/1 var(--mono); }.inspector-tool small { color: #778ba4; font-size: 9px; line-height: 1.35; }.inspector-tool > span { color: #8da0b6; font: 800 9px/1 var(--mono); }
 .mcp-row { margin-bottom: 7px; padding: 10px; border: 1px solid #d7e2ef; border-radius: 10px; background: #fff; }
 .subagent-row {
