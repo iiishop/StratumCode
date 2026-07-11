@@ -59,6 +59,7 @@ const analysisRows = computed(() => {
   const rows = [
     withUpdate({ kind: 'goal', text: analysis.intent?.summary, status: 'goal' }),
     ...(analysis.acceptance_criteria || []).map(item => withUpdate({ id: item.id, kind: 'acceptance', text: item.text, status: 'pending' })),
+    ...behaviorTaskRows(analysis).map(row => withUpdate(row)),
     ...(analysis.constraints || []).map(text => withUpdate({ kind: 'constraint', text, status: 'constraint' })),
     ...(analysis.unknowns || []).map(item => withUpdate({
       id: item.id,
@@ -70,11 +71,28 @@ const analysisRows = computed(() => {
   return dedupeTaskRows(rows)
 })
 const remainingTaskCount = computed(() => analysisRows.value.filter(item =>
-  ['unknown', 'pending', 'blocked', 'added', 'updated'].includes(item.status || '')
+  ['unknown', 'blocked', 'added', 'updated'].includes(item.status || '')
 ).length)
 
 function bestTaskUpdate(items) {
   return items.reduce((best, item) => preferredTaskRow(best, item), null)
+}
+
+function behaviorTaskRows(analysis) {
+  const behavior = analysis.behavior_contract || {}
+  const groups = [
+    ['inputs', 'behavior'],
+    ['outputs', 'behavior'],
+    ['success_behaviors', 'behavior'],
+    ['failure_behaviors', 'behavior'],
+    ['boundaries', 'boundary'],
+  ]
+  return groups.flatMap(([key, kind]) => (behavior[key] || []).map((text, index) => ({
+    id: `behavior:${key}:${index + 1}`,
+    kind,
+    text,
+    status: 'pending',
+  })))
 }
 
 function dedupeTaskRows(rows) {
@@ -96,7 +114,7 @@ function dedupeTaskRows(rows) {
 
 function preferredTaskRow(left, right) {
   if (!left) return right
-  const rank = { known: 4, blocked: 3, deferred: 2, updated: 1, added: 1, unknown: 0 }
+  const rank = { known: 5, blocked: 4, deferred: 3, updated: 2, added: 2, pending: 1, unknown: 0 }
   return (rank[right.status] ?? 0) >= (rank[left.status] ?? 0) ? { ...left, ...right, id: left.id || right.id } : left
 }
 

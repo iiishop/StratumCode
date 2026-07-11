@@ -1324,7 +1324,7 @@ def _unknowns(value) -> list[dict]:
             "question": str(raw.get("question") or "").strip(),
             "blocking": bool(raw.get("blocking")),
             "resolution_strategy": strategy,
-            "type": str(raw.get("type") or "codebase_fact").strip() or "codebase_fact",
+            "type": str(raw.get("type") or "code_fact").strip() or "code_fact",
         }
         if item["id"] and item["question"]:
             items.append(item)

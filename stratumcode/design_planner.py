@@ -16,7 +16,8 @@ from .agent_runtime import (
     usage_delta as _usage_delta,
 )
 
-MAX_OUTPUT_TOKENS = 3072
+MAX_OUTPUT_TOKENS = 6144
+MAX_JSON_ATTEMPTS = 2
 
 
 def design_planning_stream(
@@ -48,21 +49,38 @@ def design_planning_stream(
         "inherited": setting["inherited"],
     })
 
-    assistant = _call_model(
-        provider,
-        model,
-        [
-            {"role": "system", "content": _system_prompt(app_settings.get_output_language())},
-            {"role": "user", "content": _user_prompt(message, analysis, investigation, workspace_dir)},
-        ],
-        tools=[],
-        max_tokens=MAX_OUTPUT_TOKENS,
-    )
-    if usage := _usage_delta(pricing_rules, assistant.pop("_usage", {})):
-        _add_usage(usage_total, usage)
-        yield start_event(f"{run_id}-usage", "usage", {"delta": usage, "total": usage_total})
-
-    plan = _normalize_design(_json_from_text(_content_text(assistant.get("content"))))
+    messages = [
+        {"role": "system", "content": _system_prompt(app_settings.get_output_language())},
+        {"role": "user", "content": _user_prompt(message, analysis, investigation, workspace_dir)},
+    ]
+    plan = None
+    last_error = None
+    for attempt in range(1, MAX_JSON_ATTEMPTS + 1):
+        assistant = _call_model(provider, model, messages, tools=[], max_tokens=MAX_OUTPUT_TOKENS)
+        if usage := _usage_delta(pricing_rules, assistant.pop("_usage", {})):
+            _add_usage(usage_total, usage)
+            yield start_event(f"{run_id}-usage-{attempt}", "usage", {"delta": usage, "total": usage_total})
+        text = _content_text(assistant.get("content"))
+        try:
+            plan = _normalize_design(_json_from_text(text))
+            break
+        except (json.JSONDecodeError, ValueError) as exc:
+            last_error = exc
+            messages.extend([
+                {"role": "assistant", "content": text[:4000]},
+                {"role": "user", "content": (
+                    "The previous response was not valid JSON: "
+                    f"{exc}. Return a compact valid JSON object only. "
+                    "Keep arrays short and do not include Markdown."
+                )},
+            ])
+    if plan is None:
+        yield start_event(f"{run_id}-output", "output", {
+            "content": f"Design planning failed to produce valid JSON after retry: {last_error}",
+            "streaming": False,
+        })
+        yield {"op": "update", "id": stage_id, "patch": {"state": "error", "phase": "design_planning_failed"}}
+        return
     yield start_event(f"{run_id}-design", "design_plan", plan)
     yield {"op": "update", "id": stage_id, "patch": {"state": "done", "phase": "design_planned"}}
     yield {"op": "done", "design_plan": plan}
@@ -72,7 +90,7 @@ def blocking_gap(plan: dict) -> dict | None:
     return next((gap for gap in plan.get("decision_gaps", []) if gap.get("blocks_implementation")), None)
 
 
-def user_question(gap: dict, *, analysis_id: str, origin_message: str) -> dict:
+def _legacy_user_question(gap: dict, *, analysis_id: str, origin_message: str) -> dict:
     gap_id = gap.get("id") or "design-gap"
     question = gap.get("question") or "请明确这个设计决策？"
     return {
@@ -94,6 +112,40 @@ def user_question(gap: dict, *, analysis_id: str, origin_message: str) -> dict:
         "options": [
             {"label": "采用最佳实践", "description": f"按当前项目事实选择最小实现：{question}"},
             {"label": "继续调查", "description": f"暂不做选择，继续寻找项目证据：{question}"},
+        ],
+        "custom_allowed": True,
+    }
+
+
+def user_question(gap: dict, *, analysis_id: str, origin_message: str) -> dict:
+    gap_id = gap.get("id") or "design-gap"
+    question = gap.get("question") or "Please clarify this design decision."
+    why = gap.get("why", "")
+    return {
+        "id": gap_id,
+        "analysis_id": analysis_id,
+        "question": question,
+        "origin_message": origin_message,
+        "reason": why,
+        "why_it_matters": why,
+        "blocks_next_step": "patch_planning",
+        "target_unknown_ids": [gap_id],
+        "unknown_id": gap_id,
+        "linked_unknown": {
+            "id": gap_id,
+            "question": question,
+            "blocking": True,
+            "resolution_strategy": "ask_user",
+        },
+        "options": [
+            {
+                "label": "Use best engineering judgment",
+                "description": f"Choose the smallest design supported by current facts: {question}",
+            },
+            {
+                "label": "Continue investigation",
+                "description": f"Do not decide yet; look for more project evidence: {question}",
+            },
         ],
         "custom_allowed": True,
     }
@@ -142,6 +194,7 @@ def _user_prompt(message: str, analysis: dict, investigation: dict, workspace_di
         "task": {
             "intent": analysis.get("intent", {}),
             "acceptance_criteria": analysis.get("acceptance_criteria", []),
+            "behavior_contract": analysis.get("behavior_contract", {}),
             "constraints": analysis.get("constraints", []),
             "scope": analysis.get("scope", {}),
             "unknowns": analysis.get("unknowns", []),

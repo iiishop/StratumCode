@@ -16,7 +16,8 @@ from .agent_runtime import (
     usage_delta as _usage_delta,
 )
 
-MAX_OUTPUT_TOKENS = 3072
+MAX_OUTPUT_TOKENS = 6144
+MAX_JSON_ATTEMPTS = 2
 
 
 def patch_planning_stream(
@@ -49,21 +50,38 @@ def patch_planning_stream(
         "inherited": setting["inherited"],
     })
 
-    assistant = _call_model(
-        provider,
-        model,
-        [
-            {"role": "system", "content": _system_prompt(app_settings.get_output_language())},
-            {"role": "user", "content": _user_prompt(message, analysis, investigation, design_plan, workspace_dir)},
-        ],
-        tools=[],
-        max_tokens=MAX_OUTPUT_TOKENS,
-    )
-    if usage := _usage_delta(pricing_rules, assistant.pop("_usage", {})):
-        _add_usage(usage_total, usage)
-        yield start_event(f"{run_id}-usage", "usage", {"delta": usage, "total": usage_total})
-
-    plan = _normalize_plan(_json_from_text(_content_text(assistant.get("content"))))
+    messages = [
+        {"role": "system", "content": _system_prompt(app_settings.get_output_language())},
+        {"role": "user", "content": _user_prompt(message, analysis, investigation, design_plan, workspace_dir)},
+    ]
+    plan = None
+    last_error = None
+    for attempt in range(1, MAX_JSON_ATTEMPTS + 1):
+        assistant = _call_model(provider, model, messages, tools=[], max_tokens=MAX_OUTPUT_TOKENS)
+        if usage := _usage_delta(pricing_rules, assistant.pop("_usage", {})):
+            _add_usage(usage_total, usage)
+            yield start_event(f"{run_id}-usage-{attempt}", "usage", {"delta": usage, "total": usage_total})
+        text = _content_text(assistant.get("content"))
+        try:
+            plan = _normalize_plan(_json_from_text(text))
+            break
+        except (json.JSONDecodeError, ValueError) as exc:
+            last_error = exc
+            messages.extend([
+                {"role": "assistant", "content": text[:4000]},
+                {"role": "user", "content": (
+                    "The previous response was not valid JSON: "
+                    f"{exc}. Return a compact valid JSON object only. "
+                    "Keep arrays short and do not include Markdown."
+                )},
+            ])
+    if plan is None:
+        yield start_event(f"{run_id}-output", "output", {
+            "content": f"Patch planning failed to produce valid JSON after retry: {last_error}",
+            "streaming": False,
+        })
+        yield {"op": "update", "id": stage_id, "patch": {"state": "error", "phase": "patch_planning_failed"}}
+        return
     yield start_event(f"{run_id}-plan", "patch_plan", plan)
     yield {"op": "update", "id": stage_id, "patch": {"state": "done", "phase": "patch_planned"}}
     yield {"op": "done", "patch_plan": plan}
@@ -121,6 +139,7 @@ def _user_prompt(message: str, analysis: dict, investigation: dict, design_plan:
         "task": {
             "intent": analysis.get("intent", {}),
             "acceptance_criteria": analysis.get("acceptance_criteria", []),
+            "behavior_contract": analysis.get("behavior_contract", {}),
             "constraints": analysis.get("constraints", []),
             "scope": analysis.get("scope", {}),
         },

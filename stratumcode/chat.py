@@ -24,7 +24,19 @@ MAX_ANALYZER_ATTEMPTS = 3
 TASK_INTENT_TYPES = {"feature", "bugfix", "refactor", "question", "investigation", "other"}
 TASK_CERTAINTIES = {"certain", "uncertain", "guess"}
 TASK_CLUE_KINDS = {"file", "line", "symbol", "route", "other"}
-TASK_UNKNOWN_TYPES = {"codebase_fact", "user_decision", "deferred"}
+TASK_UNKNOWN_TYPES = {
+    "code_fact",
+    "doc_fact",
+    "runtime_fact",
+    "product_decision",
+    "engineering_decision",
+    "risk",
+    "deferred",
+}
+TASK_UNKNOWN_TYPE_ALIASES = {
+    "codebase_fact": "code_fact",
+    "user_decision": "product_decision",
+}
 TASK_UNKNOWN_STRATEGIES = {"investigate_project", "ask_user", "deferred"}
 
 
@@ -106,6 +118,7 @@ def _validate_task_analysis(data: dict) -> dict:
     return {
         "intent": {"type": intent_type, "summary": summary},
         "acceptance_criteria": _acceptance_criteria(data.get("acceptance_criteria")),
+        "behavior_contract": _behavior_contract(data.get("behavior_contract")),
         "constraints": _string_list(data.get("constraints"), "constraints"),
         "scope": _scope(data.get("scope")),
         "hypotheses": _hypotheses(data.get("hypotheses")),
@@ -130,6 +143,20 @@ def _acceptance_criteria(value) -> list[dict]:
         if text:
             items.append({"id": item_id or f"AC{index}", "text": text})
     return items
+
+
+def _behavior_contract(value) -> dict:
+    if value is None:
+        value = {}
+    if not isinstance(value, dict):
+        raise ValueError("behavior_contract must be an object")
+    return {
+        "inputs": _string_list(value.get("inputs"), "behavior_contract.inputs"),
+        "outputs": _string_list(value.get("outputs"), "behavior_contract.outputs"),
+        "success_behaviors": _string_list(value.get("success_behaviors"), "behavior_contract.success_behaviors"),
+        "failure_behaviors": _string_list(value.get("failure_behaviors"), "behavior_contract.failure_behaviors"),
+        "boundaries": _string_list(value.get("boundaries"), "behavior_contract.boundaries"),
+    }
 
 
 def _scope(value) -> dict:
@@ -162,7 +189,7 @@ def _unknowns(value, criteria=None) -> list[dict]:
         if isinstance(raw, dict):
             question = str(raw.get("question") or raw.get("text") or raw.get("description") or "").strip()
             item_id = str(raw.get("id") or f"U{index}").strip()
-            unknown_type = str(raw.get("type") or "codebase_fact").strip().casefold()
+            unknown_type = str(raw.get("type") or "code_fact").strip().casefold()
             strategy = str(raw.get("resolution_strategy") or "investigate_project").strip().casefold()
             accepted_ids = raw.get("acceptance_criteria_ids")
             if not isinstance(accepted_ids, list):
@@ -173,15 +200,16 @@ def _unknowns(value, criteria=None) -> list[dict]:
         else:
             question = str(raw).strip()
             item_id = f"U{index}"
-            unknown_type = "codebase_fact"
+            unknown_type = "code_fact"
             strategy = "investigate_project"
             accepted_ids = criteria_ids
             blocking = True
             why = ""
         if not question:
             continue
+        unknown_type = TASK_UNKNOWN_TYPE_ALIASES.get(unknown_type, unknown_type)
         if unknown_type not in TASK_UNKNOWN_TYPES:
-            unknown_type = "codebase_fact"
+            unknown_type = "code_fact"
         if strategy not in TASK_UNKNOWN_STRATEGIES:
             strategy = "investigate_project"
         items.append({
@@ -295,8 +323,10 @@ def _ensure_task_contract(analysis: dict) -> dict:
     analysis.setdefault("clues", [])
     analysis.setdefault("suggested_first_tools", [])
     analysis.setdefault("acceptance_criteria", [])
+    analysis.setdefault("behavior_contract", {})
     analysis.setdefault("scope", {"in": [], "out": [], "undecided": []})
     analysis["acceptance_criteria"] = _acceptance_criteria(analysis.get("acceptance_criteria"))
+    analysis["behavior_contract"] = _behavior_contract(analysis.get("behavior_contract"))
     analysis["scope"] = _scope(analysis.get("scope"))
     analysis["unknowns"] = _limited_unknowns(analysis.get("unknowns"), analysis.get("acceptance_criteria"))
     return analysis
@@ -319,6 +349,15 @@ def _analysis_context(analysis: dict) -> list[str]:
         f"Acceptance criterion {item['id']}: {item['text']}"
         for item in analysis.get("acceptance_criteria", [])
     )
+    behavior = analysis.get("behavior_contract", {})
+    for key, label in (
+        ("inputs", "Behavior input"),
+        ("outputs", "Behavior output"),
+        ("success_behaviors", "Success behavior"),
+        ("failure_behaviors", "Failure behavior"),
+        ("boundaries", "Boundary"),
+    ):
+        lines.extend(f"{label}: {item}" for item in behavior.get(key, []))
     lines.extend(f"Constraint: {item}" for item in analysis["constraints"])
     scope = analysis.get("scope", {})
     lines.extend(f"In scope: {item}" for item in scope.get("in", []))
@@ -418,7 +457,11 @@ def analyzed_stream(
         previous_knowledge=session_context.get("knowledge", []),
     ):
         if event.get("event") == "task_update":
-            event["data"]["items"] = _normalize_task_updates(analysis["id"], event["data"].get("items", []), analysis["task_updates"])
+            event["data"]["items"] = _normalize_task_updates(
+                analysis["id"],
+                analysis.get("task_updates", []) + event["data"].get("items", []),
+                [],
+            )
             analysis["task_updates"] = event["data"]["items"]
         if event.get("op") == "done" and isinstance(event.get("investigation"), dict):
             last_investigation = event["investigation"]
@@ -758,8 +801,29 @@ def _seed_task_updates(analysis: dict, existing: list[dict] | None = None) -> li
         for index, text in enumerate(analysis.get("constraints", []), start=1)
     )
     items.extend(
-        _task_item(f"{task_id}:{item['id']}", "acceptance", item["text"], "unknown", parent_id=root_goal)
+        _task_item(f"{task_id}:{item['id']}", "acceptance", item["text"], "pending", parent_id=root_goal)
         for item in analysis.get("acceptance_criteria", [])
+    )
+    behavior = analysis.get("behavior_contract", {})
+    behavior_rows = [
+        ("BI", "behavior", text)
+        for text in behavior.get("inputs", [])
+    ] + [
+        ("BO", "behavior", text)
+        for text in behavior.get("outputs", [])
+    ] + [
+        ("BS", "behavior", text)
+        for text in behavior.get("success_behaviors", [])
+    ] + [
+        ("BF", "behavior", text)
+        for text in behavior.get("failure_behaviors", [])
+    ] + [
+        ("BB", "boundary", text)
+        for text in behavior.get("boundaries", [])
+    ]
+    items.extend(
+        _task_item(f"{task_id}:{prefix}{index}", kind, text, "pending", parent_id=root_goal)
+        for index, (prefix, kind, text) in enumerate(behavior_rows, start=1)
     )
     items.extend(
         _task_item(f"{task_id}:H{index}", "hypothesis", item["text"], "unknown", parent_id=root_goal)

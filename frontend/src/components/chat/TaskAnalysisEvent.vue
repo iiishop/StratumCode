@@ -14,6 +14,16 @@ const scopeRows = computed(() => {
     ...(scope.undecided || []).map(text => ({ label: 'undecided', text })),
   ]
 })
+const behaviorRows = computed(() => {
+  const behavior = props.event.behavior_contract || {}
+  return [
+    ...(behavior.inputs || []).map(text => ({ label: 'input', text })),
+    ...(behavior.outputs || []).map(text => ({ label: 'output', text })),
+    ...(behavior.success_behaviors || []).map(text => ({ label: 'success', text })),
+    ...(behavior.failure_behaviors || []).map(text => ({ label: 'failure', text })),
+    ...(behavior.boundaries || []).map(text => ({ label: 'boundary', text })),
+  ]
+})
 
 function count(items) {
   return Array.isArray(items) ? items.length : 0
@@ -49,6 +59,13 @@ function unknownText(item) {
         <small>acceptance</small>
         <p v-for="item in event.acceptance_criteria" :key="item.id || item.text">
           <b>{{ item.id }}</b>{{ item.text }}
+        </p>
+      </section>
+
+      <section v-if="behaviorRows.length">
+        <small>behavior contract</small>
+        <p v-for="item in behaviorRows" :key="`${item.label}:${item.text}`">
+          <b>{{ item.label }}</b>{{ item.text }}
         </p>
       </section>
 

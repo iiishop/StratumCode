@@ -142,6 +142,13 @@ Required JSON schema:
   "acceptance_criteria": [
     {"id": "AC1", "text": "observable behavior that must be true when done"}
   ],
+  "behavior_contract": {
+    "inputs": ["user/system inputs involved in the behavior"],
+    "outputs": ["observable outputs or state changes"],
+    "success_behaviors": ["what happens on the successful path"],
+    "failure_behaviors": ["what happens on expected failure paths"],
+    "boundaries": ["explicit non-goals, edge cases, and scope limits"]
+  },
   "constraints": ["explicit hard requirements from the user"],
   "scope": {
     "in": ["work explicitly required now"],
@@ -166,7 +173,7 @@ Required JSON schema:
       "id": "U1",
       "question": "specific question that must be answered before implementation",
       "blocking": true,
-      "type": "codebase_fact|user_decision|deferred",
+      "type": "code_fact|doc_fact|runtime_fact|product_decision|engineering_decision|risk|deferred",
       "why": "why this question matters",
       "resolution_strategy": "investigate_project|ask_user|deferred",
       "acceptance_criteria_ids": ["AC1"]
@@ -181,8 +188,16 @@ Rules:
 - If the user states no hypothesis, keep hypotheses empty; do not invent one.
 - Do not convert the whole task into a global hypothesis.
 - Unknowns should be concrete facts or decisions needed to satisfy the intent.
-- Prefer codebase_fact + investigate_project for questions the repository can answer.
-- Use user_decision + ask_user only for choices that cannot be inferred from code.
+- Classify unknowns carefully:
+  - code_fact: answer from source code or config.
+  - doc_fact: answer from README, docs, tests, issues, or project notes.
+  - runtime_fact: answer by running tests, scripts, app flows, diagnostics, or probes.
+  - product_decision: user/business behavior that cannot be inferred from project facts.
+  - engineering_decision: engineer-owned implementation choice under current constraints.
+  - risk: a technical assumption that may invalidate the plan.
+  - deferred: non-blocking packaging, polish, or follow-up.
+- Use ask_user only for product_decision that changes observable behavior or scope.
+- Do not ask the user to decide engineering_decision items like naming, file placement, or local helper shape.
 - Use empty arrays when a section has no items.
 - Output JSON only."""
 
@@ -201,6 +216,13 @@ project to enter patch planning, not to edit files.
 
 Maintain multiple beliefs, not one global hypothesis. For each unknown from the
 task analysis, choose the cheapest next action that reduces uncertainty:
+- Treat behavior_contract as the behavior target. Investigation should discover
+  which project facts support each input, output, success path, failure path, and boundary.
+- Classify unknowns by type: code_fact/doc_fact/runtime_fact should be
+  investigated; product_decision should become ask_user only after code/docs/runtime
+  cannot determine it; engineering_decision should be resolved by project conventions
+  and professional judgment, not by asking the user; risk should trigger the cheapest
+  probe that could invalidate the plan.
 - before the first discovery call, make a short plan for all blocking unknowns:
   which unknown is first, and what kind of evidence would resolve it.
 - use glob/grep/read to inspect project structure and existing patterns.
@@ -246,6 +268,9 @@ INVESTIGATION_CONTEXT = """\
 Intent: {intent_type} - {intent_summary}
 Acceptance criteria:
 {acceptance_criteria}
+
+Behavior contract:
+{behavior_contract}
 
 Constraints:
 {constraints}
@@ -410,6 +435,7 @@ def build_investigation_context(
                 f"- {item.get('id', '')}: {item.get('text', '')}"
                 for item in analysis.get("acceptance_criteria", [])
             ) or "- (none)",
+            behavior_contract=_format_behavior_contract(analysis.get("behavior_contract", {})),
             constraints="\n".join(f"- {item}" for item in analysis.get("constraints", [])) or "- (none)",
             scope=_format_scope(analysis.get("scope", {})),
             hypotheses="\n".join(
@@ -438,6 +464,24 @@ def _format_scope(scope: dict) -> str:
     for label, key in (("in", "in"), ("out", "out"), ("undecided", "undecided")):
         for item in scope.get(key, []) or []:
             lines.append(f"- {label}: {item}")
+    return "\n".join(lines) or "- (none)"
+
+
+def _format_behavior_contract(contract: dict) -> str:
+    if not isinstance(contract, dict):
+        return "- (none)"
+    labels = (
+        ("input", "inputs"),
+        ("output", "outputs"),
+        ("success", "success_behaviors"),
+        ("failure", "failure_behaviors"),
+        ("boundary", "boundaries"),
+    )
+    lines = [
+        f"- {label}: {item}"
+        for label, key in labels
+        for item in contract.get(key, []) or []
+    ]
     return "\n".join(lines) or "- (none)"
 
 

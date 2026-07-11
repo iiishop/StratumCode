@@ -4,7 +4,7 @@ import { computed } from 'vue'
 const props = defineProps({ event: { type: Object, required: true } })
 
 const stepLabel = computed(() => ({
-  write_code: 'Ready to implement',
+  write_code: 'Ready for design',
   continue_investigation: 'More investigation needed',
   ask_user: 'Needs your input',
   failed: 'Investigation stalled',
