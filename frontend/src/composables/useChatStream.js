@@ -16,6 +16,7 @@ export function useChatStream(onRender, onPacket) {
       task_update: timeline.showTaskUpdate,
       design_plan: timeline.showDesignPlan,
       patch_plan: timeline.showPatchPlan,
+      patch: timeline.showPatch,
       stage: timeline.showStage,
       hypothesis: timeline.showHypothesis,
       evidence: timeline.showEvidence,

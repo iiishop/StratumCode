@@ -27,6 +27,7 @@ export function useChatTimeline(onAppend) {
     showTaskUpdate: (message, payload) => appendEvent(message, 'task_update', payload),
     showDesignPlan: (message, payload) => appendEvent(message, 'design_plan', payload),
     showPatchPlan: (message, payload) => appendEvent(message, 'patch_plan', payload),
+    showPatch: (message, payload) => appendEvent(message, 'patch', payload),
     showStage: (message, payload) => appendEvent(message, 'stage', payload),
     showHypothesis: (message, payload) => appendEvent(message, 'hypothesis', payload),
     showEvidence: (message, payload) => appendEvent(message, 'evidence', payload),

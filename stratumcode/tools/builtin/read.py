@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from ... import lsp
+from ...patch_engine import snapshot_file
 from ..spec import ToolDef, ToolResult
 from .common import _resolve
 
@@ -15,6 +16,7 @@ async def _read(params: dict, ctx: dict) -> ToolResult:
     end = params.get("end_line") or len(lines)
     selection = lines[start:end]
     stat = p.stat()
+    snapshot = snapshot_file(p, _resolve(".", ctx))
     lsp_status = lsp.touch_file(str(p.relative_to(_resolve(".", ctx))), str(ctx.get("directory", ".")))
     diagnostics = _format_diagnostics(p, lsp.diagnostics_for(p))
     output = "\n".join(selection)
@@ -24,6 +26,11 @@ async def _read(params: dict, ctx: dict) -> ToolResult:
         f"read {params['path']} L{start+1}-{min(end, len(lines))}",
         output,
         path=str(p),
+        snapshot_id=snapshot.id,
+        content_hash=snapshot.content_hash,
+        encoding=snapshot.encoding,
+        newline=snapshot.newline,
+        bom=snapshot.bom,
         mtime_ns=stat.st_mtime_ns,
         size=stat.st_size,
         total_lines=len(lines),

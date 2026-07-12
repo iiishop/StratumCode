@@ -8,7 +8,7 @@ from collections.abc import Iterator
 from urllib.request import Request, urlopen
 from uuid import uuid4
 
-from . import app_settings, design_planner, hypothesis_verifier, investigator, model_settings, patch_planner, prompt, providers, sessions
+from . import app_settings, design_planner, hypothesis_verifier, implementation_runner, investigator, model_settings, patch_planner, prompt, providers, sessions
 from .agent_runtime import (
     MAX_MODEL_OUTPUT_TOKENS,
     call_model as _call_model,
@@ -499,6 +499,7 @@ def analyzed_stream(
                     origin_message=message,
                 ))
             else:
+                patch_plan = None
                 for event in patch_planner.patch_planning_stream(
                     message=message,
                     analysis=analysis,
@@ -506,7 +507,17 @@ def analyzed_stream(
                     design_plan=design_plan,
                     workspace_dir=workspace_dir,
                 ):
+                    if event.get("op") == "done" and isinstance(event.get("patch_plan"), dict):
+                        patch_plan = event["patch_plan"]
                     yield event
+                if patch_plan:
+                    for event in implementation_runner.implementation_stream(
+                        message=message,
+                        analysis=analysis,
+                        patch_plan=patch_plan,
+                        workspace_dir=workspace_dir,
+                    ):
+                        yield event
     if session_id and last_investigation:
         sessions.merge_investigation(
             session_id,

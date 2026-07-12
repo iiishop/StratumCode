@@ -9,6 +9,7 @@ import TaskAnalysisEvent from './TaskAnalysisEvent.vue'
 import TaskUpdateEvent from './TaskUpdateEvent.vue'
 import DesignPlanEvent from './DesignPlanEvent.vue'
 import PatchPlanEvent from './PatchPlanEvent.vue'
+import PatchEvent from './PatchEvent.vue'
 import StageEvent from './StageEvent.vue'
 import HypothesisEvent from './HypothesisEvent.vue'
 import EvidenceEvent from './EvidenceEvent.vue'
@@ -33,6 +34,7 @@ const eventComponents = {
   task_update: TaskUpdateEvent,
   design_plan: DesignPlanEvent,
   patch_plan: PatchPlanEvent,
+  patch: PatchEvent,
   stage: StageEvent,
   hypothesis: HypothesisEvent,
   evidence: EvidenceEvent,

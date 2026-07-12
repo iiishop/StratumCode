@@ -618,6 +618,8 @@ def _short_observation(value) -> str:
 def _tool_event_type(name: str) -> str:
     if name == "code_nav":
         return "code_nav"
+    if name in {"apply_patch", "rollback_patch", "patch_history"}:
+        return "patch"
     return "tool"
 
 

@@ -7,7 +7,7 @@ from collections.abc import Iterator
 from pathlib import Path
 from uuid import uuid4
 
-from . import app_settings, model_settings, providers
+from . import app_settings, model_settings, patch_authorization, providers
 from .agent_runtime import (
     add_usage as _add_usage,
     call_model as _call_model,
@@ -91,6 +91,7 @@ def patch_planning_stream(
         })
         yield {"op": "update", "id": stage_id, "patch": {"state": "error", "phase": "patch_validation_failed"}}
         return
+    plan["execution_authorization"] = patch_authorization.create_authorization(plan, workspace_dir)
     yield start_event(f"{run_id}-plan", "patch_plan", plan)
     yield {"op": "update", "id": stage_id, "patch": {"state": "done", "phase": "patch_planned"}}
     yield {"op": "done", "patch_plan": plan}
