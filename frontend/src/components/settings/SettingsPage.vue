@@ -6,7 +6,16 @@ const props = defineProps({
 const emit = defineEmits(['save'])
 
 function select(language) {
-  if (language !== props.settings.output_language) emit('save', language)
+  if (language !== props.settings.output_language) emit('save', 'output_language', language)
+}
+
+function setScale(value) {
+  emit('save', 'font_scale', value)
+}
+
+const scaleSteps = [0.8, 0.85, 0.9, 0.95, 1.0, 1.05, 1.1, 1.15, 1.2, 1.3]
+function scaleLabel(v) {
+  return `${Math.round(v * 100)}%`
 }
 </script>
 
@@ -34,6 +43,27 @@ function select(language) {
           >
             {{ language.label }}
           </button>
+        </div>
+      </div>
+
+      <div class="settings-row">
+        <div>
+          <strong>Font scale</strong>
+          <span>Adjust the entire interface proportionally from the current size.</span>
+        </div>
+        <div class="scale-picker">
+          <label class="scale-slider">
+            <input
+              type="range"
+              :min="scaleSteps[0]"
+              :max="scaleSteps[scaleSteps.length - 1]"
+              :step="0.05"
+              :value="settings.font_scale || 1"
+              :disabled="saving"
+              @change="setScale(parseFloat($event.target.value))"
+            />
+          </label>
+          <span class="scale-value">{{ scaleLabel(settings.font_scale || 1) }}</span>
         </div>
       </div>
     </section>
@@ -108,6 +138,27 @@ function select(language) {
 .language-picker button:disabled {
   cursor: wait;
   opacity: .65;
+}
+.scale-picker {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.scale-slider input {
+  width: 160px;
+  height: 5px;
+  accent-color: #1756d1;
+  cursor: pointer;
+}
+.scale-slider input:disabled {
+  cursor: wait;
+  opacity: .5;
+}
+.scale-value {
+  min-width: 36px;
+  color: #1756d1;
+  font: 700 11px/1 var(--mono);
+  text-align: right;
 }
 @media (max-width: 720px) {
   .settings-page { padding: 24px 18px; }

@@ -66,8 +66,13 @@ const cardRefs = reactive({})
 const dotRefs = reactive({})
 const listRefs = reactive({})
 const toastRefs = reactive({})
-const appSettings = ref({ output_language: 'zh', languages: [] })
+const appSettings = ref({ output_language: 'zh', languages: [], font_scale: 1.0 })
 const settingsSaving = ref(false)
+const fontScale = computed(() => appSettings.value.font_scale || 1)
+const layoutStyle = computed(() => {
+  const s = fontScale.value
+  return s === 1 ? {} : { zoom: s, height: `calc(100svh / ${s})` }
+})
 
 let gsapCtx
 
@@ -193,11 +198,11 @@ async function loadAppSettings() {
   appSettings.value = data
 }
 
-async function saveOutputLanguage(language) {
+async function saveSetting(field, value) {
+  appSettings.value = { ...appSettings.value, [field]: value }
   settingsSaving.value = true
   try {
-    const data = await api('/app-settings/save', { output_language: language })
-    appSettings.value = { ...appSettings.value, output_language: data.output_language }
+    await api('/app-settings/save', { [field]: value })
   } finally {
     settingsSaving.value = false
   }
@@ -394,7 +399,7 @@ watch(currentView, (v) => {
 </script>
 
 <template>
-  <div class="layout">
+  <div class="layout" :style="layoutStyle">
     <Sidebar
       :active="currentView"
       :workspaces="workspaces"
@@ -660,7 +665,7 @@ watch(currentView, (v) => {
         v-if="currentView === 'settings'"
         :settings="appSettings"
         :saving="settingsSaving"
-        @save="saveOutputLanguage"
+        @save="saveSetting"
       />
       </main>
     </section>
