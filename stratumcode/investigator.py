@@ -170,11 +170,13 @@ def investigation_stream(
         if isinstance(item, dict)
     ]
 
+    implementation_intent = _wants_implementation(analysis)
     yield {"op": "update", "id": stage_id, "patch": {
         "state": "done",
-        "phase": "patch_planning_ready" if final.get("ready_for_patch_planning") else "needs_more_info",
+        "phase": "patch_planning_ready" if final.get("ready_for_patch_planning") and implementation_intent else "done",
     }}
-    step = _step_result(final)
+    step = _step_result(final, implementation_intent=implementation_intent)
+    final["step_result"] = step
     yield start_event(f"{run_id}-step-result", "step_result", step)
     if final.get("task_updates"):
         yield start_event(f"{run_id}-task-update", "task_update", {
@@ -1182,7 +1184,7 @@ def _task_updates(value, beliefs, unknowns: list[dict], resolutions: list[dict] 
     return updates[:8]
 
 
-def _step_result(final: dict) -> dict:
+def _step_result(final: dict, *, implementation_intent: bool = True) -> dict:
     if final.get("runtime_failure"):
         return {
             "next_step": "failed",
@@ -1233,7 +1235,7 @@ def _step_result(final: dict) -> dict:
             "resolutions": final.get("resolutions", []),
             "unknowns": final.get("unknowns", []),
         }
-    if final.get("ready_for_patch_planning"):
+    if final.get("ready_for_patch_planning") and implementation_intent:
         return {
             "next_step": "write_code",
             "continue_reason": final.get("summary") or app_settings.text("ready_patch"),
@@ -1245,12 +1247,25 @@ def _step_result(final: dict) -> dict:
             "resolutions": final.get("resolutions", []),
             "unknowns": [],
         }
+    if final.get("ready_for_patch_planning") and not implementation_intent:
+        return {
+            "next_step": "done",
+            "continue_reason": final.get("summary") or "Investigation complete.",
+            "target_unknown_ids": [],
+            "summary": final.get("summary", ""),
+            "beliefs": final.get("beliefs", []),
+            "ready_for_patch_planning": False,
+            "patch_planning_context": final.get("patch_planning_context", []),
+            "resolutions": final.get("resolutions", []),
+            "unknowns": [],
+        }
     open_questions = final.get("open_questions") or []
     question = str(open_questions[0]) if open_questions else ""
     return {
-        "next_step": "ask_user" if open_questions else "failed",
+        "next_step": "ask_user" if open_questions else "done",
         "continue_reason": question
-        or app_settings.text("not_ready_patch"),
+        or final.get("summary")
+        or "Investigation complete.",
         "target_unknown_ids": [],
         "summary": final.get("summary", "") if open_questions else "",
         "beliefs": final.get("beliefs", []),
@@ -1259,6 +1274,10 @@ def _step_result(final: dict) -> dict:
         "resolutions": final.get("resolutions", []),
         "unknowns": final.get("unknowns", []),
     }
+
+
+def _wants_implementation(analysis: dict) -> bool:
+    return (analysis.get("intent") or {}).get("type") in {"feature", "bugfix", "refactor"}
 
 
 def _user_question(final: dict, step: dict, origin_message: str = "", analysis_id: str = "") -> dict:

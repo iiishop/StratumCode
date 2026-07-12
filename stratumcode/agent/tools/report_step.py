@@ -6,7 +6,7 @@ PARAMETERS = {
     "properties": {
         "next_step": {
             "type": "string",
-            "enum": ["continue_investigation", "ask_user", "write_code", "failed"],
+            "enum": ["continue_investigation", "ask_user", "write_code", "done", "failed"],
         },
         "continue_reason": {
             "type": "string",

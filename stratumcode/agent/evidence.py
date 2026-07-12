@@ -223,8 +223,8 @@ class EvidenceRun:
         continue_reason: str,
         target_unknown_ids: list[str] | None = None,
     ) -> StepResult:
-        if next_step not in {"continue_investigation", "ask_user", "write_code", "failed"}:
-            raise ValueError("next_step must be continue_investigation, ask_user, write_code, or failed")
+        if next_step not in {"continue_investigation", "ask_user", "write_code", "done", "failed"}:
+            raise ValueError("next_step must be continue_investigation, ask_user, write_code, done, or failed")
         targets = list(target_unknown_ids or [])
         if next_step == "continue_investigation" and not targets:
             raise ValueError("continue_investigation requires target_unknown_ids")

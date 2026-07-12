@@ -38,6 +38,7 @@ TASK_UNKNOWN_TYPE_ALIASES = {
     "user_decision": "product_decision",
 }
 TASK_UNKNOWN_STRATEGIES = {"investigate_project", "ask_user", "deferred"}
+IMPLEMENTATION_INTENT_TYPES = {"feature", "bugfix", "refactor"}
 
 
 def analyze_task(message: str, context: list[str], workspace_dir: str, session_context: dict | None = None) -> dict:
@@ -478,7 +479,7 @@ def analyzed_stream(
                 "items": analysis["task_updates"],
             })
         yield event
-    if last_investigation and last_investigation.get("ready_for_patch_planning"):
+    if last_investigation and last_investigation.get("ready_for_patch_planning") and _wants_implementation(analysis):
         design_plan = None
         for event in design_planner.design_planning_stream(
             message=message,
@@ -537,6 +538,10 @@ def evidence_stream(
         )
     finally:
         hypothesis_verifier._call_model = original_call_model
+
+
+def _wants_implementation(analysis: dict) -> bool:
+    return (analysis.get("intent") or {}).get("type") in IMPLEMENTATION_INTENT_TYPES
 
 
 _discovery_tools = hypothesis_verifier._discovery_tools
@@ -883,9 +888,9 @@ def _normalize_task_updates(analysis_id: str, updates: list[dict], existing: lis
 
 def _finalize_task_statuses(items: list[dict], investigation: dict) -> list[dict]:
     next_step = ((investigation.get("step_result") or {}).get("next_step") or "").strip()
-    if next_step == "ask_user" or not investigation.get("ready_for_patch_planning"):
+    if next_step == "ask_user" or (next_step != "done" and not investigation.get("ready_for_patch_planning")):
         return items
-    done_status = "known" if investigation.get("ready_for_patch_planning") else "deferred"
+    done_status = "known"
     final = []
     for item in items:
         status = item.get("status") or "unknown"

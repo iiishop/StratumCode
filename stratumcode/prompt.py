@@ -79,6 +79,8 @@ as the structured decision:
 - ask_user: stop and ask the user because the blocking unknown needs user input.
 - write_code: stop investigation because remaining unknowns are non-blocking or
   resolved well enough for patch planning.
+- done: stop investigation because the request only needed investigation/reporting
+  and does not need patch planning.
 - failed: stop because investigation cannot make progress.
 
 Do not rely on natural language to signal intent. report_step.next_step is the
