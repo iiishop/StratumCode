@@ -55,21 +55,22 @@ def analyze_task(message: str, context: list[str], workspace_dir: str, session_c
     model = setting["model_id"]
     last_error = ""
     for _ in range(MAX_ANALYZER_ATTEMPTS):
+        messages = [
+            {"role": "system", "content": prompt.build_task_analyzer(app_settings.get_output_language())},
+            {
+                "role": "user",
+                "content": prompt.build_task_analyzer_user(
+                    message=message,
+                    directory=workspace_dir,
+                    context=context + _session_context_lines(session_context),
+                    error=last_error,
+                ),
+            },
+        ]
         assistant = _call_model(
             provider,
             model,
-            [
-                {"role": "system", "content": prompt.build_task_analyzer(app_settings.get_output_language())},
-                {
-                    "role": "user",
-                    "content": prompt.build_task_analyzer_user(
-                        message=message,
-                        directory=workspace_dir,
-                        context=context + _session_context_lines(session_context),
-                        error=last_error,
-                    ),
-                },
-            ],
+            messages,
             tools=[],
         )
         try:
@@ -83,7 +84,13 @@ def analyze_task(message: str, context: list[str], workspace_dir: str, session_c
             return analysis
         except ValueError as exc:
             last_error = str(exc)
-    raise ValueError(f"task analyzer returned invalid JSON after {MAX_ANALYZER_ATTEMPTS} attempts: {last_error}")
+    analysis = _fallback_task_analysis(message, context)
+    analysis["model"] = model
+    analysis["provider"] = provider["name"]
+    analysis["analyzer_error"] = f"task analyzer fallback after invalid JSON: {last_error}"
+    analysis["suggested_first_tools"] = _suggested_first_tools(analysis)
+    analysis["evidence_hypothesis"] = _analysis_hypothesis(message, analysis)
+    return analysis
 
 
 def _json_object(raw: str) -> dict:
@@ -103,6 +110,49 @@ def _json_object(raw: str) -> dict:
     if not isinstance(data, dict):
         raise ValueError("top-level JSON must be an object")
     return data
+
+
+def _fallback_task_analysis(message: str, context: list[str]) -> dict:
+    text = " ".join(str(message or "").split()).strip()
+    lowered = text.casefold()
+    intent_type = "question"
+    if any(word in lowered for word in ("修复", "fix", "bug", "报错", "错误")):
+        intent_type = "bugfix"
+    elif any(word in lowered for word in ("实现", "添加", "增加", "修改", "支持", "create", "add", "implement", "change")):
+        intent_type = "feature"
+    clues = []
+    for index, item in enumerate(context or [], start=1):
+        value = str(item).strip()
+        if value:
+            clues.append({"kind": "file", "value": value, "path": value, "line": 0, "symbol": "", "note": "user-provided context"})
+    return {
+        "intent": {"type": intent_type, "summary": text[:160] or "Handle the user request."},
+        "acceptance_criteria": [
+            {"id": "AC1", "text": text[:220] or "The requested behavior is completed."},
+        ],
+        "behavior_contract": {
+            "inputs": ["User request"],
+            "outputs": ["Updated behavior or answer matching the request"],
+            "success_behaviors": [text[:220] or "The request is satisfied."],
+            "failure_behaviors": [],
+            "boundaries": ["Do not add unrelated behavior."],
+        },
+        "constraints": [],
+        "scope": {"in": [text[:220] or "Requested work"], "out": ["Unrelated changes"], "undecided": []},
+        "hypotheses": [],
+        "clues": clues,
+        "unknowns": [
+            {
+                "id": "U1",
+                "question": "Which existing files and project conventions are relevant to this request?",
+                "blocking": True,
+                "type": "code_fact",
+                "why": "Implementation or answer must be grounded in the current workspace.",
+                "resolution_strategy": "investigate_project",
+                "acceptance_criteria_ids": ["AC1"],
+            }
+        ],
+    }
 
 
 def _validate_task_analysis(data: dict) -> dict:

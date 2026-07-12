@@ -8,6 +8,8 @@ from pathlib import Path
 
 from . import db
 
+AUTHORIZATION_TTL_SECONDS = 60 * 60 * 6
+
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS patch_authorizations (
@@ -16,7 +18,9 @@ CREATE TABLE IF NOT EXISTS patch_authorizations (
     plan_hash TEXT NOT NULL,
     allowed_steps_json TEXT NOT NULL,
     active INTEGER NOT NULL,
-    created_at REAL NOT NULL
+    created_at REAL NOT NULL,
+    expires_at REAL NOT NULL DEFAULT 0,
+    consumed_steps_json TEXT NOT NULL DEFAULT '[]'
 )
 """
 
@@ -27,22 +31,24 @@ def create_authorization(plan: dict, workspace_dir: str) -> dict:
     plan_hash = hash_plan(plan)
     auth_id = "EA-" + hashlib.sha256(f"{root}|{plan_hash}|{time.time()}".encode("utf-8")).hexdigest()[:12]
     allowed_steps = _allowed_steps(plan, root)
+    now = time.time()
     auth = {
         "authorization_id": auth_id,
         "plan_hash": plan_hash,
         "workspace_root": str(root),
         "allowed_steps": allowed_steps,
         "expires_after_state_change": True,
+        "expires_at": now + AUTHORIZATION_TTL_SECONDS,
     }
     with db.db_session() as conn:
         conn.execute(
             """
             INSERT INTO patch_authorizations (
-                id, workspace_root, plan_hash, allowed_steps_json, active, created_at
+                id, workspace_root, plan_hash, allowed_steps_json, active, created_at, expires_at, consumed_steps_json
             )
-            VALUES (?, ?, ?, ?, 1, ?)
+            VALUES (?, ?, ?, ?, 1, ?, ?, '[]')
             """,
-            (auth_id, _root_key(root), plan_hash, json.dumps(allowed_steps, ensure_ascii=False), time.time()),
+            (auth_id, _root_key(root), plan_hash, json.dumps(allowed_steps, ensure_ascii=False), now, auth["expires_at"]),
         )
     return auth
 
@@ -54,11 +60,16 @@ def validate_request(request: dict, root: Path, changed_bytes: int = 0) -> None:
     row = _get(auth_id)
     if not row or not row.get("active"):
         raise AuthorizationError("AUTHORIZATION_NOT_FOUND", auth_id)
+    if float(row.get("expires_at") or 0) and time.time() > float(row["expires_at"]):
+        raise AuthorizationError("AUTHORIZATION_EXPIRED", "authorization expired")
     if row["workspace_root"] != _root_key(root):
         raise AuthorizationError("AUTHORIZATION_EXPIRED", "authorization belongs to a different workspace")
     if str(request.get("plan_hash") or "").strip() != row["plan_hash"]:
         raise AuthorizationError("PLAN_HASH_MISMATCH", "patch request plan_hash does not match authorization")
     step_id = str(request.get("step_id") or "").strip()
+    consumed = set(_loads(row.get("consumed_steps_json"), []))
+    if step_id in consumed:
+        raise AuthorizationError("STEP_ALREADY_APPLIED", step_id)
     steps = json.loads(row["allowed_steps_json"])
     step = steps.get(step_id)
     if not step:
@@ -81,6 +92,32 @@ def validate_request(request: dict, root: Path, changed_bytes: int = 0) -> None:
             raise AuthorizationError("OPERATION_NOT_AUTHORIZED", "modify_existing")
     if changed_bytes > int(step.get("max_changed_bytes") or 0):
         raise AuthorizationError("PATCH_TOO_LARGE", "changed bytes exceed step authorization")
+
+
+def mark_step_applied(auth_id: str, step_id: str) -> None:
+    row = _get(auth_id)
+    if not row:
+        raise AuthorizationError("AUTHORIZATION_NOT_FOUND", auth_id)
+    consumed = set(_loads(row.get("consumed_steps_json"), []))
+    consumed.add(str(step_id))
+    with db.db_session() as conn:
+        conn.execute(
+            "UPDATE patch_authorizations SET consumed_steps_json = ? WHERE id = ?",
+            (json.dumps(sorted(consumed), ensure_ascii=False), auth_id),
+        )
+
+
+def mark_step_rolled_back(auth_id: str, step_id: str) -> None:
+    row = _get(auth_id)
+    if not row:
+        return
+    consumed = set(_loads(row.get("consumed_steps_json"), []))
+    consumed.discard(str(step_id))
+    with db.db_session() as conn:
+        conn.execute(
+            "UPDATE patch_authorizations SET consumed_steps_json = ? WHERE id = ?",
+            (json.dumps(sorted(consumed), ensure_ascii=False), auth_id),
+        )
 
 
 def hash_plan(plan: dict) -> str:
@@ -131,6 +168,11 @@ def _get(auth_id: str) -> dict | None:
 def _init() -> None:
     with db.db_session() as conn:
         conn.execute(SCHEMA)
+        columns = {row["name"] for row in conn.execute("PRAGMA table_info(patch_authorizations)").fetchall()}
+        if "expires_at" not in columns:
+            conn.execute("ALTER TABLE patch_authorizations ADD COLUMN expires_at REAL NOT NULL DEFAULT 0")
+        if "consumed_steps_json" not in columns:
+            conn.execute("ALTER TABLE patch_authorizations ADD COLUMN consumed_steps_json TEXT NOT NULL DEFAULT '[]'")
 
 
 def _root_key(root: Path) -> str:
@@ -145,3 +187,11 @@ def _strings(value) -> list[str]:
     if not isinstance(value, list):
         return []
     return [item for raw in value if (item := str(raw).strip())]
+
+
+def _loads(value, fallback):
+    try:
+        parsed = json.loads(value or "")
+    except (TypeError, json.JSONDecodeError):
+        return fallback
+    return parsed if isinstance(parsed, type(fallback)) else fallback

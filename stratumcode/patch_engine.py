@@ -5,7 +5,9 @@ import json
 import os
 import shutil
 import tempfile
+import threading
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from difflib import unified_diff
@@ -17,6 +19,8 @@ MAX_FILES = 5
 MAX_OPS_PER_FILE = 30
 MAX_FILE_BYTES = 1_000_000
 MAX_CHANGED_BYTES = 200_000
+_workspace_locks: dict[str, threading.RLock] = {}
+_workspace_locks_guard = threading.RLock()
 
 
 class PatchError(Exception):
@@ -69,49 +73,45 @@ def snapshot_file(path: Path, root: Path) -> FileSnapshot:
 
 
 def apply_patch_request(request: dict, root: Path) -> dict:
-    files = request.get("files")
-    if not isinstance(files, list) or not files:
-        raise PatchError("INVALID_REQUEST", "files must be a non-empty array")
-    if len(files) > MAX_FILES:
-        raise PatchError("PATCH_TOO_LARGE", f"at most {MAX_FILES} files per patch")
-    _validate_authorization(request, root, changed_bytes=0)
+    with _workspace_lock(root):
+        files = request.get("files")
+        if not isinstance(files, list) or not files:
+            raise PatchError("INVALID_REQUEST", "files must be a non-empty array")
+        if len(files) > MAX_FILES:
+            raise PatchError("PATCH_TOO_LARGE", f"at most {MAX_FILES} files per patch")
+        _validate_authorization(request, root, changed_bytes=0)
 
-    prepared = []
-    total_delta = 0
-    for file_patch in files:
-        result = _prepare_file(file_patch, root)
-        total_delta += abs(len(result["after"]) - len(result["before"]))
-        if total_delta > MAX_CHANGED_BYTES:
-            raise PatchError("PATCH_TOO_LARGE", "changed bytes exceed limit")
-        prepared.append(result)
-    _validate_authorization(request, root, changed_bytes=total_delta)
+        prepared = []
+        touched_bytes = 0
+        for file_patch in files:
+            result = _prepare_file(file_patch, root)
+            touched_bytes += int(result["touched_bytes"])
+            if touched_bytes > MAX_CHANGED_BYTES:
+                raise PatchError("PATCH_TOO_LARGE", "changed bytes exceed limit")
+            prepared.append(result)
+        _validate_authorization(request, root, changed_bytes=touched_bytes)
 
-    tx = _prepare_transaction(request, root, prepared)
-    committed: list[dict] = []
-    try:
-        _set_transaction_state(tx, "committing")
-        for entry in tx["files"]:
-            path = Path(entry["absolute_path"])
-            after = Path(entry["after_path"]).read_bytes()
-            if entry["mode"] == "create":
-                _atomic_write(path, after)
-            else:
-                _atomic_write(path, after, metadata_source=path)
-            committed.append(entry)
-            _mark_committed(tx, entry["path"])
-        _set_transaction_state(tx, "committed")
-    except PatchError:
-        _rollback_items(tx, committed, force=True)
-        _set_transaction_state(tx, "rolled_back")
-        raise
-    except Exception as exc:
+        tx = _prepare_transaction(request, root, prepared)
+        committed: list[dict] = []
         try:
-            _rollback_items(tx, committed, force=True)
-            _set_transaction_state(tx, "rolled_back")
-        except Exception as rollback_exc:
-            _set_transaction_state(tx, "rollback_failed", error=str(rollback_exc))
-            raise PatchError("ROLLBACK_FAILED", str(rollback_exc)) from rollback_exc
-        raise PatchError("WRITE_FAILED", str(exc)) from exc
+            _set_transaction_state(tx, "committing")
+            _precommit_preflight(tx)
+            for entry in tx["files"]:
+                path = Path(entry["absolute_path"])
+                after = Path(entry["after_path"]).read_bytes()
+                if entry["mode"] == "create":
+                    _atomic_write(path, after)
+                else:
+                    _atomic_write(path, after, metadata_source=path)
+                committed.append(entry)
+                _mark_committed(tx, entry["path"])
+            _set_transaction_state(tx, "committed")
+            patch_authorization.mark_step_applied(
+                str(request.get("authorization_id") or ""),
+                str(request.get("step_id") or ""),
+            )
+        except Exception as exc:
+            _abort_transaction(tx, committed, exc)
 
     return {
         "status": "applied",
@@ -124,6 +124,9 @@ def apply_patch_request(request: dict, root: Path) -> dict:
                 "before_hash": _hash(item["before"]),
                 "after_hash": _hash(item["after"]),
                 "operations_applied": item["operations"],
+                "removed_bytes": item["removed_bytes"],
+                "added_bytes": item["added_bytes"],
+                "touched_bytes": item["touched_bytes"],
                 "lsp": _lsp_diagnostics(item["path"], root),
             }
             for item in prepared
@@ -134,8 +137,18 @@ def apply_patch_request(request: dict, root: Path) -> dict:
     }
 
 
-def rollback_patch(rollback_id: str, *, force: bool = False) -> dict:
+def rollback_patch(
+    rollback_id: str,
+    *,
+    root: Path | str | None = None,
+    authorization_id: str | None = None,
+    force: bool = False,
+) -> dict:
     tx = _load_transaction(rollback_id)
+    if root is not None and os.path.normcase(str(Path(tx.get("workspace_root") or "").resolve())) != os.path.normcase(str(Path(root).resolve())):
+        raise PatchError("ROLLBACK_NOT_AVAILABLE", "rollback belongs to a different workspace")
+    if authorization_id and str(tx.get("authorization_id") or "") != str(authorization_id):
+        raise PatchError("ROLLBACK_NOT_AVAILABLE", "rollback belongs to a different authorization")
     state = tx.get("state")
     if state == "rolled_back":
         return {"status": "rolled_back", "rollback_id": rollback_id, "files": []}
@@ -145,6 +158,10 @@ def rollback_patch(rollback_id: str, *, force: bool = False) -> dict:
     try:
         files = _rollback_entries(tx, reversed(tx.get("files", [])), force=force)
         _set_transaction_state(tx, "rolled_back")
+        patch_authorization.mark_step_rolled_back(
+            str(tx.get("authorization_id") or ""),
+            str(tx.get("step_id") or ""),
+        )
         return {"status": "rolled_back", "rollback_id": rollback_id, "files": files}
     except PatchError as exc:
         _set_transaction_state(tx, "rollback_failed", error=f"{exc.code}: {exc.message}")
@@ -198,6 +215,27 @@ def _validate_authorization(request: dict, root: Path, *, changed_bytes: int) ->
         raise PatchError(exc.code, exc.message) from exc
 
 
+@contextmanager
+def _workspace_lock(root: Path):
+    key = os.path.normcase(str(root.resolve()))
+    with _workspace_locks_guard:
+        lock = _workspace_locks.setdefault(key, threading.RLock())
+    with lock:
+        yield
+
+
+def _abort_transaction(tx: dict, committed: list[dict], original_error: Exception) -> None:
+    try:
+        _rollback_items(tx, committed, force=True)
+        _set_transaction_state(tx, "rolled_back", error=str(original_error))
+    except Exception as rollback_exc:
+        _set_transaction_state(tx, "rollback_failed", error=f"{original_error}; rollback: {rollback_exc}")
+        raise PatchError("ROLLBACK_FAILED", str(rollback_exc)) from rollback_exc
+    if isinstance(original_error, PatchError):
+        raise original_error
+    raise PatchError("WRITE_FAILED", str(original_error)) from original_error
+
+
 def _prepare_file(file_patch: dict, root: Path) -> dict:
     rel = str(file_patch.get("path") or "").strip()
     if not rel:
@@ -218,18 +256,25 @@ def _prepare_file(file_patch: dict, root: Path) -> dict:
         raise PatchError("INVALID_REQUEST", "operations must be a non-empty array")
     if len(operations) > MAX_OPS_PER_FILE:
         raise PatchError("PATCH_TOO_LARGE", f"at most {MAX_OPS_PER_FILE} operations per file")
-    encoding = _encoding(before)
-    text = before.decode(encoding)
+    bom, body = _split_bom(before)
+    encoding = "utf-8"
+    text = body.decode(encoding)
     edits = _compile_operations(text, operations, encoding)
-    after = _apply_edits(before, edits)
+    after_body = _apply_edits(body, edits)
+    after = bom + after_body
+    removed_bytes = sum(edit.end - edit.start for edit in edits)
+    added_bytes = sum(len(edit.replacement) for edit in edits)
     return {
         "path": path,
         "rel_path": str(path.relative_to(root)),
         "mode": mode,
         "before": before,
         "after": after,
-        "encoding": encoding,
+        "encoding": _encoding(before),
         "operations": len(operations),
+        "removed_bytes": removed_bytes,
+        "added_bytes": added_bytes,
+        "touched_bytes": removed_bytes + added_bytes,
         "diff": _diff(str(path.relative_to(root)), before, after, encoding),
     }
 
@@ -260,6 +305,9 @@ def _prepare_create(file_patch: dict, path: Path, root: Path) -> dict:
         "after": after,
         "encoding": "utf-8",
         "operations": 1,
+        "removed_bytes": 0,
+        "added_bytes": len(after),
+        "touched_bytes": len(after),
         "diff": _diff(str(path.relative_to(root)), b"", after, "utf-8"),
     }
 
@@ -365,6 +413,12 @@ def _encoding(data: bytes) -> str:
     return "utf-8"
 
 
+def _split_bom(data: bytes) -> tuple[bytes, bytes]:
+    if data.startswith(b"\xef\xbb\xbf"):
+        return b"\xef\xbb\xbf", data[3:]
+    return b"", data
+
+
 def _newline(data: bytes) -> str:
     return "crlf" if b"\r\n" in data else "lf"
 
@@ -461,6 +515,19 @@ def _prepare_transaction(request: dict, root: Path, prepared: list[dict]) -> dic
         })
     _write_transaction(tx)
     return tx
+
+
+def _precommit_preflight(tx: dict) -> None:
+    for entry in tx["files"]:
+        path = Path(entry["absolute_path"])
+        if entry.get("mode") == "create":
+            if path.exists():
+                raise PatchError("FILE_ALREADY_EXISTS", entry["path"])
+            continue
+        if not path.is_file():
+            raise PatchError("STALE_SNAPSHOT", f"file missing before commit: {entry['path']}")
+        if _hash(path.read_bytes()) != entry["before_hash"]:
+            raise PatchError("STALE_SNAPSHOT", f"file changed before commit: {entry['path']}")
 
 
 def _transaction_dir(tx_id: str) -> Path:
