@@ -74,13 +74,16 @@ const remainingTaskCount = computed(() => analysisRows.value.filter(item =>
   ['unknown', 'blocked', 'added', 'updated'].includes(item.status || '')
 ).length)
 
-const taskCompletedCount = computed(() => analysisRows.value.filter(item =>
-  ['known', 'added', 'updated'].includes(item.status || '') ||
-  item.status === 'pending' && item.text && item.kind !== 'unknown'
+const investigationProgressRows = computed(() => analysisRows.value.filter(item => item.kind === 'unknown'))
+
+const taskCompletedCount = computed(() => investigationProgressRows.value.filter(item =>
+  ['known', 'deferred'].includes(item.status || '')
 ).length)
 
+const taskProgressTotal = computed(() => investigationProgressRows.value.length)
+
 const taskProgressPercent = computed(() =>
-  analysisRows.value.length ? Math.round((taskCompletedCount.value / analysisRows.value.length) * 100) : 0
+  taskProgressTotal.value ? Math.round((taskCompletedCount.value / taskProgressTotal.value) * 100) : 0
 )
 
 const groupedTasks = computed(() => {
@@ -481,9 +484,9 @@ function onWsRowLeave(el) {
         <div class="inspector__section-head"><strong>Tasks</strong><span>{{ remainingTaskCount }} remaining</span></div>
 
         <!-- progress bar -->
-        <div v-if="analysisRows.length" class="tk-progress">
+        <div v-if="taskProgressTotal" class="tk-progress">
           <div class="tk-progress-bar"><i :style="{ width: taskProgressPercent + '%' }"></i></div>
-          <span>{{ taskCompletedCount }}/{{ analysisRows.length }} resolved</span>
+          <span>{{ taskCompletedCount }}/{{ taskProgressTotal }} unknowns resolved</span>
         </div>
 
         <!-- goal -->

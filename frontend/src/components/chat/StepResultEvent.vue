@@ -9,6 +9,7 @@ const stepLabel = computed(() => ({
   write_code: 'Ready for design',
   continue_investigation: 'More investigation needed',
   ask_user: 'Needs your input',
+  done: 'Investigation complete',
   failed: 'Investigation stalled',
 })[props.event.next_step] || props.event.next_step)
 
@@ -16,6 +17,7 @@ const stepColor = computed(() => ({
   write_code: 'var(--ok, #11866f)',
   continue_investigation: 'var(--warn, #c48b00)',
   ask_user: 'var(--accent, #1756d1)',
+  done: 'var(--ok, #11866f)',
   failed: 'var(--err, #c44747)',
 })[props.event.next_step] || 'var(--text-muted)')
 
@@ -69,7 +71,7 @@ onMounted(() => {
   <div ref="rootRef" class="sr" :style="{ '--sr-accent': stepColor }">
     <div class="sr__banner">
       <span class="sr__banner-icon">
-        <template v-if="event.next_step === 'write_code'">
+        <template v-if="event.next_step === 'write_code' || event.next_step === 'done'">
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M20 6 9 17l-5-5"/></svg>
         </template>
         <template v-else-if="event.next_step === 'continue_investigation'">

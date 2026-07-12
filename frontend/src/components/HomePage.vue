@@ -55,6 +55,7 @@ const msgList = ref(null)
 const messages = reactive([])
 const msgRefs = reactive({})
 const isStreaming = ref(false)
+const restoring = ref(false)
 const textareaRef = ref(null)
 
 /* ── mention state ── */
@@ -274,11 +275,38 @@ function scheduleSave() {
   saveTimer = setTimeout(() => emit('save-session-state', snapshotState()), 220)
 }
 
-function restoreState(state = {}) {
-  messages.splice(0, messages.length, ...(state.messages || []).map(message => reactive({
-    ...message,
-    events: (message.events || []).map(event => ({ ...event, data: reactive(event.data || {}) })),
-  })))
+function clearState() {
+  messages.splice(0, messages.length)
+  evidenceRuns.splice(0, evidenceRuns.length)
+  taskAnalyses.splice(0, taskAnalyses.length)
+  subagentRuns.splice(0, subagentRuns.length)
+  activeRunId.value = ''
+  fileContext.splice(0, fileContext.length)
+  Object.assign(sessionUsage, usageDefaults())
+  Object.assign(agentStatus, { state: 'idle', phase: '', provider: '', model: '', contextLength: null, contextUsed: 0 })
+}
+
+async function restoreState(state = {}) {
+  clearState()
+  restoring.value = true
+  await nextTick()
+
+  const rawMessages = state.messages || []
+  const CHUNK = 30
+
+  for (let i = 0; i < rawMessages.length; i += CHUNK) {
+    const batch = rawMessages.slice(i, i + CHUNK)
+    for (const msg of batch) {
+      messages.push(reactive({
+        ...msg,
+        events: (msg.events || []).map(event => ({ ...event, data: reactive(event.data || {}) })),
+      }))
+    }
+    if (i + CHUNK < rawMessages.length) {
+      await new Promise(resolve => requestAnimationFrame(resolve))
+    }
+  }
+
   evidenceRuns.splice(0, evidenceRuns.length, ...(state.evidenceRuns || []).map(run => reactive(run)))
   taskAnalyses.splice(0, taskAnalyses.length, ...(state.taskAnalyses || []).map(analysis => reactive(analysis)))
   subagentRuns.splice(0, subagentRuns.length, ...(state.subagentRuns || []).map(run => reactive(run)))
@@ -286,7 +314,10 @@ function restoreState(state = {}) {
   fileContext.splice(0, fileContext.length, ...(state.fileContext || []))
   Object.assign(sessionUsage, usageDefaults(), state.usage || {})
   Object.assign(agentStatus, { state: 'idle', phase: '', provider: '', model: '', contextLength: null, contextUsed: 0 })
-  nextTick(scrollBottom)
+
+  restoring.value = false
+  await nextTick()
+  scrollBottom()
 }
 
 async function loadTools() {
@@ -600,7 +631,11 @@ onMounted(() => {
 })
 onUnmounted(() => { abortChat(); gsapCtx?.revert(); clearTimeout(saveTimer) })
 
-watch(() => props.session?.id, () => {
+watch(() => props.session?.id, (id) => {
+  if (!id) {
+    clearState()
+    return
+  }
   restoreState(props.session?.state || {})
 }, { immediate: true })
 
@@ -660,7 +695,12 @@ watch(() => props.activeWorkspace?.id, () => {
       <!-- ============= message area ============= -->
       <div class="chat__main">
 
-        <div v-if="!messages.length" class="chat__empty">
+        <div v-if="restoring" class="chat__restoring">
+          <span class="chat__restoring-spinner"></span>
+          <p>Loading session...</p>
+        </div>
+
+        <div v-else-if="!messages.length" class="chat__empty">
           <div class="chat__welcome">
             <span class="chat__welcome-mark">&gt;_</span>
             <h1 class="chat__title">What should we change?</h1>
@@ -893,6 +933,31 @@ watch(() => props.activeWorkspace?.id, () => {
 
 /* ---- empty ---- */
 .chat__empty { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 32px; }
+
+/* ---- restoring ---- */
+.chat__restoring {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 16px;
+  color: var(--text-muted);
+}
+.chat__restoring p {
+  margin: 0;
+  font: 12px/1 var(--sans);
+}
+.chat__restoring-spinner {
+  width: 28px;
+  height: 28px;
+  border: 2.5px solid var(--border);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: restore-spin .7s linear infinite;
+}
+@keyframes restore-spin { to { transform: rotate(360deg); } }
+
 .chat__welcome { text-align: center; }
 .chat__title { font-size: 28px; font-weight: 700; color: var(--text-h); margin: 0 0 6px; letter-spacing: -0.02em; }
 .chat__subtitle { font-size: 14px; color: var(--text-muted); margin: 0; max-width: 360px; line-height: 1.55; }
