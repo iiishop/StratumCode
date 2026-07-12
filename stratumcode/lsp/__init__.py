@@ -144,6 +144,7 @@ def _ensure_table() -> None:
                 env_json TEXT NOT NULL DEFAULT '{}',
                 executable TEXT NOT NULL DEFAULT '',
                 args_json TEXT NOT NULL DEFAULT '[]',
+                categories_json TEXT NOT NULL DEFAULT '[]',
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
             )
@@ -153,6 +154,8 @@ def _ensure_table() -> None:
             db.execute("ALTER TABLE lsp_servers ADD COLUMN executable TEXT NOT NULL DEFAULT ''")
         if "args_json" not in columns:
             db.execute("ALTER TABLE lsp_servers ADD COLUMN args_json TEXT NOT NULL DEFAULT '[]'")
+        if "categories_json" not in columns:
+            db.execute("ALTER TABLE lsp_servers ADD COLUMN categories_json TEXT NOT NULL DEFAULT '[]'")
 
 
 def _loads(value: str, fallback):
@@ -169,6 +172,7 @@ def _row_to_server(row) -> dict:
     data["languages"] = _loads(data.pop("languages_json"), [])
     data["env"] = _loads(data.pop("env_json"), {})
     data["args"] = _loads(data.pop("args_json", "[]"), [])
+    data["categories"] = _loads(data.pop("categories_json", "[]"), [])
     data["available"] = bool(data.get("executable") and _command_available(data["executable"]))
     data["status"] = "ready" if data["enabled"] and data["available"] else "missing" if data["enabled"] else "disabled"
     return data
@@ -435,6 +439,7 @@ def _parse_packages() -> list[dict]:
             "display_name": str(data.get("display_name") or data.get("name") or name).strip(),
             "description": str(data.get("description") or "").strip(),
             "languages": _normalize_languages(data.get("languages") or data.get("language") or []),
+            "categories": _normalize_categories(data.get("categories") or _yaml_list(raw, "categories")),
             "homepage": str(data.get("homepage") or "").strip(),
         })
     return packages
@@ -470,12 +475,40 @@ def _normalize_languages(raw) -> list[str]:
     ))
 
 
+def _normalize_categories(raw) -> list[str]:
+    if isinstance(raw, str):
+        return [raw.strip()] if raw.strip() else []
+    if not isinstance(raw, list):
+        return []
+    return list(dict.fromkeys(str(item).strip() for item in raw if str(item).strip()))
+
+
+def _yaml_list(raw: str, key: str) -> list[str]:
+    items = []
+    in_list = False
+    for line in raw.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if not line.startswith((" ", "\t")) and stripped.endswith(":"):
+            in_list = stripped[:-1] == key
+            continue
+        if in_list and stripped.startswith("-"):
+            items.append(stripped[1:].strip().strip("\"'"))
+    return items
+
+
+def _is_lsp_package(package: dict) -> bool:
+    return any(str(item).casefold() == "lsp" for item in package.get("categories", []))
+
+
 def _fallback_packages() -> list[dict]:
     return [{
         "name": name,
         "display_name": info.get("display_name", name),
         "description": f"Built-in installer via npx: {', '.join(info['packages'])}",
         "languages": info.get("languages", []),
+        "categories": ["LSP"],
         "homepage": "",
     } for name, info in _NPM_LSP.items()]
 
@@ -486,6 +519,7 @@ def _seed_catalog() -> None:
     if use_mason:
         _sync_registry()
     packages = _parse_packages() if use_mason else _fallback_packages()
+    packages = [package for package in packages if _is_lsp_package(package)]
     with db_session() as db:
         existing = {
             row["name"]: _row_to_server(row)
@@ -502,13 +536,14 @@ def _seed_catalog() -> None:
                 db.execute(
                     """
                     UPDATE lsp_servers
-                    SET display_name = ?, description = ?, languages_json = ?, homepage = ?
+                    SET display_name = ?, description = ?, languages_json = ?, categories_json = ?, homepage = ?
                     WHERE name = ?
                     """,
                     (
                         entry_display,
                         entry_desc,
                         json.dumps(entry["languages"], ensure_ascii=False),
+                        json.dumps(entry["categories"], ensure_ascii=False),
                         entry_homepage,
                         entry["name"],
                     ),
@@ -516,14 +551,15 @@ def _seed_catalog() -> None:
             else:
                 db.execute(
                     """
-                    INSERT INTO lsp_servers (name, display_name, description, languages_json, homepage)
-                    VALUES (?, ?, ?, ?, ?)
+                    INSERT INTO lsp_servers (name, display_name, description, languages_json, categories_json, homepage)
+                    VALUES (?, ?, ?, ?, ?, ?)
                     """,
                     (
                         entry["name"],
                         entry["display_name"],
                         entry["description"],
                         json.dumps(entry["languages"], ensure_ascii=False),
+                        json.dumps(entry["categories"], ensure_ascii=False),
                         entry["homepage"],
                     ),
                 )

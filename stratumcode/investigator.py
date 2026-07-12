@@ -121,7 +121,7 @@ def investigation_stream(
             try:
                 arguments = _tool_arguments(function.get("arguments"))
                 if name == "finish_investigation":
-                    final = _finish_payload(arguments, analysis=analysis)
+                    final = _finish_payload(arguments, analysis=analysis, observations=observations)
                     messages.append({
                         "role": "tool",
                         "tool_call_id": call_id,
@@ -133,6 +133,7 @@ def investigation_stream(
                     call_id,
                     arguments,
                     workspace_dir,
+                    analysis,
                 )
                 observations.append(_tool_observation(name, call_id, output))
             except Exception as exc:
@@ -161,6 +162,8 @@ def investigation_stream(
             pricing_rules=pricing_rules,
             usage_total=usage_total,
             run_id=run_id,
+            analysis=analysis,
+            observations=observations,
         )
     final["observations"] = observations + [
         item for item in final.get("observations", [])
@@ -211,6 +214,14 @@ def _investigation_tool_schema(name: str, description: str, parameters: dict) ->
         "type": "string",
         "description": "One short sentence explaining why this call helps those unknowns.",
     }
+    properties["orientation"] = {
+        "type": "boolean",
+        "description": "True only for a broad first-pass orientation call that cannot yet target a specific unknown.",
+    }
+    required = schema.setdefault("required", [])
+    for field in ("target_unknown_ids", "reason"):
+        if field not in required:
+            required.append(field)
     return openai_tool_schema(name, description, schema)
 
 
@@ -348,6 +359,8 @@ def _finalize_investigation(
     pricing_rules: list[dict],
     usage_total: dict,
     run_id: str,
+    analysis: dict | None = None,
+    observations: list[dict] | None = None,
 ) -> Iterator[dict]:
     messages.append({"role": "user", "content": prompt.build_investigation_finalize()})
     last_error = ""
@@ -398,7 +411,11 @@ def _finalize_investigation(
             call_id = finish_call.get("id") or f"call-{uuid4().hex[:8]}"
             function = finish_call.get("function") or {}
             try:
-                final = _finish_payload(_tool_arguments(function.get("arguments")))
+                final = _finish_payload(
+                    _tool_arguments(function.get("arguments")),
+                    analysis=analysis,
+                    observations=observations or [],
+                )
             except Exception as exc:
                 last_error = f"finish_investigation arguments were invalid: {exc}"
                 messages.append({
@@ -415,7 +432,11 @@ def _finalize_investigation(
                 return final
         elif content:
             try:
-                final = _finish_payload(_json_content(content))
+                final = _finish_payload(
+                    _json_content(content),
+                    analysis=analysis,
+                    observations=observations or [],
+                )
             except Exception:
                 last_error = "Investigation step limit reached before finish_investigation was called."
             else:
@@ -447,12 +468,20 @@ def _finalize_investigation(
     }
 
 
-def _run_tool_stream(name: str, call_id: str, arguments: dict, workspace_dir: str) -> Iterator[dict]:
+def _run_tool_stream(name: str, call_id: str, arguments: dict, workspace_dir: str, analysis: dict | None = None) -> Iterator[dict]:
     if name not in INVESTIGATION_TOOLS:
         raise ValueError(f"unknown investigation tool: {name or 'tool'}")
     target_unknown_ids = _target_unknown_ids(arguments)
     reason = str(arguments.pop("reason", "") or "").strip()
+    orientation = bool(arguments.pop("orientation", False))
     arguments.pop("target_unknown_ids", None)
+    _validate_tool_contract(
+        name,
+        target_unknown_ids=target_unknown_ids,
+        reason=reason,
+        orientation=orientation,
+        analysis=analysis,
+    )
 
     if name == "subagent" and (arguments.get("agent") or arguments.get("name")):
         agent = str(arguments.get("agent") or arguments.get("name"))
@@ -469,6 +498,7 @@ def _run_tool_stream(name: str, call_id: str, arguments: dict, workspace_dir: st
                     yield packet
             done["target_unknown_ids"] = target_unknown_ids
             done["reason"] = reason
+            done["orientation"] = orientation
             return json.dumps(done, ensure_ascii=False)
 
     tool = registry.get(name)
@@ -483,6 +513,7 @@ def _run_tool_stream(name: str, call_id: str, arguments: dict, workspace_dir: st
         "output": "",
         "target_unknown_ids": target_unknown_ids,
         "reason": reason,
+        "orientation": orientation,
     })
     result = asyncio.run(tool.execute(arguments, {"directory": workspace_dir}))
     yield {"op": "update", "id": call_id, "patch": {
@@ -493,20 +524,45 @@ def _run_tool_stream(name: str, call_id: str, arguments: dict, workspace_dir: st
             **result.metadata,
             "target_unknown_ids": target_unknown_ids,
             "reason": reason,
+            "orientation": orientation,
         },
     }}
     return json.dumps({
         "tool_call_id": call_id,
         "target_unknown_ids": target_unknown_ids,
         "reason": reason,
+        "orientation": orientation,
         "title": result.title,
         "output": result.output,
         "metadata": {
             **result.metadata,
             "target_unknown_ids": target_unknown_ids,
             "reason": reason,
+            "orientation": orientation,
         },
     }, ensure_ascii=False)
+
+
+def _validate_tool_contract(
+    name: str,
+    *,
+    target_unknown_ids: list[str],
+    reason: str,
+    orientation: bool,
+    analysis: dict | None,
+) -> None:
+    if not reason:
+        raise ValueError(f"{name} requires reason")
+    known = {
+        str(item.get("id") or "").strip()
+        for item in (analysis or {}).get("unknowns", [])
+        if isinstance(item, dict) and str(item.get("id") or "").strip()
+    }
+    if not orientation and not target_unknown_ids:
+        raise ValueError(f"{name} requires target_unknown_ids unless orientation is true")
+    unknown = [item for item in target_unknown_ids if known and item not in known]
+    if unknown:
+        raise ValueError(f"{name} target_unknown_ids not in task contract: {', '.join(unknown)}")
 
 
 def _target_unknown_ids(arguments: dict) -> list[str]:
@@ -592,6 +648,7 @@ def _finish_payload(
     arguments: dict,
     *,
     analysis: dict | None = None,
+    observations: list[dict] | None = None,
     expected_step: dict | None = None,
     required_items: list[dict] | None = None,
     repair_conflicts: bool = False,
@@ -628,8 +685,10 @@ def _finish_payload(
             }
             for index, question in enumerate(_clean_questions(open_questions), start=1)
         ]
+    beliefs = _beliefs(arguments.get("beliefs"))
     resolutions = _resolutions(arguments.get("resolutions"))
     resolutions = _complete_resolutions(resolutions, initial_unknowns, unknowns)
+    _validate_resolution_refs(resolutions, beliefs, observations or [])
     resolutions = _enforce_resolution_evidence(resolutions, initial_unknowns)
     unresolved = _unresolved_from_resolutions(resolutions, initial_unknowns)
     unknowns = _merge_unknowns(unresolved + unknowns + decision_unknowns + new_unknowns)
@@ -666,13 +725,13 @@ def _finish_payload(
     return {
         "summary": str(arguments.get("summary") or "").strip(),
         "ready_for_patch_planning": ready,
-        "beliefs": arguments.get("beliefs") if isinstance(arguments.get("beliefs"), list) else [],
+        "beliefs": beliefs,
         "open_questions": open_questions,
         "resolutions": resolutions,
         "new_unknowns": new_unknowns,
         "user_decisions_required": user_decisions,
         "unknowns": unknowns,
-        "task_updates": _task_updates(arguments.get("task_updates"), arguments.get("beliefs"), unknowns, resolutions),
+        "task_updates": _task_updates(arguments.get("task_updates"), beliefs, unknowns, resolutions),
         "patch_planning_context": patch_context,
         "patch_planning_facts": patch_context,
         "recommended_next_step": str(arguments.get("recommended_next_step") or "").strip(),
@@ -689,6 +748,35 @@ def _string_list(value) -> list[str]:
     if not isinstance(value, list):
         return []
     return [item for raw in value if (item := str(raw).strip())]
+
+
+def _beliefs(value) -> list[dict]:
+    if not isinstance(value, list):
+        return []
+    items = []
+    allowed = {
+        "unverified",
+        "plausible",
+        "supported",
+        "strongly_supported",
+        "runtime_confirmed",
+        "contradicted",
+        "invalidated",
+    }
+    for index, raw in enumerate(value, start=1):
+        if not isinstance(raw, dict):
+            continue
+        statement = str(raw.get("statement") or raw.get("text") or "").strip()
+        status = str(raw.get("status") or "unverified").strip()
+        if not statement or status not in allowed:
+            continue
+        items.append({
+            "id": str(raw.get("id") or f"B{index}").strip(),
+            "statement": statement,
+            "status": status,
+            "evidence": _string_list(raw.get("evidence")),
+        })
+    return items
 
 
 def _resolutions(value) -> list[dict]:
@@ -713,6 +801,42 @@ def _resolutions(value) -> list[dict]:
             "reason": str(raw.get("reason") or "").strip(),
         })
     return items
+
+
+def _validate_resolution_refs(resolutions: list[dict], beliefs: list[dict], observations: list[dict]) -> None:
+    evidence_ids = {
+        str(item.get("id") or "").strip()
+        for item in observations
+        if isinstance(item, dict) and str(item.get("id") or "").strip()
+    }
+    belief_by_id = {
+        str(item.get("id") or "").strip(): item
+        for item in beliefs
+        if isinstance(item, dict) and str(item.get("id") or "").strip()
+    }
+    usable_belief_status = {"plausible", "supported", "strongly_supported", "runtime_confirmed"}
+    for resolution in resolutions:
+        missing_evidence = [item for item in resolution.get("evidence", []) if item not in evidence_ids]
+        if missing_evidence:
+            raise ValueError(
+                f"resolution {resolution['unknown_id']} references unknown evidence ids: "
+                + ", ".join(missing_evidence)
+            )
+        missing_beliefs = [item for item in resolution.get("belief_ids", []) if item not in belief_by_id]
+        if missing_beliefs:
+            raise ValueError(
+                f"resolution {resolution['unknown_id']} references unknown belief ids: "
+                + ", ".join(missing_beliefs)
+            )
+        weak_beliefs = [
+            item for item in resolution.get("belief_ids", [])
+            if belief_by_id[item].get("status") not in usable_belief_status
+        ]
+        if weak_beliefs:
+            raise ValueError(
+                f"resolution {resolution['unknown_id']} references unsupported belief ids: "
+                + ", ".join(weak_beliefs)
+            )
 
 
 def _runtime_readiness(
@@ -1126,10 +1250,9 @@ def _step_result(final: dict) -> dict:
     return {
         "next_step": "ask_user" if open_questions else "failed",
         "continue_reason": question
-        or final.get("summary")
         or app_settings.text("not_ready_patch"),
         "target_unknown_ids": [],
-        "summary": final.get("summary", ""),
+        "summary": final.get("summary", "") if open_questions else "",
         "beliefs": final.get("beliefs", []),
         "ready_for_patch_planning": False,
         "patch_planning_context": final.get("patch_planning_context", []),

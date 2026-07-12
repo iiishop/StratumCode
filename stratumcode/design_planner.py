@@ -81,6 +81,14 @@ def design_planning_stream(
         })
         yield {"op": "update", "id": stage_id, "patch": {"state": "error", "phase": "design_planning_failed"}}
         return
+    issues = validate_design_plan(plan, analysis, investigation)
+    if issues:
+        yield start_event(f"{run_id}-output", "output", {
+            "content": "Design plan rejected by runtime validator:\n" + "\n".join(f"- {item}" for item in issues),
+            "streaming": False,
+        })
+        yield {"op": "update", "id": stage_id, "patch": {"state": "error", "phase": "design_validation_failed"}}
+        return
     yield start_event(f"{run_id}-design", "design_plan", plan)
     yield {"op": "update", "id": stage_id, "patch": {"state": "done", "phase": "design_planned"}}
     yield {"op": "done", "design_plan": plan}
@@ -88,6 +96,33 @@ def design_planning_stream(
 
 def blocking_gap(plan: dict) -> dict | None:
     return next((gap for gap in plan.get("decision_gaps", []) if gap.get("blocks_implementation")), None)
+
+
+def validate_design_plan(plan: dict, analysis: dict, investigation: dict) -> list[str]:
+    issues = []
+    criteria = [item for item in analysis.get("acceptance_criteria", []) if isinstance(item, dict)]
+    requirements = plan.get("requirement_model") or []
+    alignments = plan.get("project_alignment") or []
+    decisions = plan.get("design_decisions") or []
+    requirement_ids = {item.get("id") for item in requirements if item.get("id")}
+    aligned_ids = {item.get("requirement_id") for item in alignments if item.get("requirement_id")}
+    if criteria and len(requirements) < len(criteria):
+        issues.append("not every acceptance criterion is represented in requirement_model")
+    missing_alignment = sorted(item for item in requirement_ids if item not in aligned_ids)
+    if missing_alignment:
+        issues.append("requirements missing project_alignment: " + ", ".join(missing_alignment))
+    invalid_alignment = sorted(item for item in aligned_ids if item not in requirement_ids)
+    if invalid_alignment:
+        issues.append("project_alignment references unknown requirements: " + ", ".join(invalid_alignment))
+    for item in alignments:
+        if item.get("status") == "matched" and not item.get("evidence"):
+            issues.append(f"matched alignment {item.get('requirement_id') or '?'} has no evidence")
+    for item in decisions:
+        if not item.get("because"):
+            issues.append(f"design decision {item.get('id') or item.get('decision') or '?'} has no because")
+    if not (investigation.get("patch_planning_facts") or investigation.get("patch_planning_context")):
+        issues.append("design plan has no grounded investigation facts to rely on")
+    return issues
 
 
 def _legacy_user_question(gap: dict, *, analysis_id: str, origin_message: str) -> dict:

@@ -4,6 +4,7 @@ import json
 import platform
 import re
 from collections.abc import Iterator
+from pathlib import Path
 from uuid import uuid4
 
 from . import app_settings, model_settings, providers
@@ -82,6 +83,14 @@ def patch_planning_stream(
         })
         yield {"op": "update", "id": stage_id, "patch": {"state": "error", "phase": "patch_planning_failed"}}
         return
+    issues = validate_patch_plan(plan, analysis, design_plan, workspace_dir)
+    if issues:
+        yield start_event(f"{run_id}-output", "output", {
+            "content": "Patch plan rejected by runtime validator:\n" + "\n".join(f"- {item}" for item in issues),
+            "streaming": False,
+        })
+        yield {"op": "update", "id": stage_id, "patch": {"state": "error", "phase": "patch_validation_failed"}}
+        return
     yield start_event(f"{run_id}-plan", "patch_plan", plan)
     yield {"op": "update", "id": stage_id, "patch": {"state": "done", "phase": "patch_planned"}}
     yield {"op": "done", "patch_plan": plan}
@@ -129,6 +138,83 @@ Rules:
 - Prefer the fewest steps that cover the accepted design.
 - If no test framework exists, use one minimal runnable check.
 """
+
+
+def validate_patch_plan(plan: dict, analysis: dict, design_plan: dict, workspace_dir: str) -> list[str]:
+    issues = []
+    criteria_ids = {
+        str(item.get("id") or "").strip()
+        for item in analysis.get("acceptance_criteria", [])
+        if isinstance(item, dict) and str(item.get("id") or "").strip()
+    }
+    decision_ids = {
+        str(item.get("id") or "").strip()
+        for item in design_plan.get("design_decisions", [])
+        if isinstance(item, dict) and str(item.get("id") or "").strip()
+    }
+    steps = plan.get("implementation_steps") or []
+    step_ids = {item.get("id") for item in steps if item.get("id")}
+    step_files = {item.get("file") for item in steps if item.get("file")}
+    files = set(plan.get("files_to_change") or [])
+    if files != step_files:
+        issues.append("files_to_change must match implementation step files")
+    missing_ac = sorted(criteria_ids - {
+        item.get("acceptance_id")
+        for item in plan.get("acceptance_mapping", [])
+        if item.get("acceptance_id")
+    })
+    if missing_ac:
+        issues.append("acceptance criteria missing acceptance_mapping: " + ", ".join(missing_ac))
+    for item in plan.get("acceptance_mapping", []):
+        if item.get("acceptance_id") not in criteria_ids:
+            issues.append(f"acceptance_mapping references unknown acceptance id: {item.get('acceptance_id')}")
+        missing_steps = [step for step in item.get("covered_by", []) if step not in step_ids]
+        if missing_steps:
+            issues.append("acceptance_mapping references unknown steps: " + ", ".join(missing_steps))
+        if not item.get("verification"):
+            issues.append(f"acceptance_mapping {item.get('acceptance_id') or '?'} has no verification")
+    workspace = Path(workspace_dir or ".").resolve()
+    for step in steps:
+        step_id = step.get("id") or "?"
+        if not step.get("id"):
+            issues.append("implementation step is missing id")
+        if not step.get("file"):
+            issues.append(f"step {step_id} has no file")
+            continue
+        try:
+            target = (workspace / step["file"]).resolve()
+            if workspace not in (target, *target.parents):
+                issues.append(f"step {step_id} file is outside workspace")
+        except OSError:
+            issues.append(f"step {step_id} file path is invalid")
+        if not step.get("because"):
+            issues.append(f"step {step_id} has no because")
+        if not step.get("required_behavior_if_removed"):
+            issues.append(f"step {step_id} has no required_behavior_if_removed")
+        if not step.get("minimality_check"):
+            issues.append(f"step {step_id} has no minimality_check")
+        refs = set(step.get("because") or [])
+        if criteria_ids or decision_ids:
+            valid = criteria_ids | decision_ids
+            if not any(_cites(ref, valid) for ref in refs):
+                issues.append(f"step {step_id} because does not cite a valid AC or design decision")
+    for item in plan.get("responsibility_chain", []):
+        if item.get("step_id") not in step_ids:
+            issues.append(f"responsibility_chain references unknown step: {item.get('step_id')}")
+        for req in item.get("requirement_ids", []):
+            if req not in criteria_ids:
+                issues.append(f"responsibility_chain references unknown acceptance id: {req}")
+        for decision in item.get("decision_ids", []):
+            if decision not in decision_ids:
+                issues.append(f"responsibility_chain references unknown design decision: {decision}")
+    if analysis.get("intent", {}).get("type") in {"feature", "bugfix"} and not plan.get("tests_or_checks"):
+        issues.append("feature/bugfix patch plan requires at least one test or check")
+    return issues
+
+
+def _cites(value: str, ids: set[str]) -> bool:
+    text = str(value or "")
+    return any(item and item in text for item in ids)
 
 
 def _user_prompt(message: str, analysis: dict, investigation: dict, design_plan: dict, workspace_dir: str) -> str:

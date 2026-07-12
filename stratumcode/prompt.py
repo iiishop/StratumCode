@@ -226,10 +226,15 @@ task analysis, choose the cheapest next action that reduces uncertainty:
 - before the first discovery call, make a short plan for all blocking unknowns:
   which unknown is first, and what kind of evidence would resolve it.
 - use glob/grep/read to inspect project structure and existing patterns.
-- use code_nav for semantic structure when the task depends on symbols,
+- use code_nav before broad read/grep when the task depends on symbols,
   functions, classes, definitions, references, or function-level/code-level
   audit. A common flow is glob to find candidate source files, then code_nav
-  symbols/inspect on the relevant files before reading broad file bodies.
+  operation="symbols" for file structure and operation="inspect" for a target
+  identifier. Use read/grep as fallback when code_nav reports error/no_result,
+  when the language has no enabled LSP, or when you need literal text.
+- do not treat empty code_nav references/hover as proof by itself. It may mean
+  the LSP lacks that capability at that position. Pair it with symbols, read, or
+  grep before drawing a negative conclusion such as "unused" or "not defined".
 - every glob/grep/read/code_nav/webfetch/websearch/subagent call must include
   target_unknown_ids and reason. target_unknown_ids must reference unknown IDs
   from the task contract unless the call is only broad orientation.
@@ -247,8 +252,16 @@ task analysis, choose the cheapest next action that reduces uncertainty:
   already known, such as reading several files found by a previous glob.
 - do not batch dependent actions. If a tool result decides the next file,
   symbol, or search query, wait for that result before choosing the next action.
-- use subagent with agent="hypothesis-verifier" only when a specific belief needs
-  support/opposition evidence, for example "Character.HP represents health".
+- use subagent with agent="hypothesis-verifier" when a specific belief is an
+  inference rather than a direct observation, for example "Character.HP
+  represents health", "this component restores submitted askuser state", or
+  "this function is unused". Direct facts from one file, such as "main.py is
+  empty", do not need verifier.
+- before finish_investigation, verify at least one atomic belief with
+  hypothesis-verifier when the planned patch depends on a cross-file
+  relationship, semantic interpretation, usage/reference claim, or competing
+  explanation. Skip it only when every patch_planning_fact is directly observed
+  from the inspected file/config/runtime output.
 - every hypothesis-verifier call must contain exactly one atomic belief. Do not
   send numbered lists, multiple clauses, or "verify all of these" batches; verify
   one belief, read the result, then decide the next belief.
