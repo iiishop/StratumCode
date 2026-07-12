@@ -405,6 +405,9 @@ async function continueAfterAnswer(answer) {
   isStreaming.value = true
   Object.assign(agentStatus, { state: 'running', phase: 'continuing', contextUsed: 0 })
   inspectorTab.value = 'evidence'
+  const continuation = reactive({ id: Date.now() + 1, role: 'assistant', time: timeNow(), events: [] })
+  messages.push(continuation)
+  nextTick(() => { scrollBottom(); animateLast() })
   try {
     const taskAnalysis = analysisForQuestion(answer)
     const origin = answer.origin_message || taskAnalysis?.origin_message || answer.question || ''
@@ -415,11 +418,11 @@ async function continueAfterAnswer(answer) {
       answer: { ...answer, origin_message: origin },
     }
     if (taskAnalysis) request.analysis = plain(taskAnalysis)
-    await chatStream(message, request)
+    await chatStream(continuation, request)
   } catch (error) {
     if (error.name !== 'AbortError') {
-      message.events.push({
-        id: `${message.id}-answer-error`,
+      continuation.events.push({
+        id: `${continuation.id}-answer-error`,
         type: 'output',
         data: reactive({ content: `Chat failed: ${error.message}`, streaming: false }),
       })
@@ -1409,6 +1412,8 @@ watch(() => props.activeWorkspace?.id, () => {
   font-size: 14px;
   line-height: 1.6;
   position: relative;
+  user-select: text;
+  cursor: text;
 }
 
 .chat__msg--user .chat__time {

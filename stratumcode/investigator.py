@@ -23,7 +23,7 @@ from .agent_runtime import (
 from .tools import registry
 
 MAX_INVESTIGATION_ROUNDS = 10
-MAX_FINALIZATION_ATTEMPTS = 2
+MAX_FINALIZATION_ATTEMPTS = 3
 FINALIZATION_OUTPUT_TOKENS = 4096
 INVESTIGATION_TOOLS = ("glob", "grep", "read", "code_nav", "websearch", "webfetch", "subagent")
 
@@ -401,10 +401,13 @@ def _finalize_investigation(
             ),
             None,
         )
-        replay = dict(assistant)
+        replay = {"role": "assistant", "content": assistant.get("content") or ""}
+        for key in ("reasoning_content", "reasoning"):
+            if assistant.get(key):
+                replay[key] = assistant[key]
         if finish_call:
             replay["tool_calls"] = [finish_call]
-        messages.append(_assistant_message(replay))
+        messages.append(replay)
         yield {"op": "update", "id": thinking_id, "patch": {
             "text": content,
             "done": True,
@@ -446,11 +449,6 @@ def _finalize_investigation(
             except Exception:
                 last_error = "Investigation step limit reached before finish_investigation was called."
             else:
-                messages.append({
-                    "role": "tool",
-                    "tool_call_id": f"final-{attempt}",
-                    "content": json.dumps(final, ensure_ascii=False),
-                })
                 return final
         else:
             last_error = "Investigation step limit reached before finish_investigation was called."

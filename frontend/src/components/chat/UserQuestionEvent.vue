@@ -1,5 +1,5 @@
 <script setup>
-import { computed, nextTick, ref } from 'vue'
+import { computed, nextTick, ref, watch } from 'vue'
 import { gsap } from 'gsap'
 import { animate, stagger as animeStagger } from 'animejs'
 import EventFrame from './EventFrame.vue'
@@ -13,6 +13,22 @@ const selectedLabel = ref('')
 const selectedOptionId = ref('')
 const rootRef = ref(null)
 const optionsRef = ref(null)
+
+watch(
+  () => [
+    props.event.answer_status,
+    props.event.selected_option_id,
+    props.event.selected_option_label,
+    props.event.response,
+  ],
+  () => {
+    const answered = props.event.answer_status === 'submitted'
+    submitted.value = answered
+    selectedOptionId.value = answered ? (props.event.selected_option_id || '') : ''
+    selectedLabel.value = answered ? (props.event.selected_option_label || props.event.response || '') : ''
+  },
+  { immediate: true },
+)
 
 function onContextEnter(el, done) {
   if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) { done(); return }

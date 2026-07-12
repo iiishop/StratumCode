@@ -54,6 +54,7 @@ def analyze_task(message: str, context: list[str], workspace_dir: str, session_c
     provider = setting["provider"]
     model = setting["model_id"]
     last_error = ""
+    best_partial = None
     for _ in range(MAX_ANALYZER_ATTEMPTS):
         messages = [
             {"role": "system", "content": prompt.build_task_analyzer(app_settings.get_output_language())},
@@ -84,10 +85,15 @@ def analyze_task(message: str, context: list[str], workspace_dir: str, session_c
             return analysis
         except ValueError as exc:
             last_error = str(exc)
-    analysis = _fallback_task_analysis(message, context)
+            best_partial = _partial_task_analysis(_content_text(assistant.get("content")), message, context, last_error) or best_partial
+    analysis = best_partial or _fallback_task_analysis(message, context)
     analysis["model"] = model
     analysis["provider"] = provider["name"]
-    analysis["analyzer_error"] = f"task analyzer fallback after invalid JSON: {last_error}"
+    analysis["analyzer_error"] = (
+        f"task analyzer partial recovery after invalid JSON: {last_error}"
+        if best_partial else
+        f"task analyzer fallback after invalid JSON: {last_error}"
+    )
     analysis["suggested_first_tools"] = _suggested_first_tools(analysis)
     analysis["evidence_hypothesis"] = _analysis_hypothesis(message, analysis)
     return analysis
@@ -99,17 +105,82 @@ def _json_object(raw: str) -> dict:
         text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text, flags=re.IGNORECASE).strip()
     if not text.startswith("{"):
         start = text.find("{")
-        end = text.rfind("}")
-        if start == -1 or end == -1 or end <= start:
+        if start == -1:
             raise ValueError("response is not a JSON object")
-        text = text[start:end + 1]
+        text = text[start:]
     try:
-        data = json.loads(text)
+        data, _ = json.JSONDecoder().raw_decode(text)
     except json.JSONDecodeError as exc:
         raise ValueError(f"invalid JSON: {exc}") from exc
     if not isinstance(data, dict):
         raise ValueError("top-level JSON must be an object")
     return data
+
+
+def _partial_task_analysis(raw: str, message: str, context: list[str], error: str) -> dict | None:
+    try:
+        data = _json_object(raw)
+    except ValueError:
+        return None
+    fallback = _fallback_task_analysis(message, context)
+    result = dict(fallback)
+
+    intent = data.get("intent")
+    if isinstance(intent, dict):
+        summary = str(intent.get("summary") or "").strip()
+        intent_type = str(intent.get("type") or fallback["intent"]["type"]).strip().casefold()
+        if intent_type not in TASK_INTENT_TYPES:
+            intent_type = fallback["intent"]["type"]
+        if summary:
+            result["intent"] = {"type": intent_type, "summary": summary}
+
+    for key, parser in (
+        ("acceptance_criteria", _acceptance_criteria),
+        ("constraints", lambda value: _string_list(value, "constraints")),
+        ("hypotheses", _hypotheses),
+    ):
+        if key in data:
+            try:
+                result[key] = parser(data.get(key))
+            except ValueError:
+                pass
+
+    if "behavior_contract" in data:
+        try:
+            parsed = _behavior_contract(data.get("behavior_contract"))
+            result["behavior_contract"] = {
+                key: parsed.get(key) or fallback["behavior_contract"].get(key) or []
+                for key in fallback["behavior_contract"]
+            }
+        except ValueError:
+            pass
+
+    if "scope" in data:
+        try:
+            parsed = _scope(data.get("scope"))
+            result["scope"] = {
+                key: parsed.get(key) or fallback["scope"].get(key) or []
+                for key in fallback["scope"]
+            }
+        except ValueError:
+            pass
+
+    if "clues" in data:
+        try:
+            parsed = _clues(data.get("clues"))
+            result["clues"] = _unique_clues(parsed + fallback["clues"])
+        except ValueError:
+            pass
+
+    if "unknowns" in data:
+        try:
+            result["unknowns"] = _limited_unknowns(data.get("unknowns"), result.get("acceptance_criteria"))
+        except ValueError:
+            pass
+
+    result["recovered_from_partial_analyzer_output"] = True
+    result["partial_recovery_error"] = error
+    return result
 
 
 def _fallback_task_analysis(message: str, context: list[str]) -> dict:
@@ -333,6 +404,24 @@ def _clues(value) -> list[dict]:
     return items
 
 
+def _unique_clues(items: list[dict]) -> list[dict]:
+    result = []
+    seen = set()
+    for item in items:
+        key = (
+            str(item.get("kind") or ""),
+            str(item.get("value") or ""),
+            str(item.get("path") or ""),
+            str(item.get("line") or ""),
+            str(item.get("symbol") or ""),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(item)
+    return result
+
+
 def _analysis_hypothesis(message: str, analysis: dict) -> str:
     if analysis["hypotheses"]:
         return analysis["hypotheses"][0]["text"]
@@ -457,6 +546,7 @@ def analyzed_stream(
     except ValueError:
         state = {}
     session_context = _session_context(state)
+    analyzer_session_context = _select_session_memory(message, None, session_context)
     workspace_context = _workspace_snapshot(workspace_dir)
     if workspace_context:
         context = workspace_context + context
@@ -475,7 +565,7 @@ def analyzed_stream(
             "provider": "",
             "inherited": False,
         })
-        analysis = analyze_task(message, context, workspace_dir, session_context=session_context)
+        analysis = analyze_task(message, context, workspace_dir, session_context=analyzer_session_context)
         analysis.setdefault("model", "")
         analysis.setdefault("provider", "")
         yield {"op": "update", "id": analyze_stage, "patch": {
@@ -487,6 +577,7 @@ def analyzed_stream(
     analysis = _ensure_task_contract(analysis)
     if answer:
         analysis = {**analysis, "suggested_first_tools": []}
+    selected_session_context = _select_session_memory(message, analysis, session_context)
     analysis.setdefault("id", f"task-{uuid4().hex[:8]}")
     analysis.setdefault("origin_message", message)
     _attach_session_relationship(analysis, session_context.get("tasks", []))
@@ -495,7 +586,7 @@ def analyzed_stream(
     if not answer:
         yield start_event(f"task-analysis-{uuid4().hex[:8]}", "task_analysis", analysis)
     findings = _prior_findings(prior_analysis, answer)
-    continuation_context = _continuation_context(answer, session_context)
+    continuation_context = _continuation_context(answer, selected_session_context)
     last_investigation = None
     for event in investigator.investigation_stream(
         message=message,
@@ -504,8 +595,8 @@ def analyzed_stream(
         workspace_dir=workspace_dir,
         max_rounds=max_rounds,
         findings=findings,
-        previous_observations=session_context.get("observations", []),
-        previous_knowledge=session_context.get("knowledge", []),
+        previous_observations=selected_session_context.get("observations", []),
+        previous_knowledge=selected_session_context.get("knowledge", []),
     ):
         if event.get("event") == "task_update":
             event["data"]["items"] = _normalize_task_updates(
@@ -1030,7 +1121,97 @@ def _session_context(state: dict) -> dict:
         "recent_user_messages": [item.get("content", "") for item in state.get("messages", []) if item.get("role") == "user"][-5:],
         "observations": observations,
         "knowledge": knowledge,
+        "investigations": state.get("investigations", []),
     }
+
+
+def _select_session_memory(message: str, analysis: dict | None, session_context: dict) -> dict:
+    if not session_context:
+        return {}
+    query = _memory_query(message, analysis)
+    reuse_ids = set(analysis.get("reused_context_ids", [])) if isinstance(analysis, dict) else set()
+    goals = _rank_memory_items(query, session_context.get("goals", []), ("text",), limit=3)
+    if not goals:
+        goals = [item for item in session_context.get("goals", []) if isinstance(item, dict)][:3]
+    tasks = _rank_memory_items(query, session_context.get("tasks", []), ("text", "reason"), limit=12)
+    knowledge = _rank_memory_items(
+        query,
+        [item for item in session_context.get("knowledge", []) if item.get("fresh", True)],
+        ("statement", "id"),
+        limit=10,
+        pinned_ids=reuse_ids,
+    )
+    observation_ids = {
+        obs_id
+        for item in knowledge
+        for obs_id in item.get("observation_ids", [])
+    }
+    observations = _rank_memory_items(
+        query,
+        [item for item in session_context.get("observations", []) if item.get("fresh")],
+        ("summary", "title", "path", "tool", "id"),
+        limit=12,
+        pinned_ids=observation_ids | reuse_ids,
+    )
+    investigations = _rank_memory_items(
+        query,
+        session_context.get("investigations", []),
+        ("request", "summary", "id"),
+        limit=5,
+        pinned_ids=reuse_ids,
+    )
+    return {
+        "tasks": tasks,
+        "goals": goals,
+        "recent_user_messages": session_context.get("recent_user_messages", [])[-3:],
+        "observations": observations,
+        "knowledge": knowledge,
+        "investigations": investigations,
+    }
+
+
+def _memory_query(message: str, analysis: dict | None) -> set[str]:
+    parts = [message]
+    if isinstance(analysis, dict):
+        intent = analysis.get("intent") if isinstance(analysis.get("intent"), dict) else {}
+        parts.append(intent.get("summary", ""))
+        parts.extend(item.get("text", "") for item in analysis.get("acceptance_criteria", []) if isinstance(item, dict))
+        parts.extend(item.get("question", "") for item in analysis.get("unknowns", []) if isinstance(item, dict))
+        parts.extend(analysis.get("constraints", []) if isinstance(analysis.get("constraints"), list) else [])
+    return _memory_terms(" ".join(str(part or "") for part in parts))
+
+
+def _rank_memory_items(
+    query: set[str],
+    items: list[dict],
+    fields: tuple[str, ...],
+    *,
+    limit: int,
+    pinned_ids: set[str] | None = None,
+) -> list[dict]:
+    pinned_ids = pinned_ids or set()
+    ranked = []
+    for index, item in enumerate(item for item in items if isinstance(item, dict)):
+        item_id = str(item.get("id") or "")
+        text = " ".join(str(item.get(field) or "") for field in fields)
+        score = len(query & _memory_terms(text))
+        if item_id in pinned_ids:
+            score += 100
+        if score > 0:
+            ranked.append((score, index, item))
+    ranked.sort(key=lambda row: (-row[0], row[1]))
+    return [item for _, _, item in ranked[:limit]]
+
+
+def _memory_terms(value: str) -> set[str]:
+    text = str(value or "").casefold()
+    terms = {match.group(0) for match in re.finditer(r"[a-z0-9_./:-]{2,}", text)}
+    for chunk in re.findall(r"[\u4e00-\u9fff]+", text):
+        if len(chunk) == 1:
+            terms.add(chunk)
+        else:
+            terms.update(chunk[index:index + 2] for index in range(len(chunk) - 1))
+    return terms
 
 
 def _session_context_lines(session_context: dict | None) -> list[str]:
@@ -1039,6 +1220,7 @@ def _session_context_lines(session_context: dict | None) -> list[str]:
     lines = []
     lines.extend(f"Session goal: {item.get('text')}" for item in session_context.get("goals", [])[:3])
     lines.extend(f"Known: {item.get('statement')}" for item in session_context.get("knowledge", [])[:8] if item.get("fresh", True))
+    lines.extend(f"Prior investigation: {item.get('summary')}" for item in session_context.get("investigations", [])[:3] if item.get("summary"))
     return lines
 
 

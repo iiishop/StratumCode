@@ -18,6 +18,7 @@ from .agent_runtime import (
 from .tools import registry
 
 MAX_IMPLEMENTATION_ROUNDS = 6
+MAX_CONSECUTIVE_TOOL_ERROR_ROUNDS = 3
 IMPLEMENTATION_TOOLS = ("read", "apply_patch", "patch_history", "rollback_patch")
 
 
@@ -65,6 +66,7 @@ def implementation_stream(
     ]
     tools = _implementation_tools()
     final_text = ""
+    consecutive_error_rounds = 0
 
     for round_index in range(1, MAX_IMPLEMENTATION_ROUNDS + 1):
         assistant = _call_model(provider, model, messages, tools=tools)
@@ -84,6 +86,7 @@ def implementation_stream(
             break
 
         abort = False
+        round_had_success = False
         for call in tool_calls:
             function = call.get("function") or {}
             name = function.get("name") or ""
@@ -92,6 +95,7 @@ def implementation_stream(
                 arguments = _tool_arguments(function.get("arguments"))
                 arguments = _prepare_tool_arguments(name, arguments, patch_plan)
                 output = yield from _run_tool(name, call_id, arguments, workspace_dir)
+                round_had_success = round_had_success or not _tool_failed(output)
             except Exception as exc:
                 output = json.dumps({"error": str(exc)}, ensure_ascii=False)
                 yield start_event(call_id, "tool", {
@@ -106,6 +110,13 @@ def implementation_stream(
                 abort = True
             messages.append({"role": "tool", "tool_call_id": call_id, "content": output})
         if abort:
+            break
+        consecutive_error_rounds = 0 if round_had_success else consecutive_error_rounds + 1
+        if consecutive_error_rounds >= MAX_CONSECUTIVE_TOOL_ERROR_ROUNDS:
+            final_text = (
+                "Implementation stopped after repeated tool errors. "
+                "The file path could not be resolved from the current patch plan; return to patch planning or use the read suggestions."
+            )
             break
     else:
         final_text = "Implementation stopped after the maximum patch rounds."
@@ -240,6 +251,18 @@ def _tool_arguments(raw: str | None) -> dict:
     if not isinstance(data, dict):
         raise ValueError("tool arguments must be an object")
     return data
+
+
+def _tool_failed(output: str) -> bool:
+    try:
+        data = json.loads(output or "{}")
+    except json.JSONDecodeError:
+        return False
+    title = str(data.get("title") or "")
+    if title.startswith("[error]"):
+        return True
+    metadata = data.get("metadata") if isinstance(data.get("metadata"), dict) else {}
+    return bool(metadata.get("error_code") or data.get("error"))
 
 
 def _system_prompt(language: str) -> str:
