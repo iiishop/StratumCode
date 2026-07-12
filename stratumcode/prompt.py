@@ -318,8 +318,18 @@ finish_investigation with:
 - required fields: summary and ready_for_patch_planning. All other fields below
   are optional; include only fields you can fill compactly and correctly.
 - grounded beliefs from observed files, commands, documents, or verifier results.
+  Give each belief a stable id such as B1 when you want a resolution to cite it.
 - resolutions for every initial unknown, keyed by unknown_id. Use status:
   resolved, partially_resolved, needs_user, or deferred.
+- For a resolved code/doc/runtime unknown, either:
+  - cite a real observation/tool result id in resolution.evidence, or
+  - cite a real belief id in resolution.belief_ids.
+  Do not invent ids like E1 unless such an observation id appeared in the tool
+  result stream. If you are unsure of the exact observation id, cite a belief id
+  that you define in beliefs instead.
+- A resolution answer should be the direct answer to the unknown, not a restated
+  question. If the user asked a question and the investigation answered it, set
+  ready_for_patch_planning=false and mark the unknown resolved.
 - user_decisions_required for blocking choices that cannot be inferred from code;
   these will become ask_user prompts. Do not duplicate the same item in
   open_questions. Each item must be one concrete standalone question the user
@@ -329,10 +339,39 @@ finish_investigation with:
 - task_updates for task panel progress:
   - mark initial unknowns as status=known when evidence or beliefs resolve them.
   - when updating an existing unknown, reuse that unknown's id even if the text is rewritten.
+  - do not mark a resolved unknown as blocked.
+  - use blocked only when the next step truly requires user input or more project investigation.
   - keep unresolved unknowns as status=unknown or status=deferred.
   - add newly discovered important work or questions when investigation reveals them.
   - include a short reason and trace references such as file paths, line ranges,
     tool call ids, belief statements, or evidence ids.
+
+Minimal examples:
+Question/reporting task:
+{
+  "summary": "The project defines two subagents: mcp-installer and hypothesis-verifier.",
+  "ready_for_patch_planning": false,
+  "beliefs": [
+    {"id": "B1", "statement": "AVAILABLE_SUBAGENTS defines mcp-installer and hypothesis-verifier.", "status": "strongly_supported", "evidence": []}
+  ],
+  "resolutions": [
+    {"unknown_id": "U1", "status": "resolved", "answer": "Two subagents are defined: mcp-installer and hypothesis-verifier.", "belief_ids": ["B1"]}
+  ],
+  "task_updates": [
+    {"id": "U1", "kind": "unknown", "text": "Which subagents are defined?", "status": "known", "reason": "Answered from inspected project files.", "trace": ["B1"]}
+  ],
+  "patch_planning_facts": []
+}
+
+Implementation task ready for design:
+{
+  "summary": "The required behavior and target files are known.",
+  "ready_for_patch_planning": true,
+  "resolutions": [
+    {"unknown_id": "U1", "status": "resolved", "answer": "The function belongs in main.py.", "belief_ids": ["B1"]}
+  ],
+  "patch_planning_facts": ["main.py is the target file."]
+}
 
 Avoid open_questions unless it is non-blocking background uncertainty. Blocking
 questions should be user_decisions_required or an unknown with

@@ -254,6 +254,7 @@ def _finish_tool_schema() -> dict:
                     "items": {
                         "type": "object",
                         "properties": {
+                            "id": {"type": "string"},
                             "statement": {"type": "string"},
                             "status": {
                                 "type": "string",
@@ -367,6 +368,7 @@ def _finalize_investigation(
     messages.append({"role": "user", "content": prompt.build_investigation_finalize()})
     last_error = ""
     last_content = ""
+    last_arguments: dict | None = None
 
     for attempt in range(MAX_FINALIZATION_ATTEMPTS):
         thinking_id = f"{run_id}-thinking-final-{attempt}"
@@ -413,8 +415,9 @@ def _finalize_investigation(
             call_id = finish_call.get("id") or f"call-{uuid4().hex[:8]}"
             function = finish_call.get("function") or {}
             try:
+                last_arguments = _tool_arguments(function.get("arguments"))
                 final = _finish_payload(
-                    _tool_arguments(function.get("arguments")),
+                    last_arguments,
                     analysis=analysis,
                     observations=observations or [],
                 )
@@ -434,8 +437,9 @@ def _finalize_investigation(
                 return final
         elif content:
             try:
+                last_arguments = _json_content(content)
                 final = _finish_payload(
-                    _json_content(content),
+                    last_arguments,
                     analysis=analysis,
                     observations=observations or [],
                 )
@@ -459,6 +463,17 @@ def _finalize_investigation(
                     "Call finish_investigation again with valid JSON arguments."
                 ),
             })
+
+    if last_arguments:
+        try:
+            return _finish_payload(
+                last_arguments,
+                analysis=analysis,
+                observations=observations or [],
+                repair_conflicts=True,
+            )
+        except Exception:
+            pass
 
     return {
         "summary": last_content or "Investigation step limit reached before a final summary was produced.",
@@ -690,8 +705,11 @@ def _finish_payload(
     beliefs = _beliefs(arguments.get("beliefs"))
     resolutions = _resolutions(arguments.get("resolutions"))
     resolutions = _complete_resolutions(resolutions, initial_unknowns, unknowns)
-    _validate_resolution_refs(resolutions, beliefs, observations or [])
-    resolutions = _enforce_resolution_evidence(resolutions, initial_unknowns)
+    if repair_conflicts:
+        resolutions = _drop_invalid_resolution_refs(resolutions, beliefs, observations or [], repairs)
+    else:
+        _validate_resolution_refs(resolutions, beliefs, observations or [])
+    resolutions = _enforce_resolution_evidence(resolutions, initial_unknowns, strict=not repair_conflicts)
     unresolved = _unresolved_from_resolutions(resolutions, initial_unknowns)
     unknowns = _merge_unknowns(unresolved + unknowns + decision_unknowns + new_unknowns)
     patch_context = _patch_context(arguments.get("patch_planning_facts"), repairs, repair_conflicts)
@@ -841,6 +859,36 @@ def _validate_resolution_refs(resolutions: list[dict], beliefs: list[dict], obse
             )
 
 
+def _drop_invalid_resolution_refs(
+    resolutions: list[dict],
+    beliefs: list[dict],
+    observations: list[dict],
+    repairs: list[str],
+) -> list[dict]:
+    evidence_ids = {
+        str(item.get("id") or "").strip()
+        for item in observations
+        if isinstance(item, dict) and str(item.get("id") or "").strip()
+    }
+    usable_beliefs = {
+        str(item.get("id") or "").strip()
+        for item in beliefs
+        if isinstance(item, dict)
+        and str(item.get("id") or "").strip()
+        and item.get("status") in {"plausible", "supported", "strongly_supported", "runtime_confirmed"}
+    }
+    changed = False
+    for resolution in resolutions:
+        evidence = [item for item in resolution.get("evidence", []) if item in evidence_ids]
+        beliefs = [item for item in resolution.get("belief_ids", []) if item in usable_beliefs]
+        changed = changed or evidence != resolution.get("evidence", []) or beliefs != resolution.get("belief_ids", [])
+        resolution["evidence"] = evidence
+        resolution["belief_ids"] = beliefs
+    if changed:
+        repairs.append("Dropped invalid resolution references during finalization repair")
+    return resolutions
+
+
 def _runtime_readiness(
     *,
     model_ready: bool,
@@ -908,7 +956,9 @@ def _complete_resolutions(resolutions: list[dict], initial_unknowns: list[dict],
     return resolutions
 
 
-def _enforce_resolution_evidence(resolutions: list[dict], initial_unknowns: list[dict]) -> list[dict]:
+def _enforce_resolution_evidence(resolutions: list[dict], initial_unknowns: list[dict], *, strict: bool = True) -> list[dict]:
+    if not strict:
+        return resolutions
     by_id = {item["id"]: item for item in initial_unknowns}
     for resolution in resolutions:
         source = by_id.get(resolution["unknown_id"])
@@ -1150,7 +1200,7 @@ def _task_updates(value, beliefs, unknowns: list[dict], resolutions: list[dict] 
     known_ids = {item["id"] for item in updates if item["status"] == "known" and item.get("id")}
     for resolution in resolutions or []:
         unknown_id = resolution.get("unknown_id", "")
-        if not unknown_id or unknown_id in known_ids:
+        if not unknown_id or any(_same_unknown_id(unknown_id, known_id) for known_id in known_ids):
             continue
         status = {
             "resolved": "known",
@@ -1171,7 +1221,8 @@ def _task_updates(value, beliefs, unknowns: list[dict], resolutions: list[dict] 
         if status == "known":
             known_ids.add(unknown_id)
     for item in unknowns:
-        if item.get("id") in {update.get("id") for update in updates if update.get("id")}:
+        existing_ids = {update.get("id") for update in updates if update.get("id")}
+        if any(_same_unknown_id(item.get("id"), existing_id) for existing_id in existing_ids):
             continue
         updates.append({
             "id": item.get("id", ""),
