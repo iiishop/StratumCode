@@ -620,7 +620,7 @@ def analyzed_stream(
                 "items": analysis["task_updates"],
             })
         yield event
-    if last_investigation and last_investigation.get("ready_for_patch_planning") and _wants_implementation(analysis):
+    if last_investigation and _investigation_allows_patch(last_investigation) and _wants_implementation(analysis):
         design_plan = None
         for event in design_planner.design_planning_stream(
             message=message,
@@ -694,6 +694,11 @@ def evidence_stream(
 
 def _wants_implementation(analysis: dict) -> bool:
     return (analysis.get("intent") or {}).get("type") in IMPLEMENTATION_INTENT_TYPES
+
+
+def _investigation_allows_patch(investigation: dict) -> bool:
+    step = investigation.get("step_result") if isinstance(investigation.get("step_result"), dict) else {}
+    return bool(investigation.get("ready_for_patch_planning") or step.get("next_step") == "write_code")
 
 
 _discovery_tools = hypothesis_verifier._discovery_tools

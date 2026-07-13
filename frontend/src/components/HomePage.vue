@@ -752,6 +752,7 @@ watch(() => props.activeWorkspace?.id, () => {
                   v-for="event in m.events"
                   :key="event.id"
                   :event="event"
+                  :events="m.events"
                   @answer="answerQuestion"
                 />
               </TransitionGroup>

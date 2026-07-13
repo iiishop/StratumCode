@@ -449,7 +449,7 @@ def _atomic_write(path: Path, data: bytes, *, metadata_source: Path | None = Non
 def _diff(path: str, before: bytes, after: bytes, encoding: str) -> str:
     old = before.decode(encoding).splitlines(keepends=True)
     new = after.decode(encoding).splitlines(keepends=True)
-    return "".join(unified_diff(old, new, fromfile=f"a/{path}", tofile=f"b/{path}", lineterm=""))
+    return "".join(unified_diff(old, new, fromfile=f"a/{path}", tofile=f"b/{path}"))
 
 
 def _lsp_diagnostics(path: Path, root: Path) -> dict:

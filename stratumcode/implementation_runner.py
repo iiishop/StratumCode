@@ -85,7 +85,6 @@ def implementation_stream(
             final_text = text.strip()
             break
 
-        abort = False
         round_had_success = False
         for call in tool_calls:
             function = call.get("function") or {}
@@ -97,7 +96,11 @@ def implementation_stream(
                 output = yield from _run_tool(name, call_id, arguments, workspace_dir)
                 round_had_success = round_had_success or not _tool_failed(output)
             except Exception as exc:
-                output = json.dumps({"error": str(exc)}, ensure_ascii=False)
+                output = json.dumps({
+                    "error": str(exc),
+                    "retryable": True,
+                    "hint": _tool_retry_hint(name, str(exc), patch_plan),
+                }, ensure_ascii=False)
                 yield start_event(call_id, "tool", {
                     "name": name or "invalid",
                     "description": "Implementation tool",
@@ -106,11 +109,7 @@ def implementation_stream(
                     "input": function.get("arguments") or "{}",
                     "output": output,
                 })
-                final_text = f"Implementation stopped because the tool call was invalid: {exc}"
-                abort = True
             messages.append({"role": "tool", "tool_call_id": call_id, "content": output})
-        if abort:
-            break
         consecutive_error_rounds = 0 if round_had_success else consecutive_error_rounds + 1
         if consecutive_error_rounds >= MAX_CONSECUTIVE_TOOL_ERROR_ROUNDS:
             final_text = (
@@ -253,6 +252,24 @@ def _tool_arguments(raw: str | None) -> dict:
     return data
 
 
+def _tool_retry_hint(name: str, error: str, patch_plan: dict) -> str:
+    if name == "apply_patch" and "authorized patch plan" in error:
+        steps = [
+            str(item.get("id") or "")
+            for item in patch_plan.get("implementation_steps") or []
+            if item.get("id")
+        ]
+        suffix = f" Authorized step ids: {', '.join(steps)}." if steps else ""
+        return (
+            "Use exactly one authorized step_id per apply_patch call. "
+            "Do not combine step ids such as IS1+IS2; call apply_patch once per step."
+            + suffix
+        )
+    if "invalid tool JSON" in error:
+        return "Call the tool again with valid JSON arguments only."
+    return "Correct the tool arguments and retry. If the patch plan is wrong, stop and explain why."
+
+
 def _tool_failed(output: str) -> bool:
     try:
         data = json.loads(output or "{}")
@@ -274,6 +291,9 @@ Use read to obtain fresh snapshot_id values before modifying existing files.
 Use apply_patch for all file writes. Its authorization_id, plan_hash, and
 acceptance_ids are injected by runtime; do not include them. For an existing
 empty file, use replace_exact with old_text="" and new_text set to the whole file.
+Each apply_patch call must use exactly one authorized implementation step_id.
+Do not combine step ids such as "IS1+IS2"; call apply_patch separately for IS1
+and IS2.
 
 After a successful apply_patch, stop unless the patch plan explicitly has another
 implementation step. If apply_patch reports STALE_SNAPSHOT, read the file again

@@ -1,4 +1,5 @@
 <script setup>
+import { computed, provide } from 'vue'
 import ThinkingEvent from './ThinkingEvent.vue'
 import ToolEvent from './ToolEvent.vue'
 import CodeNavEvent from './CodeNavEvent.vue'
@@ -20,8 +21,13 @@ import StepResultEvent from './StepResultEvent.vue'
 import SafetyStopEvent from './SafetyStopEvent.vue'
 import UserQuestionEvent from './UserQuestionEvent.vue'
 
-defineProps({ event: { type: Object, required: true } })
+const props = defineProps({
+  event: { type: Object, required: true },
+  events: { type: Array, default: () => [] },
+})
 defineEmits(['answer'])
+
+provide('messageEvents', computed(() => props.events))
 
 const eventComponents = {
   thinking: ThinkingEvent,

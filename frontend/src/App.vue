@@ -69,10 +69,14 @@ const toastRefs = reactive({})
 const appSettings = ref({ output_language: 'zh', languages: [], font_scale: 1.0 })
 const settingsSaving = ref(false)
 const fontScale = computed(() => appSettings.value.font_scale || 1)
-const layoutStyle = computed(() => {
-  const s = fontScale.value
-  return s === 1 ? {} : { zoom: s, height: `calc(100svh / ${s})` }
-})
+
+function applyFontScale(scale) {
+  const root = document.documentElement
+  root.style.setProperty('--font-body', `${Math.round(14 * scale)}px`)
+  root.style.setProperty('--font-ui', `${Math.round(12 * scale)}px`)
+  root.style.setProperty('--font-caption', `${Math.round(11 * scale)}px`)
+  root.style.setProperty('--font-code', `${Math.round(12 * scale)}px`)
+}
 
 let gsapCtx
 
@@ -388,9 +392,11 @@ function statusLabel(s) {
 onMounted(() => {
   bootstrap()
   gsapCtx = gsap.context(() => {}, undefined)
+  applyFontScale(fontScale.value)
 })
 onUnmounted(() => { gsapCtx?.revert() })
 
+watch(fontScale, applyFontScale)
 watch(currentView, (v) => {
   if (v === 'providers' && !providers.value.length) load()
   if (v === 'mcp') mcpStore.load()
@@ -399,7 +405,7 @@ watch(currentView, (v) => {
 </script>
 
 <template>
-  <div class="layout" :style="layoutStyle">
+  <div class="layout">
     <Sidebar
       :active="currentView"
       :workspaces="workspaces"

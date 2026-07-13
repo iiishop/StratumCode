@@ -1,5 +1,5 @@
 <script setup>
-import { computed, onMounted, onUnmounted, ref } from 'vue'
+import { computed, inject, onMounted, onUnmounted, ref } from 'vue'
 import { animate, createTimeline } from 'animejs'
 import { gsap } from 'gsap'
 import { highlightCode } from '../../lib/highlight'
@@ -7,6 +7,22 @@ import EventFrame from './EventFrame.vue'
 
 const props = defineProps({ event: { type: Object, required: true } })
 const emit = defineEmits(['rollback'])
+
+const messageEvents = inject('messageEvents', computed(() => []))
+
+const matchingStep = computed(() => {
+  const sid = props.event.metadata?.step_id || null
+  if (!sid) {
+    try { const p = JSON.parse(props.event.output || '{}'); if (p.step_id) return { id: p.step_id } } catch {}
+    return null
+  }
+  for (const ev of messageEvents.value) {
+    if (ev.type !== 'patch_plan' || !ev.data?.implementation_steps) continue
+    const step = ev.data.implementation_steps.find(s => s.id === sid)
+    if (step) return step
+  }
+  return { id: sid }
+})
 
 const rootRef = ref(null)
 const rollbackConfirm = ref(false)
@@ -119,6 +135,20 @@ onUnmounted(() => rollbackTimeline?.revert())
           <span v-else-if="rollbackConfirm && !rolling">Click again to confirm rollback</span>
           <span v-else>Rolling back...</span>
         </button>
+      </div>
+
+      <!-- step context -->
+      <div v-if="matchingStep" class="pe__section pe__step-context">
+        <div class="pe__section-head">
+          <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+          <span>From step</span>
+          <span class="pe__step-id-badge">{{ matchingStep.id }}</span>
+        </div>
+        <p v-if="matchingStep.action" class="pe__step-action">{{ matchingStep.action }}</p>
+        <div v-if="matchingStep.file || matchingStep.target" class="pe__step-tags">
+          <code v-if="matchingStep.file" class="pe__step-tag pe__step-tag--file">{{ matchingStep.file }}</code>
+          <b v-if="matchingStep.target" class="pe__step-tag pe__step-tag--target">{{ matchingStep.target }}</b>
+        </div>
       </div>
 
       <!-- diff stats -->
@@ -291,6 +321,45 @@ onUnmounted(() => rollbackTimeline?.revert())
   font-weight: 400;
   text-transform: none;
   letter-spacing: 0;
+}
+
+/* ---- step context ---- */
+.pe__step-context {
+  border-color: rgba(102,88,199,.18);
+  background: linear-gradient(135deg, rgba(102,88,199,.04), rgba(102,88,199,.01));
+}
+.pe__step-id-badge {
+  margin-left: auto;
+  padding: 1px 6px;
+  border-radius: 4px;
+  color: #fff;
+  background: #6658c7;
+  font: 700 8px/1.3 var(--mono, monospace);
+}
+.pe__step-action {
+  margin: 0;
+  color: var(--text, #3f5274);
+  font-size: 10.5px;
+  line-height: 1.5;
+}
+.pe__step-tags {
+  display: flex;
+  gap: 5px;
+  flex-wrap: wrap;
+}
+.pe__step-tag {
+  padding: 1px 6px;
+  border-radius: 4px;
+  font: 8px/1.3 var(--mono, monospace);
+}
+.pe__step-tag--file {
+  color: var(--accent-text, #1748a3);
+  background: var(--accent-bg, rgba(23,86,209,.07));
+}
+.pe__step-tag--target {
+  color: var(--ok, #11866f);
+  background: rgba(17,134,111,.08);
+  text-transform: uppercase;
 }
 
 /* ---- stats ---- */

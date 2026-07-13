@@ -273,9 +273,13 @@ task analysis, choose the cheapest next action that reduces uncertainty:
 Prefer project facts over framework defaults. Framework knowledge can suggest
 where to look, but current project code/config wins.
 
-Stop only by calling finish_investigation when you have enough grounded context
-for patch planning, or when the remaining ambiguity cannot be resolved from the
-project and must be asked of the user. Do not call finish_investigation just
+When you have a grounded finding, call record_investigation_findings. Keep each
+record call focused: beliefs/resolutions/user questions/task updates, not a
+full final report.
+
+Stop only after recorded findings cover the task contract. Then call
+finish_investigation with a short summary, patch_planning_facts when code work
+should continue, and recommended_next_step. Do not call finish_investigation just
 because one hypothesis verifier run ended."""
 
 INVESTIGATION_CONTEXT = """\
@@ -313,29 +317,18 @@ You have at most {max_rounds} model rounds."""
 INVESTIGATION_FINALIZE = """\
 Investigation step limit reached. Do not call discovery tools now.
 
-Use only the tool results already present in this conversation. Call
-finish_investigation with:
-- required fields: summary and ready_for_patch_planning. All other fields below
-  are optional; include only fields you can fill compactly and correctly.
-- grounded beliefs from observed files, commands, documents, or verifier results.
-  Give each belief a stable id such as B1 when you want a resolution to cite it.
+Use only the tool results already present in this conversation.
+
+First call record_investigation_findings with:
+- beliefs from observed files, commands, documents, or verifier results. Give
+  each belief a stable id such as B1 when a resolution cites it.
 - resolutions for every initial unknown, keyed by unknown_id. Use status:
   resolved, partially_resolved, needs_user, or deferred.
-- For a resolved code/doc/runtime unknown, either:
-  - cite a real observation/tool result id in resolution.evidence, or
-  - cite a real belief id in resolution.belief_ids.
-  Do not invent ids like E1 unless such an observation id appeared in the tool
-  result stream. If you are unsure of the exact observation id, cite a belief id
-  that you define in beliefs instead.
-- A resolution answer should be the direct answer to the unknown, not a restated
-  question. If the user asked a question and the investigation answered it, set
-  ready_for_patch_planning=false and mark the unknown resolved.
-- user_decisions_required for blocking choices that cannot be inferred from code;
-  these will become ask_user prompts. Do not duplicate the same item in
-  open_questions. Each item must be one concrete standalone question the user
-  can answer, not a status phrase like "cannot infer naming strategy".
+- for a resolved code/doc/runtime unknown, cite a real observation/tool result
+  id in resolution.evidence or a real belief id in resolution.belief_ids.
+- user_decisions_required for blocking choices that cannot be inferred from code.
+  Each item must be one concrete standalone question the user can answer.
 - new_unknowns only for important questions discovered during investigation.
-- patch_planning_facts for concrete facts a later patch planner can rely on.
 - task_updates for task panel progress:
   - mark initial unknowns as status=known when evidence or beliefs resolve them.
   - when updating an existing unknown, reuse that unknown's id even if the text is rewritten.
@@ -346,11 +339,15 @@ finish_investigation with:
   - include a short reason and trace references such as file paths, line ranges,
     tool call ids, belief statements, or evidence ids.
 
+Then call finish_investigation with:
+- summary
+- recommended_next_step: patch_planning, ask_user, continue_investigation, or done.
+- patch_planning_facts for concrete facts a later patch planner can rely on when
+  recommended_next_step is patch_planning.
+
 Minimal examples:
 Question/reporting task:
-{
-  "summary": "The project defines two subagents: mcp-installer and hypothesis-verifier.",
-  "ready_for_patch_planning": false,
+record_investigation_findings({
   "beliefs": [
     {"id": "B1", "statement": "AVAILABLE_SUBAGENTS defines mcp-installer and hypothesis-verifier.", "status": "strongly_supported", "evidence": []}
   ],
@@ -359,33 +356,33 @@ Question/reporting task:
   ],
   "task_updates": [
     {"id": "U1", "kind": "unknown", "text": "Which subagents are defined?", "status": "known", "reason": "Answered from inspected project files.", "trace": ["B1"]}
-  ],
-  "patch_planning_facts": []
-}
+  ]
+})
+finish_investigation({
+  "summary": "The project defines two subagents: mcp-installer and hypothesis-verifier.",
+  "recommended_next_step": "done"
+})
 
 Implementation task ready for design:
-{
-  "summary": "The required behavior and target files are known.",
-  "ready_for_patch_planning": true,
+record_investigation_findings({
   "resolutions": [
     {"unknown_id": "U1", "status": "resolved", "answer": "The function belongs in main.py.", "belief_ids": ["B1"]}
-  ],
+  ]
+})
+finish_investigation({
+  "summary": "The required behavior and target files are known.",
+  "recommended_next_step": "patch_planning",
   "patch_planning_facts": ["main.py is the target file."]
-}
-
-Avoid open_questions unless it is non-blocking background uncertainty. Blocking
-questions should be user_decisions_required or an unknown with
-resolution_strategy="ask_user".
+})
 
 Keep the JSON compact: at most 6 beliefs, 5 user_decisions_required, and 10
 patch_planning_facts entries. Each string should be one short sentence. Keep
 task_updates to at most 8 items.
 
-You may set ready_for_patch_planning as a recommendation, but runtime will
-recompute it from resolutions, evidence, blocking unknowns, and
-patch_planning_facts. If any resolution is partially_resolved or needs_user and
-blocks choosing the implementation path, recommend false. Use deferred only for
-packaging or polish questions that do not block the next code patch."""
+Runtime will recompute readiness from recorded resolutions, evidence, blocking
+unknowns, and patch_planning_facts. If any blocking issue needs the user,
+recommended_next_step must be ask_user. Use deferred only for packaging or polish
+questions that do not block the next code patch."""
 
 
 def output_language_section(language: str = "zh") -> str:
