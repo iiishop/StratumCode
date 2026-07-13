@@ -18,8 +18,10 @@ from .agent_runtime import (
 from .tools import registry
 
 MAX_IMPLEMENTATION_ROUNDS = 6
+MAX_VALIDATION_ROUNDS = 4
 MAX_CONSECUTIVE_TOOL_ERROR_ROUNDS = 3
 IMPLEMENTATION_TOOLS = ("read", "apply_patch", "patch_history", "rollback_patch")
+VALIDATION_TOOLS = ("read", "code_nav")
 
 
 def implementation_stream(
@@ -67,6 +69,8 @@ def implementation_stream(
     tools = _implementation_tools()
     final_text = ""
     consecutive_error_rounds = 0
+    patch_applied = False
+    changed_files: list[str] = []
 
     for round_index in range(1, MAX_IMPLEMENTATION_ROUNDS + 1):
         assistant = _call_model(provider, model, messages, tools=tools)
@@ -95,6 +99,9 @@ def implementation_stream(
                 arguments = _prepare_tool_arguments(name, arguments, patch_plan)
                 output = yield from _run_tool(name, call_id, arguments, workspace_dir)
                 round_had_success = round_had_success or not _tool_failed(output)
+                if name == "apply_patch" and not _tool_failed(output):
+                    patch_applied = True
+                    changed_files.extend(_patch_files_from_output(output))
             except Exception as exc:
                 output = json.dumps({
                     "error": str(exc),
@@ -118,19 +125,45 @@ def implementation_stream(
             )
             break
     else:
-        final_text = "Implementation stopped after the maximum patch rounds."
+        if not patch_applied:
+            yield start_event(f"{run_id}-checkpoint", "user_question", _checkpoint_question(
+                analysis.get("id", ""),
+                message,
+                "Implementation reached its checkpoint before applying a patch.",
+            ))
+            yield {"op": "update", "id": stage_id, "patch": {"state": "waiting", "phase": "implementation_checkpoint"}}
+            return
+        final_text = "Implementation patching reached its checkpoint; continuing with validation."
 
     yield start_event(f"{run_id}-output", "output", {
         "content": final_text or "Implementation finished.",
         "streaming": False,
     })
     yield {"op": "update", "id": stage_id, "patch": {"state": "done", "phase": "implementation_done"}}
-    yield {"op": "done", "implementation": {"summary": final_text}}
+    if patch_applied:
+        validation_done = yield from _validation_stream(
+            message=message,
+            analysis=analysis,
+            patch_plan=patch_plan,
+            workspace_dir=workspace_dir,
+            changed_files=changed_files,
+        )
+        if validation_done is False:
+            return
+    yield {"op": "done", "implementation": {"summary": final_text, "semantic_checked": patch_applied}}
 
 
 def _implementation_tools() -> list[dict]:
+    return _tools_for(IMPLEMENTATION_TOOLS)
+
+
+def _validation_tools() -> list[dict]:
+    return _tools_for(VALIDATION_TOOLS)
+
+
+def _tools_for(names: tuple[str, ...]) -> list[dict]:
     tools = []
-    for name in IMPLEMENTATION_TOOLS:
+    for name in names:
         tool = registry.get(name)
         if tool:
             if name == "apply_patch":
@@ -210,7 +243,7 @@ def _prepare_tool_arguments(name: str, arguments: dict, patch_plan: dict) -> dic
 
 def _run_tool(name: str, call_id: str, arguments: dict, workspace_dir: str) -> Iterator[dict]:
     tool = registry.get(name)
-    if name not in IMPLEMENTATION_TOOLS or tool is None:
+    if name not in (*IMPLEMENTATION_TOOLS, *VALIDATION_TOOLS) or tool is None:
         output = json.dumps({"error": f"tool not allowed in implementation: {name}"}, ensure_ascii=False)
         yield start_event(call_id, "tool", {
             "name": name or "invalid",
@@ -222,7 +255,7 @@ def _run_tool(name: str, call_id: str, arguments: dict, workspace_dir: str) -> I
         })
         return output
 
-    event_type = "patch" if name in {"apply_patch", "patch_history", "rollback_patch"} else "tool"
+    event_type = "patch" if name in {"apply_patch", "patch_history", "rollback_patch"} else ("code_nav" if name == "code_nav" else "tool")
     yield start_event(call_id, event_type, {
         "name": name,
         "description": tool.description,
@@ -286,6 +319,134 @@ def _tool_failed(output: str) -> bool:
     return bool(metadata.get("error_code") or data.get("error"))
 
 
+def _code_nav_validated(output: str) -> bool:
+    try:
+        data = json.loads(output or "{}")
+    except json.JSONDecodeError:
+        return False
+    metadata = data.get("metadata") if isinstance(data.get("metadata"), dict) else {}
+    return metadata.get("status") == "ok"
+
+
+def _patch_files_from_output(output: str) -> list[str]:
+    try:
+        data = json.loads(output or "{}")
+        payload = json.loads(data.get("output") or "{}")
+    except (TypeError, json.JSONDecodeError):
+        return []
+    return [
+        str(item.get("path") or "")
+        for item in payload.get("files", [])
+        if isinstance(item, dict) and item.get("path")
+    ]
+
+
+def _validation_stream(
+    *,
+    message: str,
+    analysis: dict,
+    patch_plan: dict,
+    workspace_dir: str,
+    changed_files: list[str],
+) -> Iterator[dict]:
+    setting = model_settings.resolve(model_settings.DEFAULT_STAGE)
+    if setting is None:
+        return True
+    provider = setting["provider"]
+    model = setting["model_id"]
+    pricing_rules = providers.get_model_pricing(provider["id"], model)
+    usage_total = _empty_usage(pricing_rules)
+    run_id = uuid4().hex[:10]
+    stage_id = f"{run_id}-stage"
+    yield start_event(stage_id, "stage", {
+        "name": "validation",
+        "label": "Validate implementation",
+        "state": "running",
+        "phase": "semantic_validation",
+        "model": model,
+        "context_length": providers.model_context_length(provider["base_url"], provider["api_key"], model),
+        "provider": provider["name"],
+        "inherited": setting["inherited"],
+    })
+    messages = [
+        {"role": "system", "content": _validation_prompt(app_settings.get_output_language())},
+        {"role": "user", "content": json.dumps({
+            "user_request": message,
+            "acceptance_criteria": analysis.get("acceptance_criteria", []),
+            "patch_plan": patch_plan,
+            "changed_files": sorted(set(changed_files)),
+            "workspace_dir": workspace_dir,
+        }, ensure_ascii=False)},
+    ]
+    tools = _validation_tools()
+    semantic_checked = False
+    final_text = ""
+    for round_index in range(1, MAX_VALIDATION_ROUNDS + 1):
+        assistant = _call_model(provider, model, messages, tools=tools)
+        if usage := _usage_delta(pricing_rules, assistant.pop("_usage", {})):
+            _add_usage(usage_total, usage)
+            yield start_event(f"{run_id}-usage-{round_index}", "usage", {"delta": usage, "total": usage_total})
+        text = _content_text(assistant.get("content"))
+        tool_calls = assistant.get("tool_calls") or []
+        messages.append({"role": "assistant", "content": text, "tool_calls": tool_calls})
+        if not tool_calls:
+            if not semantic_checked:
+                messages.append({"role": "user", "content": "Call code_nav at least once on a changed identifier before finalizing validation."})
+                continue
+            final_text = text.strip()
+            break
+        for call in tool_calls:
+            function = call.get("function") or {}
+            name = function.get("name") or ""
+            call_id = call.get("id") or f"{run_id}-tool-{round_index}"
+            try:
+                arguments = _tool_arguments(function.get("arguments"))
+                output = yield from _run_tool(name, call_id, arguments, workspace_dir)
+                if name == "code_nav" and _code_nav_validated(output):
+                    semantic_checked = True
+            except Exception as exc:
+                output = json.dumps({"error": str(exc), "retryable": True}, ensure_ascii=False)
+                yield start_event(call_id, "tool", {
+                    "name": name or "invalid",
+                    "description": "Validation tool",
+                    "status": "error",
+                    "open": False,
+                    "input": function.get("arguments") or "{}",
+                    "output": output,
+                })
+            messages.append({"role": "tool", "tool_call_id": call_id, "content": output})
+    else:
+        yield start_event(f"{run_id}-checkpoint", "user_question", _checkpoint_question(
+            analysis.get("id", ""),
+            message,
+            "Semantic validation reached its checkpoint before a clear pass/fail result.",
+        ))
+        yield {"op": "update", "id": stage_id, "patch": {"state": "waiting", "phase": "validation_checkpoint"}}
+        return False
+    yield start_event(f"{run_id}-output", "output", {
+        "content": final_text or "Semantic validation completed.",
+        "streaming": False,
+    })
+    yield {"op": "update", "id": stage_id, "patch": {"state": "done", "phase": "validation_done"}}
+    return True
+
+
+def _checkpoint_question(analysis_id: str, origin_message: str, reason: str) -> dict:
+    return {
+        "id": f"checkpoint-{uuid4().hex[:8]}",
+        "analysis_id": analysis_id,
+        "question": reason,
+        "title": "Continue this run?",
+        "summary": reason,
+        "origin_message": origin_message,
+        "answer_status": "waiting",
+        "options": [
+            {"id": "continue", "label": "Continue", "value": "Continue from this checkpoint."},
+            {"id": "stop", "label": "Stop", "value": "Stop and summarize the current state."},
+        ],
+    }
+
+
 def _system_prompt(language: str) -> str:
     return f"""\
 You are StratumCode's implementation runner. Write user-visible text in {language}.
@@ -301,7 +462,24 @@ Each apply_patch call must use exactly one authorized implementation step_id.
 Do not combine step ids such as "IS1+IS2"; call apply_patch separately for IS1
 and IS2.
 
-After a successful apply_patch, stop unless the patch plan explicitly has another
-implementation step. If apply_patch reports STALE_SNAPSHOT, read the file again
-and retry once with the new snapshot. If authorization fails, stop and explain.
+If apply_patch reports STALE_SNAPSHOT, read the file again and retry once with
+the new snapshot. If authorization fails, stop and explain.
+"""
+
+
+def _validation_prompt(language: str) -> str:
+    return f"""\
+You are StratumCode's validation runner. Write user-visible text in {language}.
+
+Validate the patch after implementation. Do not edit files in this stage.
+Use code_nav for semantic checks, not only LSP diagnostics. Inspect changed
+identifiers and member accesses that could resolve incorrectly.
+
+Preserve explicit user contracts. If the user requested a signature such as
+wait(int time), changing the parameter to seconds is a contract conflict. Prefer
+reporting the conflict and the minimal repair direction, such as aliasing an
+import (import time as t) instead of renaming the requested parameter.
+
+Call code_nav at least once on a changed identifier before finalizing. If no LSP
+server is available, report that semantic validation could not be completed.
 """
