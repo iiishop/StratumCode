@@ -119,11 +119,13 @@ def implementation_stream(
             messages.append({"role": "tool", "tool_call_id": call_id, "content": output})
         consecutive_error_rounds = 0 if round_had_success else consecutive_error_rounds + 1
         if consecutive_error_rounds >= MAX_CONSECUTIVE_TOOL_ERROR_ROUNDS:
-            final_text = (
-                "Implementation stopped after repeated tool errors. "
-                "The file path could not be resolved from the current patch plan; return to patch planning or use the read suggestions."
-            )
-            break
+            yield start_event(f"{run_id}-tool-error-checkpoint", "user_question", _checkpoint_question(
+                analysis.get("id", ""),
+                message,
+                "Implementation hit repeated tool errors. The patch plan or file path likely needs correction.",
+            ))
+            yield {"op": "update", "id": stage_id, "patch": {"state": "waiting", "phase": "implementation_tool_error_checkpoint"}}
+            return
     else:
         if not patch_applied:
             yield start_event(f"{run_id}-checkpoint", "user_question", _checkpoint_question(
@@ -151,6 +153,25 @@ def implementation_stream(
         if validation_done is False:
             return
     yield {"op": "done", "implementation": {"summary": final_text, "semantic_checked": patch_applied}}
+
+
+def resume_validation_stream(
+    *,
+    message: str,
+    analysis: dict,
+    patch_plan: dict,
+    workspace_dir: str,
+    changed_files: list[str],
+) -> Iterator[dict]:
+    done = yield from _validation_stream(
+        message=message,
+        analysis=analysis,
+        patch_plan=patch_plan,
+        workspace_dir=workspace_dir,
+        changed_files=changed_files,
+    )
+    if done:
+        yield {"op": "done", "implementation": {"summary": "Semantic validation resumed.", "semantic_checked": True}}
 
 
 def _implementation_tools() -> list[dict]:
@@ -420,6 +441,9 @@ def _validation_stream(
             analysis.get("id", ""),
             message,
             "Semantic validation reached its checkpoint before a clear pass/fail result.",
+            checkpoint_phase="validation_checkpoint",
+            patch_plan=patch_plan,
+            changed_files=changed_files,
         ))
         yield {"op": "update", "id": stage_id, "patch": {"state": "waiting", "phase": "validation_checkpoint"}}
         return False
@@ -431,7 +455,15 @@ def _validation_stream(
     return True
 
 
-def _checkpoint_question(analysis_id: str, origin_message: str, reason: str) -> dict:
+def _checkpoint_question(
+    analysis_id: str,
+    origin_message: str,
+    reason: str,
+    *,
+    checkpoint_phase: str = "",
+    patch_plan: dict | None = None,
+    changed_files: list[str] | None = None,
+) -> dict:
     return {
         "id": f"checkpoint-{uuid4().hex[:8]}",
         "analysis_id": analysis_id,
@@ -439,6 +471,9 @@ def _checkpoint_question(analysis_id: str, origin_message: str, reason: str) -> 
         "title": "Continue this run?",
         "summary": reason,
         "origin_message": origin_message,
+        "checkpoint_phase": checkpoint_phase,
+        "patch_plan": patch_plan or {},
+        "changed_files": changed_files or [],
         "answer_status": "waiting",
         "options": [
             {"id": "continue", "label": "Continue", "value": "Continue from this checkpoint."},

@@ -95,12 +95,13 @@ def validate_request(request: dict, root: Path, changed_bytes: int = 0) -> None:
     for file_patch in files:
         rel = str(file_patch.get("path") or "").strip()
         if _path_key(rel) not in allowed_files:
-            raise AuthorizationError("PATH_NOT_AUTHORIZED", rel)
+            allowed = ", ".join(step.get("files") or [])
+            raise AuthorizationError("PATH_NOT_AUTHORIZED", f"{rel} is not authorized for step {step_id}. Allowed files: {allowed}")
         mode = str(file_patch.get("mode") or "modify")
         if mode == "create" and "create_file" not in capabilities:
             raise AuthorizationError("OPERATION_NOT_AUTHORIZED", "create_file")
         if mode != "create" and "modify_existing" not in capabilities:
-            raise AuthorizationError("OPERATION_NOT_AUTHORIZED", "modify_existing")
+            raise AuthorizationError("OPERATION_NOT_AUTHORIZED", f"modify_existing is not authorized for step {step_id}")
     if changed_bytes > int(step.get("max_changed_bytes") or 0):
         raise AuthorizationError("PATCH_TOO_LARGE", "changed bytes exceed step authorization")
 

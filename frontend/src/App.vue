@@ -141,7 +141,7 @@ async function activateWorkspaceAndSession(id) {
 }
 
 async function addWorkspacePrompt() {
-  const path = window.prompt('Local workspace path')
+  const path = await window.pywebview.api.select_folder()
   if (!path) return
   await addWorkspace('', path)
   await loadWorkspaces()

@@ -5,6 +5,7 @@ import threading
 import time
 from pathlib import Path
 from urllib.request import urlopen
+import tkinter.filedialog
 
 import webview
 
@@ -16,6 +17,19 @@ DIST_DIR = FRONTEND_DIR / "dist"
 WORKSPACE_DIR = FRONTEND_DIR.parent
 
 
+
+class Api:
+    """Expose native OS dialogs to the webview frontend."""
+
+    def select_folder(self) -> str:
+        import tkinter as tk
+
+        root = tk.Tk()
+        root.withdraw()
+        root.attributes("-topmost", True)
+        path = tkinter.filedialog.askdirectory(title="Select workspace folder")
+        root.destroy()
+        return path if path else ""
 def _free_port():
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.bind(("", 0))
@@ -43,7 +57,7 @@ def main():
     port = server.server_address[1]
     threading.Thread(target=server.serve_forever, daemon=True).start()
 
-    webview.create_window("StratumCode", f"http://localhost:{port}")
+    webview.create_window("StratumCode", f"http://localhost:{port}", js_api=Api())
     webview.start()
 
 
@@ -62,5 +76,5 @@ def main_dev():
     url = f"http://localhost:{vite_port}"
     _wait_for(url, timeout=15)
 
-    webview.create_window("StratumCode", url)
+    webview.create_window("StratumCode", url, js_api=Api())
     webview.start()

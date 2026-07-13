@@ -582,7 +582,12 @@ def analyzed_stream(
     selected_session_context = _select_session_memory(message, analysis, session_context)
     _attach_session_relationship(analysis, session_context.get("tasks", []))
     seeded_tasks = _seed_task_updates(analysis, session_context.get("tasks", []))
-    analysis["task_updates"] = _normalize_task_updates(analysis["id"], analysis.get("task_updates", []) + seeded_tasks, session_context.get("tasks", []))
+    answered_task = _answered_task_update(analysis["id"], answer)
+    analysis["task_updates"] = _normalize_task_updates(
+        analysis["id"],
+        analysis.get("task_updates", []) + seeded_tasks + ([answered_task] if answered_task else []),
+        session_context.get("tasks", []),
+    )
     if not answer:
         yield start_event(f"task-analysis-{uuid4().hex[:8]}", "task_analysis", analysis)
     findings = _prior_findings(prior_analysis, answer)
@@ -602,7 +607,7 @@ def analyzed_stream(
         if event.get("event") == "task_update":
             event["data"]["items"] = _normalize_task_updates(
                 analysis["id"],
-                analysis.get("task_updates", []) + event["data"].get("items", []),
+                analysis.get("task_updates", []) + event["data"].get("items", []) + ([answered_task] if answered_task else []),
                 [],
             )
             analysis["task_updates"] = event["data"]["items"]
@@ -610,7 +615,7 @@ def analyzed_stream(
             last_investigation = event["investigation"]
             last_investigation["task_updates"] = _normalize_task_updates(
                 analysis["id"],
-                analysis.get("task_updates", []) + last_investigation.get("task_updates", []),
+                analysis.get("task_updates", []) + last_investigation.get("task_updates", []) + ([answered_task] if answered_task else []),
                 session_context.get("tasks", []),
             )
             last_investigation["task_updates"] = _finalize_task_statuses(last_investigation["task_updates"], last_investigation)
@@ -698,8 +703,19 @@ def _wants_implementation(analysis: dict) -> bool:
 
 
 def _investigation_allows_patch(investigation: dict) -> bool:
+    if _has_blocking_tasks(investigation):
+        return False
     step = investigation.get("step_result") if isinstance(investigation.get("step_result"), dict) else {}
     return bool(investigation.get("ready_for_patch_planning") or step.get("next_step") == "write_code")
+
+
+def _has_blocking_tasks(investigation: dict) -> bool:
+    for item in investigation.get("task_updates", []) if isinstance(investigation.get("task_updates"), list) else []:
+        if not isinstance(item, dict):
+            continue
+        if item.get("status") == "blocked":
+            return True
+    return False
 
 
 _discovery_tools = hypothesis_verifier._discovery_tools
@@ -848,6 +864,8 @@ def stream(request: dict, workspace_dir: str = ".") -> Iterator[dict]:
     analysis = prior_analysis if answer else None
     if answer and str(answer.get("origin_message") or "").strip():
         message = str(answer["origin_message"]).strip()
+    if answer and answer.get("checkpoint_phase") == "validation_checkpoint":
+        return _resume_validation_checkpoint(message, answer, analysis or {}, workspace_dir)
     return analyzed_stream(
         message,
         context,
@@ -858,6 +876,25 @@ def stream(request: dict, workspace_dir: str = ".") -> Iterator[dict]:
         prior_analysis=prior_analysis,
         session_id=request.get("session_id"),
     )
+
+
+def _resume_validation_checkpoint(message: str, answer: dict, analysis: dict, workspace_dir: str) -> Iterator[dict]:
+    if answer.get("selected_option_id") == "stop":
+        return _single_output("Stopped at semantic validation checkpoint.")
+    patch_plan = answer.get("patch_plan") if isinstance(answer.get("patch_plan"), dict) else {}
+    changed_files = [str(path) for path in answer.get("changed_files", [])] if isinstance(answer.get("changed_files"), list) else []
+    return implementation_runner.resume_validation_stream(
+        message=message,
+        analysis=analysis,
+        patch_plan=patch_plan,
+        workspace_dir=workspace_dir,
+        changed_files=changed_files,
+    )
+
+
+def _single_output(content: str) -> Iterator[dict]:
+    yield start_event(f"output-{uuid4().hex[:8]}", "output", {"content": content, "streaming": False})
+    yield {"op": "done"}
 
 
 def _workspace_snapshot(workspace_dir: str) -> list[str]:
@@ -917,6 +954,23 @@ def _answer_context(answer: dict | None) -> list[str]:
         lines.append(app_settings.text("selected_option", option=selected))
     lines.append(app_settings.text("user_answer", answer=response))
     return lines
+
+
+def _answered_task_update(analysis_id: str, answer: dict | None) -> dict | None:
+    if not answer:
+        return None
+    question_id = str(answer.get("question_id") or answer.get("unknown_id") or "").strip()
+    response = str(answer.get("response") or answer.get("text") or "").strip()
+    if not question_id or not response:
+        return None
+    question = str(answer.get("question") or question_id).strip()
+    return {
+        "id": _scoped_id(analysis_id, question_id),
+        "kind": "unknown",
+        "text": question,
+        "status": "known",
+        "reason": f"User answered: {response}",
+    }
 
 
 def _continuation_context(answer: dict | None, session_context: dict) -> list[str]:

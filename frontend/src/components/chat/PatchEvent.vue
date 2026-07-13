@@ -43,6 +43,7 @@ const patchId = computed(() => payload.value.patch_id || props.event.metadata?.p
 const rollbackId = computed(() => payload.value.rollback_id || props.event.metadata?.rollback_id || '')
 const status = computed(() => props.event.status || payload.value.status || 'running')
 const frameState = computed(() => status.value === 'error' ? 'error' : status.value === 'running' ? 'running' : 'done')
+const frameLabel = computed(() => status.value === 'error' ? 'Patch failed' : status.value === 'running' ? 'Applying patch' : 'Patch applied')
 const stepId = computed(() => props.event.metadata?.step_id || payload.value.step_id || '')
 const authId = computed(() => props.event.metadata?.authorization_id || payload.value.authorization_id || '')
 const attemptId = computed(() => props.event.metadata?.attempt_id || payload.value.attempt_id || '')
@@ -117,7 +118,7 @@ onUnmounted(() => rollbackTimeline?.revert())
   <EventFrame
     kind="diff"
     :symbol="status === 'running' ? '◌' : status === 'error' ? '!' : '✓'"
-    label="Patch applied"
+    :label="frameLabel"
     :detail="detail"
     :status="status"
     :state="frameState"
