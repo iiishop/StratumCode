@@ -20,7 +20,9 @@ CREATE TABLE IF NOT EXISTS patch_authorizations (
     active INTEGER NOT NULL,
     created_at REAL NOT NULL,
     expires_at REAL NOT NULL DEFAULT 0,
-    consumed_steps_json TEXT NOT NULL DEFAULT '[]'
+    consumed_steps_json TEXT NOT NULL DEFAULT '[]',
+    step_states_json TEXT NOT NULL DEFAULT '{}',
+    applied_attempts_json TEXT NOT NULL DEFAULT '{}'
 )
 """
 
@@ -44,11 +46,19 @@ def create_authorization(plan: dict, workspace_dir: str) -> dict:
         conn.execute(
             """
             INSERT INTO patch_authorizations (
-                id, workspace_root, plan_hash, allowed_steps_json, active, created_at, expires_at, consumed_steps_json
+                id, workspace_root, plan_hash, allowed_steps_json, active, created_at, expires_at, consumed_steps_json, step_states_json, applied_attempts_json
             )
-            VALUES (?, ?, ?, ?, 1, ?, ?, '[]')
+            VALUES (?, ?, ?, ?, 1, ?, ?, '[]', ?, '{}')
             """,
-            (auth_id, _root_key(root), plan_hash, json.dumps(allowed_steps, ensure_ascii=False), now, auth["expires_at"]),
+            (
+                auth_id,
+                _root_key(root),
+                plan_hash,
+                json.dumps(allowed_steps, ensure_ascii=False),
+                now,
+                auth["expires_at"],
+                json.dumps({step_id: "pending" for step_id in allowed_steps}, ensure_ascii=False),
+            ),
         )
     return auth
 
@@ -67,13 +77,14 @@ def validate_request(request: dict, root: Path, changed_bytes: int = 0) -> None:
     if str(request.get("plan_hash") or "").strip() != row["plan_hash"]:
         raise AuthorizationError("PLAN_HASH_MISMATCH", "patch request plan_hash does not match authorization")
     step_id = str(request.get("step_id") or "").strip()
-    consumed = set(_loads(row.get("consumed_steps_json"), []))
-    if step_id in consumed:
-        raise AuthorizationError("STEP_ALREADY_APPLIED", step_id)
     steps = json.loads(row["allowed_steps_json"])
     step = steps.get(step_id)
     if not step:
         raise AuthorizationError("STEP_NOT_AUTHORIZED", step_id)
+    attempts = _loads(row.get("applied_attempts_json"), {})
+    attempt_id = str(request.get("attempt_id") or request.get("patch_id") or "").strip()
+    if attempt_id and attempt_id in set(attempts.get(step_id) or []):
+        raise AuthorizationError("PATCH_ATTEMPT_ALREADY_APPLIED", attempt_id)
     requested_acceptance = set(_strings(request.get("acceptance_ids")))
     allowed_acceptance = set(step.get("acceptance_ids") or [])
     if requested_acceptance and not requested_acceptance <= allowed_acceptance:
@@ -94,30 +105,63 @@ def validate_request(request: dict, root: Path, changed_bytes: int = 0) -> None:
         raise AuthorizationError("PATCH_TOO_LARGE", "changed bytes exceed step authorization")
 
 
-def mark_step_applied(auth_id: str, step_id: str) -> None:
+def mark_step_applied(auth_id: str, step_id: str, attempt_id: str = "") -> None:
     row = _get(auth_id)
     if not row:
         raise AuthorizationError("AUTHORIZATION_NOT_FOUND", auth_id)
     consumed = set(_loads(row.get("consumed_steps_json"), []))
-    consumed.add(str(step_id))
+    states = _loads(row.get("step_states_json"), {})
+    attempts = _loads(row.get("applied_attempts_json"), {})
+    step_id = str(step_id)
+    attempt_id = str(attempt_id or "")
+    consumed.add(step_id)
+    states[step_id] = "validation_required"
+    if attempt_id:
+        values = set(attempts.get(step_id) or [])
+        values.add(attempt_id)
+        attempts[step_id] = sorted(values)
     with db.db_session() as conn:
         conn.execute(
-            "UPDATE patch_authorizations SET consumed_steps_json = ? WHERE id = ?",
-            (json.dumps(sorted(consumed), ensure_ascii=False), auth_id),
+            "UPDATE patch_authorizations SET consumed_steps_json = ?, step_states_json = ?, applied_attempts_json = ? WHERE id = ?",
+            (
+                json.dumps(sorted(consumed), ensure_ascii=False),
+                json.dumps(states, ensure_ascii=False),
+                json.dumps(attempts, ensure_ascii=False),
+                auth_id,
+            ),
         )
 
 
-def mark_step_rolled_back(auth_id: str, step_id: str) -> None:
+def mark_step_rolled_back(auth_id: str, step_id: str, attempt_id: str = "") -> None:
     row = _get(auth_id)
     if not row:
         return
     consumed = set(_loads(row.get("consumed_steps_json"), []))
-    consumed.discard(str(step_id))
+    states = _loads(row.get("step_states_json"), {})
+    attempts = _loads(row.get("applied_attempts_json"), {})
+    step_id = str(step_id)
+    attempt_id = str(attempt_id or "")
+    consumed.discard(step_id)
+    states[step_id] = "rolled_back"
+    if attempt_id:
+        values = set(attempts.get(step_id) or [])
+        values.discard(attempt_id)
+        attempts[step_id] = sorted(values)
     with db.db_session() as conn:
         conn.execute(
-            "UPDATE patch_authorizations SET consumed_steps_json = ? WHERE id = ?",
-            (json.dumps(sorted(consumed), ensure_ascii=False), auth_id),
+            "UPDATE patch_authorizations SET consumed_steps_json = ?, step_states_json = ?, applied_attempts_json = ? WHERE id = ?",
+            (
+                json.dumps(sorted(consumed), ensure_ascii=False),
+                json.dumps(states, ensure_ascii=False),
+                json.dumps(attempts, ensure_ascii=False),
+                auth_id,
+            ),
         )
+
+
+def step_states(auth_id: str) -> dict:
+    row = _get(auth_id)
+    return _loads(row.get("step_states_json"), {}) if row else {}
 
 
 def hash_plan(plan: dict) -> str:
@@ -151,7 +195,15 @@ def _allowed_steps(plan: dict, root: Path) -> dict:
             capabilities.add("modify_existing" if target.exists() else "create_file")
         steps[step_id] = {
             "files": rels,
-            "acceptance_ids": sorted(acceptance_by_step.get(step_id) or []),
+            "purpose": str(item.get("purpose") or "").strip(),
+            "target": str(item.get("target") or "").strip(),
+            "action": str(item.get("action") or "").strip(),
+            "acceptance_ids": sorted(set(_strings(item.get("acceptance_ids"))) | (acceptance_by_step.get(step_id) or set())),
+            "decision_ids": _strings(item.get("decision_ids")),
+            "project_fact_ids": _strings(item.get("project_fact_ids")),
+            "required_behavior_if_removed": str(item.get("required_behavior_if_removed") or "").strip(),
+            "completion_conditions": _strings(item.get("completion_conditions")),
+            "out_of_scope": _strings(item.get("out_of_scope")),
             "capabilities": sorted(capabilities),
             "max_changed_bytes": 20_000,
         }
@@ -173,6 +225,10 @@ def _init() -> None:
             conn.execute("ALTER TABLE patch_authorizations ADD COLUMN expires_at REAL NOT NULL DEFAULT 0")
         if "consumed_steps_json" not in columns:
             conn.execute("ALTER TABLE patch_authorizations ADD COLUMN consumed_steps_json TEXT NOT NULL DEFAULT '[]'")
+        if "step_states_json" not in columns:
+            conn.execute("ALTER TABLE patch_authorizations ADD COLUMN step_states_json TEXT NOT NULL DEFAULT '{}'")
+        if "applied_attempts_json" not in columns:
+            conn.execute("ALTER TABLE patch_authorizations ADD COLUMN applied_attempts_json TEXT NOT NULL DEFAULT '{}'")
 
 
 def _root_key(root: Path) -> str:

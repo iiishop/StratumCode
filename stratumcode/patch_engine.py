@@ -109,6 +109,7 @@ def apply_patch_request(request: dict, root: Path) -> dict:
             patch_authorization.mark_step_applied(
                 str(request.get("authorization_id") or ""),
                 str(request.get("step_id") or ""),
+                str(request.get("attempt_id") or request.get("patch_id") or ""),
             )
         except Exception as exc:
             _abort_transaction(tx, committed, exc)
@@ -116,8 +117,15 @@ def apply_patch_request(request: dict, root: Path) -> dict:
     return {
         "status": "applied",
         "patch_id": str(request.get("patch_id") or ""),
+        "attempt_id": str(request.get("attempt_id") or ""),
         "authorization_id": str(request.get("authorization_id") or ""),
         "step_id": str(request.get("step_id") or ""),
+        "purpose": str(request.get("purpose") or ""),
+        "operation_summary": str(request.get("operation_summary") or ""),
+        "acceptance_ids": request.get("acceptance_ids") or [],
+        "decision_ids": request.get("decision_ids") or [],
+        "project_fact_ids": request.get("project_fact_ids") or [],
+        "is_state": patch_authorization.step_states(str(request.get("authorization_id") or "")).get(str(request.get("step_id") or ""), ""),
         "files": [
             {
                 "path": str(item["path"].relative_to(root)),
@@ -161,6 +169,7 @@ def rollback_patch(
         patch_authorization.mark_step_rolled_back(
             str(tx.get("authorization_id") or ""),
             str(tx.get("step_id") or ""),
+            str(tx.get("attempt_id") or tx.get("patch_id") or ""),
         )
         return {"status": "rolled_back", "rollback_id": rollback_id, "files": files}
     except PatchError as exc:
@@ -488,8 +497,12 @@ def _prepare_transaction(request: dict, root: Path, prepared: list[dict]) -> dic
         "id": tx_id,
         "state": "prepared",
         "patch_id": request.get("patch_id", ""),
+        "attempt_id": request.get("attempt_id", ""),
         "authorization_id": request.get("authorization_id", ""),
         "step_id": request.get("step_id", ""),
+        "purpose": request.get("purpose", ""),
+        "operation_summary": request.get("operation_summary", ""),
+        "acceptance_ids": request.get("acceptance_ids", []),
         "workspace_root": str(root),
         "request": request,
         "created_at": now,

@@ -16,7 +16,18 @@ async def _apply_patch(params: dict, ctx: dict) -> ToolResult:
     return ToolResult.ok(
         "patch applied",
         json.dumps(result, ensure_ascii=False, indent=2),
-        **{key: result.get(key) for key in ("status", "patch_id", "authorization_id", "step_id", "rollback_id")},
+        **{key: result.get(key) for key in (
+            "status",
+            "patch_id",
+            "attempt_id",
+            "authorization_id",
+            "step_id",
+            "purpose",
+            "operation_summary",
+            "acceptance_ids",
+            "is_state",
+            "rollback_id",
+        )},
     )
 
 
@@ -30,6 +41,9 @@ apply_patch_tool = ToolDef(
             "plan_hash": {"type": "string"},
             "patch_id": {"type": "string"},
             "step_id": {"type": "string"},
+            "attempt_id": {"type": "string"},
+            "operation_summary": {"type": "string"},
+            "purpose": {"type": "string"},
             "reason": {"type": "string"},
             "acceptance_ids": {"type": "array", "items": {"type": "string"}},
             "files": {

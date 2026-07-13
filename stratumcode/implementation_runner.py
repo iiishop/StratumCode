@@ -146,7 +146,8 @@ def _apply_patch_parameters() -> dict:
         "properties": {
             "patch_id": {"type": "string"},
             "step_id": {"type": "string"},
-            "reason": {"type": "string"},
+            "attempt_id": {"type": "string"},
+            "operation_summary": {"type": "string"},
             "files": {
                 "type": "array",
                 "items": {
@@ -176,7 +177,7 @@ def _apply_patch_parameters() -> dict:
                 },
             },
         },
-        "required": ["step_id", "reason", "files"],
+        "required": ["step_id", "operation_summary", "files"],
     }
 
 
@@ -191,16 +192,19 @@ def _prepare_tool_arguments(name: str, arguments: dict, patch_plan: dict) -> dic
     )
     if not step:
         raise ValueError(f"patch step is not in the authorized patch plan: {step_id}")
-    acceptance_ids = [
-        str(item.get("acceptance_id") or "")
-        for item in patch_plan.get("acceptance_mapping") or []
-        if step_id in [str(value) for value in item.get("covered_by") or []]
-    ]
+    allowed = (auth.get("allowed_steps") or {}).get(step_id) or {}
     patched = dict(arguments)
     patched["authorization_id"] = auth.get("authorization_id", "")
     patched["plan_hash"] = auth.get("plan_hash", "")
-    patched["acceptance_ids"] = [item for item in acceptance_ids if item]
-    patched["patch_id"] = patched.get("patch_id") or f"{step_id}-patch"
+    patched["acceptance_ids"] = allowed.get("acceptance_ids") or step.get("acceptance_ids") or []
+    patched["purpose"] = allowed.get("purpose") or step.get("purpose") or ""
+    patched["decision_ids"] = allowed.get("decision_ids") or step.get("decision_ids") or []
+    patched["project_fact_ids"] = allowed.get("project_fact_ids") or step.get("project_fact_ids") or []
+    patched["completion_conditions"] = allowed.get("completion_conditions") or step.get("completion_conditions") or []
+    patched["required_behavior_if_removed"] = allowed.get("required_behavior_if_removed") or step.get("required_behavior_if_removed") or ""
+    patched["reason"] = patched["purpose"] or step.get("action") or str(arguments.get("operation_summary") or "")
+    patched["attempt_id"] = patched.get("attempt_id") or f"{step_id}-A1"
+    patched["patch_id"] = patched.get("patch_id") or patched["attempt_id"]
     return patched
 
 
@@ -288,8 +292,10 @@ You are StratumCode's implementation runner. Write user-visible text in {languag
 
 Apply the already authorized patch plan. Do not redesign the solution.
 Use read to obtain fresh snapshot_id values before modifying existing files.
-Use apply_patch for all file writes. Its authorization_id, plan_hash, and
-acceptance_ids are injected by runtime; do not include them. For an existing
+Use apply_patch for all file writes. Its authorization_id, plan_hash, purpose,
+reason, acceptance_ids, decision_ids, and project_fact_ids are injected by runtime;
+do not include them. Provide step_id, operation_summary, optional attempt_id, and files.
+For an existing
 empty file, use replace_exact with old_text="" and new_text set to the whole file.
 Each apply_patch call must use exactly one authorized implementation step_id.
 Do not combine step ids such as "IS1+IS2"; call apply_patch separately for IS1

@@ -45,9 +45,13 @@ const status = computed(() => props.event.status || payload.value.status || 'run
 const frameState = computed(() => status.value === 'error' ? 'error' : status.value === 'running' ? 'running' : 'done')
 const stepId = computed(() => props.event.metadata?.step_id || payload.value.step_id || '')
 const authId = computed(() => props.event.metadata?.authorization_id || payload.value.authorization_id || '')
+const attemptId = computed(() => props.event.metadata?.attempt_id || payload.value.attempt_id || '')
+const purpose = computed(() => props.event.metadata?.purpose || payload.value.purpose || matchingStep.value?.purpose || '')
+const operationSummary = computed(() => props.event.metadata?.operation_summary || payload.value.operation_summary || '')
+const isState = computed(() => props.event.metadata?.is_state || payload.value.is_state || '')
 
 const detail = computed(() => {
-  const bits = [patchId.value, stepId.value, files.value.length ? `${files.value.length} files` : ''].filter(Boolean)
+  const bits = [patchId.value, stepId.value, attemptId.value, isState.value, files.value.length ? `${files.value.length} files` : ''].filter(Boolean)
   return bits.join(' · ') || props.event.name
 })
 
@@ -144,10 +148,14 @@ onUnmounted(() => rollbackTimeline?.revert())
           <span>From step</span>
           <span class="pe__step-id-badge">{{ matchingStep.id }}</span>
         </div>
+        <p v-if="purpose" class="pe__step-purpose">{{ purpose }}</p>
+        <p v-if="operationSummary" class="pe__step-operation">{{ operationSummary }}</p>
         <p v-if="matchingStep.action" class="pe__step-action">{{ matchingStep.action }}</p>
         <div v-if="matchingStep.file || matchingStep.target" class="pe__step-tags">
           <code v-if="matchingStep.file" class="pe__step-tag pe__step-tag--file">{{ matchingStep.file }}</code>
           <b v-if="matchingStep.target" class="pe__step-tag pe__step-tag--target">{{ matchingStep.target }}</b>
+          <span v-if="attemptId" class="pe__step-tag">{{ attemptId }}</span>
+          <span v-if="isState" class="pe__step-tag">{{ isState }}</span>
         </div>
       </div>
 
@@ -336,11 +344,19 @@ onUnmounted(() => rollbackTimeline?.revert())
   background: #6658c7;
   font: 700 8px/1.3 var(--mono, monospace);
 }
+.pe__step-purpose,
+.pe__step-operation,
 .pe__step-action {
   margin: 0;
   color: var(--text, #3f5274);
   font-size: 10.5px;
   line-height: 1.5;
+}
+.pe__step-purpose {
+  font-weight: 650;
+}
+.pe__step-operation {
+  color: var(--muted, #687897);
 }
 .pe__step-tags {
   display: flex;

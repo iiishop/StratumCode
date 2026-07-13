@@ -577,9 +577,9 @@ def analyzed_stream(
     analysis = _ensure_task_contract(analysis)
     if answer:
         analysis = {**analysis, "suggested_first_tools": []}
-    selected_session_context = _select_session_memory(message, analysis, session_context)
     analysis.setdefault("id", f"task-{uuid4().hex[:8]}")
     analysis.setdefault("origin_message", message)
+    selected_session_context = _select_session_memory(message, analysis, session_context)
     _attach_session_relationship(analysis, session_context.get("tasks", []))
     seeded_tasks = _seed_task_updates(analysis, session_context.get("tasks", []))
     analysis["task_updates"] = _normalize_task_updates(analysis["id"], analysis.get("task_updates", []) + seeded_tasks, session_context.get("tasks", []))
@@ -587,11 +587,12 @@ def analyzed_stream(
         yield start_event(f"task-analysis-{uuid4().hex[:8]}", "task_analysis", analysis)
     findings = _prior_findings(prior_analysis, answer)
     continuation_context = _continuation_context(answer, selected_session_context)
+    session_lines = _session_context_lines(selected_session_context)
     last_investigation = None
     for event in investigator.investigation_stream(
         message=message,
         analysis=analysis,
-        context=context + _analysis_context(analysis) + continuation_context,
+        context=context + session_lines + _analysis_context(analysis) + continuation_context,
         workspace_dir=workspace_dir,
         max_rounds=max_rounds,
         findings=findings,
@@ -1124,6 +1125,7 @@ def _session_context(state: dict) -> dict:
         "tasks": state.get("taskItems", []),
         "goals": [item for item in state.get("taskItems", []) if item.get("kind") == "goal"],
         "recent_user_messages": [item.get("content", "") for item in state.get("messages", []) if item.get("role") == "user"][-5:],
+        "recent_turns": _recent_conversation_turns(state.get("messages", [])),
         "observations": observations,
         "knowledge": knowledge,
         "investigations": state.get("investigations", []),
@@ -1135,10 +1137,12 @@ def _select_session_memory(message: str, analysis: dict | None, session_context:
         return {}
     query = _memory_query(message, analysis)
     reuse_ids = set(analysis.get("reused_context_ids", [])) if isinstance(analysis, dict) else set()
-    goals = _rank_memory_items(query, session_context.get("goals", []), ("text",), limit=3)
+    if isinstance(analysis, dict):
+        reuse_ids |= _task_scoped_memory_ids(session_context, str(analysis.get("id") or ""))
+    goals = _rank_memory_items(query, session_context.get("goals", []), ("text",), limit=3, pinned_ids=reuse_ids)
     if not goals:
         goals = [item for item in session_context.get("goals", []) if isinstance(item, dict)][:3]
-    tasks = _rank_memory_items(query, session_context.get("tasks", []), ("text", "reason"), limit=12)
+    tasks = _rank_memory_items(query, session_context.get("tasks", []), ("text", "reason"), limit=12, pinned_ids=reuse_ids)
     knowledge = _rank_memory_items(
         query,
         [item for item in session_context.get("knowledge", []) if item.get("fresh", True)],
@@ -1169,10 +1173,32 @@ def _select_session_memory(message: str, analysis: dict | None, session_context:
         "tasks": tasks,
         "goals": goals,
         "recent_user_messages": session_context.get("recent_user_messages", [])[-3:],
+        "recent_turns": session_context.get("recent_turns", [])[-4:],
         "observations": observations,
         "knowledge": knowledge,
         "investigations": investigations,
     }
+
+
+def _task_scoped_memory_ids(session_context: dict, task_id: str) -> set[str]:
+    task_id = str(task_id or "").strip()
+    if not task_id:
+        return set()
+    prefix = f"{task_id}:"
+    ids: set[str] = set()
+    for bucket in ("goals", "tasks", "observations", "knowledge", "investigations"):
+        for item in session_context.get(bucket, []):
+            if not isinstance(item, dict):
+                continue
+            item_id = str(item.get("id") or "")
+            if item_id == task_id or item_id.startswith(prefix):
+                ids.add(item_id)
+            if bucket == "knowledge":
+                for obs_id in item.get("observation_ids", []) if isinstance(item.get("observation_ids"), list) else []:
+                    obs_id = str(obs_id or "")
+                    if obs_id == task_id or obs_id.startswith(prefix):
+                        ids.add(obs_id)
+    return ids
 
 
 def _memory_query(message: str, analysis: dict | None) -> set[str]:
@@ -1226,7 +1252,47 @@ def _session_context_lines(session_context: dict | None) -> list[str]:
     lines.extend(f"Session goal: {item.get('text')}" for item in session_context.get("goals", [])[:3])
     lines.extend(f"Known: {item.get('statement')}" for item in session_context.get("knowledge", [])[:8] if item.get("fresh", True))
     lines.extend(f"Prior investigation: {item.get('summary')}" for item in session_context.get("investigations", [])[:3] if item.get("summary"))
+    for turn in session_context.get("recent_turns", [])[-4:]:
+        if turn.get("user"):
+            lines.append(f"Recent user: {turn['user']}")
+        if turn.get("assistant"):
+            lines.append(f"Recent assistant: {turn['assistant']}")
     return lines
+
+
+def _recent_conversation_turns(messages: list[dict]) -> list[dict]:
+    turns = []
+    pending_user = ""
+    for message in messages or []:
+        if not isinstance(message, dict):
+            continue
+        role = message.get("role")
+        if role == "user":
+            pending_user = _clip_memory_line(message.get("content", ""))
+        elif role == "assistant":
+            assistant = _clip_memory_line(_assistant_summary_from_message(message))
+            if pending_user or assistant:
+                turns.append({"user": pending_user, "assistant": assistant})
+                pending_user = ""
+    if pending_user:
+        turns.append({"user": pending_user, "assistant": ""})
+    return turns[-4:]
+
+
+def _assistant_summary_from_message(message: dict) -> str:
+    for event in reversed(message.get("events", []) if isinstance(message.get("events"), list) else []):
+        if not isinstance(event, dict) or event.get("type") != "output":
+            continue
+        data = event.get("data") if isinstance(event.get("data"), dict) else {}
+        content = data.get("content")
+        if content:
+            return str(content)
+    return ""
+
+
+def _clip_memory_line(value: str, limit: int = 320) -> str:
+    text = " ".join(str(value or "").split())
+    return text if len(text) <= limit else text[: limit - 1].rstrip() + "…"
 
 
 def _observations_freshness(state: dict) -> list[dict]:
