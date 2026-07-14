@@ -509,7 +509,7 @@ function analysisForId(id) {
 }
 
 function analysisForQuestion(question) {
-  return analysisForId(question?.analysis_id) || activeTaskAnalysis.value
+  return analysisForId(question?.analysis_id) || question?.analysis || activeTaskAnalysis.value
 }
 
 /* ── animation helpers ──────────────────────────────────── */

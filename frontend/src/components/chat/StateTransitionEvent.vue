@@ -16,10 +16,13 @@ const STATES = {
   preparing_investigation:  { label: 'Prep',       icon: '\u25C6', color: '#8b5cf6' },
   investigating:            { label: 'Investigate',icon: '\u25C8', color: '#3b82f6' },
   designing:                { label: 'Design',     icon: '\u2B21', color: '#10b981' },
-  asking_user:              { label: 'Ask',        icon: '?', color: '#eab308' },
+  waiting_for_user:         { label: 'Wait',       icon: '?', color: '#eab308' },
   patch_planning:           { label: 'Plan',       icon: '\u25EB', color: '#f97316' },
   implementing:             { label: 'Implement',  icon: '\u2B22', color: '#06b6d4' },
+  validating:               { label: 'Validate',   icon: '\u25CE', color: '#14b8a6' },
   saving_session:           { label: 'Save',       icon: '\u2713', color: '#6366f1' },
+  completed:                { label: 'Done',       icon: '\u2713', color: '#22c55e' },
+  failed:                   { label: 'Failed',     icon: '!', color: '#ef4444' },
 }
 
 const trail = computed(() => {

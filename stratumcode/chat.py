@@ -51,10 +51,13 @@ class ChatState(StrEnum):
     PREPARING_INVESTIGATION = "preparing_investigation"
     INVESTIGATING = "investigating"
     DESIGNING = "designing"
-    ASKING_USER = "asking_user"
+    WAITING_FOR_USER = "waiting_for_user"
     PATCH_PLANNING = "patch_planning"
     IMPLEMENTING = "implementing"
+    VALIDATING = "validating"
     SAVING_SESSION = "saving_session"
+    COMPLETED = "completed"
+    FAILED = "failed"
     DONE = "done"
 
 
@@ -62,13 +65,15 @@ _CHAT_TRANSITIONS = {
     ChatState.INITIALIZING: {ChatState.ANALYZING, ChatState.PREPARING_INVESTIGATION},
     ChatState.ANALYZING: {ChatState.PREPARING_INVESTIGATION},
     ChatState.PREPARING_INVESTIGATION: {ChatState.INVESTIGATING},
-    ChatState.INVESTIGATING: {ChatState.DESIGNING, ChatState.SAVING_SESSION, ChatState.DONE},
-    ChatState.DESIGNING: {ChatState.ASKING_USER, ChatState.PATCH_PLANNING, ChatState.SAVING_SESSION, ChatState.DONE},
-    ChatState.ASKING_USER: {ChatState.SAVING_SESSION, ChatState.DONE},
-    ChatState.PATCH_PLANNING: {ChatState.IMPLEMENTING, ChatState.SAVING_SESSION, ChatState.DONE},
-    ChatState.IMPLEMENTING: {ChatState.SAVING_SESSION, ChatState.DONE},
-    ChatState.SAVING_SESSION: {ChatState.DONE},
+    ChatState.INVESTIGATING: {ChatState.INVESTIGATING, ChatState.DESIGNING, ChatState.WAITING_FOR_USER, ChatState.SAVING_SESSION, ChatState.COMPLETED, ChatState.FAILED},
+    ChatState.DESIGNING: {ChatState.WAITING_FOR_USER, ChatState.PATCH_PLANNING, ChatState.SAVING_SESSION, ChatState.COMPLETED},
+    ChatState.WAITING_FOR_USER: {ChatState.INVESTIGATING, ChatState.DESIGNING, ChatState.PATCH_PLANNING, ChatState.IMPLEMENTING, ChatState.VALIDATING, ChatState.SAVING_SESSION, ChatState.COMPLETED, ChatState.FAILED},
+    ChatState.PATCH_PLANNING: {ChatState.IMPLEMENTING, ChatState.SAVING_SESSION, ChatState.COMPLETED},
+    ChatState.IMPLEMENTING: {ChatState.VALIDATING, ChatState.WAITING_FOR_USER, ChatState.SAVING_SESSION, ChatState.COMPLETED},
+    ChatState.VALIDATING: {ChatState.WAITING_FOR_USER, ChatState.SAVING_SESSION, ChatState.COMPLETED},
+    ChatState.SAVING_SESSION: {ChatState.COMPLETED},
 }
+_TERMINAL_CHAT_STATES = {ChatState.COMPLETED, ChatState.FAILED, ChatState.DONE}
 
 
 @dataclass
@@ -90,6 +95,7 @@ class ChatRun:
     last_investigation: dict | None = None
     design_plan: dict | None = None
     patch_plan: dict | None = None
+    validation_result: dict | None = None
     answered_task: dict | None = None
     transition_events: list[dict] = field(default_factory=list)
 
@@ -728,12 +734,15 @@ def _chat_events(run: ChatRun) -> Iterator[dict]:
         ChatState.PREPARING_INVESTIGATION: _chat_prepare_investigation,
         ChatState.INVESTIGATING: _chat_investigate,
         ChatState.DESIGNING: _chat_design,
-        ChatState.ASKING_USER: _chat_ask_user,
+        ChatState.WAITING_FOR_USER: _chat_waiting_for_user,
         ChatState.PATCH_PLANNING: _chat_plan_patch,
         ChatState.IMPLEMENTING: _chat_implement,
+        ChatState.VALIDATING: _chat_validate,
         ChatState.SAVING_SESSION: _chat_save_session,
     }
-    while run.state != ChatState.DONE:
+    while run.state not in _TERMINAL_CHAT_STATES:
+        if run.state == ChatState.WAITING_FOR_USER and not run.answer:
+            break
         events = handlers[run.state](run)
         if events is not None:
             yield from events
@@ -813,6 +822,7 @@ def _chat_prepare_investigation(run: ChatRun) -> Iterator[dict]:
 def _chat_investigate(run: ChatRun) -> Iterator[dict]:
     session_lines = _session_context_lines(run.selected_session_context)
     last_investigation = None
+    pending_question = None
     for event in investigator.investigation_stream(
         message=run.message,
         analysis=run.analysis,
@@ -830,6 +840,9 @@ def _chat_investigate(run: ChatRun) -> Iterator[dict]:
                 [],
             )
             run.analysis["task_updates"] = event["data"]["items"]
+        if event.get("op") == "start" and event.get("event") == "user_question":
+            pending_question = event
+            continue
         if event.get("op") == "done" and isinstance(event.get("investigation"), dict):
             last_investigation = event["investigation"]
             last_investigation["task_updates"] = _normalize_task_updates(
@@ -844,9 +857,33 @@ def _chat_investigate(run: ChatRun) -> Iterator[dict]:
                 "analysis_id": run.analysis["id"],
                 "items": run.analysis["task_updates"],
             })
+            if pending_question:
+                _prepare_waiting_question(
+                    pending_question["data"],
+                    resume_state=ChatState.INVESTIGATING,
+                    analysis=run.analysis,
+                    investigation=last_investigation,
+                )
+                yield pending_question
+                pending_question = None
         yield event
     run.last_investigation = last_investigation
-    if run.last_investigation and _investigation_allows_patch(run.last_investigation) and _wants_implementation(run.analysis, run.message):
+    if pending_question:
+        _prepare_waiting_question(
+            pending_question["data"],
+            resume_state=ChatState.INVESTIGATING,
+            analysis=run.analysis,
+            investigation=run.last_investigation,
+        )
+        yield pending_question
+    next_step = ((run.last_investigation or {}).get("step_result") or {}).get("next_step")
+    if next_step == "ask_user" or pending_question:
+        run.transition(ChatState.WAITING_FOR_USER, "Investigation needs user input.")
+    elif next_step == "continue_investigation":
+        run.transition(ChatState.INVESTIGATING, "Investigation requested another pass.")
+    elif next_step == "failed":
+        run.transition(ChatState.FAILED, "Investigation failed.")
+    elif run.last_investigation and next_step == "write_code" and _investigation_allows_patch(run.last_investigation) and _wants_implementation(run.analysis, run.message):
         run.transition(ChatState.DESIGNING, "Investigation is ready for implementation planning.")
     else:
         run.transition(_chat_finish_state(run), "Investigation ended without an implementation path.")
@@ -877,14 +914,32 @@ def _chat_design(run: ChatRun) -> Iterator[dict]:
             "design_plan": run.design_plan,
             "investigation": run.last_investigation,
         })
+        _prepare_waiting_question(
+            question,
+            resume_state=ChatState.PATCH_PLANNING,
+            analysis=run.analysis,
+            investigation=run.last_investigation,
+            design_plan=run.design_plan,
+        )
         yield start_event(f"{run.analysis['id']}-design-question", "user_question", question)
-        run.transition(ChatState.ASKING_USER, "Design planning needs user input.")
+        run.transition(ChatState.WAITING_FOR_USER, "Design planning needs user input.")
     else:
         run.transition(ChatState.PATCH_PLANNING, "Design plan has no blocking gaps.")
 
 
-def _chat_ask_user(run: ChatRun) -> None:
-    run.transition(_chat_finish_state(run), "Waiting for user answer.")
+def _chat_waiting_for_user(run: ChatRun) -> None:
+    answer = run.answer or {}
+    resume_state = _answer_resume_state(answer)
+    if answer.get("selected_option_id") == "stop":
+        run.transition(_chat_finish_state(run), "User stopped at checkpoint.")
+        return
+    _restore_waiting_context(run, answer)
+    if answer.get("selected_option_id") == "continue_investigation":
+        run.transition(ChatState.INVESTIGATING, "User requested more investigation.")
+        return
+    if resume_state == ChatState.PATCH_PLANNING:
+        run.design_plan = _design_plan_with_answer(run.design_plan or {}, answer)
+    run.transition(resume_state or _chat_finish_state(run), "User answered; resuming run.")
 
 
 def _chat_plan_patch(run: ChatRun) -> Iterator[dict]:
@@ -911,8 +966,58 @@ def _chat_implement(run: ChatRun) -> Iterator[dict]:
         patch_plan=run.patch_plan,
         workspace_dir=run.workspace_dir,
     ):
+        if event.get("op") == "start" and event.get("event") == "stage" and event.get("data", {}).get("name") == "validation":
+            if run.state == ChatState.IMPLEMENTING:
+                run.transition(ChatState.VALIDATING, "Implementation patching completed; starting validation.")
+                yield from run.pop_transition_events()
+        if event.get("op") == "start" and event.get("event") == "user_question":
+            phase = event.get("data", {}).get("checkpoint_phase")
+            resume = ChatState.VALIDATING if phase == "validation_checkpoint" else ChatState.IMPLEMENTING
+            if resume == ChatState.VALIDATING and run.state == ChatState.IMPLEMENTING:
+                run.transition(ChatState.VALIDATING, "Validation checkpoint reached.")
+                yield from run.pop_transition_events()
+            _prepare_waiting_question(
+                event["data"],
+                resume_state=resume,
+                analysis=run.analysis,
+                investigation=run.last_investigation,
+                design_plan=run.design_plan,
+                patch_plan=run.patch_plan,
+                validation_result=run.validation_result,
+            )
+            run.transition(ChatState.WAITING_FOR_USER, "Implementation needs user input.")
+            yield event
+            return
         yield event
-    run.transition(_chat_finish_state(run), "Implementation stream completed.")
+    if run.state in {ChatState.IMPLEMENTING, ChatState.VALIDATING}:
+        run.transition(_chat_finish_state(run), "Implementation stream completed.")
+
+
+def _chat_validate(run: ChatRun) -> Iterator[dict]:
+    changed_files = [str(path) for path in (run.answer or {}).get("changed_files", [])] if isinstance((run.answer or {}).get("changed_files"), list) else []
+    for event in implementation_runner.resume_validation_stream(
+        message=run.message,
+        analysis=run.analysis,
+        patch_plan=run.patch_plan or {},
+        workspace_dir=run.workspace_dir,
+        changed_files=changed_files,
+    ):
+        if event.get("op") == "start" and event.get("event") == "user_question":
+            _prepare_waiting_question(
+                event["data"],
+                resume_state=ChatState.VALIDATING,
+                analysis=run.analysis,
+                investigation=run.last_investigation,
+                design_plan=run.design_plan,
+                patch_plan=run.patch_plan,
+                validation_result=run.validation_result,
+            )
+            run.transition(ChatState.WAITING_FOR_USER, "Validation needs user input.")
+            yield event
+            return
+        yield event
+    if run.state == ChatState.VALIDATING:
+        run.transition(_chat_finish_state(run), "Validation completed.")
 
 
 def _chat_save_session(run: ChatRun) -> None:
@@ -928,11 +1033,88 @@ def _chat_save_session(run: ChatRun) -> None:
             },
             knowledge=_beliefs_as_knowledge(run.analysis["id"], run.last_investigation.get("beliefs", [])),
         )
-    run.transition(ChatState.DONE, "Session investigation was saved.")
+    run.transition(ChatState.COMPLETED, "Session investigation was saved.")
 
 
 def _chat_finish_state(run: ChatRun) -> ChatState:
-    return ChatState.SAVING_SESSION if run.session_id and run.last_investigation else ChatState.DONE
+    return ChatState.SAVING_SESSION if run.session_id and run.last_investigation else ChatState.COMPLETED
+
+
+def _prepare_waiting_question(
+    question: dict,
+    *,
+    resume_state: ChatState,
+    analysis: dict | None = None,
+    investigation: dict | None = None,
+    design_plan: dict | None = None,
+    patch_plan: dict | None = None,
+    validation_result: dict | None = None,
+) -> dict:
+    checkpoint_id = str(question.get("checkpoint_id") or question.get("id") or f"checkpoint-{uuid4().hex[:8]}")
+    question.update({
+        "checkpoint_id": checkpoint_id,
+        "resume_state": resume_state.value,
+        "question_id": question.get("question_id") or question.get("id") or checkpoint_id,
+        "analysis": analysis or {},
+        "investigation": investigation or {},
+        "design_plan": design_plan or question.get("design_plan") or {},
+        "patch_plan": patch_plan or question.get("patch_plan") or {},
+        "validation_result": validation_result or question.get("validation_result") or {},
+        "answer_status": "waiting",
+    })
+    return question
+
+
+def _answer_resume_state(answer: dict) -> ChatState | None:
+    raw = str(answer.get("resume_state") or "").strip()
+    if not raw:
+        raw = {
+            "design_checkpoint": ChatState.PATCH_PLANNING.value,
+            "implementation_checkpoint": ChatState.IMPLEMENTING.value,
+            "validation_checkpoint": ChatState.VALIDATING.value,
+            "investigation_provider_checkpoint": ChatState.INVESTIGATING.value,
+        }.get(str(answer.get("checkpoint_phase") or ""), "")
+    try:
+        state = ChatState(raw)
+    except ValueError:
+        return None
+    return state if state in _CHAT_TRANSITIONS[ChatState.WAITING_FOR_USER] else None
+
+
+def _restore_waiting_context(run: ChatRun, answer: dict) -> None:
+    if isinstance(answer.get("analysis"), dict):
+        run.analysis = answer["analysis"]
+    if isinstance(answer.get("investigation"), dict):
+        run.last_investigation = answer["investigation"]
+    if isinstance(answer.get("design_plan"), dict):
+        run.design_plan = answer["design_plan"]
+    if isinstance(answer.get("patch_plan"), dict):
+        run.patch_plan = answer["patch_plan"]
+    if isinstance(answer.get("validation_result"), dict):
+        run.validation_result = answer["validation_result"]
+    if run.analysis is None:
+        run.analysis = {}
+    run.analysis = _ensure_task_contract(run.analysis)
+    run.analysis.setdefault("id", str(answer.get("analysis_id") or f"task-{uuid4().hex[:8]}"))
+    run.analysis.setdefault("origin_message", run.message)
+    answer_context = _answer_context(answer)
+    if answer_context:
+        run.context = run.context + answer_context
+    try:
+        state = sessions.get(run.session_id)["state"] if run.session_id else {}
+    except ValueError:
+        state = {}
+    run.session_context = _session_context(state)
+    run.selected_session_context = _select_session_memory(run.message, run.analysis, run.session_context)
+    run.answered_task = _answered_task_update(run.analysis["id"], answer)
+    if run.answered_task:
+        run.analysis["task_updates"] = _normalize_task_updates(
+            run.analysis["id"],
+            run.analysis.get("task_updates", []) + [run.answered_task],
+            run.session_context.get("tasks", []),
+        )
+    run.findings = _prior_findings(run.analysis, answer)
+    run.continuation_context = _continuation_context(answer, run.selected_session_context)
 
 
 def evidence_stream(
@@ -1131,10 +1313,23 @@ def stream(request: dict, workspace_dir: str = ".") -> Iterator[dict]:
     analysis = prior_analysis if answer else None
     if answer and str(answer.get("origin_message") or "").strip():
         message = str(answer["origin_message"]).strip()
-    if answer and answer.get("checkpoint_phase") == "validation_checkpoint":
-        return _resume_validation_checkpoint(message, answer, analysis or {}, workspace_dir)
-    if answer and answer.get("checkpoint_phase") == "design_checkpoint":
-        return _resume_design_checkpoint(message, answer, analysis or {}, workspace_dir)
+    if answer:
+        answer = dict(answer)
+        answer["resume_state"] = str(answer.get("resume_state") or (_answer_resume_state(answer) or "")).strip()
+        if answer.get("resume_state"):
+            if analysis and "analysis" not in answer:
+                answer["analysis"] = analysis
+            return _chat_events(ChatRun(
+                message=message,
+                context=context,
+                workspace_dir=workspace_dir,
+                max_rounds=max_rounds,
+                answer=answer,
+                analysis=analysis,
+                prior_analysis=prior_analysis,
+                session_id=request.get("session_id"),
+                state=ChatState.WAITING_FOR_USER,
+            ))
     return analyzed_stream(
         message,
         context,
@@ -1145,67 +1340,6 @@ def stream(request: dict, workspace_dir: str = ".") -> Iterator[dict]:
         prior_analysis=prior_analysis,
         session_id=request.get("session_id"),
     )
-
-
-def _resume_validation_checkpoint(message: str, answer: dict, analysis: dict, workspace_dir: str) -> Iterator[dict]:
-    if answer.get("selected_option_id") == "stop":
-        return _single_output("Stopped at semantic validation checkpoint.")
-    patch_plan = answer.get("patch_plan") if isinstance(answer.get("patch_plan"), dict) else {}
-    changed_files = [str(path) for path in answer.get("changed_files", [])] if isinstance(answer.get("changed_files"), list) else []
-    return implementation_runner.resume_validation_stream(
-        message=message,
-        analysis=analysis,
-        patch_plan=patch_plan,
-        workspace_dir=workspace_dir,
-        changed_files=changed_files,
-    )
-
-
-def _resume_design_checkpoint(message: str, answer: dict, analysis: dict, workspace_dir: str) -> Iterator[dict]:
-    if answer.get("selected_option_id") == "stop":
-        return _single_output("Stopped at design checkpoint.")
-    if answer.get("selected_option_id") == "continue_investigation":
-        return analyzed_stream(
-            message,
-            [],
-            workspace_dir,
-            answer=answer,
-            analysis=analysis,
-            prior_analysis=analysis,
-        )
-    investigation = answer.get("investigation") if isinstance(answer.get("investigation"), dict) else {}
-    design_plan = answer.get("design_plan") if isinstance(answer.get("design_plan"), dict) else {}
-    design_plan = _design_plan_with_answer(design_plan, answer)
-    return _resume_patch_planning(message, answer, analysis, investigation, design_plan, workspace_dir)
-
-
-def _resume_patch_planning(
-    message: str,
-    answer: dict,
-    analysis: dict,
-    investigation: dict,
-    design_plan: dict,
-    workspace_dir: str,
-) -> Iterator[dict]:
-    patch_plan = None
-    for event in patch_planner.patch_planning_stream(
-        message=message,
-        analysis=analysis,
-        investigation=investigation,
-        design_plan=design_plan,
-        workspace_dir=workspace_dir,
-    ):
-        if event.get("op") == "done" and isinstance(event.get("patch_plan"), dict):
-            patch_plan = event["patch_plan"]
-        yield event
-    if patch_plan:
-        for event in implementation_runner.implementation_stream(
-            message=message,
-            analysis=analysis,
-            patch_plan=patch_plan,
-            workspace_dir=workspace_dir,
-        ):
-            yield event
 
 
 def _design_plan_with_answer(design_plan: dict, answer: dict) -> dict:
@@ -1226,11 +1360,6 @@ def _design_plan_with_answer(design_plan: dict, answer: dict) -> dict:
         })
         plan["design_decisions"] = decisions
     return plan
-
-
-def _single_output(content: str) -> Iterator[dict]:
-    yield start_event(f"output-{uuid4().hex[:8]}", "output", {"content": content, "streaming": False})
-    yield {"op": "done"}
 
 
 def _workspace_snapshot(workspace_dir: str) -> list[str]:
