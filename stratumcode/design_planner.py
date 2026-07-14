@@ -174,12 +174,16 @@ def user_question(gap: dict, *, analysis_id: str, origin_message: str) -> dict:
         },
         "options": [
             {
+                "id": "best_judgment",
                 "label": "Use best engineering judgment",
                 "description": f"Choose the smallest design supported by current facts: {question}",
+                "value": "Use best engineering judgment.",
             },
             {
+                "id": "continue_investigation",
                 "label": "Continue investigation",
                 "description": f"Do not decide yet; look for more project evidence: {question}",
+                "value": "Continue investigation.",
             },
         ],
         "custom_allowed": True,

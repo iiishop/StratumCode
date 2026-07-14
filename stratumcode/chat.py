@@ -51,6 +51,7 @@ class ChatState(StrEnum):
     PREPARING_INVESTIGATION = "preparing_investigation"
     INVESTIGATING = "investigating"
     DESIGNING = "designing"
+    ASKING_USER = "asking_user"
     PATCH_PLANNING = "patch_planning"
     IMPLEMENTING = "implementing"
     SAVING_SESSION = "saving_session"
@@ -62,7 +63,8 @@ _CHAT_TRANSITIONS = {
     ChatState.ANALYZING: {ChatState.PREPARING_INVESTIGATION},
     ChatState.PREPARING_INVESTIGATION: {ChatState.INVESTIGATING},
     ChatState.INVESTIGATING: {ChatState.DESIGNING, ChatState.SAVING_SESSION, ChatState.DONE},
-    ChatState.DESIGNING: {ChatState.PATCH_PLANNING, ChatState.SAVING_SESSION, ChatState.DONE},
+    ChatState.DESIGNING: {ChatState.ASKING_USER, ChatState.PATCH_PLANNING, ChatState.SAVING_SESSION, ChatState.DONE},
+    ChatState.ASKING_USER: {ChatState.SAVING_SESSION, ChatState.DONE},
     ChatState.PATCH_PLANNING: {ChatState.IMPLEMENTING, ChatState.SAVING_SESSION, ChatState.DONE},
     ChatState.IMPLEMENTING: {ChatState.SAVING_SESSION, ChatState.DONE},
     ChatState.SAVING_SESSION: {ChatState.DONE},
@@ -170,7 +172,7 @@ def analyze_task(message: str, context: list[str], workspace_dir: str, session_c
                 },
             )
             best_partial = _partial_task_analysis(last_raw, message, context, last_error) or best_partial
-    analysis = best_partial or _fallback_task_analysis(message, context)
+    analysis = best_partial or _minimal_task_analysis(message, context, last_raw)
     analysis["model"] = model
     analysis["provider"] = provider["name"]
     analysis["analyzer_attempts"] = MAX_ANALYZER_ATTEMPTS
@@ -178,7 +180,7 @@ def analyze_task(message: str, context: list[str], workspace_dir: str, session_c
     analysis["analyzer_error"] = (
         f"task analyzer partial recovery after validation failures: {last_error}"
         if best_partial else
-        f"task analyzer fallback after invalid JSON: {last_error}"
+        f"task analyzer minimal recovery after invalid JSON: {last_error}"
     )
     analysis["suggested_first_tools"] = _suggested_first_tools(analysis)
     analysis["evidence_hypothesis"] = _analysis_hypothesis(message, analysis)
@@ -196,20 +198,82 @@ def _analyzer_retry_context(error: str, raw: str) -> str:
 
 def _json_object(raw: str) -> dict:
     text = (raw or "").strip()
-    if text.startswith("```"):
-        text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text, flags=re.IGNORECASE).strip()
-    if not text.startswith("{"):
-        start = text.find("{")
-        if start == -1:
-            raise ValueError("response is not a JSON object")
-        text = text[start:]
-    try:
-        data, _ = json.JSONDecoder().raw_decode(text)
-    except json.JSONDecodeError as exc:
-        raise ValueError(f"invalid JSON: {exc}") from exc
-    if not isinstance(data, dict):
-        raise ValueError("top-level JSON must be an object")
-    return data
+    candidates = _json_candidates(text)
+    if not candidates:
+        raise ValueError("response is not a JSON object")
+    errors = []
+    for candidate in candidates:
+        for body in (candidate, _repair_jsonish(candidate)):
+            try:
+                data, _ = json.JSONDecoder().raw_decode(body)
+                if not isinstance(data, dict):
+                    raise ValueError("top-level JSON must be an object")
+                return data
+            except (json.JSONDecodeError, ValueError) as exc:
+                errors.append(str(exc))
+    raise ValueError(f"invalid JSON: {errors[-1]}")
+
+
+def _json_candidates(text: str) -> list[str]:
+    text = (text or "").strip()
+    if not text:
+        return []
+    candidates = []
+    candidates.extend(match.group(1).strip() for match in re.finditer(r"```(?:json)?\s*([\s\S]*?)```", text, re.IGNORECASE))
+    candidates.append(text)
+    for index, char in enumerate(text):
+        if char == "{":
+            candidates.append(text[index:])
+    result = []
+    seen = set()
+    for candidate in candidates:
+        candidate = candidate.strip()
+        if candidate and candidate not in seen:
+            seen.add(candidate)
+            result.append(candidate)
+    return result
+
+
+def _repair_jsonish(text: str) -> str:
+    text = re.sub(r",\s*([}\]])", r"\1", text)
+    text = re.sub(r":\s*([,}\]])", r": null\1", text)
+    return text
+
+
+def _minimal_task_analysis(message: str, context: list[str], raw: str = "") -> dict:
+    result = _fallback_task_analysis(message, context)
+    request = " ".join(str(message or "").split()).strip()
+    raw_text = " ".join(str(raw or "").split()).strip()
+    summary = _sentence_from_raw(raw_text) or request[:160] or result["intent"]["summary"]
+    result["intent"] = {
+        "type": "feature" if _message_requests_implementation(request) else result["intent"]["type"],
+        "summary": summary,
+    }
+    result["acceptance_criteria"] = [{"id": "AC1", "text": request[:220] or summary}]
+    result["unknowns"] = [{
+        "id": "U1",
+        "question": _implementation_unknown(request or summary),
+        "blocking": True,
+        "type": "code_fact",
+        "why": "Patch planning needs the exact code path and project convention for this requested behavior.",
+        "resolution_strategy": "investigate_project",
+        "acceptance_criteria_ids": ["AC1"],
+    }]
+    result["recovered_from_minimal_analyzer_output"] = True
+    return result
+
+
+def _sentence_from_raw(text: str) -> str:
+    if not text:
+        return ""
+    text = re.sub(r"[{}\[\]\"']", " ", text)
+    parts = [part.strip(" :-") for part in re.split(r"[。.!?\n\r]+", text) if part.strip(" :-")]
+    return next((part[:160] for part in parts if len(part) >= 8), "")
+
+
+def _implementation_unknown(request: str) -> str:
+    target = request[:120] or "the requested behavior"
+    return f"Which existing code path controls this behavior: {target}?"
 
 
 def _partial_task_analysis(raw: str, message: str, context: list[str], error: str) -> dict | None:
@@ -664,6 +728,7 @@ def _chat_events(run: ChatRun) -> Iterator[dict]:
         ChatState.PREPARING_INVESTIGATION: _chat_prepare_investigation,
         ChatState.INVESTIGATING: _chat_investigate,
         ChatState.DESIGNING: _chat_design,
+        ChatState.ASKING_USER: _chat_ask_user,
         ChatState.PATCH_PLANNING: _chat_plan_patch,
         ChatState.IMPLEMENTING: _chat_implement,
         ChatState.SAVING_SESSION: _chat_save_session,
@@ -802,14 +867,24 @@ def _chat_design(run: ChatRun) -> Iterator[dict]:
         return
     gap = design_planner.blocking_gap(run.design_plan)
     if gap:
-        yield start_event(f"{run.analysis['id']}-design-question", "user_question", design_planner.user_question(
+        question = design_planner.user_question(
             gap,
             analysis_id=run.analysis["id"],
             origin_message=run.message,
-        ))
-        run.transition(_chat_finish_state(run), "Design planning needs user input.")
+        )
+        question.update({
+            "checkpoint_phase": "design_checkpoint",
+            "design_plan": run.design_plan,
+            "investigation": run.last_investigation,
+        })
+        yield start_event(f"{run.analysis['id']}-design-question", "user_question", question)
+        run.transition(ChatState.ASKING_USER, "Design planning needs user input.")
     else:
         run.transition(ChatState.PATCH_PLANNING, "Design plan has no blocking gaps.")
+
+
+def _chat_ask_user(run: ChatRun) -> None:
+    run.transition(_chat_finish_state(run), "Waiting for user answer.")
 
 
 def _chat_plan_patch(run: ChatRun) -> Iterator[dict]:
@@ -1058,6 +1133,8 @@ def stream(request: dict, workspace_dir: str = ".") -> Iterator[dict]:
         message = str(answer["origin_message"]).strip()
     if answer and answer.get("checkpoint_phase") == "validation_checkpoint":
         return _resume_validation_checkpoint(message, answer, analysis or {}, workspace_dir)
+    if answer and answer.get("checkpoint_phase") == "design_checkpoint":
+        return _resume_design_checkpoint(message, answer, analysis or {}, workspace_dir)
     return analyzed_stream(
         message,
         context,
@@ -1082,6 +1159,73 @@ def _resume_validation_checkpoint(message: str, answer: dict, analysis: dict, wo
         workspace_dir=workspace_dir,
         changed_files=changed_files,
     )
+
+
+def _resume_design_checkpoint(message: str, answer: dict, analysis: dict, workspace_dir: str) -> Iterator[dict]:
+    if answer.get("selected_option_id") == "stop":
+        return _single_output("Stopped at design checkpoint.")
+    if answer.get("selected_option_id") == "continue_investigation":
+        return analyzed_stream(
+            message,
+            [],
+            workspace_dir,
+            answer=answer,
+            analysis=analysis,
+            prior_analysis=analysis,
+        )
+    investigation = answer.get("investigation") if isinstance(answer.get("investigation"), dict) else {}
+    design_plan = answer.get("design_plan") if isinstance(answer.get("design_plan"), dict) else {}
+    design_plan = _design_plan_with_answer(design_plan, answer)
+    return _resume_patch_planning(message, answer, analysis, investigation, design_plan, workspace_dir)
+
+
+def _resume_patch_planning(
+    message: str,
+    answer: dict,
+    analysis: dict,
+    investigation: dict,
+    design_plan: dict,
+    workspace_dir: str,
+) -> Iterator[dict]:
+    patch_plan = None
+    for event in patch_planner.patch_planning_stream(
+        message=message,
+        analysis=analysis,
+        investigation=investigation,
+        design_plan=design_plan,
+        workspace_dir=workspace_dir,
+    ):
+        if event.get("op") == "done" and isinstance(event.get("patch_plan"), dict):
+            patch_plan = event["patch_plan"]
+        yield event
+    if patch_plan:
+        for event in implementation_runner.implementation_stream(
+            message=message,
+            analysis=analysis,
+            patch_plan=patch_plan,
+            workspace_dir=workspace_dir,
+        ):
+            yield event
+
+
+def _design_plan_with_answer(design_plan: dict, answer: dict) -> dict:
+    plan = dict(design_plan)
+    gap_id = str(answer.get("unknown_id") or answer.get("question_id") or "design-gap")
+    response = str(answer.get("response") or answer.get("selected_option_label") or "").strip()
+    question = str(answer.get("question") or gap_id).strip()
+    plan["decision_gaps"] = [
+        gap for gap in plan.get("decision_gaps", [])
+        if not isinstance(gap, dict) or str(gap.get("id") or "") != gap_id
+    ]
+    if response:
+        decisions = [item for item in plan.get("design_decisions", []) if isinstance(item, dict)]
+        decisions.append({
+            "id": f"USER-{gap_id}",
+            "decision": response,
+            "because": [f"User answered: {question}"],
+        })
+        plan["design_decisions"] = decisions
+    return plan
 
 
 def _single_output(content: str) -> Iterator[dict]:

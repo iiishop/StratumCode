@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import socket
 import time
 from datetime import datetime, timezone
 from urllib.error import HTTPError, URLError
@@ -50,6 +51,9 @@ def call_model(
             detail = exc.read().decode("utf-8", errors="replace")[:1000]
             if exc.code not in MODEL_RETRY_STATUS_CODES or attempt == attempts - 1:
                 raise ValueError(f"provider request failed ({exc.code}): {detail}") from exc
+        except (TimeoutError, socket.timeout) as exc:
+            if attempt == attempts - 1:
+                raise ValueError("provider request timed out while reading response") from exc
         except URLError as exc:
             detail = str(exc.reason if hasattr(exc, "reason") else exc)
             if attempt == attempts - 1:

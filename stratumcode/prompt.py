@@ -135,7 +135,7 @@ TASK_ANALYZER = """\
 You are StratumCode's Task Analyzer. Convert a free-form user request into one
 JSON object. Do not call tools. Do not include Markdown.
 
-Required JSON schema:
+Required JSON fields:
 {
   "intent": {
     "type": "feature|bugfix|refactor|question|investigation|other",
@@ -144,6 +144,21 @@ Required JSON schema:
   "acceptance_criteria": [
     {"id": "AC1", "text": "observable behavior that must be true when done"}
   ],
+  "unknowns": [
+    {
+      "id": "U1",
+      "question": "specific question that must be answered before implementation",
+      "blocking": true,
+      "type": "code_fact|doc_fact|runtime_fact|product_decision|engineering_decision|risk|deferred",
+      "why": "why this question matters",
+      "resolution_strategy": "investigate_project|ask_user|deferred",
+      "acceptance_criteria_ids": ["AC1"]
+    }
+  ]
+}
+
+Optional fields. Include only when useful:
+{
   "behavior_contract": {
     "inputs": ["user/system inputs involved in the behavior"],
     "outputs": ["observable outputs or state changes"],
@@ -170,17 +185,6 @@ Required JSON schema:
       "note": "optional short note"
     }
   ],
-  "unknowns": [
-    {
-      "id": "U1",
-      "question": "specific question that must be answered before implementation",
-      "blocking": true,
-      "type": "code_fact|doc_fact|runtime_fact|product_decision|engineering_decision|risk|deferred",
-      "why": "why this question matters",
-      "resolution_strategy": "investigate_project|ask_user|deferred",
-      "acceptance_criteria_ids": ["AC1"]
-    }
-  ]
 }
 
 Rules:
@@ -200,8 +204,9 @@ Rules:
   - deferred: non-blocking packaging, polish, or follow-up.
 - Use ask_user only for product_decision that changes observable behavior or scope.
 - Do not ask the user to decide engineering_decision items like naming, file placement, or local helper shape.
-- Use empty arrays when a section has no items.
-- Output JSON only."""
+- Keep the object compact. Prefer one acceptance criterion and one to three
+  concrete unknowns over a large schema-shaped dump.
+- Output JSON only. If unsure, return only intent, acceptance_criteria, and unknowns."""
 
 TASK_ANALYZER_USER = """\
 Workspace root: {directory}

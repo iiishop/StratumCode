@@ -16,6 +16,7 @@ const STATES = {
   preparing_investigation:  { label: 'Prep',       icon: '\u25C6', color: '#8b5cf6' },
   investigating:            { label: 'Investigate',icon: '\u25C8', color: '#3b82f6' },
   designing:                { label: 'Design',     icon: '\u2B21', color: '#10b981' },
+  asking_user:              { label: 'Ask',        icon: '?', color: '#eab308' },
   patch_planning:           { label: 'Plan',       icon: '\u25EB', color: '#f97316' },
   implementing:             { label: 'Implement',  icon: '\u2B22', color: '#06b6d4' },
   saving_session:           { label: 'Save',       icon: '\u2713', color: '#6366f1' },
@@ -135,7 +136,7 @@ onMounted(() => {
   transform: translateY(-50%);
   width: 0%;
   background: linear-gradient(90deg,
-    #94a3b8, #f59e0b, #8b5cf6, #3b82f6, #10b981, #f97316, #06b6d4, #6366f1
+    #94a3b8, #f59e0b, #8b5cf6, #3b82f6, #10b981, #eab308, #f97316, #06b6d4, #6366f1
   );
 }
 

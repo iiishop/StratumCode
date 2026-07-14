@@ -103,7 +103,22 @@ def investigation_stream(
     for round_index in range(max_rounds):
         thinking_id = f"{run_id}-thinking-{round_index}"
         yield start_event(thinking_id, "thinking", {"text": "", "done": False, "open": True})
-        assistant = _call_model(provider, model, messages, tools=tools)
+        try:
+            assistant = _call_model(provider, model, messages, tools=tools)
+        except ValueError as exc:
+            reason = str(exc)
+            yield {"op": "update", "id": thinking_id, "patch": {
+                "text": reason,
+                "done": True,
+                "open": False,
+            }}
+            yield start_event(f"{run_id}-provider-checkpoint", "user_question", _provider_checkpoint_question(
+                reason,
+                origin_message=message,
+                analysis_id=analysis.get("id", ""),
+            ))
+            yield {"op": "update", "id": stage_id, "patch": {"state": "waiting", "phase": "provider_checkpoint"}}
+            return
         if usage := _usage_delta(pricing_rules, assistant.pop("_usage", {})):
             _add_usage(usage_total, usage)
             yield start_event(f"{run_id}-usage-{round_index}", "usage", {
@@ -1461,6 +1476,26 @@ def _step_result(final: dict, *, implementation_intent: bool = True) -> dict:
 
 def _wants_implementation(analysis: dict) -> bool:
     return (analysis.get("intent") or {}).get("type") in {"feature", "bugfix", "refactor"}
+
+
+def _provider_checkpoint_question(reason: str, *, origin_message: str = "", analysis_id: str = "") -> dict:
+    return {
+        "id": f"provider-{uuid4().hex[:8]}",
+        "analysis_id": analysis_id,
+        "question": "Provider request failed during investigation. Continue this run?",
+        "origin_message": origin_message,
+        "reason": reason,
+        "why_it_matters": "The model provider did not return a usable investigation response.",
+        "blocks_next_step": "investigation",
+        "unknown_id": "",
+        "linked_unknown": {},
+        "options": [
+            {"id": "continue", "label": "Continue", "value": "Retry the investigation from this checkpoint."},
+            {"id": "stop", "label": "Stop", "value": "Stop and keep the current state."},
+        ],
+        "custom_allowed": False,
+        "checkpoint_phase": "investigation_provider_checkpoint",
+    }
 
 
 def _user_question(final: dict, step: dict, origin_message: str = "", analysis_id: str = "") -> dict:
