@@ -536,6 +536,23 @@ def _finalize_investigation(
         except Exception:
             pass
 
+    if last_content and _wants_implementation(analysis):
+        return {
+            "summary": last_content,
+            "ready_for_patch_planning": True,
+            "runtime_recovered": True,
+            "beliefs": [],
+            "open_questions": [],
+            "patch_planning_context": [last_content],
+            "task_updates": [{
+                "id": "runtime-finalization",
+                "kind": "unknown",
+                "text": "Investigation finalization used the model's written summary after tool finalization failed.",
+                "status": "known",
+                "reason": last_error or "finish_investigation did not produce a usable result.",
+            }],
+        }
+
     return {
         "summary": last_content or "Investigation step limit reached before a final summary was produced.",
         "ready_for_patch_planning": False,
