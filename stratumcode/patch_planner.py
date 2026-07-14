@@ -4,6 +4,7 @@ import json
 import platform
 import re
 from collections.abc import Iterator
+from itertools import count
 from pathlib import Path
 from uuid import uuid4
 
@@ -18,7 +19,6 @@ from .agent_runtime import (
 )
 
 MAX_OUTPUT_TOKENS = 6144
-MAX_JSON_ATTEMPTS = 2
 
 
 def patch_planning_stream(
@@ -57,7 +57,8 @@ def patch_planning_stream(
     ]
     plan = None
     last_error = None
-    for attempt in range(1, MAX_JSON_ATTEMPTS + 1):
+    attempts = app_settings.get_round_limit("patch_json_attempts")
+    for attempt in _attempt_indexes(attempts):
         assistant = _call_model(provider, model, messages, tools=[], max_tokens=MAX_OUTPUT_TOKENS)
         if usage := _usage_delta(pricing_rules, assistant.pop("_usage", {})):
             _add_usage(usage_total, usage)
@@ -84,11 +85,11 @@ def patch_planning_stream(
         })
         yield {"op": "update", "id": stage_id, "patch": {"state": "error", "phase": "patch_planning_failed"}}
         return
-    for repair_attempt in range(1, MAX_JSON_ATTEMPTS + 1):
+    for repair_attempt in _attempt_indexes(attempts):
         issues = validate_patch_plan(plan, analysis, design_plan, workspace_dir)
         if not issues:
             break
-        if repair_attempt == MAX_JSON_ATTEMPTS:
+        if attempts > 0 and repair_attempt == attempts:
             yield start_event(f"{run_id}-output", "output", {
                 "content": "Patch plan rejected by runtime validator:\n" + "\n".join(f"- {item}" for item in issues),
                 "streaming": False,
@@ -116,6 +117,11 @@ def patch_planning_stream(
     yield start_event(f"{run_id}-plan", "patch_plan", plan)
     yield {"op": "update", "id": stage_id, "patch": {"state": "done", "phase": "patch_planned"}}
     yield {"op": "done", "patch_plan": plan}
+
+
+def _attempt_indexes(limit: int, start: int = 1):
+    limit = int(limit or 0)
+    return count(start) if limit <= 0 else range(start, start + limit)
 
 
 def _system_prompt(language: str) -> str:

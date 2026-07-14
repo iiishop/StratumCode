@@ -6,6 +6,7 @@ import platform
 import re
 from collections.abc import Iterator
 from dataclasses import asdict
+from itertools import count
 from uuid import uuid4
 
 from . import app_settings, model_settings, prompt, providers
@@ -24,8 +25,9 @@ from .agent_runtime import (
 )
 from .tools import registry
 
-MAX_AGENT_ROUNDS = 14
-MAX_EMPTY_TOOL_ROUNDS = 2
+def _round_indexes(limit: int, start: int = 0):
+    limit = int(limit or 0)
+    return count(start) if limit <= 0 else range(start, start + limit)
 
 
 def _execute_tool(name: str, params: dict, workspace_dir: str):
@@ -55,7 +57,7 @@ def evidence_stream(
     discovery_tools = _discovery_tools(hypothesis, context)
     policy = EvidencePolicy(
         discovery_tools=discovery_tools,
-        max_rounds=max_rounds or MAX_AGENT_ROUNDS,
+        max_rounds=app_settings.get_round_limit("evidence_rounds") if max_rounds is None else int(max_rounds or 0),
     )
     run_id = uuid4().hex[:10]
     stage_id = f"{run_id}-stage"
@@ -98,7 +100,8 @@ def evidence_stream(
     empty_tool_rounds = 0
     usage_total = _empty_usage(pricing_rules)
 
-    for round_index in range(policy.max_rounds):
+    empty_tool_limit = app_settings.get_round_limit("evidence_empty_tool_rounds")
+    for round_index in _round_indexes(policy.max_rounds, start=0):
         allowed_tools, _, _ = policy.next_request(run)
         phase_before = policy.phase
         step_result = None
@@ -137,7 +140,7 @@ def evidence_stream(
 
         if not tool_calls:
             empty_tool_rounds += 1
-            if empty_tool_rounds >= MAX_EMPTY_TOOL_ROUNDS:
+            if empty_tool_limit and empty_tool_rounds >= empty_tool_limit:
                 yield start_event(f"{run_id}-safety-empty-{round_index}", "safety_stop", {
                     "reason": "empty_tool_rounds",
                     "message": "Safety net triggered: the agent stopped producing tool calls.",
@@ -226,7 +229,7 @@ def evidence_stream(
                 continue
             break
 
-    if run.state == RunState.GATHERING and len(run.step_results) and run.step_results[-1].next_step == "continue_investigation":
+    if policy.max_rounds > 0 and run.state == RunState.GATHERING and len(run.step_results) and run.step_results[-1].next_step == "continue_investigation":
         yield start_event(f"{run_id}-safety-round-limit", "safety_stop", {
             "reason": "max_rounds",
             "message": "Safety net triggered: the agent still wanted to continue when max_rounds was reached.",

@@ -129,8 +129,14 @@ class _Handler(SimpleHTTPRequestHandler):
             model_settings.delete(body["stage"])
             self._json({"ok": True})
         elif path == "/api/app-settings/save":
-            language = app_settings.save_output_language(body.get("output_language", ""))
-            self._json({"output_language": language})
+            if "output_language" in body:
+                app_settings.save_output_language(body.get("output_language", ""))
+            if "font_scale" in body:
+                app_settings.save_font_scale(body.get("font_scale"))
+            for key in app_settings.ROUND_LIMITS:
+                if key in body:
+                    app_settings.save_round_limit(key, body.get(key))
+            self._json(app_settings.to_json())
         elif path == "/api/workspaces/save":
             workspace_id = workspaces.save(body.get("name", ""), body["path"])
             self._json({"id": workspace_id})

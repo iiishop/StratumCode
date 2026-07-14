@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import Iterator
+from itertools import count
 from uuid import uuid4
 
 from . import app_settings, model_settings, providers
@@ -17,9 +18,6 @@ from .agent_runtime import (
 )
 from .tools import registry
 
-MAX_IMPLEMENTATION_ROUNDS = 6
-MAX_VALIDATION_ROUNDS = 4
-MAX_CONSECUTIVE_TOOL_ERROR_ROUNDS = 3
 IMPLEMENTATION_TOOLS = ("read", "apply_patch", "patch_history", "rollback_patch")
 VALIDATION_TOOLS = ("read", "code_nav")
 
@@ -73,7 +71,8 @@ def implementation_stream(
     changed_files: list[str] = []
     patch_required = bool(patch_plan.get("implementation_steps"))
 
-    for round_index in range(1, MAX_IMPLEMENTATION_ROUNDS + 1):
+    tool_error_limit = app_settings.get_round_limit("implementation_tool_error_rounds")
+    for round_index in _round_indexes(app_settings.get_round_limit("implementation_rounds")):
         assistant = _call_model(provider, model, messages, tools=tools)
         if usage := _usage_delta(pricing_rules, assistant.pop("_usage", {})):
             _add_usage(usage_total, usage)
@@ -119,7 +118,7 @@ def implementation_stream(
                 })
             messages.append({"role": "tool", "tool_call_id": call_id, "content": output})
         consecutive_error_rounds = 0 if round_had_success else consecutive_error_rounds + 1
-        if consecutive_error_rounds >= MAX_CONSECUTIVE_TOOL_ERROR_ROUNDS:
+        if tool_error_limit and consecutive_error_rounds >= tool_error_limit:
             yield start_event(f"{run_id}-tool-error-checkpoint", "user_question", _checkpoint_question(
                 analysis.get("id", ""),
                 message,
@@ -207,8 +206,52 @@ def _implementation_tools() -> list[dict]:
     return _tools_for(IMPLEMENTATION_TOOLS)
 
 
+def _round_indexes(limit: int, start: int = 1):
+    limit = int(limit or 0)
+    return count(start) if limit <= 0 else range(start, start + limit)
+
+
 def _validation_tools() -> list[dict]:
-    return _tools_for(VALIDATION_TOOLS)
+    tools = _tools_for(VALIDATION_TOOLS)
+    tools.append(openai_tool_schema("finish_validation", "Finish semantic validation with a structured verdict.", {
+        "type": "object",
+        "properties": {
+            "verdict": {
+                "type": "string",
+                "enum": ["passed", "local_repair", "redesign", "missing_evidence", "user_decision", "inconclusive", "failed"],
+            },
+            "summary": {"type": "string"},
+            "issues": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "id": {"type": "string"},
+                        "severity": {"type": "string"},
+                        "summary": {"type": "string"},
+                        "file": {"type": "string"},
+                        "line": {"type": "integer"},
+                    },
+                },
+            },
+            "repair_plan": {"type": "object"},
+            "question": {"type": "string"},
+            "options": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "id": {"type": "string"},
+                        "label": {"type": "string"},
+                        "value": {"type": "string"},
+                    },
+                    "required": ["id", "label"],
+                },
+            },
+        },
+        "required": ["verdict", "summary", "issues"],
+    }))
+    return tools
 
 
 def _tools_for(names: tuple[str, ...]) -> list[dict]:
@@ -430,8 +473,8 @@ def _validation_stream(
     ]
     tools = _validation_tools()
     semantic_checked = False
-    final_text = ""
-    for round_index in range(1, MAX_VALIDATION_ROUNDS + 1):
+    validation_result = None
+    for round_index in _round_indexes(app_settings.get_round_limit("validation_rounds")):
         assistant = _call_model(provider, model, messages, tools=tools)
         if usage := _usage_delta(pricing_rules, assistant.pop("_usage", {})):
             _add_usage(usage_total, usage)
@@ -440,18 +483,34 @@ def _validation_stream(
         tool_calls = assistant.get("tool_calls") or []
         messages.append({"role": "assistant", "content": text, "tool_calls": tool_calls})
         if not tool_calls:
-            if not semantic_checked:
-                messages.append({"role": "user", "content": "Call code_nav at least once on a changed identifier before finalizing validation."})
-                continue
-            final_text = text.strip()
-            break
+            messages.append({"role": "user", "content": "Call finish_validation with the required JSON verdict. Do not finish validation in prose."})
+            continue
         for call in tool_calls:
             function = call.get("function") or {}
             name = function.get("name") or ""
             call_id = call.get("id") or f"{run_id}-tool-{round_index}"
             try:
                 arguments = _tool_arguments(function.get("arguments"))
-                output = yield from _run_tool(name, call_id, arguments, workspace_dir)
+                if name == "finish_validation":
+                    validation_result = _finish_validation_arguments(arguments, changed_files)
+                    if not semantic_checked and validation_result["verdict"] == "passed":
+                        output = json.dumps({
+                            "error": "finish_validation verdict passed requires at least one successful code_nav call first.",
+                            "retryable": True,
+                        }, ensure_ascii=False)
+                        validation_result = None
+                    else:
+                        output = json.dumps(validation_result, ensure_ascii=False)
+                    yield start_event(call_id, "tool", {
+                        "name": name,
+                        "description": "Finish semantic validation",
+                        "status": "error" if validation_result is None else "done",
+                        "open": False,
+                        "input": json.dumps(arguments, ensure_ascii=False, indent=2),
+                        "output": output,
+                    })
+                else:
+                    output = yield from _run_tool(name, call_id, arguments, workspace_dir)
                 if name == "code_nav" and _code_nav_validated(output):
                     semantic_checked = True
             except Exception as exc:
@@ -465,6 +524,10 @@ def _validation_stream(
                     "output": output,
                 })
             messages.append({"role": "tool", "tool_call_id": call_id, "content": output})
+            if validation_result is not None:
+                break
+        if validation_result is not None:
+            break
     else:
         yield start_event(f"{run_id}-checkpoint", "user_question", _checkpoint_question(
             analysis.get("id", ""),
@@ -476,48 +539,50 @@ def _validation_stream(
         ))
         yield {"op": "update", "id": stage_id, "patch": {"state": "waiting", "phase": "validation_checkpoint"}}
         return None
-    result = _validation_result_from_text(final_text, changed_files)
     yield start_event(f"{run_id}-output", "output", {
-        "content": result["summary"],
+        "content": validation_result["summary"],
         "streaming": False,
     })
     yield {"op": "update", "id": stage_id, "patch": {"state": "done", "phase": "validation_done"}}
-    return result
+    return validation_result
 
 
-def _validation_result(verdict: str, summary: str, changed_files: list[str], repair_plan: dict | None = None) -> dict:
+def _validation_result(
+    verdict: str,
+    summary: str,
+    changed_files: list[str],
+    repair_plan: dict | None = None,
+    issues: list[dict] | None = None,
+    question: str = "",
+    options: list[dict] | None = None,
+) -> dict:
     return {
         "verdict": verdict,
         "summary": summary,
+        "issues": issues or [],
         "changed_files": sorted(set(changed_files)),
         "repair_plan": repair_plan or {},
+        "question": question,
+        "options": options or [],
     }
 
 
-def _validation_result_from_text(text: str, changed_files: list[str]) -> dict:
-    raw = (text or "").strip()
-    try:
-        data = json.loads(raw)
-    except json.JSONDecodeError:
-        data = {}
-    if isinstance(data, dict) and data.get("verdict"):
-        verdict = str(data.get("verdict") or "inconclusive").strip()
-        summary = str(data.get("summary") or raw or "Semantic validation completed.").strip()
-        repair_plan = data.get("repair_plan") if isinstance(data.get("repair_plan"), dict) else {}
-        return _validation_result(_normalized_validation_verdict(verdict), summary, changed_files, repair_plan)
-
-    lowered = raw.casefold()
-    if any(word in lowered for word in ("fatal", "cannot continue", "unrecoverable")):
-        return _validation_result("failed", raw or "Semantic validation failed.", changed_files)
-    if any(word in lowered for word in ("redesign", "design issue", "wrong approach")):
-        return _validation_result("redesign", raw or "Semantic validation requires redesign.", changed_files)
-    if any(word in lowered for word in ("user decision", "ask user", "needs user")):
-        return _validation_result("user_decision", raw or "Semantic validation needs a user decision.", changed_files)
-    if any(word in lowered for word in ("repair", "regression", "lsp error", "type error", "failed", "failure", "conflict")):
-        return _validation_result("local_repair", raw or "Semantic validation found a repairable issue.", changed_files)
-    if any(word in lowered for word in ("missing evidence", "cannot validate", "could not validate", "inconclusive")):
-        return _validation_result("missing_evidence", raw or "Semantic validation needs more evidence.", changed_files)
-    return _validation_result("passed", raw or "Semantic validation passed.", changed_files)
+def _finish_validation_arguments(arguments: dict, changed_files: list[str]) -> dict:
+    verdict = _normalized_validation_verdict(str(arguments.get("verdict") or ""))
+    summary = str(arguments.get("summary") or "").strip()
+    if not summary:
+        raise ValueError("finish_validation requires summary")
+    issues = arguments.get("issues") if isinstance(arguments.get("issues"), list) else []
+    repair_plan = arguments.get("repair_plan") if isinstance(arguments.get("repair_plan"), dict) else {}
+    question = str(arguments.get("question") or "").strip()
+    options = arguments.get("options") if isinstance(arguments.get("options"), list) else []
+    if verdict == "passed" and issues:
+        raise ValueError("passed verdict cannot include issues")
+    if verdict == "local_repair" and not repair_plan:
+        raise ValueError("local_repair verdict requires repair_plan")
+    if verdict == "user_decision" and not question:
+        raise ValueError("user_decision verdict requires question")
+    return _validation_result(verdict, summary, changed_files, repair_plan, issues, question, options)
 
 
 def _normalized_validation_verdict(value: str) -> str:
@@ -596,8 +661,8 @@ import (import time as t) instead of renaming the requested parameter.
 Call code_nav at least once on a changed identifier before finalizing. If no LSP
 server is available, report that semantic validation could not be completed.
 
-Final response must be JSON:
-{{"verdict":"passed|local_repair|redesign|missing_evidence|user_decision|inconclusive|failed","summary":"...","repair_plan":{{}}}}
+Finish by calling finish_validation:
+{{"verdict":"passed|local_repair|redesign|missing_evidence|user_decision|inconclusive|failed","summary":"...","issues":[],"repair_plan":{{}}}}
 Use local_repair only when a minimal patch can fix the issue, and include a
 repair_plan with implementation_steps. Use passed only when changed behavior
 meets the acceptance criteria.

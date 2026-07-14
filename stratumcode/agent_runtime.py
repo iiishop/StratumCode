@@ -4,9 +4,11 @@ import json
 import socket
 import time
 from datetime import datetime, timezone
+from itertools import count
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
+from . import app_settings
 from .agent.tools import agent_tools
 from .agent.policy import DISCOVERY_TOOLS
 
@@ -40,8 +42,8 @@ def call_model(
         "Authorization": f"Bearer {provider['api_key']}",
         "Content-Type": "application/json",
     }
-    attempts = len(MODEL_RETRY_DELAYS) + 1
-    for attempt in range(attempts):
+    attempts = app_settings.get_round_limit("model_request_attempts")
+    for attempt in _attempt_indexes(attempts, start=0):
         request = Request(url, data=body, headers=headers)
         try:
             with urlopen(request, timeout=90) as response:
@@ -49,22 +51,31 @@ def call_model(
             break
         except HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace")[:1000]
-            if exc.code not in MODEL_RETRY_STATUS_CODES or attempt == attempts - 1:
+            if exc.code not in MODEL_RETRY_STATUS_CODES or _last_attempt(attempt, attempts):
                 raise ValueError(f"provider request failed ({exc.code}): {detail}") from exc
         except (TimeoutError, socket.timeout) as exc:
-            if attempt == attempts - 1:
+            if _last_attempt(attempt, attempts):
                 raise ValueError("provider request timed out while reading response") from exc
         except URLError as exc:
             detail = str(exc.reason if hasattr(exc, "reason") else exc)
-            if attempt == attempts - 1:
+            if _last_attempt(attempt, attempts):
                 raise ValueError(f"provider request failed: {detail}") from exc
-        time.sleep(MODEL_RETRY_DELAYS[attempt])
+        time.sleep(MODEL_RETRY_DELAYS[min(attempt, len(MODEL_RETRY_DELAYS) - 1)])
     choices = data.get("choices") or []
     if not choices or not isinstance(choices[0].get("message"), dict):
         raise ValueError("provider returned no assistant message")
     message = choices[0]["message"]
     message["_usage"] = data.get("usage") or {}
     return message
+
+
+def _attempt_indexes(limit: int, start: int = 0):
+    limit = int(limit or 0)
+    return count(start) if limit <= 0 else range(start, start + limit)
+
+
+def _last_attempt(attempt: int, limit: int) -> bool:
+    return int(limit or 0) > 0 and attempt >= int(limit) - 1
 
 
 def content_text(content) -> str:

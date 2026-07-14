@@ -8,6 +8,7 @@ import time
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from enum import StrEnum
+from itertools import count
 from urllib.request import Request, urlopen
 from uuid import uuid4
 
@@ -21,9 +22,6 @@ from .agent_runtime import (
 )
 from .tools import registry
 
-MAX_AGENT_ROUNDS = hypothesis_verifier.MAX_AGENT_ROUNDS
-MAX_EMPTY_TOOL_ROUNDS = hypothesis_verifier.MAX_EMPTY_TOOL_ROUNDS
-MAX_ANALYZER_ATTEMPTS = 3
 TASK_INTENT_TYPES = {"feature", "bugfix", "refactor", "question", "investigation", "other"}
 TASK_CERTAINTIES = {"certain", "uncertain", "guess"}
 TASK_CLUE_KINDS = {"file", "line", "symbol", "route", "other"}
@@ -63,9 +61,9 @@ class ChatState(StrEnum):
 
 
 _CHAT_TRANSITIONS = {
-    ChatState.INITIALIZING: {ChatState.ANALYZING, ChatState.PREPARING_INVESTIGATION},
-    ChatState.ANALYZING: {ChatState.PREPARING_INVESTIGATION},
-    ChatState.PREPARING_INVESTIGATION: {ChatState.INVESTIGATING},
+    ChatState.INITIALIZING: {ChatState.ANALYZING, ChatState.PREPARING_INVESTIGATION, ChatState.FAILED},
+    ChatState.ANALYZING: {ChatState.PREPARING_INVESTIGATION, ChatState.FAILED},
+    ChatState.PREPARING_INVESTIGATION: {ChatState.INVESTIGATING, ChatState.FAILED},
     ChatState.INVESTIGATING: {ChatState.INVESTIGATING, ChatState.DESIGNING, ChatState.WAITING_FOR_USER, ChatState.SAVING_SESSION, ChatState.COMPLETED, ChatState.FAILED},
     ChatState.DESIGNING: {ChatState.WAITING_FOR_USER, ChatState.PATCH_PLANNING, ChatState.SAVING_SESSION, ChatState.COMPLETED},
     ChatState.WAITING_FOR_USER: {ChatState.INVESTIGATING, ChatState.DESIGNING, ChatState.PATCH_PLANNING, ChatState.IMPLEMENTING, ChatState.VALIDATING, ChatState.REPAIR_PLANNING, ChatState.SAVING_SESSION, ChatState.COMPLETED, ChatState.FAILED},
@@ -73,7 +71,7 @@ _CHAT_TRANSITIONS = {
     ChatState.IMPLEMENTING: {ChatState.VALIDATING, ChatState.WAITING_FOR_USER, ChatState.SAVING_SESSION, ChatState.COMPLETED},
     ChatState.VALIDATING: {ChatState.REPAIR_PLANNING, ChatState.DESIGNING, ChatState.INVESTIGATING, ChatState.WAITING_FOR_USER, ChatState.SAVING_SESSION, ChatState.COMPLETED, ChatState.FAILED},
     ChatState.REPAIR_PLANNING: {ChatState.IMPLEMENTING, ChatState.WAITING_FOR_USER, ChatState.FAILED},
-    ChatState.SAVING_SESSION: {ChatState.COMPLETED},
+    ChatState.SAVING_SESSION: {ChatState.COMPLETED, ChatState.FAILED},
 }
 _TERMINAL_CHAT_STATES = {ChatState.COMPLETED, ChatState.FAILED, ChatState.DONE}
 
@@ -101,6 +99,7 @@ class ChatRun:
     changed_files: list[str] = field(default_factory=list)
     validation_result: dict | None = None
     answered_task: dict | None = None
+    error: str = ""
     transition_events: list[dict] = field(default_factory=list)
 
     def transition(self, next_state: ChatState, reason: str = "") -> None:
@@ -137,7 +136,8 @@ def analyze_task(message: str, context: list[str], workspace_dir: str, session_c
     last_raw = ""
     analyzer_errors = []
     best_partial = None
-    for attempt in range(1, MAX_ANALYZER_ATTEMPTS + 1):
+    attempt_limit = app_settings.get_round_limit("task_analyzer_attempts")
+    for attempt in _attempt_indexes(attempt_limit):
         messages = [
             {"role": "system", "content": prompt.build_task_analyzer(app_settings.get_output_language())},
             {
@@ -185,7 +185,7 @@ def analyze_task(message: str, context: list[str], workspace_dir: str, session_c
     analysis = best_partial or _minimal_task_analysis(message, context, last_raw)
     analysis["model"] = model
     analysis["provider"] = provider["name"]
-    analysis["analyzer_attempts"] = MAX_ANALYZER_ATTEMPTS
+    analysis["analyzer_attempts"] = attempt_limit
     analysis["analyzer_errors"] = analyzer_errors
     analysis["analyzer_error"] = (
         f"task analyzer partial recovery after validation failures: {last_error}"
@@ -204,6 +204,11 @@ def _analyzer_retry_context(error: str, raw: str) -> str:
     if not raw:
         return error
     return f"{error}\nPrevious raw output excerpt:\n{raw[:2000]}"
+
+
+def _attempt_indexes(limit: int, start: int = 1):
+    limit = int(limit or 0)
+    return count(start) if limit <= 0 else range(start, start + limit)
 
 
 def _json_object(raw: str) -> dict:
@@ -746,12 +751,23 @@ def _chat_events(run: ChatRun) -> Iterator[dict]:
         ChatState.SAVING_SESSION: _chat_save_session,
     }
     while run.state not in _TERMINAL_CHAT_STATES:
-        if run.state == ChatState.WAITING_FOR_USER and not run.answer:
+        try:
+            if run.state == ChatState.WAITING_FOR_USER and not run.answer:
+                break
+            events = handlers[run.state](run)
+            if events is not None:
+                yield from events
+            yield from run.pop_transition_events()
+        except Exception as exc:
+            run.error = str(exc)
+            yield start_event(f"error-{uuid4().hex[:8]}", "output", {
+                "content": f"Run failed: {run.error}",
+                "streaming": False,
+            })
+            if run.state not in _TERMINAL_CHAT_STATES and ChatState.FAILED in _CHAT_TRANSITIONS.get(run.state, set()):
+                run.transition(ChatState.FAILED, run.error)
+                yield from run.pop_transition_events()
             break
-        events = handlers[run.state](run)
-        if events is not None:
-            yield from events
-        yield from run.pop_transition_events()
 
 
 def _chat_initialize(run: ChatRun) -> None:
@@ -895,6 +911,7 @@ def _chat_investigate(run: ChatRun) -> Iterator[dict]:
 
 
 def _chat_design(run: ChatRun) -> Iterator[dict]:
+    run.design_plan = None
     for event in design_planner.design_planning_stream(
         message=run.message,
         analysis=run.analysis,
@@ -936,9 +953,11 @@ def _chat_waiting_for_user(run: ChatRun) -> None:
     answer = run.answer or {}
     resume_state = _answer_resume_state(answer)
     if answer.get("selected_option_id") == "stop":
+        run.answer = None
         run.transition(_chat_finish_state(run), "User stopped at checkpoint.")
         return
     _restore_waiting_context(run, answer)
+    run.answer = None
     if answer.get("selected_option_id") == "continue_investigation":
         run.transition(ChatState.INVESTIGATING, "User requested more investigation.")
         return
@@ -1024,16 +1043,21 @@ def _chat_validate(run: ChatRun) -> Iterator[dict]:
             run.validation_result = event["validation_result"]
         yield event
     if run.state == ChatState.VALIDATING:
-        run.transition(_state_after_validation(run), "Validation completed.")
+        next_state = _state_after_validation(run)
+        if next_state == ChatState.WAITING_FOR_USER:
+            yield _validation_user_question(run)
+        elif next_state in {ChatState.DESIGNING, ChatState.INVESTIGATING}:
+            _add_validation_context(run)
+        run.transition(next_state, "Validation completed.")
 
 
 def _chat_plan_repair(run: ChatRun) -> None:
     repair_plan = (run.validation_result or {}).get("repair_plan")
-    if isinstance(repair_plan, dict) and repair_plan.get("implementation_steps"):
+    if _repair_plan_authorized(repair_plan):
         run.patch_plan = repair_plan
         run.transition(ChatState.IMPLEMENTING, "Validation supplied a local repair plan.")
     else:
-        run.transition(ChatState.FAILED, "Validation requested repair but did not supply a repair plan.")
+        run.transition(ChatState.FAILED, "Validation requested repair but did not supply an authorized repair plan.")
 
 
 def _chat_save_session(run: ChatRun) -> None:
@@ -1069,6 +1093,66 @@ def _state_after_validation(run: ChatRun) -> ChatState:
     if verdict == "user_decision":
         return ChatState.WAITING_FOR_USER
     return ChatState.FAILED
+
+
+def _validation_user_question(run: ChatRun) -> dict:
+    result = run.validation_result or {}
+    question = {
+        "id": f"validation-{uuid4().hex[:8]}",
+        "analysis_id": (run.analysis or {}).get("id", ""),
+        "question": result.get("question") or result.get("summary") or "Validation needs your decision.",
+        "origin_message": run.message,
+        "reason": result.get("summary", ""),
+        "why_it_matters": "Validation could not safely choose the next step without user input.",
+        "options": result.get("options") or [],
+        "custom_allowed": True,
+    }
+    _prepare_waiting_question(
+        question,
+        resume_state=ChatState.VALIDATING,
+        analysis=run.analysis,
+        investigation=run.last_investigation,
+        design_plan=run.design_plan,
+        patch_plan=run.patch_plan,
+        implementation_result=run.implementation_result,
+        validation_result=run.validation_result,
+    )
+    return start_event(f"{run.analysis['id']}-validation-question", "user_question", question)
+
+
+def _add_validation_context(run: ChatRun) -> None:
+    result = run.validation_result or {}
+    lines = ["Validation feedback for next pass:", result.get("summary", "")]
+    for issue in result.get("issues", []) if isinstance(result.get("issues"), list) else []:
+        if isinstance(issue, dict):
+            loc = f" ({issue.get('file')}:{issue.get('line')})" if issue.get("file") else ""
+            lines.append(f"- {issue.get('severity', 'issue')}: {issue.get('summary', '')}{loc}")
+    run.continuation_context = run.continuation_context + [line for line in lines if line]
+    run.findings = run.findings + [line for line in lines if line]
+    if isinstance(run.last_investigation, dict):
+        context = run.last_investigation.get("patch_planning_context")
+        if not isinstance(context, list):
+            context = []
+        run.last_investigation["patch_planning_context"] = context + [line for line in lines if line]
+        run.last_investigation["summary"] = " ".join(
+            part for part in [run.last_investigation.get("summary", ""), result.get("summary", "")]
+            if part
+        )
+
+
+def _repair_plan_authorized(plan: object) -> bool:
+    if not isinstance(plan, dict) or not plan.get("implementation_steps"):
+        return False
+    auth = plan.get("execution_authorization")
+    if not isinstance(auth, dict):
+        return False
+    if not auth.get("authorization_id") or not auth.get("plan_hash"):
+        return False
+    allowed = auth.get("allowed_steps")
+    if not isinstance(allowed, dict):
+        return False
+    step_ids = [str(item.get("id") or "") for item in plan.get("implementation_steps", []) if isinstance(item, dict)]
+    return bool(step_ids) and all(step_id in allowed for step_id in step_ids)
 
 
 def _prepare_waiting_question(
@@ -1346,7 +1430,7 @@ def stream(request: dict, workspace_dir: str = ".") -> Iterator[dict]:
         return test_stream(message, context, workspace_dir)
     max_rounds = request.get("max_rounds")
     if max_rounds is not None:
-        max_rounds = min(50, max(1, int(max_rounds)))
+        max_rounds = min(50, max(0, int(max_rounds)))
     answer = request.get("answer") if isinstance(request.get("answer"), dict) else None
     prior_analysis = request.get("analysis") if answer and isinstance(request.get("analysis"), dict) else None
     analysis = prior_analysis if answer else None

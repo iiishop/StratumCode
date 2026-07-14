@@ -129,7 +129,7 @@ HYPOTHESIS_SECTION = """\
 ## Current hypothesis
 {hypothesis}
 
-You have at most {max_rounds} model rounds."""
+{round_limit_text}"""
 
 TASK_ANALYZER = """\
 You are StratumCode's Task Analyzer. Convert a free-form user request into one
@@ -317,7 +317,7 @@ Suggested first tool calls:
 User request:
 {message}
 
-You have at most {max_rounds} model rounds."""
+{round_limit_text}"""
 
 INVESTIGATION_FINALIZE = """\
 Investigation step limit reached. Do not call discovery tools now.
@@ -452,7 +452,7 @@ def build_evidence_context(
             directory=directory,
             context=", ".join(context or []) or "(none)",
         ),
-        HYPOTHESIS_SECTION.format(hypothesis=hypothesis, max_rounds=max_rounds),
+        HYPOTHESIS_SECTION.format(hypothesis=hypothesis, round_limit_text=_round_limit_text(max_rounds)),
     ))
 
 
@@ -508,9 +508,17 @@ def build_investigation_context(
                 for item in analysis.get("suggested_first_tools", [])
             ) or "- (none)",
             message=message,
-            max_rounds=max_rounds,
+            round_limit_text=_round_limit_text(max_rounds),
         ),
     ))
+
+
+def _round_limit_text(max_rounds: int) -> str:
+    return (
+        "No model round limit is configured."
+        if int(max_rounds or 0) <= 0
+        else f"You have at most {max_rounds} model rounds."
+    )
 
 
 def _format_scope(scope: dict) -> str:

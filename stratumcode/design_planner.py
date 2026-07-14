@@ -4,6 +4,7 @@ import json
 import platform
 import re
 from collections.abc import Iterator
+from itertools import count
 from uuid import uuid4
 
 from . import app_settings, model_settings, providers
@@ -17,7 +18,6 @@ from .agent_runtime import (
 )
 
 MAX_OUTPUT_TOKENS = 6144
-MAX_JSON_ATTEMPTS = 2
 
 
 def design_planning_stream(
@@ -55,7 +55,7 @@ def design_planning_stream(
     ]
     plan = None
     last_error = None
-    for attempt in range(1, MAX_JSON_ATTEMPTS + 1):
+    for attempt in _attempt_indexes(app_settings.get_round_limit("design_json_attempts")):
         assistant = _call_model(provider, model, messages, tools=[], max_tokens=MAX_OUTPUT_TOKENS)
         if usage := _usage_delta(pricing_rules, assistant.pop("_usage", {})):
             _add_usage(usage_total, usage)
@@ -96,6 +96,11 @@ def design_planning_stream(
 
 def blocking_gap(plan: dict) -> dict | None:
     return next((gap for gap in plan.get("decision_gaps", []) if gap.get("blocks_implementation")), None)
+
+
+def _attempt_indexes(limit: int, start: int = 1):
+    limit = int(limit or 0)
+    return count(start) if limit <= 0 else range(start, start + limit)
 
 
 def validate_design_plan(plan: dict, analysis: dict, investigation: dict) -> list[str]:

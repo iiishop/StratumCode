@@ -5,6 +5,7 @@ import json
 import platform
 import re
 from collections.abc import Iterator
+from itertools import count
 from uuid import uuid4
 
 from . import app_settings, model_settings, prompt, providers
@@ -22,8 +23,6 @@ from .agent_runtime import (
 )
 from .tools import registry
 
-MAX_INVESTIGATION_ROUNDS = 10
-MAX_FINALIZATION_ATTEMPTS = 3
 FINALIZATION_OUTPUT_TOKENS = 4096
 INVESTIGATION_TOOLS = ("glob", "grep", "read", "code_nav", "websearch", "webfetch", "subagent")
 FINDING_FIELDS = (
@@ -60,7 +59,7 @@ def investigation_stream(
     model = setting["model_id"]
     pricing_rules = providers.get_model_pricing(provider["id"], model)
     usage_total = _empty_usage(pricing_rules)
-    max_rounds = max_rounds or MAX_INVESTIGATION_ROUNDS
+    max_rounds = app_settings.get_round_limit("investigation_rounds") if max_rounds is None else int(max_rounds or 0)
     run_id = uuid4().hex[:10]
     stage_id = f"{run_id}-stage"
     yield start_event(stage_id, "stage", {
@@ -100,7 +99,7 @@ def investigation_stream(
     observations = []
     recorded_findings = _empty_recorded_findings()
 
-    for round_index in range(max_rounds):
+    for round_index in _round_indexes(max_rounds, start=0):
         thinking_id = f"{run_id}-thinking-{round_index}"
         yield start_event(thinking_id, "thinking", {"text": "", "done": False, "open": True})
         try:
@@ -252,6 +251,11 @@ def _investigation_tools() -> list[dict]:
     tools.append(_record_findings_tool_schema())
     tools.append(_finish_tool_schema())
     return tools
+
+
+def _round_indexes(limit: int, start: int = 0):
+    limit = int(limit or 0)
+    return count(start) if limit <= 0 else range(start, start + limit)
 
 
 def _investigation_tool_schema(name: str, description: str, parameters: dict) -> dict:
@@ -436,7 +440,8 @@ def _finalize_investigation(
     last_content = ""
     last_arguments: dict | None = None
 
-    for attempt in range(MAX_FINALIZATION_ATTEMPTS):
+    attempts = app_settings.get_round_limit("investigation_finalization_attempts")
+    for attempt in _round_indexes(attempts, start=0):
         thinking_id = f"{run_id}-thinking-final-{attempt}"
         yield start_event(thinking_id, "thinking", {
             "text": "Investigation step limit reached. Summarizing observed facts.",
@@ -530,7 +535,7 @@ def _finalize_investigation(
         else:
             last_error = "Investigation step limit reached before finish_investigation was called."
 
-        if attempt < MAX_FINALIZATION_ATTEMPTS - 1:
+        if attempts <= 0 or attempt < attempts - 1:
             messages.append({
                 "role": "user",
                 "content": (

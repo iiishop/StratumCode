@@ -66,7 +66,7 @@ const cardRefs = reactive({})
 const dotRefs = reactive({})
 const listRefs = reactive({})
 const toastRefs = reactive({})
-const appSettings = ref({ output_language: 'zh', languages: [], font_scale: 1.0 })
+const appSettings = ref({ output_language: 'zh', languages: [], font_scale: 1.0, round_limits: [] })
 const settingsSaving = ref(false)
 const fontScale = computed(() => appSettings.value.font_scale || 1)
 
@@ -206,7 +206,8 @@ async function saveSetting(field, value) {
   appSettings.value = { ...appSettings.value, [field]: value }
   settingsSaving.value = true
   try {
-    await api('/app-settings/save', { [field]: value })
+    const saved = await api('/app-settings/save', { [field]: value })
+    appSettings.value = { ...appSettings.value, ...saved }
   } finally {
     settingsSaving.value = false
   }

@@ -5,6 +5,7 @@ import json
 import platform
 import re
 from collections.abc import Iterator
+from itertools import count
 from uuid import uuid4
 
 from . import app_settings, hypothesis_verifier, mcp, model_settings, prompt, providers
@@ -23,10 +24,6 @@ from .agent_runtime import (
 from .subagent_catalog import normalize_agent_name
 from .tools import registry
 from .tools.spec import ToolResult
-
-
-MAX_INSTALLER_ROUNDS = 8
-
 
 def run_stream(agent: str, task: str, workspace_dir: str = ".") -> Iterator[dict]:
     name = normalize_agent_name(agent)
@@ -154,6 +151,11 @@ def _task_payload(task: str) -> dict:
     return payload if isinstance(payload, dict) else {"task": text}
 
 
+def _round_indexes(limit: int, start: int = 0):
+    limit = int(limit or 0)
+    return count(start) if limit <= 0 else range(start, start + limit)
+
+
 def _installer_setting() -> dict | None:
     return (
         model_settings.resolve(model_settings.DEFAULT_STAGE)
@@ -177,7 +179,7 @@ def _react_install(
         {"role": "user", "content": _installer_user_prompt(hint, workspace_dir)},
     ]
 
-    for round_index in range(MAX_INSTALLER_ROUNDS):
+    for round_index in _round_indexes(app_settings.get_round_limit("installer_rounds"), start=0):
         thinking_id = f"{run_id}-thinking-{round_index}"
         yield start_event(thinking_id, "thinking", {
             "text": "",
