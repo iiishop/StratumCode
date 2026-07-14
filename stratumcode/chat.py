@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import time
@@ -41,6 +42,7 @@ TASK_UNKNOWN_TYPE_ALIASES = {
 }
 TASK_UNKNOWN_STRATEGIES = {"investigate_project", "ask_user", "deferred"}
 IMPLEMENTATION_INTENT_TYPES = {"feature", "bugfix", "refactor"}
+LOGGER = logging.getLogger(__name__)
 
 
 class ChatState(StrEnum):
@@ -87,11 +89,24 @@ class ChatRun:
     design_plan: dict | None = None
     patch_plan: dict | None = None
     answered_task: dict | None = None
+    transition_events: list[dict] = field(default_factory=list)
 
-    def transition(self, next_state: ChatState) -> None:
+    def transition(self, next_state: ChatState, reason: str = "") -> None:
         if next_state not in _CHAT_TRANSITIONS.get(self.state, set()):
             raise ValueError(f"invalid chat state transition: {self.state} -> {next_state}")
+        previous = self.state
         self.state = next_state
+        if next_state != ChatState.DONE:
+            self.transition_events.append(start_event(f"state-{uuid4().hex[:8]}", "state_transition", {
+                "from_state": previous.value,
+                "to_state": next_state.value,
+                "reason": reason.strip(),
+            }))
+
+    def pop_transition_events(self) -> list[dict]:
+        events = self.transition_events
+        self.transition_events = []
+        return events
 
 
 def analyze_task(message: str, context: list[str], workspace_dir: str, session_context: dict | None = None) -> dict:
@@ -107,8 +122,10 @@ def analyze_task(message: str, context: list[str], workspace_dir: str, session_c
     provider = setting["provider"]
     model = setting["model_id"]
     last_error = ""
+    last_raw = ""
+    analyzer_errors = []
     best_partial = None
-    for _ in range(MAX_ANALYZER_ATTEMPTS):
+    for attempt in range(1, MAX_ANALYZER_ATTEMPTS + 1):
         messages = [
             {"role": "system", "content": prompt.build_task_analyzer(app_settings.get_output_language())},
             {
@@ -117,7 +134,7 @@ def analyze_task(message: str, context: list[str], workspace_dir: str, session_c
                     message=message,
                     directory=workspace_dir,
                     context=context + _session_context_lines(session_context),
-                    error=last_error,
+                    error=_analyzer_retry_context(last_error, last_raw),
                 ),
             },
         ]
@@ -127,29 +144,54 @@ def analyze_task(message: str, context: list[str], workspace_dir: str, session_c
             messages,
             tools=[],
         )
+        last_raw = _content_text(assistant.get("content"))
         try:
             if assistant.get("tool_calls"):
                 raise ValueError("tool calls are not allowed")
-            analysis = _validate_task_analysis(_json_object(_content_text(assistant.get("content"))))
+            analysis = _validate_task_analysis(_json_object(last_raw))
             analysis["model"] = model
             analysis["provider"] = provider["name"]
+            analysis["analyzer_attempts"] = attempt
+            if analyzer_errors:
+                analysis["analyzer_errors"] = analyzer_errors
             analysis["suggested_first_tools"] = _suggested_first_tools(analysis)
             analysis["evidence_hypothesis"] = _analysis_hypothesis(message, analysis)
             return analysis
         except ValueError as exc:
             last_error = str(exc)
-            best_partial = _partial_task_analysis(_content_text(assistant.get("content")), message, context, last_error) or best_partial
+            analyzer_errors.append(last_error)
+            LOGGER.warning(
+                "task analyzer attempt failed",
+                extra={
+                    "attempt": attempt,
+                    "error": last_error,
+                    "finish_reason": assistant.get("finish_reason"),
+                    "raw_excerpt": last_raw[:4000],
+                },
+            )
+            best_partial = _partial_task_analysis(last_raw, message, context, last_error) or best_partial
     analysis = best_partial or _fallback_task_analysis(message, context)
     analysis["model"] = model
     analysis["provider"] = provider["name"]
+    analysis["analyzer_attempts"] = MAX_ANALYZER_ATTEMPTS
+    analysis["analyzer_errors"] = analyzer_errors
     analysis["analyzer_error"] = (
-        f"task analyzer partial recovery after invalid JSON: {last_error}"
+        f"task analyzer partial recovery after validation failures: {last_error}"
         if best_partial else
         f"task analyzer fallback after invalid JSON: {last_error}"
     )
     analysis["suggested_first_tools"] = _suggested_first_tools(analysis)
     analysis["evidence_hypothesis"] = _analysis_hypothesis(message, analysis)
     return analysis
+
+
+def _analyzer_retry_context(error: str, raw: str) -> str:
+    if not error:
+        return ""
+    raw = (raw or "").strip()
+    if not raw:
+        return error
+    return f"{error}\nPrevious raw output excerpt:\n{raw[:2000]}"
 
 
 def _json_object(raw: str) -> dict:
@@ -242,7 +284,7 @@ def _fallback_task_analysis(message: str, context: list[str]) -> dict:
     intent_type = "question"
     if any(word in lowered for word in ("修复", "fix", "bug", "报错", "错误")):
         intent_type = "bugfix"
-    elif any(word in lowered for word in ("实现", "添加", "增加", "修改", "支持", "create", "add", "implement", "change")):
+    elif _message_requests_implementation(text):
         intent_type = "feature"
     clues = []
     for index, item in enumerate(context or [], start=1):
@@ -290,16 +332,25 @@ def _validate_task_analysis(data: dict) -> dict:
     if not summary:
         raise ValueError("intent.summary is required")
 
-    return {
+    acceptance = _optional_field(lambda: _acceptance_criteria(data.get("acceptance_criteria")), [])
+    result = {
         "intent": {"type": intent_type, "summary": summary},
-        "acceptance_criteria": _acceptance_criteria(data.get("acceptance_criteria")),
-        "behavior_contract": _behavior_contract(data.get("behavior_contract")),
-        "constraints": _string_list(data.get("constraints"), "constraints"),
-        "scope": _scope(data.get("scope")),
-        "hypotheses": _hypotheses(data.get("hypotheses")),
-        "clues": _clues(data.get("clues")),
-        "unknowns": _limited_unknowns(data.get("unknowns"), data.get("acceptance_criteria")),
+        "acceptance_criteria": acceptance,
+        "behavior_contract": _optional_field(lambda: _behavior_contract(data.get("behavior_contract")), {}),
+        "constraints": _optional_field(lambda: _string_list(data.get("constraints"), "constraints"), []),
+        "scope": _optional_field(lambda: _scope(data.get("scope")), {}),
+        "hypotheses": _optional_field(lambda: _hypotheses(data.get("hypotheses")), []),
+        "clues": _optional_field(lambda: _clues(data.get("clues")), []),
+        "unknowns": _limited_unknowns(data.get("unknowns"), acceptance),
     }
+    return _ensure_task_contract(result)
+
+
+def _optional_field(parser, fallback):
+    try:
+        return parser()
+    except ValueError:
+        return fallback
 
 
 def _acceptance_criteria(value) -> list[dict]:
@@ -621,6 +672,7 @@ def _chat_events(run: ChatRun) -> Iterator[dict]:
         events = handlers[run.state](run)
         if events is not None:
             yield from events
+        yield from run.pop_transition_events()
 
 
 def _chat_initialize(run: ChatRun) -> None:
@@ -636,7 +688,10 @@ def _chat_initialize(run: ChatRun) -> None:
     answer_context = _answer_context(run.answer)
     if answer_context:
         run.context = run.context + answer_context
-    run.transition(ChatState.ANALYZING if run.analysis is None else ChatState.PREPARING_INVESTIGATION)
+    if run.analysis is None:
+        run.transition(ChatState.ANALYZING, "No prior analysis was supplied.")
+    else:
+        run.transition(ChatState.PREPARING_INVESTIGATION, "A prior analysis was supplied with the answer.")
 
 
 def _chat_analyze(run: ChatRun) -> Iterator[dict]:
@@ -665,7 +720,7 @@ def _chat_analyze(run: ChatRun) -> Iterator[dict]:
         "state": "done",
         "phase": "analyzed",
     }}
-    run.transition(ChatState.PREPARING_INVESTIGATION)
+    run.transition(ChatState.PREPARING_INVESTIGATION, "Task analysis completed.")
 
 
 def _chat_prepare_investigation(run: ChatRun) -> Iterator[dict]:
@@ -687,7 +742,7 @@ def _chat_prepare_investigation(run: ChatRun) -> Iterator[dict]:
         yield start_event(f"task-analysis-{uuid4().hex[:8]}", "task_analysis", run.analysis)
     run.findings = _prior_findings(run.prior_analysis, run.answer)
     run.continuation_context = _continuation_context(run.answer, run.selected_session_context)
-    run.transition(ChatState.INVESTIGATING)
+    run.transition(ChatState.INVESTIGATING, "Task contract and continuation context are ready.")
 
 
 def _chat_investigate(run: ChatRun) -> Iterator[dict]:
@@ -726,10 +781,10 @@ def _chat_investigate(run: ChatRun) -> Iterator[dict]:
             })
         yield event
     run.last_investigation = last_investigation
-    if run.last_investigation and _investigation_allows_patch(run.last_investigation) and _wants_implementation(run.analysis):
-        run.transition(ChatState.DESIGNING)
+    if run.last_investigation and _investigation_allows_patch(run.last_investigation) and _wants_implementation(run.analysis, run.message):
+        run.transition(ChatState.DESIGNING, "Investigation is ready for implementation planning.")
     else:
-        run.transition(_chat_finish_state(run))
+        run.transition(_chat_finish_state(run), "Investigation ended without an implementation path.")
 
 
 def _chat_design(run: ChatRun) -> Iterator[dict]:
@@ -743,7 +798,7 @@ def _chat_design(run: ChatRun) -> Iterator[dict]:
             run.design_plan = event["design_plan"]
         yield event
     if not run.design_plan:
-        run.transition(_chat_finish_state(run))
+        run.transition(_chat_finish_state(run), "Design planning finished without a plan.")
         return
     gap = design_planner.blocking_gap(run.design_plan)
     if gap:
@@ -752,9 +807,9 @@ def _chat_design(run: ChatRun) -> Iterator[dict]:
             analysis_id=run.analysis["id"],
             origin_message=run.message,
         ))
-        run.transition(_chat_finish_state(run))
+        run.transition(_chat_finish_state(run), "Design planning needs user input.")
     else:
-        run.transition(ChatState.PATCH_PLANNING)
+        run.transition(ChatState.PATCH_PLANNING, "Design plan has no blocking gaps.")
 
 
 def _chat_plan_patch(run: ChatRun) -> Iterator[dict]:
@@ -768,7 +823,10 @@ def _chat_plan_patch(run: ChatRun) -> Iterator[dict]:
         if event.get("op") == "done" and isinstance(event.get("patch_plan"), dict):
             run.patch_plan = event["patch_plan"]
         yield event
-    run.transition(ChatState.IMPLEMENTING if run.patch_plan else _chat_finish_state(run))
+    if run.patch_plan:
+        run.transition(ChatState.IMPLEMENTING, "Patch plan is ready.")
+    else:
+        run.transition(_chat_finish_state(run), "Patch planning finished without a patch plan.")
 
 
 def _chat_implement(run: ChatRun) -> Iterator[dict]:
@@ -779,7 +837,7 @@ def _chat_implement(run: ChatRun) -> Iterator[dict]:
         workspace_dir=run.workspace_dir,
     ):
         yield event
-    run.transition(_chat_finish_state(run))
+    run.transition(_chat_finish_state(run), "Implementation stream completed.")
 
 
 def _chat_save_session(run: ChatRun) -> None:
@@ -795,7 +853,7 @@ def _chat_save_session(run: ChatRun) -> None:
             },
             knowledge=_beliefs_as_knowledge(run.analysis["id"], run.last_investigation.get("beliefs", [])),
         )
-    run.transition(ChatState.DONE)
+    run.transition(ChatState.DONE, "Session investigation was saved.")
 
 
 def _chat_finish_state(run: ChatRun) -> ChatState:
@@ -821,8 +879,19 @@ def evidence_stream(
         hypothesis_verifier._call_model = original_call_model
 
 
-def _wants_implementation(analysis: dict) -> bool:
-    return (analysis.get("intent") or {}).get("type") in IMPLEMENTATION_INTENT_TYPES
+def _wants_implementation(analysis: dict, message: str = "") -> bool:
+    return (
+        (analysis.get("intent") or {}).get("type") in IMPLEMENTATION_INTENT_TYPES
+        or _message_requests_implementation(message)
+    )
+
+
+def _message_requests_implementation(message: str) -> bool:
+    lowered = " ".join(str(message or "").split()).casefold()
+    return any(word in lowered for word in (
+        "实现", "添加", "增加", "修改", "支持", "调整", "改成", "变成", "加上", "让", "不要",
+        "create", "add", "implement", "change", "update", "adjust", "make", "set", "do not", "don't",
+    ))
 
 
 def _investigation_allows_patch(investigation: dict) -> bool:

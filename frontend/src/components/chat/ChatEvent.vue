@@ -12,6 +12,7 @@ import DesignPlanEvent from './DesignPlanEvent.vue'
 import PatchPlanEvent from './PatchPlanEvent.vue'
 import PatchEvent from './PatchEvent.vue'
 import StageEvent from './StageEvent.vue'
+import StateTransitionEvent from './StateTransitionEvent.vue'
 import HypothesisEvent from './HypothesisEvent.vue'
 import EvidenceEvent from './EvidenceEvent.vue'
 import EvidenceRelationEvent from './EvidenceRelationEvent.vue'
@@ -42,6 +43,7 @@ const eventComponents = {
   patch_plan: PatchPlanEvent,
   patch: PatchEvent,
   stage: StageEvent,
+  state_transition: StateTransitionEvent,
   hypothesis: HypothesisEvent,
   evidence: EvidenceEvent,
   evidence_relation: EvidenceRelationEvent,
