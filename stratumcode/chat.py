@@ -5,6 +5,8 @@ import os
 import re
 import time
 from collections.abc import Iterator
+from dataclasses import dataclass, field
+from enum import StrEnum
 from urllib.request import Request, urlopen
 from uuid import uuid4
 
@@ -39,6 +41,57 @@ TASK_UNKNOWN_TYPE_ALIASES = {
 }
 TASK_UNKNOWN_STRATEGIES = {"investigate_project", "ask_user", "deferred"}
 IMPLEMENTATION_INTENT_TYPES = {"feature", "bugfix", "refactor"}
+
+
+class ChatState(StrEnum):
+    INITIALIZING = "initializing"
+    ANALYZING = "analyzing"
+    PREPARING_INVESTIGATION = "preparing_investigation"
+    INVESTIGATING = "investigating"
+    DESIGNING = "designing"
+    PATCH_PLANNING = "patch_planning"
+    IMPLEMENTING = "implementing"
+    SAVING_SESSION = "saving_session"
+    DONE = "done"
+
+
+_CHAT_TRANSITIONS = {
+    ChatState.INITIALIZING: {ChatState.ANALYZING, ChatState.PREPARING_INVESTIGATION},
+    ChatState.ANALYZING: {ChatState.PREPARING_INVESTIGATION},
+    ChatState.PREPARING_INVESTIGATION: {ChatState.INVESTIGATING},
+    ChatState.INVESTIGATING: {ChatState.DESIGNING, ChatState.SAVING_SESSION, ChatState.DONE},
+    ChatState.DESIGNING: {ChatState.PATCH_PLANNING, ChatState.SAVING_SESSION, ChatState.DONE},
+    ChatState.PATCH_PLANNING: {ChatState.IMPLEMENTING, ChatState.SAVING_SESSION, ChatState.DONE},
+    ChatState.IMPLEMENTING: {ChatState.SAVING_SESSION, ChatState.DONE},
+    ChatState.SAVING_SESSION: {ChatState.DONE},
+}
+
+
+@dataclass
+class ChatRun:
+    message: str
+    context: list[str]
+    workspace_dir: str
+    max_rounds: int | None = None
+    answer: dict | None = None
+    analysis: dict | None = None
+    prior_analysis: dict | None = None
+    session_id: int | None = None
+    state: ChatState = ChatState.INITIALIZING
+    session_context: dict = field(default_factory=dict)
+    selected_session_context: dict = field(default_factory=dict)
+    analyzer_session_context: dict = field(default_factory=dict)
+    findings: list[str] = field(default_factory=list)
+    continuation_context: list[str] = field(default_factory=list)
+    last_investigation: dict | None = None
+    design_plan: dict | None = None
+    patch_plan: dict | None = None
+    answered_task: dict | None = None
+
+    def transition(self, next_state: ChatState) -> None:
+        if next_state not in _CHAT_TRANSITIONS.get(self.state, set()):
+            raise ValueError(f"invalid chat state transition: {self.state} -> {next_state}")
+        self.state = next_state
 
 
 def analyze_task(message: str, context: list[str], workspace_dir: str, session_context: dict | None = None) -> dict:
@@ -541,142 +594,212 @@ def analyzed_stream(
     prior_analysis: dict | None = None,
     session_id: int | None = None,
 ) -> Iterator[dict]:
-    try:
-        state = sessions.get(session_id)["state"] if session_id else {}
-    except ValueError:
-        state = {}
-    session_context = _session_context(state)
-    analyzer_session_context = _select_session_memory(message, None, session_context)
-    workspace_context = _workspace_snapshot(workspace_dir)
-    if workspace_context:
-        context = workspace_context + context
-    answer_context = _answer_context(answer)
-    if answer_context:
-        context = context + answer_context
-    if analysis is None:
-        analyze_stage = f"task-analysis-{uuid4().hex[:8]}"
-        yield start_event(analyze_stage, "stage", {
-            "name": "task_analysis",
-            "label": "Analyze task requirements",
-            "state": "running",
-            "phase": "analyzing",
-            "model": "",
-            "context_length": 0,
-            "provider": "",
-            "inherited": False,
-        })
-        analysis = analyze_task(message, context, workspace_dir, session_context=analyzer_session_context)
-        analysis.setdefault("model", "")
-        analysis.setdefault("provider", "")
-        yield {"op": "update", "id": analyze_stage, "patch": {
-            "model": analysis.get("model", ""),
-            "provider": analysis.get("provider", ""),
-            "state": "done",
-            "phase": "analyzed",
-        }}
-    analysis = _ensure_task_contract(analysis)
-    if answer:
-        analysis = {**analysis, "suggested_first_tools": []}
-    analysis.setdefault("id", f"task-{uuid4().hex[:8]}")
-    analysis.setdefault("origin_message", message)
-    selected_session_context = _select_session_memory(message, analysis, session_context)
-    _attach_session_relationship(analysis, session_context.get("tasks", []))
-    seeded_tasks = _seed_task_updates(analysis, session_context.get("tasks", []))
-    answered_task = _answered_task_update(analysis["id"], answer)
-    analysis["task_updates"] = _normalize_task_updates(
-        analysis["id"],
-        analysis.get("task_updates", []) + seeded_tasks + ([answered_task] if answered_task else []),
-        session_context.get("tasks", []),
-    )
-    if not answer:
-        yield start_event(f"task-analysis-{uuid4().hex[:8]}", "task_analysis", analysis)
-    findings = _prior_findings(prior_analysis, answer)
-    continuation_context = _continuation_context(answer, selected_session_context)
-    session_lines = _session_context_lines(selected_session_context)
-    last_investigation = None
-    for event in investigator.investigation_stream(
+    yield from _chat_events(ChatRun(
         message=message,
-        analysis=analysis,
-        context=context + session_lines + _analysis_context(analysis) + continuation_context,
+        context=context,
         workspace_dir=workspace_dir,
         max_rounds=max_rounds,
-        findings=findings,
-        previous_observations=selected_session_context.get("observations", []),
-        previous_knowledge=selected_session_context.get("knowledge", []),
+        answer=answer,
+        analysis=analysis,
+        prior_analysis=prior_analysis,
+        session_id=session_id,
+    ))
+
+
+def _chat_events(run: ChatRun) -> Iterator[dict]:
+    handlers = {
+        ChatState.INITIALIZING: _chat_initialize,
+        ChatState.ANALYZING: _chat_analyze,
+        ChatState.PREPARING_INVESTIGATION: _chat_prepare_investigation,
+        ChatState.INVESTIGATING: _chat_investigate,
+        ChatState.DESIGNING: _chat_design,
+        ChatState.PATCH_PLANNING: _chat_plan_patch,
+        ChatState.IMPLEMENTING: _chat_implement,
+        ChatState.SAVING_SESSION: _chat_save_session,
+    }
+    while run.state != ChatState.DONE:
+        events = handlers[run.state](run)
+        if events is not None:
+            yield from events
+
+
+def _chat_initialize(run: ChatRun) -> None:
+    try:
+        state = sessions.get(run.session_id)["state"] if run.session_id else {}
+    except ValueError:
+        state = {}
+    run.session_context = _session_context(state)
+    run.analyzer_session_context = _select_session_memory(run.message, None, run.session_context)
+    workspace_context = _workspace_snapshot(run.workspace_dir)
+    if workspace_context:
+        run.context = workspace_context + run.context
+    answer_context = _answer_context(run.answer)
+    if answer_context:
+        run.context = run.context + answer_context
+    run.transition(ChatState.ANALYZING if run.analysis is None else ChatState.PREPARING_INVESTIGATION)
+
+
+def _chat_analyze(run: ChatRun) -> Iterator[dict]:
+    analyze_stage = f"task-analysis-{uuid4().hex[:8]}"
+    yield start_event(analyze_stage, "stage", {
+        "name": "task_analysis",
+        "label": "Analyze task requirements",
+        "state": "running",
+        "phase": "analyzing",
+        "model": "",
+        "context_length": 0,
+        "provider": "",
+        "inherited": False,
+    })
+    run.analysis = analyze_task(
+        run.message,
+        run.context,
+        run.workspace_dir,
+        session_context=run.analyzer_session_context,
+    )
+    run.analysis.setdefault("model", "")
+    run.analysis.setdefault("provider", "")
+    yield {"op": "update", "id": analyze_stage, "patch": {
+        "model": run.analysis.get("model", ""),
+        "provider": run.analysis.get("provider", ""),
+        "state": "done",
+        "phase": "analyzed",
+    }}
+    run.transition(ChatState.PREPARING_INVESTIGATION)
+
+
+def _chat_prepare_investigation(run: ChatRun) -> Iterator[dict]:
+    run.analysis = _ensure_task_contract(run.analysis or {})
+    if run.answer:
+        run.analysis = {**run.analysis, "suggested_first_tools": []}
+    run.analysis.setdefault("id", f"task-{uuid4().hex[:8]}")
+    run.analysis.setdefault("origin_message", run.message)
+    run.selected_session_context = _select_session_memory(run.message, run.analysis, run.session_context)
+    _attach_session_relationship(run.analysis, run.session_context.get("tasks", []))
+    seeded_tasks = _seed_task_updates(run.analysis, run.session_context.get("tasks", []))
+    run.answered_task = _answered_task_update(run.analysis["id"], run.answer)
+    run.analysis["task_updates"] = _normalize_task_updates(
+        run.analysis["id"],
+        run.analysis.get("task_updates", []) + seeded_tasks + ([run.answered_task] if run.answered_task else []),
+        run.session_context.get("tasks", []),
+    )
+    if not run.answer:
+        yield start_event(f"task-analysis-{uuid4().hex[:8]}", "task_analysis", run.analysis)
+    run.findings = _prior_findings(run.prior_analysis, run.answer)
+    run.continuation_context = _continuation_context(run.answer, run.selected_session_context)
+    run.transition(ChatState.INVESTIGATING)
+
+
+def _chat_investigate(run: ChatRun) -> Iterator[dict]:
+    session_lines = _session_context_lines(run.selected_session_context)
+    last_investigation = None
+    for event in investigator.investigation_stream(
+        message=run.message,
+        analysis=run.analysis,
+        context=run.context + session_lines + _analysis_context(run.analysis) + run.continuation_context,
+        workspace_dir=run.workspace_dir,
+        max_rounds=run.max_rounds,
+        findings=run.findings,
+        previous_observations=run.selected_session_context.get("observations", []),
+        previous_knowledge=run.selected_session_context.get("knowledge", []),
     ):
         if event.get("event") == "task_update":
             event["data"]["items"] = _normalize_task_updates(
-                analysis["id"],
-                analysis.get("task_updates", []) + event["data"].get("items", []) + ([answered_task] if answered_task else []),
+                run.analysis["id"],
+                run.analysis.get("task_updates", []) + event["data"].get("items", []) + ([run.answered_task] if run.answered_task else []),
                 [],
             )
-            analysis["task_updates"] = event["data"]["items"]
+            run.analysis["task_updates"] = event["data"]["items"]
         if event.get("op") == "done" and isinstance(event.get("investigation"), dict):
             last_investigation = event["investigation"]
             last_investigation["task_updates"] = _normalize_task_updates(
-                analysis["id"],
-                analysis.get("task_updates", []) + last_investigation.get("task_updates", []) + ([answered_task] if answered_task else []),
-                session_context.get("tasks", []),
+                run.analysis["id"],
+                run.analysis.get("task_updates", []) + last_investigation.get("task_updates", []) + ([run.answered_task] if run.answered_task else []),
+                run.session_context.get("tasks", []),
             )
             last_investigation["task_updates"] = _finalize_task_statuses(last_investigation["task_updates"], last_investigation)
-            last_investigation["observations"] = _scoped_items(analysis["id"], last_investigation.get("observations", []))
-            analysis["task_updates"] = last_investigation["task_updates"]
-            yield start_event(f"{analysis['id']}-task-final", "task_update", {
-                "analysis_id": analysis["id"],
-                "items": analysis["task_updates"],
+            last_investigation["observations"] = _scoped_items(run.analysis["id"], last_investigation.get("observations", []))
+            run.analysis["task_updates"] = last_investigation["task_updates"]
+            yield start_event(f"{run.analysis['id']}-task-final", "task_update", {
+                "analysis_id": run.analysis["id"],
+                "items": run.analysis["task_updates"],
             })
         yield event
-    if last_investigation and _investigation_allows_patch(last_investigation) and _wants_implementation(analysis):
-        design_plan = None
-        for event in design_planner.design_planning_stream(
-            message=message,
-            analysis=analysis,
-            investigation=last_investigation,
-            workspace_dir=workspace_dir,
-        ):
-            if event.get("op") == "done" and isinstance(event.get("design_plan"), dict):
-                design_plan = event["design_plan"]
-            yield event
-        if design_plan:
-            gap = design_planner.blocking_gap(design_plan)
-            if gap:
-                yield start_event(f"{analysis['id']}-design-question", "user_question", design_planner.user_question(
-                    gap,
-                    analysis_id=analysis["id"],
-                    origin_message=message,
-                ))
-            else:
-                patch_plan = None
-                for event in patch_planner.patch_planning_stream(
-                    message=message,
-                    analysis=analysis,
-                    investigation=last_investigation,
-                    design_plan=design_plan,
-                    workspace_dir=workspace_dir,
-                ):
-                    if event.get("op") == "done" and isinstance(event.get("patch_plan"), dict):
-                        patch_plan = event["patch_plan"]
-                    yield event
-                if patch_plan:
-                    for event in implementation_runner.implementation_stream(
-                        message=message,
-                        analysis=analysis,
-                        patch_plan=patch_plan,
-                        workspace_dir=workspace_dir,
-                    ):
-                        yield event
-    if session_id and last_investigation:
+    run.last_investigation = last_investigation
+    if run.last_investigation and _investigation_allows_patch(run.last_investigation) and _wants_implementation(run.analysis):
+        run.transition(ChatState.DESIGNING)
+    else:
+        run.transition(_chat_finish_state(run))
+
+
+def _chat_design(run: ChatRun) -> Iterator[dict]:
+    for event in design_planner.design_planning_stream(
+        message=run.message,
+        analysis=run.analysis,
+        investigation=run.last_investigation,
+        workspace_dir=run.workspace_dir,
+    ):
+        if event.get("op") == "done" and isinstance(event.get("design_plan"), dict):
+            run.design_plan = event["design_plan"]
+        yield event
+    if not run.design_plan:
+        run.transition(_chat_finish_state(run))
+        return
+    gap = design_planner.blocking_gap(run.design_plan)
+    if gap:
+        yield start_event(f"{run.analysis['id']}-design-question", "user_question", design_planner.user_question(
+            gap,
+            analysis_id=run.analysis["id"],
+            origin_message=run.message,
+        ))
+        run.transition(_chat_finish_state(run))
+    else:
+        run.transition(ChatState.PATCH_PLANNING)
+
+
+def _chat_plan_patch(run: ChatRun) -> Iterator[dict]:
+    for event in patch_planner.patch_planning_stream(
+        message=run.message,
+        analysis=run.analysis,
+        investigation=run.last_investigation,
+        design_plan=run.design_plan,
+        workspace_dir=run.workspace_dir,
+    ):
+        if event.get("op") == "done" and isinstance(event.get("patch_plan"), dict):
+            run.patch_plan = event["patch_plan"]
+        yield event
+    run.transition(ChatState.IMPLEMENTING if run.patch_plan else _chat_finish_state(run))
+
+
+def _chat_implement(run: ChatRun) -> Iterator[dict]:
+    for event in implementation_runner.implementation_stream(
+        message=run.message,
+        analysis=run.analysis,
+        patch_plan=run.patch_plan,
+        workspace_dir=run.workspace_dir,
+    ):
+        yield event
+    run.transition(_chat_finish_state(run))
+
+
+def _chat_save_session(run: ChatRun) -> None:
+    if run.session_id and run.last_investigation:
         sessions.merge_investigation(
-            session_id,
-            last_investigation.get("task_updates", []),
-            last_investigation.get("observations", []),
+            run.session_id,
+            run.last_investigation.get("task_updates", []),
+            run.last_investigation.get("observations", []),
             investigation={
-                "id": analysis["id"],
-                "request": message,
-                "summary": last_investigation.get("summary", ""),
+                "id": run.analysis["id"],
+                "request": run.message,
+                "summary": run.last_investigation.get("summary", ""),
             },
-            knowledge=_beliefs_as_knowledge(analysis["id"], last_investigation.get("beliefs", [])),
+            knowledge=_beliefs_as_knowledge(run.analysis["id"], run.last_investigation.get("beliefs", [])),
         )
+    run.transition(ChatState.DONE)
+
+
+def _chat_finish_state(run: ChatRun) -> ChatState:
+    return ChatState.SAVING_SESSION if run.session_id and run.last_investigation else ChatState.DONE
 
 
 def evidence_stream(
