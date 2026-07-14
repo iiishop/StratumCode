@@ -71,6 +71,7 @@ def implementation_stream(
     consecutive_error_rounds = 0
     patch_applied = False
     changed_files: list[str] = []
+    patch_required = bool(patch_plan.get("implementation_steps"))
 
     for round_index in range(1, MAX_IMPLEMENTATION_ROUNDS + 1):
         assistant = _call_model(provider, model, messages, tools=tools)
@@ -127,15 +128,28 @@ def implementation_stream(
             yield {"op": "update", "id": stage_id, "patch": {"state": "waiting", "phase": "implementation_tool_error_checkpoint"}}
             return
     else:
-        if not patch_applied:
+        if patch_required and not patch_applied:
             yield start_event(f"{run_id}-checkpoint", "user_question", _checkpoint_question(
                 analysis.get("id", ""),
                 message,
                 "Implementation reached its checkpoint before applying a patch.",
+                checkpoint_phase="implementation_checkpoint",
+                patch_plan=patch_plan,
             ))
             yield {"op": "update", "id": stage_id, "patch": {"state": "waiting", "phase": "implementation_checkpoint"}}
             return
         final_text = "Implementation patching reached its checkpoint; continuing with validation."
+
+    if patch_required and not patch_applied:
+        yield start_event(f"{run_id}-checkpoint", "user_question", _checkpoint_question(
+            analysis.get("id", ""),
+            message,
+            "Implementation stopped before applying the authorized patch plan.",
+            checkpoint_phase="implementation_checkpoint",
+            patch_plan=patch_plan,
+        ))
+        yield {"op": "update", "id": stage_id, "patch": {"state": "waiting", "phase": "implementation_checkpoint"}}
+        return
 
     yield start_event(f"{run_id}-output", "output", {
         "content": final_text or "Implementation finished.",
