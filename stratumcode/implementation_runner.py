@@ -156,17 +156,32 @@ def implementation_stream(
         "streaming": False,
     })
     yield {"op": "update", "id": stage_id, "patch": {"state": "done", "phase": "implementation_done"}}
-    if patch_applied:
-        validation_done = yield from _validation_stream(
-            message=message,
-            analysis=analysis,
-            patch_plan=patch_plan,
-            workspace_dir=workspace_dir,
-            changed_files=changed_files,
-        )
-        if validation_done is False:
-            return
-    yield {"op": "done", "implementation": {"summary": final_text, "semantic_checked": patch_applied}}
+    yield {"op": "done", "implementation": {
+        "status": "patch_applied" if patch_applied else "no_patch",
+        "summary": final_text,
+        "patch_applied": patch_applied,
+        "changed_files": sorted(set(changed_files)),
+        "semantic_checked": False,
+    }}
+
+
+def validation_stream(
+    *,
+    message: str,
+    analysis: dict,
+    patch_plan: dict,
+    workspace_dir: str,
+    changed_files: list[str],
+) -> Iterator[dict]:
+    result = yield from _validation_stream(
+        message=message,
+        analysis=analysis,
+        patch_plan=patch_plan,
+        workspace_dir=workspace_dir,
+        changed_files=changed_files,
+    )
+    if result:
+        yield {"op": "done", "validation_result": result}
 
 
 def resume_validation_stream(
@@ -177,15 +192,15 @@ def resume_validation_stream(
     workspace_dir: str,
     changed_files: list[str],
 ) -> Iterator[dict]:
-    done = yield from _validation_stream(
+    result = yield from _validation_stream(
         message=message,
         analysis=analysis,
         patch_plan=patch_plan,
         workspace_dir=workspace_dir,
         changed_files=changed_files,
     )
-    if done:
-        yield {"op": "done", "implementation": {"summary": "Semantic validation resumed.", "semantic_checked": True}}
+    if result:
+        yield {"op": "done", "validation_result": result}
 
 
 def _implementation_tools() -> list[dict]:
@@ -386,7 +401,7 @@ def _validation_stream(
 ) -> Iterator[dict]:
     setting = model_settings.resolve(model_settings.DEFAULT_STAGE)
     if setting is None:
-        return True
+        return _validation_result("inconclusive", "Semantic validation skipped; no model configured.", changed_files)
     provider = setting["provider"]
     model = setting["model_id"]
     pricing_rules = providers.get_model_pricing(provider["id"], model)
@@ -460,13 +475,62 @@ def _validation_stream(
             changed_files=changed_files,
         ))
         yield {"op": "update", "id": stage_id, "patch": {"state": "waiting", "phase": "validation_checkpoint"}}
-        return False
+        return None
+    result = _validation_result_from_text(final_text, changed_files)
     yield start_event(f"{run_id}-output", "output", {
-        "content": final_text or "Semantic validation completed.",
+        "content": result["summary"],
         "streaming": False,
     })
     yield {"op": "update", "id": stage_id, "patch": {"state": "done", "phase": "validation_done"}}
-    return True
+    return result
+
+
+def _validation_result(verdict: str, summary: str, changed_files: list[str], repair_plan: dict | None = None) -> dict:
+    return {
+        "verdict": verdict,
+        "summary": summary,
+        "changed_files": sorted(set(changed_files)),
+        "repair_plan": repair_plan or {},
+    }
+
+
+def _validation_result_from_text(text: str, changed_files: list[str]) -> dict:
+    raw = (text or "").strip()
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        data = {}
+    if isinstance(data, dict) and data.get("verdict"):
+        verdict = str(data.get("verdict") or "inconclusive").strip()
+        summary = str(data.get("summary") or raw or "Semantic validation completed.").strip()
+        repair_plan = data.get("repair_plan") if isinstance(data.get("repair_plan"), dict) else {}
+        return _validation_result(_normalized_validation_verdict(verdict), summary, changed_files, repair_plan)
+
+    lowered = raw.casefold()
+    if any(word in lowered for word in ("fatal", "cannot continue", "unrecoverable")):
+        return _validation_result("failed", raw or "Semantic validation failed.", changed_files)
+    if any(word in lowered for word in ("redesign", "design issue", "wrong approach")):
+        return _validation_result("redesign", raw or "Semantic validation requires redesign.", changed_files)
+    if any(word in lowered for word in ("user decision", "ask user", "needs user")):
+        return _validation_result("user_decision", raw or "Semantic validation needs a user decision.", changed_files)
+    if any(word in lowered for word in ("repair", "regression", "lsp error", "type error", "failed", "failure", "conflict")):
+        return _validation_result("local_repair", raw or "Semantic validation found a repairable issue.", changed_files)
+    if any(word in lowered for word in ("missing evidence", "cannot validate", "could not validate", "inconclusive")):
+        return _validation_result("missing_evidence", raw or "Semantic validation needs more evidence.", changed_files)
+    return _validation_result("passed", raw or "Semantic validation passed.", changed_files)
+
+
+def _normalized_validation_verdict(value: str) -> str:
+    value = value.strip().casefold()
+    return value if value in {
+        "passed",
+        "local_repair",
+        "redesign",
+        "missing_evidence",
+        "user_decision",
+        "inconclusive",
+        "failed",
+    } else "inconclusive"
 
 
 def _checkpoint_question(
@@ -531,4 +595,10 @@ import (import time as t) instead of renaming the requested parameter.
 
 Call code_nav at least once on a changed identifier before finalizing. If no LSP
 server is available, report that semantic validation could not be completed.
+
+Final response must be JSON:
+{{"verdict":"passed|local_repair|redesign|missing_evidence|user_decision|inconclusive|failed","summary":"...","repair_plan":{{}}}}
+Use local_repair only when a minimal patch can fix the issue, and include a
+repair_plan with implementation_steps. Use passed only when changed behavior
+meets the acceptance criteria.
 """

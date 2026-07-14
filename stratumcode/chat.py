@@ -55,6 +55,7 @@ class ChatState(StrEnum):
     PATCH_PLANNING = "patch_planning"
     IMPLEMENTING = "implementing"
     VALIDATING = "validating"
+    REPAIR_PLANNING = "repair_planning"
     SAVING_SESSION = "saving_session"
     COMPLETED = "completed"
     FAILED = "failed"
@@ -67,10 +68,11 @@ _CHAT_TRANSITIONS = {
     ChatState.PREPARING_INVESTIGATION: {ChatState.INVESTIGATING},
     ChatState.INVESTIGATING: {ChatState.INVESTIGATING, ChatState.DESIGNING, ChatState.WAITING_FOR_USER, ChatState.SAVING_SESSION, ChatState.COMPLETED, ChatState.FAILED},
     ChatState.DESIGNING: {ChatState.WAITING_FOR_USER, ChatState.PATCH_PLANNING, ChatState.SAVING_SESSION, ChatState.COMPLETED},
-    ChatState.WAITING_FOR_USER: {ChatState.INVESTIGATING, ChatState.DESIGNING, ChatState.PATCH_PLANNING, ChatState.IMPLEMENTING, ChatState.VALIDATING, ChatState.SAVING_SESSION, ChatState.COMPLETED, ChatState.FAILED},
+    ChatState.WAITING_FOR_USER: {ChatState.INVESTIGATING, ChatState.DESIGNING, ChatState.PATCH_PLANNING, ChatState.IMPLEMENTING, ChatState.VALIDATING, ChatState.REPAIR_PLANNING, ChatState.SAVING_SESSION, ChatState.COMPLETED, ChatState.FAILED},
     ChatState.PATCH_PLANNING: {ChatState.IMPLEMENTING, ChatState.SAVING_SESSION, ChatState.COMPLETED},
     ChatState.IMPLEMENTING: {ChatState.VALIDATING, ChatState.WAITING_FOR_USER, ChatState.SAVING_SESSION, ChatState.COMPLETED},
-    ChatState.VALIDATING: {ChatState.WAITING_FOR_USER, ChatState.SAVING_SESSION, ChatState.COMPLETED},
+    ChatState.VALIDATING: {ChatState.REPAIR_PLANNING, ChatState.DESIGNING, ChatState.INVESTIGATING, ChatState.WAITING_FOR_USER, ChatState.SAVING_SESSION, ChatState.COMPLETED, ChatState.FAILED},
+    ChatState.REPAIR_PLANNING: {ChatState.IMPLEMENTING, ChatState.WAITING_FOR_USER, ChatState.FAILED},
     ChatState.SAVING_SESSION: {ChatState.COMPLETED},
 }
 _TERMINAL_CHAT_STATES = {ChatState.COMPLETED, ChatState.FAILED, ChatState.DONE}
@@ -95,6 +97,8 @@ class ChatRun:
     last_investigation: dict | None = None
     design_plan: dict | None = None
     patch_plan: dict | None = None
+    implementation_result: dict | None = None
+    changed_files: list[str] = field(default_factory=list)
     validation_result: dict | None = None
     answered_task: dict | None = None
     transition_events: list[dict] = field(default_factory=list)
@@ -738,6 +742,7 @@ def _chat_events(run: ChatRun) -> Iterator[dict]:
         ChatState.PATCH_PLANNING: _chat_plan_patch,
         ChatState.IMPLEMENTING: _chat_implement,
         ChatState.VALIDATING: _chat_validate,
+        ChatState.REPAIR_PLANNING: _chat_plan_repair,
         ChatState.SAVING_SESSION: _chat_save_session,
     }
     while run.state not in _TERMINAL_CHAT_STATES:
@@ -966,36 +971,35 @@ def _chat_implement(run: ChatRun) -> Iterator[dict]:
         patch_plan=run.patch_plan,
         workspace_dir=run.workspace_dir,
     ):
-        if event.get("op") == "start" and event.get("event") == "stage" and event.get("data", {}).get("name") == "validation":
-            if run.state == ChatState.IMPLEMENTING:
-                run.transition(ChatState.VALIDATING, "Implementation patching completed; starting validation.")
-                yield from run.pop_transition_events()
         if event.get("op") == "start" and event.get("event") == "user_question":
             phase = event.get("data", {}).get("checkpoint_phase")
-            resume = ChatState.VALIDATING if phase == "validation_checkpoint" else ChatState.IMPLEMENTING
-            if resume == ChatState.VALIDATING and run.state == ChatState.IMPLEMENTING:
-                run.transition(ChatState.VALIDATING, "Validation checkpoint reached.")
-                yield from run.pop_transition_events()
             _prepare_waiting_question(
                 event["data"],
-                resume_state=resume,
+                resume_state=ChatState.IMPLEMENTING,
                 analysis=run.analysis,
                 investigation=run.last_investigation,
                 design_plan=run.design_plan,
                 patch_plan=run.patch_plan,
+                implementation_result=run.implementation_result,
                 validation_result=run.validation_result,
             )
             run.transition(ChatState.WAITING_FOR_USER, "Implementation needs user input.")
             yield event
             return
+        if event.get("op") == "done" and isinstance(event.get("implementation"), dict):
+            run.implementation_result = event["implementation"]
+            run.changed_files = [str(path) for path in run.implementation_result.get("changed_files", [])]
         yield event
-    if run.state in {ChatState.IMPLEMENTING, ChatState.VALIDATING}:
+    if run.state == ChatState.IMPLEMENTING and (run.implementation_result or {}).get("patch_applied"):
+        run.transition(ChatState.VALIDATING, "Implementation patching completed; starting validation.")
+    elif run.state == ChatState.IMPLEMENTING:
         run.transition(_chat_finish_state(run), "Implementation stream completed.")
 
 
 def _chat_validate(run: ChatRun) -> Iterator[dict]:
-    changed_files = [str(path) for path in (run.answer or {}).get("changed_files", [])] if isinstance((run.answer or {}).get("changed_files"), list) else []
-    for event in implementation_runner.resume_validation_stream(
+    changed_files = run.changed_files or ([str(path) for path in (run.answer or {}).get("changed_files", [])] if isinstance((run.answer or {}).get("changed_files"), list) else [])
+    run.validation_result = None
+    for event in implementation_runner.validation_stream(
         message=run.message,
         analysis=run.analysis,
         patch_plan=run.patch_plan or {},
@@ -1010,14 +1014,26 @@ def _chat_validate(run: ChatRun) -> Iterator[dict]:
                 investigation=run.last_investigation,
                 design_plan=run.design_plan,
                 patch_plan=run.patch_plan,
+                implementation_result=run.implementation_result,
                 validation_result=run.validation_result,
             )
             run.transition(ChatState.WAITING_FOR_USER, "Validation needs user input.")
             yield event
             return
+        if event.get("op") == "done" and isinstance(event.get("validation_result"), dict):
+            run.validation_result = event["validation_result"]
         yield event
     if run.state == ChatState.VALIDATING:
-        run.transition(_chat_finish_state(run), "Validation completed.")
+        run.transition(_state_after_validation(run), "Validation completed.")
+
+
+def _chat_plan_repair(run: ChatRun) -> None:
+    repair_plan = (run.validation_result or {}).get("repair_plan")
+    if isinstance(repair_plan, dict) and repair_plan.get("implementation_steps"):
+        run.patch_plan = repair_plan
+        run.transition(ChatState.IMPLEMENTING, "Validation supplied a local repair plan.")
+    else:
+        run.transition(ChatState.FAILED, "Validation requested repair but did not supply a repair plan.")
 
 
 def _chat_save_session(run: ChatRun) -> None:
@@ -1040,6 +1056,21 @@ def _chat_finish_state(run: ChatRun) -> ChatState:
     return ChatState.SAVING_SESSION if run.session_id and run.last_investigation else ChatState.COMPLETED
 
 
+def _state_after_validation(run: ChatRun) -> ChatState:
+    verdict = str((run.validation_result or {}).get("verdict") or "inconclusive")
+    if verdict == "passed":
+        return _chat_finish_state(run)
+    if verdict == "local_repair":
+        return ChatState.REPAIR_PLANNING
+    if verdict == "redesign":
+        return ChatState.DESIGNING
+    if verdict == "missing_evidence":
+        return ChatState.INVESTIGATING
+    if verdict == "user_decision":
+        return ChatState.WAITING_FOR_USER
+    return ChatState.FAILED
+
+
 def _prepare_waiting_question(
     question: dict,
     *,
@@ -1048,6 +1079,7 @@ def _prepare_waiting_question(
     investigation: dict | None = None,
     design_plan: dict | None = None,
     patch_plan: dict | None = None,
+    implementation_result: dict | None = None,
     validation_result: dict | None = None,
 ) -> dict:
     checkpoint_id = str(question.get("checkpoint_id") or question.get("id") or f"checkpoint-{uuid4().hex[:8]}")
@@ -1059,6 +1091,7 @@ def _prepare_waiting_question(
         "investigation": investigation or {},
         "design_plan": design_plan or question.get("design_plan") or {},
         "patch_plan": patch_plan or question.get("patch_plan") or {},
+        "implementation_result": implementation_result or question.get("implementation_result") or {},
         "validation_result": validation_result or question.get("validation_result") or {},
         "answer_status": "waiting",
     })
@@ -1090,8 +1123,14 @@ def _restore_waiting_context(run: ChatRun, answer: dict) -> None:
         run.design_plan = answer["design_plan"]
     if isinstance(answer.get("patch_plan"), dict):
         run.patch_plan = answer["patch_plan"]
+    if isinstance(answer.get("implementation_result"), dict):
+        run.implementation_result = answer["implementation_result"]
     if isinstance(answer.get("validation_result"), dict):
         run.validation_result = answer["validation_result"]
+    if isinstance(answer.get("changed_files"), list):
+        run.changed_files = [str(path) for path in answer["changed_files"]]
+    elif run.implementation_result and isinstance(run.implementation_result.get("changed_files"), list):
+        run.changed_files = [str(path) for path in run.implementation_result["changed_files"]]
     if run.analysis is None:
         run.analysis = {}
     run.analysis = _ensure_task_contract(run.analysis)
