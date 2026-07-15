@@ -59,6 +59,14 @@ const defaultPricingRule = () => ({
   cache_per_m: 0.25,
 })
 const form = ref({ name: '', base_url: '', api_key: '' })
+const providerNotice = ref('')
+const codexOAuth = reactive({
+  loading: false,
+  deviceAuthId: '',
+  userCode: '',
+  verificationUri: '',
+  message: '',
+})
 const expandedId = ref(null)
 const state = reactive({})
 const bodyRefs = reactive({})
@@ -90,6 +98,13 @@ const presets = [
   { name: 'SiliconFlow',  url: 'https://api.siliconflow.cn',   color: '#06b6d4' },
   { name: 'Mistral',      url: 'https://api.mistral.ai',       color: '#f59e0b' },
   { name: 'Ollama',       url: 'http://localhost:11434',        color: '#84cc16' },
+  {
+    name: 'Codex subscription',
+    url: 'ChatGPT/Codex OAuth',
+    color: '#111827',
+    auth: 'codex_oauth',
+    note: 'Connect with the same OpenAI device OAuth flow used by Codex-style clients.',
+  },
 ]
 
 async function bootstrap() {
@@ -184,6 +199,13 @@ function dedupName(name) {
 }
 
 function selectPreset(p) {
+  providerNotice.value = ''
+  if (p.auth === 'codex_oauth') {
+    providerNotice.value = p.note
+    showForm.value = true
+    startCodexOAuth()
+    return
+  }
   form.value.name = dedupName(p.name)
   form.value.base_url = p.url
   showForm.value = true
@@ -210,6 +232,65 @@ async function saveSetting(field, value) {
     appSettings.value = { ...appSettings.value, ...saved }
   } finally {
     settingsSaving.value = false
+  }
+}
+
+async function startCodexOAuth() {
+  codexOAuth.loading = true
+  codexOAuth.message = ''
+  try {
+    const data = await api('/providers/codex-oauth/start', {})
+    codexOAuth.deviceAuthId = data.device_auth_id
+    codexOAuth.userCode = data.user_code
+    codexOAuth.verificationUri = data.verification_uri
+    window.open(data.verification_uri, '_blank', 'noopener,noreferrer')
+  } catch (reason) {
+    codexOAuth.message = reason.message || 'Failed to start Codex OAuth.'
+  } finally {
+    codexOAuth.loading = false
+  }
+}
+
+async function copyCodexUserCode() {
+  if (!codexOAuth.userCode) return
+  try {
+    await navigator.clipboard.writeText(codexOAuth.userCode)
+    codexOAuth.message = 'Device code copied.'
+  } catch {
+    const textarea = document.createElement('textarea')
+    textarea.value = codexOAuth.userCode
+    textarea.style.position = 'fixed'
+    textarea.style.opacity = '0'
+    document.body.appendChild(textarea)
+    textarea.select()
+    document.execCommand('copy')
+    document.body.removeChild(textarea)
+    codexOAuth.message = 'Device code copied.'
+  }
+}
+
+async function finishCodexOAuth() {
+  if (!codexOAuth.deviceAuthId || !codexOAuth.userCode) return
+  codexOAuth.loading = true
+  codexOAuth.message = ''
+  try {
+    const data = await api('/providers/codex-oauth/finish', {
+      device_auth_id: codexOAuth.deviceAuthId,
+      user_code: codexOAuth.userCode,
+    })
+    if (data.pending) {
+      codexOAuth.message = 'Authorization is still pending.'
+      return
+    }
+    codexOAuth.deviceAuthId = ''
+    codexOAuth.userCode = ''
+    codexOAuth.verificationUri = ''
+    showForm.value = false
+    await load()
+  } catch (reason) {
+    codexOAuth.message = reason.message || 'Failed to finish Codex OAuth.'
+  } finally {
+    codexOAuth.loading = false
   }
 }
 
@@ -249,6 +330,7 @@ function animateCardsEntrance() {
 async function save() {
   const { name, base_url, api_key } = form.value
   if (!name || !base_url || !api_key) return
+  providerNotice.value = ''
   await api('/providers/save', { name, base_url, api_key })
   form.value = { name: '', base_url: '', api_key: '' }
   showForm.value = false
@@ -284,7 +366,14 @@ async function testConn(p) {
   const s = init(p.id)
   s.loading = 'conn'
   s.testMsg = null
-  const r = await api('/providers/test-connection', { base_url: p.base_url, api_key: p.api_key })
+  const r = p.auth_type === 'codex_oauth'
+    ? await api('/providers/models', { provider_id: p.id }).then(data => ({
+        ok: Array.isArray(data.models) && data.models.length > 0,
+        msg: Array.isArray(data.models) && data.models.length > 0
+          ? `OK - ${data.models.length} models available`
+          : (data.error || 'Model list is empty'),
+      }))
+    : await api('/providers/test-connection', { base_url: p.base_url, api_key: p.api_key })
   s.testMsg = r
   s.connOk = r.ok
   s.loading = ''
@@ -300,7 +389,9 @@ async function fetchModels(p) {
   s.loading = 'models'
   s.models = []
   s.filter = ''
-  const r = await api('/providers/list-models', { base_url: p.base_url, api_key: p.api_key })
+  const r = p.auth_type === 'codex_oauth'
+    ? await api('/providers/models', { provider_id: p.id })
+    : await api('/providers/list-models', { base_url: p.base_url, api_key: p.api_key })
   s.models = r.models
   s.loading = ''
   await nextTick()
@@ -314,7 +405,9 @@ async function fetchModels(p) {
 async function testModel(p, model_id) {
   const s = init(p.id)
   s.modelResults[model_id] = null
-  const r = await api('/providers/test-model', { base_url: p.base_url, api_key: p.api_key, model_id })
+  const r = p.auth_type === 'codex_oauth'
+    ? await api('/providers/test-model', { provider_id: p.id, model_id })
+    : await api('/providers/test-model', { base_url: p.base_url, api_key: p.api_key, model_id })
   s.modelResults[model_id] = r
   await nextTick()
   const listEl = listRefs[p.id]
@@ -373,9 +466,16 @@ async function saveModelPricing(p, model) {
 }
 
 function filtered(s) {
-  if (!s.filter) return s.models
+  const models = s.models.map(modelName).filter(Boolean)
+  if (!s.filter) return models
   const q = s.filter.toLowerCase()
-  return s.models.filter(m => m.toLowerCase().includes(q))
+  return models.filter(m => m.toLowerCase().includes(q))
+}
+
+function modelName(model) {
+  if (typeof model === 'string') return model === 'None' ? '' : model
+  if (!model || typeof model !== 'object') return ''
+  return model.id || model.name || model.model || model.model_slug || model.api?.id || ''
 }
 
 function statusColor(s) {
@@ -468,13 +568,34 @@ watch(currentView, (v) => {
             </div>
             <p class="pm__preset-label">Provider presets</p>
             <div class="pm__presets">
-              <button v-for="p in presets" :key="p.name" class="pm__preset" @click="selectPreset(p)">
+              <button
+                v-for="p in presets"
+                :key="p.name"
+                class="pm__preset"
+                :class="{ 'pm__preset--oauth': p.auth }"
+                @click="selectPreset(p)"
+              >
                 <span class="pm__preset-avatar" :style="{ background: p.color }">{{ p.name[0] }}</span>
                 <span class="pm__preset-body">
                   <span class="pm__preset-name">{{ p.name }}</span>
                   <span class="pm__preset-url">{{ p.url }}</span>
                 </span>
               </button>
+            </div>
+            <p v-if="providerNotice" class="pm__provider-note">{{ providerNotice }}</p>
+            <div v-if="codexOAuth.userCode" class="pm__oauth-box">
+              <div>
+                <span class="pm__oauth-label">OpenAI device code</span>
+                <strong>{{ codexOAuth.userCode }}</strong>
+                <a :href="codexOAuth.verificationUri" target="_blank" rel="noreferrer">{{ codexOAuth.verificationUri }}</a>
+                <p v-if="codexOAuth.message">{{ codexOAuth.message }}</p>
+              </div>
+              <div class="pm__oauth-actions">
+                <button type="button" class="pm__copy-btn" @click="copyCodexUserCode">Copy code</button>
+                <button type="button" class="pm__save-btn" :disabled="codexOAuth.loading" @click="finishCodexOAuth">
+                  {{ codexOAuth.loading ? 'Checking...' : 'Finish login' }}
+                </button>
+              </div>
             </div>
 
             <form class="pm__form" @submit.prevent="save">
@@ -1182,6 +1303,81 @@ watch(currentView, (v) => {
   max-width: 190px;
   color: var(--text-muted);
   font-size: 9px;
+}
+
+.pm__preset--oauth {
+  background: #f8fafc;
+}
+
+.pm__preset--oauth .pm__preset-url {
+  color: #b45309;
+}
+
+.pm__provider-note {
+  margin: 10px 0 0;
+  padding: 10px 12px;
+  border: 1px solid #f3d08a;
+  border-radius: var(--radius-sm);
+  color: #7a4b00;
+  background: #fff7e6;
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.pm__oauth-box {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  margin-top: 10px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--code-bg);
+}
+
+.pm__oauth-box > div {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.pm__oauth-label {
+  color: var(--text-muted);
+  font-size: 10px;
+}
+
+.pm__oauth-box strong {
+  color: var(--text-h);
+  font: 700 18px/1 ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+  letter-spacing: 0.08em;
+}
+
+.pm__oauth-box a,
+.pm__oauth-box p {
+  overflow-wrap: anywhere;
+  color: var(--text-muted);
+  font-size: 10px;
+}
+
+.pm__oauth-actions {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 8px;
+}
+
+.pm__copy-btn {
+  height: 38px;
+  padding: 0 13px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text-h);
+  background: #ffffff;
+  white-space: nowrap;
+}
+
+.pm__copy-btn:hover {
+  background: var(--code-bg-hover);
 }
 
 .pm__form {

@@ -88,6 +88,10 @@ class _Handler(SimpleHTTPRequestHandler):
                 body.get("pricing_rules"),
             )
             self._json({"id": pid})
+        elif path == "/api/providers/codex-oauth/start":
+            self._json(providers.start_codex_oauth())
+        elif path == "/api/providers/codex-oauth/finish":
+            self._json(providers.finish_codex_oauth(body["device_auth_id"], body["user_code"]))
         elif path == "/api/providers/delete":
             providers.delete(body["id"])
             self._json({"ok": True})
@@ -116,9 +120,21 @@ class _Handler(SimpleHTTPRequestHandler):
             if provider is None:
                 self._json({"error": "provider not found"}, 404)
                 return
-            self._json({"models": providers.list_models(provider["base_url"], provider["api_key"])})
+            account_id = ""
+            if provider.get("auth_type") == "codex_oauth":
+                provider["api_key"], account_id = providers.codex_access_token(provider)
+            self._json({"models": providers.list_models(provider["base_url"], provider["api_key"], account_id)})
         elif path == "/api/providers/test-model":
-            ok, msg = providers.test_model(body["base_url"], body["api_key"], body["model_id"])
+            if body.get("provider_id"):
+                provider = providers.get_saved(int(body["provider_id"]))
+                if provider is None:
+                    self._json({"error": "provider not found"}, 404)
+                    return
+                if provider.get("auth_type") == "codex_oauth":
+                    provider["api_key"], _ = providers.codex_access_token(provider)
+                ok, msg = providers.test_model(provider["base_url"], provider["api_key"], body["model_id"])
+            else:
+                ok, msg = providers.test_model(body["base_url"], body["api_key"], body["model_id"])
             self._json({"ok": ok, "msg": msg})
         elif path == "/api/model-settings/save":
             model_settings.save(
