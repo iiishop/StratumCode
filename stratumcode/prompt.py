@@ -233,6 +233,12 @@ task analysis, choose the cheapest next action that reduces uncertainty:
 - before the first discovery call, make a short plan for all blocking unknowns:
   which unknown is first, and what kind of evidence would resolve it.
 - use glob/grep/read to inspect project structure and existing patterns.
+- for Python dead-code, unused-import, duplicate-definition, or broad symbol
+  usage audits, prefer one python_static_check call before many grep/code_nav
+  calls. Use grep/code_nav afterward only to verify a specific surprising item.
+- when checking several related regex patterns, use one grep call with
+  patterns=[...] instead of repeated single-pattern grep calls. Do not spend a
+  model round on one grep if the next related grep is already known.
 - use code_nav before broad read/grep when the task depends on symbols,
   functions, classes, definitions, references, or function-level/code-level
   audit. A common flow is glob to find candidate source files, then code_nav
@@ -250,11 +256,16 @@ task analysis, choose the cheapest next action that reduces uncertainty:
 - if PREVIOUS OBSERVATIONS or PREVIOUS SUPPORTED KNOWLEDGE are present, reuse
   them first. Do not repeat the same glob/read/code_nav call unless the prior
   observation is stale or the answer requires a narrower position/range.
+- within the same investigation, do not repeat the same tool with the same
+  effective arguments. If a result already answered the question, record the
+  finding; if it did not, choose a narrower or different tool call.
 - if Workspace snapshot already proves the project is empty or has only a few
   files, treat it as project evidence. Do not run broad glob/read just to
   rediscover the same file list.
 - if Suggested first tool calls contains entries, run the first applicable one
   before choosing a different starter.
+- every tool call must include a concrete, user-visible reason explaining why
+  this tool is the next step and what returned evidence would decide.
 - you may call multiple independent tools in one turn when their inputs are
   already known, such as reading several files found by a previous glob.
 - do not batch dependent actions. If a tool result decides the next file,
@@ -262,8 +273,12 @@ task analysis, choose the cheapest next action that reduces uncertainty:
 - use subagent with agent="hypothesis-verifier" when a specific belief is an
   inference rather than a direct observation, for example "Character.HP
   represents health", "this component restores submitted askuser state", or
-  "this function is unused". Direct facts from one file, such as "main.py is
-  empty", do not need verifier.
+  "this callback remains connected after resume". Direct facts from one file,
+  such as "main.py is empty", do not need verifier.
+- hypothesis-verifier is expensive and limited. Use at most two calls in one
+  investigation. Do not use it for simple "is this imported/used/referenced",
+  "is this dead code", or duplicate-definition checks that python_static_check,
+  grep, read, or code_nav already answer directly.
 - before finish_investigation, verify at least one atomic belief with
   hypothesis-verifier when the planned patch depends on a cross-file
   relationship, semantic interpretation, usage/reference claim, or competing
@@ -280,11 +295,27 @@ where to look, but current project code/config wins.
 
 When you have a grounded finding, call record_investigation_findings. Keep each
 record call focused: beliefs/resolutions/user questions/task updates, not a
-full final report.
+full final report. Its reason must explain why these findings are ready to
+record now.
+
+After a small discovery batch, the runtime may require you to record the new
+observations before more discovery. In that state, do not call grep, read,
+code_nav, python_static_check, web tools, or subagents. Call
+record_investigation_findings with concise beliefs/resolutions for the batch,
+or finish_investigation if the task contract is already covered.
+
+For resolutions, prefer creating concise beliefs with ids like B1 and citing
+those ids in resolution.belief_ids. Use resolution.evidence only for exact
+observation ids/tool_call_ids already present in the conversation. Never put
+file paths, line ranges, tool card titles such as "read ui.py L1-668",
+hypothesis-verifier summaries, or prose evidence descriptions in
+resolution.evidence. If finish_investigation reports unknown evidence ids, do
+not rediscover files; fix the references by recording/citing beliefs.
 
 Stop only after recorded findings cover the task contract. Then call
 finish_investigation with a short summary, patch_planning_facts when code work
-should continue, and recommended_next_step. Do not call finish_investigation just
+should continue, and recommended_next_step. Its reason must explain why no more
+discovery is needed before the handoff. Do not call finish_investigation just
 because one hypothesis verifier run ended."""
 
 INVESTIGATION_CONTEXT = """\
@@ -320,17 +351,22 @@ User request:
 {round_limit_text}"""
 
 INVESTIGATION_FINALIZE = """\
-Investigation step limit reached. Do not call discovery tools now.
+{reason} Do not call discovery tools now.
 
 Use only the tool results already present in this conversation.
 
 First call record_investigation_findings with:
+- reason: visible explanation for why these findings are being recorded now.
 - beliefs from observed files, commands, documents, or verifier results. Give
   each belief a stable id such as B1 when a resolution cites it.
 - resolutions for every initial unknown, keyed by unknown_id. Use status:
   resolved, partially_resolved, needs_user, or deferred.
-- for a resolved code/doc/runtime unknown, cite a real observation/tool result
-  id in resolution.evidence or a real belief id in resolution.belief_ids.
+- for a resolved code/doc/runtime unknown, use resolution.belief_ids whenever
+  you created beliefs. If you use resolution.evidence, each item must be an
+  exact observation id from the conversation, usually a raw tool_call_id like
+  call_abc123. Do not put file paths, line ranges, UI titles such as
+  "read main.py L1-404", verifier summaries, or human-readable evidence
+  descriptions in resolution.evidence.
 - user_decisions_required for blocking choices that cannot be inferred from code.
   Each item must be one concrete standalone question the user can answer.
 - new_unknowns only for important questions discovered during investigation.
@@ -345,10 +381,16 @@ First call record_investigation_findings with:
     tool call ids, belief statements, or evidence ids.
 
 Then call finish_investigation with:
+- reason: visible explanation for why investigation can stop now.
 - summary
 - recommended_next_step: patch_planning, ask_user, continue_investigation, or done.
 - patch_planning_facts for concrete facts a later patch planner can rely on when
   recommended_next_step is patch_planning.
+
+If a previous finish_investigation failed because of unknown evidence ids, do
+not call glob/grep/read/code_nav/subagent again. Keep the same conclusion and
+repair only record_investigation_findings: create or cite stable belief ids
+(B1, B2, ...) and put those ids in resolution.belief_ids.
 
 Minimal examples:
 Question/reporting task:
@@ -560,8 +602,8 @@ def _format_unknown(item) -> str:
     )
 
 
-def build_investigation_finalize() -> str:
-    return INVESTIGATION_FINALIZE.strip()
+def build_investigation_finalize(reason: str = "Investigation needs a final structured summary.") -> str:
+    return INVESTIGATION_FINALIZE.replace("{reason}", reason, 1).strip()
 
 
 def build_evidence(

@@ -67,9 +67,10 @@ def implementation_stream(
     tools = _implementation_tools()
     final_text = ""
     consecutive_error_rounds = 0
-    patch_applied = False
+    applied_steps: set[str] = set()
     changed_files: list[str] = []
-    patch_required = bool(patch_plan.get("implementation_steps"))
+    required_steps = _required_step_ids(patch_plan)
+    patch_required = bool(required_steps)
 
     tool_error_limit = app_settings.get_round_limit("implementation_tool_error_rounds")
     for round_index in _round_indexes(app_settings.get_round_limit("implementation_rounds")):
@@ -80,13 +81,16 @@ def implementation_stream(
 
         text = _content_text(assistant.get("content"))
         tool_calls = assistant.get("tool_calls") or []
-        messages.append({
-            "role": "assistant",
-            "content": text,
-            "tool_calls": tool_calls,
-        })
+        messages.append(_assistant_replay(text, tool_calls))
         if not tool_calls:
             final_text = text.strip()
+            missing_steps = _missing_steps(required_steps, applied_steps)
+            if missing_steps:
+                messages.append({"role": "user", "content": (
+                    "Implementation is not complete. Apply every authorized implementation step before finishing. "
+                    f"Missing step ids: {', '.join(missing_steps)}."
+                )})
+                continue
             break
 
         round_had_success = False
@@ -100,7 +104,7 @@ def implementation_stream(
                 output = yield from _run_tool(name, call_id, arguments, workspace_dir)
                 round_had_success = round_had_success or not _tool_failed(output)
                 if name == "apply_patch" and not _tool_failed(output):
-                    patch_applied = True
+                    applied_steps.add(str(arguments.get("step_id") or "").strip())
                     changed_files.extend(_patch_files_from_output(output))
             except Exception as exc:
                 output = json.dumps({
@@ -127,11 +131,12 @@ def implementation_stream(
             yield {"op": "update", "id": stage_id, "patch": {"state": "waiting", "phase": "implementation_tool_error_checkpoint"}}
             return
     else:
-        if patch_required and not patch_applied:
+        missing_steps = _missing_steps(required_steps, applied_steps)
+        if missing_steps:
             yield start_event(f"{run_id}-checkpoint", "user_question", _checkpoint_question(
                 analysis.get("id", ""),
                 message,
-                "Implementation reached its checkpoint before applying a patch.",
+                "Implementation reached its checkpoint before applying every authorized patch step.",
                 checkpoint_phase="implementation_checkpoint",
                 patch_plan=patch_plan,
             ))
@@ -139,11 +144,12 @@ def implementation_stream(
             return
         final_text = "Implementation patching reached its checkpoint; continuing with validation."
 
-    if patch_required and not patch_applied:
+    missing_steps = _missing_steps(required_steps, applied_steps)
+    if missing_steps:
         yield start_event(f"{run_id}-checkpoint", "user_question", _checkpoint_question(
             analysis.get("id", ""),
             message,
-            "Implementation stopped before applying the authorized patch plan.",
+            "Implementation stopped before applying every authorized patch step.",
             checkpoint_phase="implementation_checkpoint",
             patch_plan=patch_plan,
         ))
@@ -156,9 +162,11 @@ def implementation_stream(
     })
     yield {"op": "update", "id": stage_id, "patch": {"state": "done", "phase": "implementation_done"}}
     yield {"op": "done", "implementation": {
-        "status": "patch_applied" if patch_applied else "no_patch",
+        "status": "patch_applied" if applied_steps else "no_patch",
         "summary": final_text,
-        "patch_applied": patch_applied,
+        "patch_applied": bool(applied_steps),
+        "applied_steps": sorted(applied_steps),
+        "missing_steps": missing_steps,
         "changed_files": sorted(set(changed_files)),
         "semantic_checked": False,
     }}
@@ -206,9 +214,28 @@ def _implementation_tools() -> list[dict]:
     return _tools_for(IMPLEMENTATION_TOOLS)
 
 
+def _required_step_ids(patch_plan: dict) -> set[str]:
+    return {
+        step_id
+        for item in patch_plan.get("implementation_steps") or []
+        if isinstance(item, dict) and (step_id := str(item.get("id") or "").strip())
+    }
+
+
+def _missing_steps(required: set[str], applied: set[str]) -> list[str]:
+    return sorted(required - applied)
+
+
 def _round_indexes(limit: int, start: int = 1):
     limit = int(limit or 0)
     return count(start) if limit <= 0 else range(start, start + limit)
+
+
+def _assistant_replay(content: str, tool_calls: list[dict]) -> dict:
+    message = {"role": "assistant", "content": content or ""}
+    if tool_calls:
+        message["tool_calls"] = tool_calls
+    return message
 
 
 def _validation_tools() -> list[dict]:
@@ -481,7 +508,7 @@ def _validation_stream(
             yield start_event(f"{run_id}-usage-{round_index}", "usage", {"delta": usage, "total": usage_total})
         text = _content_text(assistant.get("content"))
         tool_calls = assistant.get("tool_calls") or []
-        messages.append({"role": "assistant", "content": text, "tool_calls": tool_calls})
+        messages.append(_assistant_replay(text, tool_calls))
         if not tool_calls:
             messages.append({"role": "user", "content": "Call finish_validation with the required JSON verdict. Do not finish validation in prose."})
             continue

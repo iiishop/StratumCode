@@ -904,7 +904,7 @@ def _chat_investigate(run: ChatRun) -> Iterator[dict]:
         run.transition(ChatState.INVESTIGATING, "Investigation requested another pass.")
     elif next_step == "failed":
         run.transition(ChatState.FAILED, "Investigation failed.")
-    elif run.last_investigation and next_step == "write_code" and _investigation_allows_patch(run.last_investigation) and _wants_implementation(run.analysis, run.message):
+    elif run.last_investigation and _investigation_allows_patch(run.last_investigation) and _wants_implementation(run.analysis, run.message):
         run.transition(ChatState.DESIGNING, "Investigation is ready for implementation planning.")
     else:
         run.transition(_chat_finish_state(run), "Investigation ended without an implementation path.")
@@ -1269,7 +1269,8 @@ def _wants_implementation(analysis: dict, message: str = "") -> bool:
 def _message_requests_implementation(message: str) -> bool:
     lowered = " ".join(str(message or "").split()).casefold()
     return any(word in lowered for word in (
-        "实现", "添加", "增加", "修改", "支持", "调整", "改成", "变成", "加上", "让", "不要",
+        "实现", "添加", "增加", "修改", "修复", "支持", "调整", "改成", "变成", "加上", "让", "不要",
+        "删除", "移除", "清理", "替换", "优化", "进行修复",
         "create", "add", "implement", "change", "update", "adjust", "make", "set", "do not", "don't",
     ))
 

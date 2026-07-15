@@ -15,6 +15,7 @@ from .agent.policy import DISCOVERY_TOOLS
 MAX_MODEL_OUTPUT_TOKENS = 2048
 MODEL_RETRY_STATUS_CODES = {429, 502, 503, 504}
 MODEL_RETRY_DELAYS = (0.5, 1.0)
+_NON_THINKING_TOOL_CHOICE_MODELS: set[str] = set()
 
 
 def start_event(event_id: str, event_type: str, data: dict) -> dict:
@@ -28,22 +29,18 @@ def call_model(
     *,
     tools: list[dict] | None = None,
     max_tokens: int = MAX_MODEL_OUTPUT_TOKENS,
+    tool_choice=None,
 ) -> dict:
-    payload = {
-        "model": model,
-        "messages": messages,
-        "tools": agent_tools(DISCOVERY_TOOLS) if tools is None else tools,
-        "temperature": 0.1,
-        "max_tokens": max_tokens,
-    }
-    body = json.dumps(payload).encode()
     url = f"{provider['base_url'].rstrip('/')}/v1/chat/completions"
     headers = {
         "Authorization": f"Bearer {provider['api_key']}",
         "Content-Type": "application/json",
     }
     attempts = app_settings.get_round_limit("model_request_attempts")
+    data = None
     for attempt in _attempt_indexes(attempts, start=0):
+        payload = _payload(provider, model, messages, tools, max_tokens, tool_choice)
+        body = json.dumps(payload).encode()
         request = Request(url, data=body, headers=headers)
         try:
             with urlopen(request, timeout=90) as response:
@@ -51,6 +48,9 @@ def call_model(
             break
         except HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace")[:1000]
+            if tool_choice is not None and _tool_choice_needs_disabled_thinking(exc.code, detail):
+                _NON_THINKING_TOOL_CHOICE_MODELS.add(_model_key(provider, model))
+                continue
             if exc.code not in MODEL_RETRY_STATUS_CODES or _last_attempt(attempt, attempts):
                 raise ValueError(f"provider request failed ({exc.code}): {detail}") from exc
         except (TimeoutError, socket.timeout) as exc:
@@ -61,12 +61,38 @@ def call_model(
             if _last_attempt(attempt, attempts):
                 raise ValueError(f"provider request failed: {detail}") from exc
         time.sleep(MODEL_RETRY_DELAYS[min(attempt, len(MODEL_RETRY_DELAYS) - 1)])
+    if data is None:
+        raise ValueError("provider request failed before returning a response")
     choices = data.get("choices") or []
     if not choices or not isinstance(choices[0].get("message"), dict):
         raise ValueError("provider returned no assistant message")
     message = choices[0]["message"]
     message["_usage"] = data.get("usage") or {}
     return message
+
+
+def _payload(provider: dict, model: str, messages: list[dict], tools, max_tokens: int, tool_choice) -> dict:
+    payload = {
+        "model": model,
+        "messages": messages,
+        "tools": agent_tools(DISCOVERY_TOOLS) if tools is None else tools,
+        "temperature": 0.1,
+        "max_tokens": max_tokens,
+    }
+    if tool_choice is not None:
+        payload["tool_choice"] = tool_choice
+        if _model_key(provider, model) in _NON_THINKING_TOOL_CHOICE_MODELS:
+            payload["thinking"] = {"type": "disabled"}
+    return payload
+
+
+def _model_key(provider: dict, model: str) -> str:
+    return f"{provider.get('base_url', '').rstrip('/')}|{model}"
+
+
+def _tool_choice_needs_disabled_thinking(status: int, detail: str) -> bool:
+    lowered = detail.casefold()
+    return status == 400 and "thinking" in lowered and "tool_choice" in lowered
 
 
 def _attempt_indexes(limit: int, start: int = 0):
