@@ -12,3 +12,6 @@ stratumcode.db-wal
 .claude/settings.local.json
 tests/
 .agents/
+.openscience/
+paper/
+prompt_migration_summary.docx

@@ -12,6 +12,8 @@ const acceptance = computed(() => props.event.acceptance_criteria || [])
 const hypotheses = computed(() => props.event.hypotheses || [])
 const clues = computed(() => props.event.clues || [])
 const unknowns = computed(() => props.event.unknowns || [])
+const analyzerErrors = computed(() => props.event.analyzer_errors || [])
+const hasAnalyzerDiagnostics = computed(() => props.event.analyzer_error || analyzerErrors.value.length || props.event.recovered_from_partial_analyzer_output)
 const scopeRows = computed(() => {
   const scope = props.event.scope || {}
   return [
@@ -75,6 +77,17 @@ function onExpandLeave(el, done) {
         <div class="ta__meta" v-if="event.provider && event.model">
           {{ event.provider }} / {{ event.model }}
         </div>
+      </div>
+
+      <div v-if="hasAnalyzerDiagnostics" class="ta__card ta__card--diagnostics">
+        <div class="ta__card-head">
+          <span class="ta__chip ta__chip--diagnostics">Analyzer diagnostics</span>
+          <span v-if="event.analyzer_attempts" class="ta__count">{{ event.analyzer_attempts }} attempts</span>
+        </div>
+        <p v-if="event.analyzer_error" class="ta__diagnostic">{{ event.analyzer_error }}</p>
+        <ol v-if="analyzerErrors.length" class="ta__errors">
+          <li v-for="(error, index) in analyzerErrors" :key="`${index}-${error}`">{{ error }}</li>
+        </ol>
       </div>
 
       <div v-if="constraints.length" class="ta__card">
@@ -237,6 +250,7 @@ function onExpandLeave(el, done) {
 .ta__chip--acceptance { color: var(--ok, #11866f); background: var(--ok-bg, rgba(17,134,111,.08)); }
 .ta__chip--behavior { color: #3b5998; background: rgba(59,89,152,.08); }
 .ta__chip--scope { color: #4a6d7c; background: rgba(74,109,124,.08); }
+.ta__chip--diagnostics { color: var(--err, #c44747); background: rgba(196,71,71,.08); }
 
 .ta__count {
   color: var(--text-muted, #71809c);
@@ -281,6 +295,29 @@ function onExpandLeave(el, done) {
   height: 4px;
   border-radius: 50%;
   background: var(--text-muted);
+}
+
+.ta__card--diagnostics {
+  border-color: rgba(196,71,71,.22);
+  background: rgba(196,71,71,.035);
+}
+
+.ta__diagnostic {
+  margin: 0;
+  color: var(--text, #3f5274);
+  font-size: 10.5px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.ta__errors {
+  display: grid;
+  gap: 4px;
+  margin: 0;
+  padding-left: 16px;
+  color: var(--text-muted, #71809c);
+  font: 9.5px/1.45 var(--mono, monospace);
+  overflow-wrap: anywhere;
 }
 
 .ta__clues {

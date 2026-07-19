@@ -122,6 +122,7 @@ function collapseLeave(el, done) {
 .event-frame--output { --event: #1756d1; }
 .event-frame--task-analysis { --event: #6658c7; }
 .event-frame--stage { --event: #1756d1; }
+.event-frame--state-transition { --event: #7c8ba0; }
 .event-frame--hypothesis { --event: #1756d1; }
 .event-frame--evidence { --event: #0f7d65; }
 .event-frame--evidence.event-frame--oppose { --event: #c48b00; }

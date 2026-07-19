@@ -5,6 +5,7 @@ import json
 import platform
 import re
 from collections.abc import Iterator
+from itertools import count
 from uuid import uuid4
 
 from . import app_settings, model_settings, prompt, providers
@@ -22,10 +23,10 @@ from .agent_runtime import (
 )
 from .tools import registry
 
-MAX_INVESTIGATION_ROUNDS = 10
-MAX_FINALIZATION_ATTEMPTS = 3
 FINALIZATION_OUTPUT_TOKENS = 4096
-INVESTIGATION_TOOLS = ("glob", "grep", "read", "code_nav", "websearch", "webfetch", "subagent")
+INVESTIGATION_TOOLS = ("glob", "grep", "read", "code_nav", "python_static_check", "websearch", "webfetch", "subagent")
+MAX_HYPOTHESIS_VERIFIER_CALLS = 2
+DISCOVERY_BATCH_OBSERVATIONS = 3
 FINDING_FIELDS = (
     "beliefs",
     "resolutions",
@@ -60,7 +61,7 @@ def investigation_stream(
     model = setting["model_id"]
     pricing_rules = providers.get_model_pricing(provider["id"], model)
     usage_total = _empty_usage(pricing_rules)
-    max_rounds = max_rounds or MAX_INVESTIGATION_ROUNDS
+    max_rounds = app_settings.get_round_limit("investigation_rounds") if max_rounds is None else int(max_rounds or 0)
     run_id = uuid4().hex[:10]
     stage_id = f"{run_id}-stage"
     yield start_event(stage_id, "stage", {
@@ -77,7 +78,7 @@ def investigation_stream(
     messages = [
         {"role": "system", "content": prompt.build_investigation_static(app_settings.get_output_language())},
         {
-            "role": "system",
+            "role": "user",
             "content": prompt.build_investigation_context(
                 analysis=analysis,
                 message=message,
@@ -91,19 +92,56 @@ def investigation_stream(
         {"role": "user", "content": message},
     ]
     if findings:
-        messages.insert(2, {"role": "system", "content": "\n".join(findings)})
+        messages.insert(2, {"role": "user", "content": "\n".join(findings)})
     prior_lines = _previous_context(previous_observations, previous_knowledge)
     if prior_lines:
-        messages.insert(2, {"role": "system", "content": "\n".join(prior_lines)})
+        messages.insert(2, {"role": "user", "content": "\n".join(prior_lines)})
     tools = _investigation_tools()
     final = None
     observations = []
+    tool_cache = {}
     recorded_findings = _empty_recorded_findings()
+    finalization_reason = "Investigation model stopped before finish_investigation; summarizing observed facts."
+    pending_observation_ids: list[str] = []
+    hypothesis_verifier_calls = 0
 
-    for round_index in range(max_rounds):
+    for round_index in _round_indexes(max_rounds, start=0):
         thinking_id = f"{run_id}-thinking-{round_index}"
         yield start_event(thinking_id, "thinking", {"text": "", "done": False, "open": True})
-        assistant = _call_model(provider, model, messages, tools=tools)
+        current_tools = tools
+        current_tool_choice = "required"
+        if _recorded_resolves_initial_unknowns(recorded_findings, analysis):
+            current_tools = [_finish_tool_schema()]
+            current_tool_choice = {"type": "function", "function": {"name": "finish_investigation"}}
+        elif len(pending_observation_ids) >= DISCOVERY_BATCH_OBSERVATIONS:
+            messages.append({"role": "user", "content": (
+                "You have a full unrecorded discovery batch: "
+                f"{', '.join(pending_observation_ids[-6:])}. "
+                "Call record_investigation_findings before any more discovery. "
+                "Then call finish_investigation if the task contract is covered."
+            )})
+            current_tools = [_record_findings_tool_schema(), _finish_tool_schema()]
+        allowed_tool_names = {
+            str(((tool.get("function") or {}).get("name")) or "")
+            for tool in current_tools
+            if isinstance(tool, dict)
+        }
+        try:
+            assistant = _call_model(provider, model, messages, tools=current_tools, tool_choice=current_tool_choice)
+        except ValueError as exc:
+            reason = str(exc)
+            yield {"op": "update", "id": thinking_id, "patch": {
+                "text": reason,
+                "done": True,
+                "open": False,
+            }}
+            yield start_event(f"{run_id}-provider-checkpoint", "user_question", _provider_checkpoint_question(
+                reason,
+                origin_message=message,
+                analysis_id=analysis.get("id", ""),
+            ))
+            yield {"op": "update", "id": stage_id, "patch": {"state": "waiting", "phase": "provider_checkpoint"}}
+            return
         if usage := _usage_delta(pricing_rules, assistant.pop("_usage", {})):
             _add_usage(usage_total, usage)
             yield start_event(f"{run_id}-usage-{round_index}", "usage", {
@@ -111,8 +149,8 @@ def investigation_stream(
                 "total": usage_total,
             })
 
-        content = _assistant_visible_text(assistant)
         tool_calls = assistant.get("tool_calls") or []
+        content = _assistant_visible_text(assistant) or _tool_call_summary(tool_calls)
         messages.append(_assistant_message(assistant))
         yield {"op": "update", "id": thinking_id, "patch": {
             "text": content,
@@ -121,7 +159,12 @@ def investigation_stream(
         }}
 
         if not tool_calls:
-            break
+            messages.append({"role": "user", "content": (
+                "You did not call a tool. Continue by making an actual tool call, "
+                "or call finish_investigation if the investigation is complete. "
+                "Do not describe intended tool use in prose."
+            )})
+            continue
 
         for raw_call in tool_calls:
             call_id = raw_call.get("id") or f"call-{uuid4().hex[:8]}"
@@ -129,8 +172,18 @@ def investigation_stream(
             name = function.get("name") or ""
             try:
                 arguments = _tool_arguments(function.get("arguments"))
+                if name not in allowed_tool_names:
+                    if len(pending_observation_ids) >= DISCOVERY_BATCH_OBSERVATIONS:
+                        raise ValueError(
+                            f"tool not allowed until the current discovery batch is recorded: {name}. "
+                            "Call record_investigation_findings first."
+                        )
+                    raise ValueError(f"tool not allowed at this investigation step: {name}")
                 if name == "record_investigation_findings":
+                    _require_control_reason(arguments, name)
                     recorded_findings = _merge_recorded_findings(recorded_findings, arguments)
+                    pending_observation_ids.clear()
+                    task_updates = _record_task_updates(arguments)
                     output = json.dumps({
                         "recorded": True,
                         "counts": {field: len(recorded_findings.get(field, [])) for field in FINDING_FIELDS},
@@ -143,6 +196,11 @@ def investigation_stream(
                         "input": json.dumps(arguments, ensure_ascii=False, indent=2),
                         "output": output,
                     })
+                    if task_updates:
+                        yield start_event(f"{call_id}-task-update", "task_update", {
+                            "analysis_id": analysis.get("id", ""),
+                            "items": task_updates,
+                        })
                     messages.append({
                         "role": "tool",
                         "tool_call_id": call_id,
@@ -150,10 +208,12 @@ def investigation_stream(
                     })
                     continue
                 if name == "finish_investigation":
+                    _require_control_reason(arguments, name)
                     final = _finish_payload(
                         _finish_arguments(recorded_findings, arguments),
                         analysis=analysis,
                         observations=observations,
+                        repair_conflicts=True,
                     )
                     messages.append({
                         "role": "tool",
@@ -161,14 +221,39 @@ def investigation_stream(
                         "content": json.dumps(final, ensure_ascii=False),
                     })
                     break
-                output = yield from _run_tool_stream(
-                    name,
-                    call_id,
-                    arguments,
-                    workspace_dir,
-                    analysis,
-                )
+                if _is_hypothesis_verifier_call(name, arguments):
+                    if hypothesis_verifier_calls >= MAX_HYPOTHESIS_VERIFIER_CALLS:
+                        raise ValueError(
+                            "hypothesis-verifier budget reached. Use recorded evidence, "
+                            "python_static_check, grep, read, or code_nav instead, then record findings."
+                        )
+                    hypothesis_verifier_calls += 1
+                cache_key = _tool_cache_key(name, arguments)
+                if cache_key in tool_cache:
+                    output = tool_cache[cache_key]
+                    yield start_event(call_id, _tool_event_type(name), {
+                        "name": name,
+                        "description": "Investigation tool",
+                        "status": "done",
+                        "open": False,
+                        "input": json.dumps(arguments, ensure_ascii=False, indent=2),
+                        "output": output,
+                        "deduplicated": True,
+                    })
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": call_id,
+                        "content": (
+                            "Duplicate tool call. Previous result summary: "
+                            f"{_short_observation(output)}. "
+                            "Do not repeat this call again; record the finding or choose a different check."
+                        ),
+                    })
+                    continue
+                output = yield from _run_tool_stream(name, call_id, arguments, workspace_dir, analysis)
+                tool_cache[cache_key] = output
                 observations.append(_tool_observation(name, call_id, output))
+                pending_observation_ids.append(call_id)
             except Exception as exc:
                 output = tool_error_json(exc, name)
                 yield start_event(call_id, _tool_event_type(name), {
@@ -186,6 +271,8 @@ def investigation_stream(
             })
         if final is not None:
             break
+    else:
+        finalization_reason = "Investigation step limit reached. Summarizing observed facts."
 
     if final is None:
         final = yield from _finalize_investigation(
@@ -198,13 +285,14 @@ def investigation_stream(
             analysis=analysis,
             observations=observations,
             recorded_findings=recorded_findings,
+            reason=finalization_reason,
         )
     final["observations"] = observations + [
         item for item in final.get("observations", [])
         if isinstance(item, dict)
     ]
 
-    implementation_intent = _wants_implementation(analysis)
+    implementation_intent = _wants_implementation(analysis, message)
     yield {"op": "update", "id": stage_id, "patch": {
         "state": "done",
         "phase": "patch_planning_ready" if final.get("ready_for_patch_planning") and implementation_intent else "done",
@@ -237,6 +325,87 @@ def _investigation_tools() -> list[dict]:
     tools.append(_record_findings_tool_schema())
     tools.append(_finish_tool_schema())
     return tools
+
+
+def _round_indexes(limit: int, start: int = 0):
+    limit = int(limit or 0)
+    return count(start) if limit <= 0 else range(start, start + limit)
+
+
+def _tool_call_summary(tool_calls: list[dict]) -> str:
+    items = []
+    for call in tool_calls:
+        if not isinstance(call, dict):
+            continue
+        function = call.get("function") or {}
+        name = function.get("name") or "tool"
+        try:
+            arguments = _tool_arguments(function.get("arguments"))
+        except ValueError:
+            arguments = {}
+        reason = str(arguments.get("reason") or arguments.get("operation_summary") or "").strip()
+        targets = arguments.get("target_unknown_ids") if isinstance(arguments.get("target_unknown_ids"), list) else []
+        subject = _tool_call_subject(name, arguments)
+        line = f"{name}{subject}"
+        if targets:
+            line += f" for {', '.join(str(item) for item in targets if str(item).strip())}"
+        if reason:
+            line += f": {reason}"
+        items.append(line)
+    if not items:
+        return ""
+    return "Calling tools:\n" + "\n".join(f"- {item}" for item in items)
+
+
+def _tool_call_subject(name: str, arguments: dict) -> str:
+    if name in {"read", "glob", "grep", "code_nav", "webfetch"}:
+        value = arguments.get("path") or arguments.get("pattern") or arguments.get("query") or arguments.get("url")
+        if not value and name == "grep":
+            patterns = arguments.get("patterns") if isinstance(arguments.get("patterns"), list) else []
+            if patterns:
+                value = f"{len(patterns)} patterns"
+        return f"({value})" if value else ""
+    if name == "subagent":
+        value = arguments.get("agent") or arguments.get("name")
+        return f"({value})" if value else ""
+    if name in {"record_investigation_findings", "finish_investigation"}:
+        summary = str(arguments.get("summary") or "").strip()
+        return f"({summary[:80]})" if summary else ""
+    return ""
+
+
+def _tool_cache_key(name: str, arguments: dict) -> str:
+    ignored = {"reason"}
+    comparable = {
+        key: value
+        for key, value in arguments.items()
+        if key not in ignored
+    }
+    return f"{name}:{json.dumps(comparable, ensure_ascii=False, sort_keys=True)}"
+
+
+def _is_hypothesis_verifier_call(name: str, arguments: dict) -> bool:
+    if name != "subagent":
+        return False
+    agent = str(arguments.get("agent") or arguments.get("name") or "")
+    return agent.strip().removeprefix("@").casefold() == "hypothesis-verifier"
+
+
+def _recorded_resolves_initial_unknowns(recorded: dict, analysis: dict | None) -> bool:
+    initial = [item for item in (analysis or {}).get("unknowns", []) if isinstance(item, dict) and item.get("id")]
+    if not initial:
+        return False
+    resolved = {
+        str(item.get("unknown_id") or "").strip()
+        for item in recorded.get("resolutions", [])
+        if isinstance(item, dict) and str(item.get("status") or "") in {"resolved", "partially_resolved", "needs_user", "deferred"}
+    }
+    return all(str(item["id"]) in resolved for item in initial)
+
+
+def _require_control_reason(arguments: dict, name: str) -> None:
+    if not str(arguments.get("reason") or "").strip():
+        raise ValueError(f"{name} requires reason")
 
 
 def _investigation_tool_schema(name: str, description: str, parameters: dict) -> dict:
@@ -282,6 +451,10 @@ def _record_findings_tool_schema() -> dict:
         {
             "type": "object",
             "properties": {
+                "reason": {
+                    "type": "string",
+                    "description": "Visible one-sentence reason for recording these findings now.",
+                },
                 "beliefs": {
                     "type": "array",
                     "items": {
@@ -301,7 +474,11 @@ def _record_findings_tool_schema() -> dict:
                                     "invalidated",
                                 ],
                             },
-                            "evidence": {"type": "array", "items": {"type": "string"}},
+                            "evidence": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                                "description": "Exact observation ids/tool_call_ids only, never file paths, line ranges, UI titles, or prose summaries.",
+                            },
                         },
                         "required": ["statement", "status"],
                     },
@@ -317,8 +494,16 @@ def _record_findings_tool_schema() -> dict:
                                 "enum": ["resolved", "partially_resolved", "needs_user", "deferred"],
                             },
                             "answer": {"type": "string"},
-                            "evidence": {"type": "array", "items": {"type": "string"}},
-                            "belief_ids": {"type": "array", "items": {"type": "string"}},
+                            "evidence": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                                "description": "Exact observation ids/tool_call_ids only. Prefer belief_ids for summarized conclusions.",
+                            },
+                            "belief_ids": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                                "description": "Ids of beliefs recorded in this or a prior record_investigation_findings call, e.g. B1.",
+                            },
                             "reason": {"type": "string"},
                         },
                         "required": ["unknown_id", "status"],
@@ -373,13 +558,26 @@ def _record_findings_tool_schema() -> dict:
                                 "enum": ["unknown", "known", "deferred", "blocked", "added", "updated"],
                             },
                             "reason": {"type": "string"},
+                            "answers": {
+                                "type": "array",
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "source": {"type": "string", "enum": ["investigation", "user"]},
+                                        "text": {"type": "string"},
+                                        "reason": {"type": "string"},
+                                        "trace": {"type": "array", "items": {"type": "string"}},
+                                    },
+                                    "required": ["text"],
+                                },
+                            },
                             "trace": {"type": "array", "items": {"type": "string"}},
                         },
                         "required": ["text", "status"],
                     },
                 },
             },
-            "required": [],
+            "required": ["reason"],
         },
     )
 
@@ -391,6 +589,10 @@ def _finish_tool_schema() -> dict:
         {
             "type": "object",
             "properties": {
+                "reason": {
+                    "type": "string",
+                    "description": "Visible one-sentence reason why the investigation is complete or must hand off.",
+                },
                 "summary": {"type": "string"},
                 "patch_planning_facts": {"type": "array", "items": {"type": "string"}},
                 "patch_planning_context": {"type": "array", "items": {"type": "string"}},
@@ -399,7 +601,7 @@ def _finish_tool_schema() -> dict:
                     "enum": ["patch_planning", "ask_user", "continue_investigation", "done"],
                 },
             },
-            "required": ["summary", "recommended_next_step"],
+            "required": ["reason", "summary", "recommended_next_step"],
         },
     )
 
@@ -415,16 +617,18 @@ def _finalize_investigation(
     analysis: dict | None = None,
     observations: list[dict] | None = None,
     recorded_findings: dict | None = None,
+    reason: str = "Investigation needs a final structured summary.",
 ) -> Iterator[dict]:
-    messages.append({"role": "user", "content": prompt.build_investigation_finalize()})
+    messages.append({"role": "user", "content": prompt.build_investigation_finalize(reason)})
     last_error = ""
     last_content = ""
     last_arguments: dict | None = None
 
-    for attempt in range(MAX_FINALIZATION_ATTEMPTS):
+    attempts = app_settings.get_round_limit("investigation_finalization_attempts")
+    for attempt in _round_indexes(attempts, start=0):
         thinking_id = f"{run_id}-thinking-final-{attempt}"
         yield start_event(thinking_id, "thinking", {
-            "text": "Investigation step limit reached. Summarizing observed facts.",
+            "text": reason,
             "done": False,
             "open": True,
         })
@@ -434,6 +638,7 @@ def _finalize_investigation(
             messages,
             tools=[_record_findings_tool_schema(), _finish_tool_schema()],
             max_tokens=FINALIZATION_OUTPUT_TOKENS,
+            tool_choice="required",
         )
         if usage := _usage_delta(pricing_rules, assistant.pop("_usage", {})):
             _add_usage(usage_total, usage)
@@ -442,9 +647,9 @@ def _finalize_investigation(
                 "total": usage_total,
             })
 
-        content = _assistant_visible_text(assistant)
-        last_content = content or last_content
         tool_calls = assistant.get("tool_calls") or []
+        content = _assistant_visible_text(assistant) or _tool_call_summary(tool_calls)
+        last_content = content or last_content
         record_calls = [
             call for call in tool_calls
             if ((call.get("function") or {}).get("name") == "record_investigation_findings")
@@ -470,9 +675,11 @@ def _finalize_investigation(
             call_id = record_call.get("id") or f"call-{uuid4().hex[:8]}"
             function = record_call.get("function") or {}
             try:
+                record_arguments = _tool_arguments(function.get("arguments"))
+                _require_control_reason(record_arguments, "record_investigation_findings")
                 recorded_findings = _merge_recorded_findings(
                     recorded_findings or _empty_recorded_findings(),
-                    _tool_arguments(function.get("arguments")),
+                    record_arguments,
                 )
                 messages.append({
                     "role": "tool",
@@ -491,6 +698,7 @@ def _finalize_investigation(
             function = finish_call.get("function") or {}
             try:
                 last_arguments = _tool_arguments(function.get("arguments"))
+                _require_control_reason(last_arguments, "finish_investigation")
                 final = _finish_payload(
                     _finish_arguments(recorded_findings or _empty_recorded_findings(), last_arguments),
                     analysis=analysis,
@@ -513,14 +721,16 @@ def _finalize_investigation(
         elif content:
             last_error = "Investigation finalization must use record_investigation_findings and finish_investigation tool calls."
         else:
-            last_error = "Investigation step limit reached before finish_investigation was called."
+            last_error = "Investigation finalization started before finish_investigation was called."
 
-        if attempt < MAX_FINALIZATION_ATTEMPTS - 1:
+        if attempts <= 0 or attempt < attempts - 1:
             messages.append({
                 "role": "user",
                 "content": (
                     f"Previous finalization failed: {last_error}\n"
-                    "Call record_investigation_findings for missing findings if needed, "
+                    "Do not call discovery tools or repeat investigation. "
+                    "Fix only the finalization arguments: create/cite belief ids like B1 in "
+                    "record_investigation_findings, use those ids in resolution.belief_ids, "
                     "then call finish_investigation with summary and recommended_next_step."
                 ),
             })
@@ -554,7 +764,7 @@ def _finalize_investigation(
         }
 
     return {
-        "summary": last_content or "Investigation step limit reached before a final summary was produced.",
+        "summary": last_content or "Investigation finalization did not produce a final summary.",
         "ready_for_patch_planning": False,
         "runtime_failure": True,
         "beliefs": [],
@@ -804,7 +1014,7 @@ def _finish_payload(
     if not unknowns and repair_conflicts:
         ready = True
     readiness = _runtime_readiness(
-        model_ready=model_ready,
+        model_ready=ready,
         analysis=analysis,
         initial_unknowns=initial_unknowns,
         resolutions=resolutions,
@@ -869,6 +1079,15 @@ def _identity_key(item) -> str:
         if value:
             return f"{field}:{value}"
     return ""
+
+
+def _record_task_updates(arguments: dict) -> list[dict]:
+    return _task_updates(
+        arguments.get("task_updates"),
+        _beliefs(arguments.get("beliefs")),
+        _unknowns(arguments.get("unknowns")) + _unknowns(arguments.get("new_unknowns")),
+        _resolutions(arguments.get("resolutions")),
+    )
 
 
 def _finish_arguments(recorded: dict, finish: dict) -> dict:
@@ -1334,21 +1553,29 @@ def _task_updates(value, beliefs, unknowns: list[dict], resolutions: list[dict] 
         unknown_id = resolution.get("unknown_id", "")
         if not unknown_id or any(_same_unknown_id(unknown_id, known_id) for known_id in known_ids):
             continue
+        resolution_status = resolution.get("status")
         status = {
             "resolved": "known",
             "partially_resolved": "unknown",
             "needs_user": "blocked",
             "deferred": "deferred",
-        }.get(resolution.get("status"), "unknown")
-        if status != "known":
-            continue
+        }.get(resolution_status, "unknown")
+        evidence = resolution.get("evidence") if isinstance(resolution.get("evidence"), list) else []
+        trace = evidence or resolution.get("belief_ids", [])
         updates.append({
             "id": unknown_id,
+            "target_id": unknown_id,
             "kind": "unknown",
             "text": resolution.get("answer") or unknown_id,
             "status": status,
             "reason": resolution.get("reason", ""),
-            "trace": resolution.get("evidence", [])[:6],
+            "trace": trace[:6],
+            "answers": [{
+                "source": "investigation",
+                "text": resolution.get("answer") or unknown_id,
+                "reason": resolution.get("reason", ""),
+                "trace": trace[:6],
+            }] if resolution.get("answer") else [],
         })
         if status == "known":
             known_ids.add(unknown_id)
@@ -1360,11 +1587,20 @@ def _task_updates(value, beliefs, unknowns: list[dict], resolutions: list[dict] 
             "id": item.get("id", ""),
             "kind": "unknown",
             "text": item["question"],
-            "status": "blocked" if item.get("blocking") else "deferred",
+            "status": _unknown_task_status(item),
             "reason": item.get("resolution_strategy", ""),
             "trace": [],
         })
     return updates[:8]
+
+
+def _unknown_task_status(item: dict) -> str:
+    strategy = item.get("resolution_strategy")
+    if strategy == "ask_user":
+        return "blocked"
+    if strategy == "deferred" or not item.get("blocking"):
+        return "deferred"
+    return "unknown"
 
 
 def _step_result(final: dict, *, implementation_intent: bool = True) -> dict:
@@ -1459,8 +1695,36 @@ def _step_result(final: dict, *, implementation_intent: bool = True) -> dict:
     }
 
 
-def _wants_implementation(analysis: dict) -> bool:
-    return (analysis.get("intent") or {}).get("type") in {"feature", "bugfix", "refactor"}
+def _wants_implementation(analysis: dict, message: str = "") -> bool:
+    if (analysis.get("intent") or {}).get("type") in {"feature", "bugfix", "refactor"}:
+        return True
+    lowered = " ".join(str(message or "").split()).casefold()
+    keywords = (
+        "实现", "添加", "增加", "修改", "修复", "支持", "调整", "改成", "变成", "加上", "让", "不要",
+        "删除", "移除", "清理", "替换", "优化", "进行修复",
+        "create", "add", "implement", "change", "update", "adjust", "make", "set", "do not", "don't",
+    )
+    return any(word in lowered for word in keywords)
+
+
+def _provider_checkpoint_question(reason: str, *, origin_message: str = "", analysis_id: str = "") -> dict:
+    return {
+        "id": f"provider-{uuid4().hex[:8]}",
+        "analysis_id": analysis_id,
+        "question": "Provider request failed during investigation. Continue this run?",
+        "origin_message": origin_message,
+        "reason": reason,
+        "why_it_matters": "The model provider did not return a usable investigation response.",
+        "blocks_next_step": "investigation",
+        "unknown_id": "",
+        "linked_unknown": {},
+        "options": [
+            {"id": "continue", "label": "Continue", "value": "Retry the investigation from this checkpoint."},
+            {"id": "stop", "label": "Stop", "value": "Stop and keep the current state."},
+        ],
+        "custom_allowed": False,
+        "checkpoint_phase": "investigation_provider_checkpoint",
+    }
 
 
 def _user_question(final: dict, step: dict, origin_message: str = "", analysis_id: str = "") -> dict:

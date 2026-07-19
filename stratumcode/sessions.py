@@ -295,19 +295,15 @@ def _merge_by_task(old: list[dict], new: list[dict]) -> list[dict]:
 def _same_task(left: dict, right: dict) -> bool:
     if _same_task_id(left.get("id"), right.get("id")):
         return True
+    if _same_task_id(left.get("id"), right.get("target_id")) or _same_task_id(right.get("id"), left.get("target_id")):
+        return True
     left_trace = left.get("trace") if isinstance(left.get("trace"), list) else []
     right_trace = right.get("trace") if isinstance(right.get("trace"), list) else []
     left_ids = [left.get("id"), *left_trace]
     right_ids = [right.get("id"), *right_trace]
-    if any(_same_task_id(left_id, right_id) for left_id in left_ids for right_id in right_ids):
-        return True
-    a = _task_key(left.get("text"))
-    b = _task_key(right.get("text"))
-    return bool(a and b and (a == b or a in b or b in a))
+    return any(_same_task_id(left_id, right_id) for left_id in left_ids for right_id in right_ids)
 
 
-def _task_key(value: str | None) -> str:
-    import re
     return re.sub(r"\W+", "", re.sub(r"[（(][^）)]*[）)]", "", value or "")).casefold()
 
 
