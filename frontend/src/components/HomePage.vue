@@ -496,20 +496,23 @@ function applyTaskUpdate(update) {
     const id = item.id || `${item.kind || 'unknown'}:${text}`
     const trace = Array.isArray(item.trace) ? item.trace : []
     const existing = analysis.task_updates.find(row => sameTaskItem(row, { ...item, id, text, trace }))
+    const answers = mergeTaskAnswers(existing?.answers, item.answers)
     const next = {
       id: existing?.id || id,
+      target_id: item.target_id || existing?.target_id || '',
       kind: item.kind || 'unknown',
       text,
       status: item.status || 'updated',
       reason: item.reason || '',
       trace,
+      answers,
     }
     const before = existing ? { ...existing } : null
     const action = !existing
       ? 'add'
       : existing.status !== next.status
         ? 'status'
-        : existing.text !== next.text || existing.kind !== next.kind || existing.reason !== next.reason
+        : existing.text !== next.text || existing.kind !== next.kind || existing.reason !== next.reason || JSON.stringify(taskAnswers(existing.answers)) !== JSON.stringify(next.answers)
           ? 'update'
           : 'noop'
     if (existing) Object.assign(existing, next)
@@ -519,22 +522,39 @@ function applyTaskUpdate(update) {
   return changes.filter(change => change.action !== 'noop')
 }
 
-function normalizedTaskText(value) {
-  return String(value || '')
-    .replace(/[（(][^）)]*[）)]/g, '')
-    .replace(/[^\p{L}\p{N}]+/gu, '')
-    .toLowerCase()
+function taskAnswers(value) {
+  if (!Array.isArray(value)) return []
+  return value.map(answer => typeof answer === 'object' && answer !== null ? answer : { text: answer })
+    .map(answer => ({
+      source: String(answer.source || 'investigation'),
+      text: String(answer.text || answer.answer || '').trim(),
+      reason: String(answer.reason || ''),
+      trace: Array.isArray(answer.trace) ? answer.trace.map(String) : [],
+    }))
+    .filter(answer => answer.text)
 }
+
+function mergeTaskAnswers(oldAnswers, newAnswers) {
+  const merged = []
+  const seen = new Set()
+  for (const answer of [...taskAnswers(oldAnswers), ...taskAnswers(newAnswers)]) {
+    const key = `${answer.source}:${answer.text}`
+    if (seen.has(key)) continue
+    seen.add(key)
+    merged.push(answer)
+  }
+  return merged
+}
+
 
 function sameTaskItem(left, right) {
   if (!left || !right) return false
   if (sameTaskId(left.id, right.id)) return true
+  if (sameTaskId(left.id, right.target_id) || sameTaskId(right.id, left.target_id)) return true
   const leftTrace = Array.isArray(left.trace) ? left.trace : []
   const rightTrace = Array.isArray(right.trace) ? right.trace : []
   if ([left.id, ...leftTrace].some(leftId => [right.id, ...rightTrace].some(rightId => sameTaskId(leftId, rightId)))) return true
-  const a = normalizedTaskText(left.text)
-  const b = normalizedTaskText(right.text)
-  return Boolean(a && b && (a === b || a.includes(b) || b.includes(a)))
+  return false
 }
 
 function sameTaskId(left, right) {

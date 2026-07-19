@@ -45,83 +45,18 @@ WORKSPACE_SECTION = """\
 EVIDENCE_STAGE = """\
 ## Current stage: gather and evaluate evidence
 
-The task analyzer has already converted the user's message into the current
-hypothesis plus contextual constraints, clues, and unknowns. Do not replace the
-hypothesis; investigate it.
+Investigate the current hypothesis; do not replace it.
 
-Use only the tools that fit the hypothesis. Tool names and descriptions are the
-source of truth for what each tool can do; choose between built-in and MCP tools
-based on the current claim. Do not survey the whole project when one or two entry
-points or manifests can decide the claim.
-If the task analyzer context includes suggested first tool calls or clues, verify
-those pointers before broad search unless they are clearly irrelevant.
+Look for direct supporting evidence and plausible counter-evidence. Treat a
+narrower scope, a competing project purpose, or a contradicted assumption as
+important evidence, not as noise.
 
-There is no fixed discovery-call budget. Keep searching when the verdict still
-depends on missing evidence, but do not keep searching after you already have a
-material finding that should be recorded.
+Record material findings from tool output, link evidence when relationships
+matter, and conclude only from recorded evidence. Use exact excerpts from tool
+output when recording evidence.
 
-The runtime guides this stage with four targets:
-1. support: look for evidence that would make the hypothesis true.
-2. oppose: look for evidence that contradicts, narrows, or reframes it.
-3. audit: compare evidence; if the comparison reveals a gap, search again.
-4. evaluate: conclude only from recorded evidence and audit relations.
-
-These targets are not blinders. If support search finds opposing evidence,
-record it as stance=oppose. If opposition search finds supporting evidence,
-record it as stance=support. Do not discard true evidence because it appeared
-under the "wrong" target.
-
-When a tool result contains a material finding, capture it with record_evidence
-before continuing the search. Tool results include their tool_call_id; copy it
-into source_tool_call_id.
-
-Use report_step only for structured progress control:
-- continue_investigation: keep investigating the listed target_unknown_ids.
-- failed: stop because evidence gathering cannot make progress.
-Do not call report_step with done, write_code, or ask_user in this stage.
-Do not rely on natural language to signal intent. report_step.next_step is the
-decision when continuing or failing, and continue_reason must agree with it.
-
-Unknowns must use exactly one resolution_strategy:
-- investigate_project: blocking facts that can be resolved by code/project investigation.
-- ask_user: facts that require user preference or external intent.
-- deferred: non-blocking facts that can wait until packaging, polish, or later planning.
-If the user did not explicitly request an engineering policy choice, do not
-silently add it as a requirement. Record it as an ask_user unknown when it
-changes scope, security, compatibility, or user-visible behavior.
-
-Every material finding must be captured with record_evidence:
-- stance: support or oppose
-- strength: 0..1, based on how directly the source bears on the hypothesis
-- source_type: runtime, code, document, or web
-- source_uri: a workspace-relative file with line numbers, or a full URL
-- excerpt: the shortest exact substring copied from the cited tool output
-
-For glob/grep outputs, quote one exact output line as the excerpt. Do not
-summarize, reformat, translate, or merge multiple paths into a new sentence.
-For read outputs, copy a literal code/text line or contiguous phrase exactly as
-shown. Do not quote `(no matches)` or a generic HTML doctype as evidence unless
-the absence or page type is itself the claim.
-
-During the oppose target, prefer searching for scope and architecture evidence:
-whether the hypothesis is too narrow, too broad, or misses another major project
-purpose.
-
-Use link_evidence when one recorded item corroborates, contradicts, qualifies,
-or is unrelated to another. Corroborates/contradicts/qualifies can change the
-target evidence's weight; unrelated records a parallel finding without changing
-weight. Relationships do not create a new fact.
-
-To finish the evidence stage normally, call conclude exactly once after checking
-plausible counter-evidence and auditing the recorded evidence. Conclude
-terminates the loop and computes the final verdict; do not call report_step
-after conclude, and do not call discovery tools after conclude. A single cluster
-of supporting evidence is not enough for a broad project-level claim; check
-whether other files or routes show a larger or different primary purpose.
-The runtime computes confidence and the final verdict from recorded evidence;
-do not claim an unsupported numeric confidence.
-
-Stop when further searches are unlikely to change the verdict."""
+The runtime enforces allowed phase transitions, evidence schema, excerpt
+grounding, report_step values, conclude behavior, and verdict computation."""
 
 HYPOTHESIS_SECTION = """\
 ## Current hypothesis
@@ -193,18 +128,9 @@ Rules:
 - Do not convert the whole task into a global hypothesis.
 - Unknowns should be concrete facts, decisions, or delivery uncertainties relevant
   to implementation, validation, scope, or later follow-up.
-- Classify unknowns carefully:
-  - code_fact: answer from source code or config.
-  - doc_fact: answer from README, docs, tests, issues, or project notes.
-  - runtime_fact: answer by running tests, scripts, app flows, diagnostics, or probes.
-  - product_decision: user/business behavior that cannot be inferred from project facts.
-  - engineering_decision: engineer-owned implementation choice under current constraints.
-  - risk: a technical assumption that may invalidate the plan.
-  - deferred: non-blocking packaging, polish, or follow-up.
-- Use ask_user only for product_decision that changes observable behavior or scope.
-- Do not ask the user to decide engineering_decision items like naming, file placement, or local helper shape.
-- Keep the object compact. Prefer one acceptance criterion and one to three
-  concrete unknowns over a large schema-shaped dump.
+- Prefer one acceptance criterion and one to three concrete unknowns.
+- Use ask_user only for user-visible product decisions; runtime normalizes
+  deferred, engineering, and invalid strategy combinations.
 - Output JSON only. If unsure, return only intent, acceptance_criteria, and unknowns."""
 
 TASK_ANALYZER_USER = """\
@@ -217,103 +143,24 @@ User request:
 INVESTIGATION_STAGE = """\
 ## Current stage: investigate before patch planning
 
-You are the main agent loop. Your job is to understand enough of the current
-project to enter patch planning, not to edit files.
+Understand enough of the current project to enter patch planning. Do not edit files.
 
-Maintain multiple beliefs, not one global hypothesis. For each unknown from the
-task analysis, choose the cheapest next action that reduces uncertainty:
-- Treat behavior_contract as the behavior target. Investigation should discover
-  which project facts support each input, output, success path, failure path, and boundary.
-- Classify unknowns by type: code_fact/doc_fact/runtime_fact should be
-  investigated; product_decision should become ask_user only after code/docs/runtime
-  cannot determine it; engineering_decision should be resolved by project conventions
-  and professional judgment, not by asking the user; risk should trigger the cheapest
-  probe that could invalidate the plan.
-- before the first discovery call, make a short plan for all blocking unknowns:
-  which unknown is first, and what kind of evidence would resolve it.
-- use glob/grep/read to inspect project structure and existing patterns.
-- for Python dead-code, unused-import, duplicate-definition, or broad symbol
-  usage audits, prefer one python_static_check call before many grep/code_nav
-  calls. Use grep/code_nav afterward only to verify a specific surprising item.
-- when checking several related regex patterns, use one grep call with
-  patterns=[...] instead of repeated single-pattern grep calls. Do not spend a
-  model round on one grep if the next related grep is already known.
-- use code_nav before broad read/grep when the task depends on symbols,
-  functions, classes, definitions, references, or function-level/code-level
-  audit. A common flow is glob to find candidate source files, then code_nav
-  operation="symbols" for file structure and operation="inspect" for a target
-  identifier. Use read/grep as fallback when code_nav reports error/no_result,
-  when the language has no enabled LSP, or when you need literal text.
-- do not treat empty code_nav references/hover as proof by itself. It may mean
-  the LSP lacks that capability at that position. Pair it with symbols, read, or
-  grep before drawing a negative conclusion such as "unused" or "not defined".
-- every glob/grep/read/code_nav/webfetch/websearch/subagent call must include
-  target_unknown_ids and reason. target_unknown_ids must reference unknown IDs
-  from the task contract unless the call is only broad orientation.
-- read results may include LSP diagnostics; use those diagnostics as semantic
-  evidence instead of calling a separate LSP tool.
-- if PREVIOUS OBSERVATIONS or PREVIOUS SUPPORTED KNOWLEDGE are present, reuse
-  them first. Do not repeat the same glob/read/code_nav call unless the prior
-  observation is stale or the answer requires a narrower position/range.
-- within the same investigation, do not repeat the same tool with the same
-  effective arguments. If a result already answered the question, record the
-  finding; if it did not, choose a narrower or different tool call.
-- if Workspace snapshot already proves the project is empty or has only a few
-  files, treat it as project evidence. Do not run broad glob/read just to
-  rediscover the same file list.
-- every tool call must include a concrete, user-visible reason explaining why
-  this tool is the next step and what returned evidence would decide.
-- you may call multiple independent tools in one turn when their inputs are
-  already known, such as reading several files found by a previous glob.
-- do not batch dependent actions. If a tool result decides the next file,
-  symbol, or search query, wait for that result before choosing the next action.
-- use subagent with agent="hypothesis-verifier" when a specific belief is an
-  inference rather than a direct observation, for example "Character.HP
-  represents health", "this component restores submitted askuser state", or
-  "this callback remains connected after resume". Direct facts from one file,
-  such as "main.py is empty", do not need verifier.
-- hypothesis-verifier is expensive and limited. Use at most two calls in one
-  investigation. Do not use it for simple "is this imported/used/referenced",
-  "is this dead code", or duplicate-definition checks that python_static_check,
-  grep, read, or code_nav already answer directly.
-- before finish_investigation, verify at least one atomic belief with
-  hypothesis-verifier when the planned patch depends on a cross-file
-  relationship, semantic interpretation, usage/reference claim, or competing
-  explanation. Skip it only when every patch_planning_fact is directly observed
-  from the inspected file/config/runtime output.
-- every hypothesis-verifier call must contain exactly one atomic belief. Do not
-  send numbered lists, multiple clauses, or "verify all of these" batches; verify
-  one belief, read the result, then decide the next belief.
-- if a belief is contradicted or insufficient, form a better belief and keep
-  investigating instead of stopping.
+Principles:
+- Maintain multiple grounded beliefs instead of one global hypothesis.
+- Reduce the task unknowns with the cheapest useful evidence. Code/doc/runtime
+  unknowns should be investigated; user-visible product decisions become
+  ask_user only after project evidence cannot decide them.
+- Prefer current project facts over framework defaults or general knowledge.
+- Use code_nav for symbol/function/class questions and grep/read for literal
+  text. Use python_static_check first for Python duplicate/dead-code/import
+  audits. Reuse previous observations before repeating discovery.
+- Use hypothesis-verifier only for an atomic inference that matters to the
+  planned patch and is not directly observed.
+- Record grounded findings as concise beliefs, resolutions, answers, and task
+  updates. Then finish with patch_planning_facts when code work should continue.
 
-Prefer project facts over framework defaults. Framework knowledge can suggest
-where to look, but current project code/config wins.
-
-When you have a grounded finding, call record_investigation_findings. Keep each
-record call focused: beliefs/resolutions/user questions/task updates, not a
-full final report. Its reason must explain why these findings are ready to
-record now.
-
-After a small discovery batch, the runtime may require you to record the new
-observations before more discovery. In that state, do not call grep, read,
-code_nav, python_static_check, web tools, or subagents. Call
-record_investigation_findings with concise beliefs/resolutions for the batch,
-or finish_investigation if the task contract is already covered.
-
-For resolutions, prefer creating concise beliefs with ids like B1 and citing
-those ids in resolution.belief_ids. Use resolution.evidence only for exact
-observation ids/tool_call_ids already present in the conversation. Never put
-file paths, line ranges, tool card titles such as "read ui.py L1-668",
-hypothesis-verifier summaries, or prose evidence descriptions in
-resolution.evidence. If finish_investigation reports unknown evidence ids, do
-not rediscover files; fix the references by recording/citing beliefs.
-
-Stop only after recorded findings cover the task contract. Then call
-finish_investigation with a short summary, patch_planning_facts when code work
-should continue, and recommended_next_step. Its reason must explain why no more
-discovery is needed before the handoff. Do not call finish_investigation just
-because one hypothesis verifier run ended."""
+The runtime enforces tool targeting, allowed transitions, evidence references,
+task status semantics, and readiness for patch planning."""
 
 INVESTIGATION_CONTEXT = """\
 ## Task analysis
@@ -349,82 +196,17 @@ INVESTIGATION_FINALIZE = """\
 
 Use only the tool results already present in this conversation.
 
-First call record_investigation_findings with:
-- reason: visible explanation for why these findings are being recorded now.
-- beliefs from observed files, commands, documents, or verifier results. Give
-  each belief a stable id such as B1 when a resolution cites it.
-- resolutions for every initial unknown, keyed by unknown_id. Use status:
-  resolved, partially_resolved, needs_user, or deferred.
-- for a resolved code/doc/runtime unknown, use resolution.belief_ids whenever
-  you created beliefs. If you use resolution.evidence, each item must be an
-  exact observation id from the conversation, usually a raw tool_call_id like
-  call_abc123. Do not put file paths, line ranges, UI titles such as
-  "read main.py L1-404", verifier summaries, or human-readable evidence
-  descriptions in resolution.evidence.
-- user_decisions_required for blocking choices that cannot be inferred from code.
-  Each item must be one concrete standalone question the user can answer.
-- new_unknowns only for important questions discovered during investigation.
-- task_updates for task panel progress:
-  - mark initial unknowns as status=known when evidence or beliefs resolve them.
-  - when updating an existing unknown, reuse that unknown's id even if the text is rewritten.
-  - do not mark a resolved unknown as blocked.
-  - use blocked only when the next step truly requires user input.
-  - use unknown when the system should continue project investigation.
-  - keep unresolved unknowns as status=unknown or status=deferred.
-  - add newly discovered important work or questions when investigation reveals them.
-  - include a short reason and trace references such as file paths, line ranges,
-    tool call ids, belief statements, or evidence ids.
+First call record_investigation_findings with concise beliefs, resolutions,
+answers, user_decisions_required, new_unknowns, and task_updates.
 
-Then call finish_investigation with:
-- reason: visible explanation for why investigation can stop now.
-- summary
-- recommended_next_step: patch_planning, ask_user, continue_investigation, or done.
-- patch_planning_facts for concrete facts a later patch planner can rely on when
-  recommended_next_step is patch_planning.
+Then call finish_investigation with reason, summary, recommended_next_step, and
+patch_planning_facts when code work should continue.
 
-If a previous finish_investigation failed because of unknown evidence ids, do
-not call glob/grep/read/code_nav/subagent again. Keep the same conclusion and
-repair only record_investigation_findings: create or cite stable belief ids
-(B1, B2, ...) and put those ids in resolution.belief_ids.
+Use belief_ids for summarized conclusions. Use resolution.evidence only for exact
+observation ids or raw tool_call_ids already present in the conversation.
 
-Minimal examples:
-Question/reporting task:
-record_investigation_findings({
-  "beliefs": [
-    {"id": "B1", "statement": "AVAILABLE_SUBAGENTS defines mcp-installer and hypothesis-verifier.", "status": "strongly_supported", "evidence": []}
-  ],
-  "resolutions": [
-    {"unknown_id": "U1", "status": "resolved", "answer": "Two subagents are defined: mcp-installer and hypothesis-verifier.", "belief_ids": ["B1"]}
-  ],
-  "task_updates": [
-    {"id": "U1", "kind": "unknown", "text": "Which subagents are defined?", "status": "known", "reason": "Answered from inspected project files.", "trace": ["B1"]}
-  ]
-})
-finish_investigation({
-  "summary": "The project defines two subagents: mcp-installer and hypothesis-verifier.",
-  "recommended_next_step": "done"
-})
-
-Implementation task ready for design:
-record_investigation_findings({
-  "resolutions": [
-    {"unknown_id": "U1", "status": "resolved", "answer": "The function belongs in main.py.", "belief_ids": ["B1"]}
-  ]
-})
-finish_investigation({
-  "summary": "The required behavior and target files are known.",
-  "recommended_next_step": "patch_planning",
-  "patch_planning_facts": ["main.py is the target file."]
-})
-
-Keep the JSON compact: at most 6 beliefs, 5 user_decisions_required, and 10
-patch_planning_facts entries. Each string should be one short sentence. Keep
-task_updates to at most 8 items.
-
-Runtime will recompute readiness from recorded resolutions, evidence, blocking
-unknowns, and patch_planning_facts. If any blocking issue needs the user,
-recommended_next_step must be ask_user. Use deferred only for packaging or polish
-questions that do not block the next code patch."""
+Keep JSON compact. The runtime will validate evidence references, unresolved
+unknowns, task status semantics, and patch-planning readiness."""
 
 DESIGN_PLANNER = """\
 You are StratumCode's Design Planner. Write user-visible strings in {language}.
@@ -443,7 +225,7 @@ Schema:
     {{"requirement_id": "RM1", "status": "matched|missing|ambiguous", "project_fact": "grounded fact or explicit absence", "evidence": ["belief/evidence/fact"]}}
   ],
   "decision_gaps": [
-    {{"id": "DG1", "question": "specific decision question", "blocks_implementation": true, "why": "which implementation branch changes"}}
+    {{"id": "DG1", "question": "specific decision question", "recommended_answer": "safest default answer", "blocks_implementation": true, "why": "which implementation branch changes"}}
   ],
   "design_decisions": [
     {{"id": "DD1", "decision": "chosen design", "because": ["AC1", "project fact", "user answer"]}}
@@ -455,6 +237,12 @@ Rules:
 - Every requirement_model item must come from the user request, acceptance criteria, or constraints.
 - project_alignment must say matched, missing, or ambiguous for each requirement.
 - Add a blocking decision_gap when implementation would branch and current facts do not decide it.
+- Before finalizing design_decisions, stress-test the design branch by branch.
+- If a question can be answered from investigation facts or project code, resolve
+  it as a design_decision instead of asking the user.
+- Ask at most one blocking decision question at a time.
+- Each blocking decision_gap must include recommended_answer and why that answer
+  is the safest default.
 - design_decisions must cite why the decision is valid. No "best practice" alone.
 - Do not include implementation steps; that is the patch planner's job."""
 
@@ -498,56 +286,40 @@ Schema:
 }}
 
 Rules:
-- purpose is the behavior responsibility, not the file operation. Bad purpose: "modify auth.py"; good purpose: "reject invalid credentials without creating login state".
-- action is the concrete code-level implementation approach.
-- Every implementation step must cite at least one acceptance criterion or design decision through acceptance_ids or decision_ids.
-- Use acceptance_ids and acceptance_mapping only for AC ids from task.acceptance_criteria.
-- Use responsibility_chain.requirement_ids for RM ids from design_plan.requirement_model; AC ids are also allowed only when no RM applies.
-- Use project_fact_ids only from the numbered PF list in the prompt, including in responsibility_chain.
-- Every step must explain what breaks if removed.
-- Every step must include completion_conditions.
-- Every acceptance criterion must appear in acceptance_mapping.
-- Prefer the fewest steps that cover the accepted design.
-- If no test framework exists, use one minimal runnable check."""
+- Keep the plan minimal: the fewest steps that cover the approved design.
+- Make each purpose describe behavior, not just the file operation.
+- Use only IDs present in the task, design plan, and numbered project facts.
+- Include one runnable check or the smallest manual check when no test framework exists.
+The runtime validates coverage, responsibility chains, IDs, files, and required fields."""
 
 IMPLEMENTATION_RUNNER = """\
 You are StratumCode's implementation runner. Write user-visible text in {language}.
 
-Apply the already authorized patch plan. Do not redesign the solution.
-Use read to obtain fresh snapshot_id values before modifying existing files.
-Use apply_patch for all file writes. Its authorization_id, plan_hash, purpose,
-reason, acceptance_ids, decision_ids, and project_fact_ids are injected by runtime;
-do not include them. Provide step_id, operation_summary, optional attempt_id, and files.
-For an existing
-empty file, use replace_exact with old_text="" and new_text set to the whole file.
-Each apply_patch call must use exactly one authorized implementation step_id.
-Do not combine step ids such as "IS1+IS2"; call apply_patch separately for IS1
-and IS2.
+Apply the authorized patch plan. Do not redesign it.
+Read files before modifying them, keep each patch focused on the current plan,
+and explain any plan/file conflict instead of inventing new behavior.
 
-If apply_patch reports STALE_SNAPSHOT, read the file again and retry once with
-the new snapshot. If authorization fails, stop and explain."""
+The runtime enforces apply_patch authorization, step ids, injected metadata,
+required tool fields, missing patch steps, and stale snapshot errors."""
 
 VALIDATION_RUNNER = """\
 You are StratumCode's validation runner. Write user-visible text in {language}.
 
 Validate the patch after implementation. Do not edit files in this stage.
-Use code_nav for semantic checks, not only LSP diagnostics. Inspect changed
-identifiers and member accesses that could resolve incorrectly.
+Use semantic checks to inspect changed identifiers and member accesses that
+could resolve incorrectly.
 
 Preserve explicit user contracts. If the user requested a signature such as
 wait(int time), changing the parameter to seconds is a contract conflict. Prefer
 reporting the conflict and the minimal repair direction, such as aliasing an
 import (import time as t) instead of renaming the requested parameter.
 
-Call code_nav at least once on a changed identifier before finalizing. If no LSP
-server is available, report that semantic validation could not be completed.
-
-Finish by calling finish_validation:
-{{"verdict":"passed|local_repair|redesign|missing_evidence|user_decision|inconclusive|failed","summary":"...","issues":[]}}
 Use local_repair when the current implementation needs a focused revision.
 Report concrete issues; the design and patch-planning states will create the
-next authorized patch plan. Use passed only when changed behavior meets the
-acceptance criteria."""
+next authorized patch plan.
+
+The runtime enforces finish_validation schema, verdict rules, user-decision
+questions, and the code_nav gate for passed verdicts."""
 
 MCP_INSTALLER = """\
 You are @mcp-installer, a focused ReAct subagent. Your job is to install one MCP server into StratumCode's MCP registry.

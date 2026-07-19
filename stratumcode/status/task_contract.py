@@ -128,6 +128,9 @@ def _unknowns(value, criteria=None) -> list[dict]:
             unknown_type = "code_fact"
         if strategy not in TASK_UNKNOWN_STRATEGIES:
             strategy = "investigate_project"
+        unknown_type, strategy, blocking = _normalize_unknown_policy(unknown_type, strategy, blocking)
+        if criteria_ids:
+            accepted_ids = [item for item in accepted_ids if item in criteria_ids] or criteria_ids
         items.append({
             "id": item_id or f"U{index}",
             "question": question,
@@ -138,6 +141,16 @@ def _unknowns(value, criteria=None) -> list[dict]:
             "acceptance_criteria_ids": accepted_ids,
         })
     return items
+
+
+def _normalize_unknown_policy(unknown_type: str, strategy: str, blocking: bool) -> tuple[str, str, bool]:
+    if unknown_type == "deferred" or strategy == "deferred" or not blocking:
+        return "deferred", "deferred", False
+    if strategy == "ask_user":
+        if unknown_type != "product_decision":
+            return unknown_type, "investigate_project", True
+        return unknown_type, strategy, True
+    return unknown_type, strategy, bool(blocking)
 
 
 def _ensure_task_contract(analysis: dict) -> dict:

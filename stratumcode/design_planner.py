@@ -108,6 +108,7 @@ def validate_design_plan(plan: dict, analysis: dict, investigation: dict) -> lis
     requirements = plan.get("requirement_model") or []
     alignments = plan.get("project_alignment") or []
     decisions = plan.get("design_decisions") or []
+    blocking_gaps = [item for item in plan.get("decision_gaps", []) if item.get("blocks_implementation")]
     requirement_ids = {item.get("id") for item in requirements if item.get("id")}
     aligned_ids = {item.get("requirement_id") for item in alignments if item.get("requirement_id")}
     if criteria and len(requirements) < len(criteria):
@@ -124,6 +125,13 @@ def validate_design_plan(plan: dict, analysis: dict, investigation: dict) -> lis
     for item in decisions:
         if not item.get("because"):
             issues.append(f"design decision {item.get('id') or item.get('decision') or '?'} has no because")
+    if len(blocking_gaps) > 1:
+        issues.append("design plan can ask at most one blocking decision question")
+    for item in blocking_gaps:
+        if not item.get("question"):
+            issues.append(f"blocking decision gap {item.get('id') or '?'} has no question")
+        if not item.get("recommended_answer"):
+            issues.append(f"blocking decision gap {item.get('id') or item.get('question') or '?'} has no recommended_answer")
     if not (investigation.get("patch_planning_facts") or investigation.get("patch_planning_context")):
         issues.append("design plan has no grounded investigation facts to rely on")
     return issues
@@ -160,6 +168,7 @@ def user_question(gap: dict, *, analysis_id: str, origin_message: str) -> dict:
     gap_id = gap.get("id") or "design-gap"
     question = gap.get("question") or "Please clarify this design decision."
     why = gap.get("why", "")
+    recommended = gap.get("recommended_answer") or "Use best engineering judgment."
     return {
         "id": gap_id,
         "analysis_id": analysis_id,
@@ -180,8 +189,8 @@ def user_question(gap: dict, *, analysis_id: str, origin_message: str) -> dict:
             {
                 "id": "best_judgment",
                 "label": "Use best engineering judgment",
-                "description": f"Choose the smallest design supported by current facts: {question}",
-                "value": "Use best engineering judgment.",
+                "description": recommended,
+                "value": recommended,
             },
             {
                 "id": "continue_investigation",
@@ -258,6 +267,7 @@ def _decision_gaps(value) -> list[dict]:
         {
             "id": str(item.get("id") or "").strip(),
             "question": str(item.get("question") or "").strip(),
+            "recommended_answer": str(item.get("recommended_answer") or "").strip(),
             "blocks_implementation": bool(item.get("blocks_implementation")),
             "why": str(item.get("why") or "").strip(),
         }

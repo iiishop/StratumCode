@@ -94,7 +94,11 @@ def handle(run):
     next_step = ((run.last_investigation or {}).get("step_result") or {}).get("next_step")
     has_blocked_task = _has_task_status(run.last_investigation, "blocked")
     has_unknown_task = _has_task_status(run.last_investigation, "unknown")
-    if next_step == "ask_user" or pending_question or has_blocked_task:
+    if pending_question:
+        run.transition(chat.ChatState.WAITING_FOR_USER, "Investigation needs user input.")
+    elif next_step == "done":
+        run.transition(chat._chat_finish_state(run), "Investigation ended without an implementation path.")
+    elif next_step == "ask_user" or has_blocked_task:
         run.transition(chat.ChatState.WAITING_FOR_USER, "Investigation needs user input.")
     elif next_step == "continue_investigation" or has_unknown_task:
         run.findings = _merge_findings(run.findings, _investigation_continuation_findings(run.last_investigation))

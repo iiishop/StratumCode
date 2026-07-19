@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import re
-
 from .task_contract import _ensure_task_contract
 
 def _seed_task_updates(analysis: dict, existing: list[dict] | None = None) -> list[dict]:
@@ -82,19 +80,27 @@ def _normalize_task_updates(analysis_id: str, updates: list[dict], existing: lis
         item.setdefault("status", "updated")
         item.setdefault("reason", "")
         item["trace"] = [str(entry) for entry in item.get("trace", [])] if isinstance(item.get("trace"), list) else []
+        item["answers"] = _answers(item.get("answers"))
         matched = next((row for row in prior + result if _same_task(row, item)), None)
         if matched:
             if matched.get("kind") == "goal":
                 item = dict(matched)
                 item["trace"] = [str(entry) for entry in item.get("trace", [])] if isinstance(item.get("trace"), list) else []
+                item["answers"] = _answers(item.get("answers"))
                 result.append(item)
                 continue
             item["id"] = matched.get("id") or item["id"]
+            item["answers"] = _merge_answers(matched.get("answers"), item.get("answers"))
         index = next((i for i, row in enumerate(result) if _same_task(row, item)), None)
         if index is None:
             result.append(item)
         elif result[index].get("kind") != "goal":
-            result[index] = {**result[index], **item, "id": result[index].get("id") or item["id"]}
+            result[index] = {
+                **result[index],
+                **item,
+                "id": result[index].get("id") or item["id"],
+                "answers": _merge_answers(result[index].get("answers"), item.get("answers")),
+            }
     return result
 
 
@@ -136,19 +142,15 @@ def _resolved_unknown_ids(investigation: dict) -> set[str]:
 def _same_task(left: dict, right: dict) -> bool:
     if _same_task_id(left.get("id"), right.get("id")):
         return True
+    if _same_task_id(left.get("id"), right.get("target_id")) or _same_task_id(right.get("id"), left.get("target_id")):
+        return True
     left_trace = left.get("trace") if isinstance(left.get("trace"), list) else []
     right_trace = right.get("trace") if isinstance(right.get("trace"), list) else []
     left_ids = [left.get("id"), *left_trace]
     right_ids = [right.get("id"), *right_trace]
     if any(_same_task_id(left_id, right_id) for left_id in left_ids for right_id in right_ids):
         return True
-    a = _task_key(left.get("text"))
-    b = _task_key(right.get("text"))
-    return bool(a and b and (a == b or a in b or b in a))
-
-
-def _task_key(value: str | None) -> str:
-    return re.sub(r"\W+", "", re.sub(r"[\uff08(][^\uff09)]*[\uff09)]", "", value or "")).casefold()
+    return False
 
 
 def _task_id_tail(value: str | None) -> str:
@@ -165,6 +167,38 @@ def _same_task_id(left: str | None, right: str | None) -> bool:
     if ":" in left and ":" in right:
         return False
     return _task_id_tail(left) == _task_id_tail(right)
+
+
+def _answers(value) -> list[dict]:
+    if not isinstance(value, list):
+        return []
+    answers = []
+    for raw in value:
+        if not isinstance(raw, dict):
+            raw = {"text": raw}
+        text = str(raw.get("text") or raw.get("answer") or "").strip()
+        if not text:
+            continue
+        trace = raw.get("trace") if isinstance(raw.get("trace"), list) else []
+        answers.append({
+            "source": str(raw.get("source") or "investigation").strip(),
+            "text": text,
+            "reason": str(raw.get("reason") or "").strip(),
+            "trace": [str(item) for item in trace],
+        })
+    return answers
+
+
+def _merge_answers(old, new) -> list[dict]:
+    merged = []
+    seen = set()
+    for answer in _answers(old) + _answers(new):
+        key = (answer["source"], answer["text"])
+        if key in seen:
+            continue
+        seen.add(key)
+        merged.append(answer)
+    return merged
 
 
 def _scoped_id(analysis_id: str, item_id: str) -> str:

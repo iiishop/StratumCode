@@ -98,6 +98,12 @@ def _answered_task_update(analysis_id: str, answer: dict | None) -> dict | None:
         "text": question,
         "status": "known",
         "reason": f"User answered: {response}",
+        "answers": [{
+            "source": "user",
+            "text": response,
+            "reason": "User answered this blocking question.",
+            "trace": [],
+        }],
     }
 
 

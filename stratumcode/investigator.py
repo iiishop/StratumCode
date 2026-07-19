@@ -558,6 +558,19 @@ def _record_findings_tool_schema() -> dict:
                                 "enum": ["unknown", "known", "deferred", "blocked", "added", "updated"],
                             },
                             "reason": {"type": "string"},
+                            "answers": {
+                                "type": "array",
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "source": {"type": "string", "enum": ["investigation", "user"]},
+                                        "text": {"type": "string"},
+                                        "reason": {"type": "string"},
+                                        "trace": {"type": "array", "items": {"type": "string"}},
+                                    },
+                                    "required": ["text"],
+                                },
+                            },
                             "trace": {"type": "array", "items": {"type": "string"}},
                         },
                         "required": ["text", "status"],
@@ -1551,11 +1564,18 @@ def _task_updates(value, beliefs, unknowns: list[dict], resolutions: list[dict] 
         trace = evidence or resolution.get("belief_ids", [])
         updates.append({
             "id": unknown_id,
+            "target_id": unknown_id,
             "kind": "unknown",
             "text": resolution.get("answer") or unknown_id,
             "status": status,
             "reason": resolution.get("reason", ""),
             "trace": trace[:6],
+            "answers": [{
+                "source": "investigation",
+                "text": resolution.get("answer") or unknown_id,
+                "reason": resolution.get("reason", ""),
+                "trace": trace[:6],
+            }] if resolution.get("answer") else [],
         })
         if status == "known":
             known_ids.add(unknown_id)

@@ -29,6 +29,11 @@ const hasBeliefs = computed(() => beliefs.value.length > 0)
 const hasPatchContext = computed(() => patchFacts.value.length > 0)
 const hasResolutions = computed(() => resolutions.value.length > 0)
 const hasBlockers = computed(() => unknowns.value.length > 0)
+const bannerReason = computed(() => {
+  if (props.event.next_step === 'done') return ''
+  return props.event.continue_reason || ''
+})
+const showSummary = computed(() => props.event.next_step !== 'done' && props.event.summary)
 
 function beliefLabel(status) {
   return {
@@ -86,11 +91,11 @@ onMounted(() => {
       </span>
       <div class="sr__banner-body">
         <strong>{{ stepLabel }}</strong>
-        <p>{{ event.continue_reason }}</p>
+        <p v-if="bannerReason">{{ bannerReason }}</p>
       </div>
     </div>
 
-    <div v-if="event.summary" class="sr__summary">
+    <div v-if="showSummary" class="sr__summary">
       {{ event.summary }}
     </div>
 

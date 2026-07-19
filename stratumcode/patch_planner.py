@@ -185,6 +185,8 @@ def validate_patch_plan(plan: dict, analysis: dict, design_plan: dict, workspace
         if not step.get("file"):
             issues.append(f"step {step_id} has no file")
             continue
+        if not step.get("target"):
+            issues.append(f"step {step_id} has no target")
         try:
             target = (workspace / step["file"]).resolve()
             if workspace not in (target, *target.parents):
@@ -202,6 +204,8 @@ def validate_patch_plan(plan: dict, analysis: dict, design_plan: dict, workspace
         if criteria_ids or decision_ids:
             if not (set(step.get("acceptance_ids") or []) & criteria_ids or set(step.get("decision_ids") or []) & decision_ids):
                 issues.append(f"step {step_id} does not cite a valid AC or design decision")
+        if fact_ids and not step.get("project_fact_ids"):
+            issues.append(f"step {step_id} has no project_fact_ids")
         for ref in step.get("acceptance_ids") or []:
             if ref not in criteria_ids:
                 issues.append(f"step {step_id} references unknown acceptance id: {ref}")
@@ -218,6 +222,10 @@ def validate_patch_plan(plan: dict, analysis: dict, design_plan: dict, workspace
     for item in plan.get("responsibility_chain", []):
         if item.get("step_id") not in step_ids:
             issues.append(f"responsibility_chain references unknown step: {item.get('step_id')}")
+        if not item.get("removal_breaks"):
+            issues.append(f"responsibility_chain {item.get('step_id') or '?'} has no removal_breaks")
+        if fact_ids and not item.get("project_fact_ids"):
+            issues.append(f"responsibility_chain {item.get('step_id') or '?'} has no project_fact_ids")
         for req in item.get("requirement_ids", []):
             if req not in criteria_ids and req not in requirement_ids:
                 issues.append(f"responsibility_chain references unknown requirement or acceptance id: {req}")
