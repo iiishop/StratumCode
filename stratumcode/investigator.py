@@ -1922,16 +1922,7 @@ def _unknowns(value) -> list[dict]:
 
 def _summary(final: dict) -> str:
     lines = [final.get("summary") or "Investigation complete."]
-    if final.get("beliefs"):
-        lines.append(f"\n{app_settings.text('summary_beliefs')}")
-        lines.extend(
-            f"- {item.get('status', 'unverified')}: {item.get('statement', '')}"
-            for item in final["beliefs"][:8]
-        )
     if final.get("open_questions"):
         lines.append(f"\n{app_settings.text('summary_open_questions')}")
         lines.extend(f"- {item}" for item in final["open_questions"][:5])
-    if final.get("patch_planning_context"):
-        lines.append(f"\n{app_settings.text('summary_patch_context')}")
-        lines.extend(f"- {item}" for item in final["patch_planning_context"][:8])
     return "\n".join(lines)
