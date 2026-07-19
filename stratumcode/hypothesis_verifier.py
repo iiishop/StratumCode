@@ -84,7 +84,7 @@ def evidence_stream(
             "content": prompt.build_evidence_static(app_settings.get_output_language()),
         },
         {
-            "role": "system",
+            "role": "user",
             "content": prompt.build_evidence_context(
                 hypothesis=hypothesis,
                 directory=workspace_dir,
@@ -489,6 +489,12 @@ def _handle_agent_tool(
         return json.dumps(data, ensure_ascii=False), False, None
 
     if name == "report_step":
+        next_step = str(arguments.get("next_step") or "")
+        if next_step not in {"continue_investigation", "failed"}:
+            raise ValueError(
+                "evidence report_step only supports continue_investigation or failed; "
+                "finish normal evidence gathering with conclude"
+            )
         for item in arguments.get("unknowns") or []:
             run.upsert_unknown(
                 unknown_id=str(item.get("id") or ""),
@@ -508,7 +514,7 @@ def _handle_agent_tool(
                 resolves_unknown_ids=_string_list(item.get("resolves_unknown_ids")),
             )
         step = run.report_step(
-            next_step=str(arguments.get("next_step") or ""),
+            next_step=next_step,
             continue_reason=str(arguments.get("continue_reason") or ""),
             target_unknown_ids=_string_list(arguments.get("target_unknown_ids")),
         )

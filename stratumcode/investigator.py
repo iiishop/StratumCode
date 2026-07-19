@@ -78,7 +78,7 @@ def investigation_stream(
     messages = [
         {"role": "system", "content": prompt.build_investigation_static(app_settings.get_output_language())},
         {
-            "role": "system",
+            "role": "user",
             "content": prompt.build_investigation_context(
                 analysis=analysis,
                 message=message,
@@ -92,10 +92,10 @@ def investigation_stream(
         {"role": "user", "content": message},
     ]
     if findings:
-        messages.insert(2, {"role": "system", "content": "\n".join(findings)})
+        messages.insert(2, {"role": "user", "content": "\n".join(findings)})
     prior_lines = _previous_context(previous_observations, previous_knowledge)
     if prior_lines:
-        messages.insert(2, {"role": "system", "content": "\n".join(prior_lines)})
+        messages.insert(2, {"role": "user", "content": "\n".join(prior_lines)})
     tools = _investigation_tools()
     final = None
     observations = []
@@ -183,6 +183,7 @@ def investigation_stream(
                     _require_control_reason(arguments, name)
                     recorded_findings = _merge_recorded_findings(recorded_findings, arguments)
                     pending_observation_ids.clear()
+                    task_updates = _record_task_updates(arguments)
                     output = json.dumps({
                         "recorded": True,
                         "counts": {field: len(recorded_findings.get(field, [])) for field in FINDING_FIELDS},
@@ -195,6 +196,11 @@ def investigation_stream(
                         "input": json.dumps(arguments, ensure_ascii=False, indent=2),
                         "output": output,
                     })
+                    if task_updates:
+                        yield start_event(f"{call_id}-task-update", "task_update", {
+                            "analysis_id": analysis.get("id", ""),
+                            "items": task_updates,
+                        })
                     messages.append({
                         "role": "tool",
                         "tool_call_id": call_id,
@@ -207,6 +213,7 @@ def investigation_stream(
                         _finish_arguments(recorded_findings, arguments),
                         analysis=analysis,
                         observations=observations,
+                        repair_conflicts=True,
                     )
                     messages.append({
                         "role": "tool",
@@ -994,7 +1001,7 @@ def _finish_payload(
     if not unknowns and repair_conflicts:
         ready = True
     readiness = _runtime_readiness(
-        model_ready=model_ready,
+        model_ready=ready,
         analysis=analysis,
         initial_unknowns=initial_unknowns,
         resolutions=resolutions,
@@ -1059,6 +1066,15 @@ def _identity_key(item) -> str:
         if value:
             return f"{field}:{value}"
     return ""
+
+
+def _record_task_updates(arguments: dict) -> list[dict]:
+    return _task_updates(
+        arguments.get("task_updates"),
+        _beliefs(arguments.get("beliefs")),
+        _unknowns(arguments.get("unknowns")) + _unknowns(arguments.get("new_unknowns")),
+        _resolutions(arguments.get("resolutions")),
+    )
 
 
 def _finish_arguments(recorded: dict, finish: dict) -> dict:
@@ -1524,21 +1540,22 @@ def _task_updates(value, beliefs, unknowns: list[dict], resolutions: list[dict] 
         unknown_id = resolution.get("unknown_id", "")
         if not unknown_id or any(_same_unknown_id(unknown_id, known_id) for known_id in known_ids):
             continue
+        resolution_status = resolution.get("status")
         status = {
             "resolved": "known",
             "partially_resolved": "unknown",
             "needs_user": "blocked",
             "deferred": "deferred",
-        }.get(resolution.get("status"), "unknown")
-        if status != "known":
-            continue
+        }.get(resolution_status, "unknown")
+        evidence = resolution.get("evidence") if isinstance(resolution.get("evidence"), list) else []
+        trace = evidence or resolution.get("belief_ids", [])
         updates.append({
             "id": unknown_id,
             "kind": "unknown",
             "text": resolution.get("answer") or unknown_id,
             "status": status,
             "reason": resolution.get("reason", ""),
-            "trace": resolution.get("evidence", [])[:6],
+            "trace": trace[:6],
         })
         if status == "known":
             known_ids.add(unknown_id)
@@ -1550,11 +1567,20 @@ def _task_updates(value, beliefs, unknowns: list[dict], resolutions: list[dict] 
             "id": item.get("id", ""),
             "kind": "unknown",
             "text": item["question"],
-            "status": "blocked" if item.get("blocking") else "deferred",
+            "status": _unknown_task_status(item),
             "reason": item.get("resolution_strategy", ""),
             "trace": [],
         })
     return updates[:8]
+
+
+def _unknown_task_status(item: dict) -> str:
+    strategy = item.get("resolution_strategy")
+    if strategy == "ask_user":
+        return "blocked"
+    if strategy == "deferred" or not item.get("blocking"):
+        return "deferred"
+    return "unknown"
 
 
 def _step_result(final: dict, *, implementation_intent: bool = True) -> dict:

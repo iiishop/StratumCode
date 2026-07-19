@@ -20,7 +20,6 @@ const STATES = {
   patch_planning:           { label: 'Plan',       icon: '\u25EB', color: '#f97316' },
   implementing:             { label: 'Implement',  icon: '\u2B22', color: '#06b6d4' },
   validating:               { label: 'Validate',   icon: '\u25CE', color: '#14b8a6' },
-  repair_planning:          { label: 'Repair',     icon: '\u25E7', color: '#f43f5e' },
   saving_session:           { label: 'Save',       icon: '\u2713', color: '#6366f1' },
   completed:                { label: 'Done',       icon: '\u2713', color: '#22c55e' },
   failed:                   { label: 'Failed',     icon: '!', color: '#ef4444' },

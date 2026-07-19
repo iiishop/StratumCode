@@ -1,13 +1,12 @@
 from __future__ import annotations
 
 import json
-import platform
 import re
 from collections.abc import Iterator
 from itertools import count
 from uuid import uuid4
 
-from . import app_settings, model_settings, providers
+from . import app_settings, model_settings, prompt, providers
 from .agent_runtime import (
     add_usage as _add_usage,
     call_model as _call_model,
@@ -50,8 +49,8 @@ def design_planning_stream(
     })
 
     messages = [
-        {"role": "system", "content": _system_prompt(app_settings.get_output_language())},
-        {"role": "user", "content": _user_prompt(message, analysis, investigation, workspace_dir)},
+        {"role": "system", "content": prompt.build_design_planner_system(app_settings.get_output_language())},
+        {"role": "user", "content": prompt.build_design_planner_user(message, analysis, investigation, workspace_dir)},
     ]
     plan = None
     last_error = None
@@ -193,64 +192,6 @@ def user_question(gap: dict, *, analysis_id: str, origin_message: str) -> dict:
         ],
         "custom_allowed": True,
     }
-
-
-def _system_prompt(language: str) -> str:
-    return f"""\
-You are StratumCode's Design Planner. Write user-visible strings in {language}.
-Return one JSON object only. Do not use Markdown.
-
-Derive a professional implementation design from the requirement contract and
-investigation facts. Do not plan code yet. Do not invent project facts.
-
-Schema:
-{{
-  "summary": "one short sentence",
-  "requirement_model": [
-    {{"id": "RM1", "concept": "domain concept", "behavior": "required behavior", "source": "user_request|acceptance_criteria|constraint"}}
-  ],
-  "project_alignment": [
-    {{"requirement_id": "RM1", "status": "matched|missing|ambiguous", "project_fact": "grounded fact or explicit absence", "evidence": ["belief/evidence/fact"]}}
-  ],
-  "decision_gaps": [
-    {{"id": "DG1", "question": "specific decision question", "blocks_implementation": true, "why": "which implementation branch changes"}}
-  ],
-  "design_decisions": [
-    {{"id": "DD1", "decision": "chosen design", "because": ["AC1", "project fact", "user answer"]}}
-  ],
-  "out_of_scope": ["behavior intentionally not implemented"]
-}}
-
-Rules:
-- Every requirement_model item must come from the user request, acceptance criteria, or constraints.
-- project_alignment must say matched, missing, or ambiguous for each requirement.
-- Add a blocking decision_gap when implementation would branch and current facts do not decide it.
-- design_decisions must cite why the decision is valid. No "best practice" alone.
-- Do not include implementation steps; that is the patch planner's job.
-"""
-
-
-def _user_prompt(message: str, analysis: dict, investigation: dict, workspace_dir: str) -> str:
-    return json.dumps({
-        "platform": platform.system(),
-        "workspace_root": workspace_dir,
-        "user_request": message,
-        "task": {
-            "intent": analysis.get("intent", {}),
-            "acceptance_criteria": analysis.get("acceptance_criteria", []),
-            "behavior_contract": analysis.get("behavior_contract", {}),
-            "constraints": analysis.get("constraints", []),
-            "scope": analysis.get("scope", {}),
-            "unknowns": analysis.get("unknowns", []),
-        },
-        "investigation": {
-            "summary": investigation.get("summary", ""),
-            "patch_planning_facts": investigation.get("patch_planning_facts") or investigation.get("patch_planning_context") or [],
-            "beliefs": investigation.get("beliefs", []),
-            "resolutions": investigation.get("resolutions", []),
-            "user_decisions_required": investigation.get("user_decisions_required", []),
-        },
-    }, ensure_ascii=False, indent=2)
 
 
 def _json_from_text(text: str) -> dict:

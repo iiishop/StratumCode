@@ -6,7 +6,7 @@ from collections.abc import Iterator
 from itertools import count
 from uuid import uuid4
 
-from . import app_settings, model_settings, providers
+from . import app_settings, model_settings, prompt, providers
 from .agent.tools import openai_tool_schema
 from .agent_runtime import (
     add_usage as _add_usage,
@@ -52,7 +52,7 @@ def implementation_stream(
     })
 
     messages = [
-        {"role": "system", "content": _system_prompt(app_settings.get_output_language())},
+        {"role": "system", "content": prompt.build_implementation_runner_system(app_settings.get_output_language())},
         {"role": "user", "content": json.dumps({
             "user_request": message,
             "analysis": {
@@ -261,7 +261,6 @@ def _validation_tools() -> list[dict]:
                     },
                 },
             },
-            "repair_plan": {"type": "object"},
             "question": {"type": "string"},
             "options": {
                 "type": "array",
@@ -489,7 +488,7 @@ def _validation_stream(
         "inherited": setting["inherited"],
     })
     messages = [
-        {"role": "system", "content": _validation_prompt(app_settings.get_output_language())},
+        {"role": "system", "content": prompt.build_validation_runner_system(app_settings.get_output_language())},
         {"role": "user", "content": json.dumps({
             "user_request": message,
             "acceptance_criteria": analysis.get("acceptance_criteria", []),
@@ -600,16 +599,13 @@ def _finish_validation_arguments(arguments: dict, changed_files: list[str]) -> d
     if not summary:
         raise ValueError("finish_validation requires summary")
     issues = arguments.get("issues") if isinstance(arguments.get("issues"), list) else []
-    repair_plan = arguments.get("repair_plan") if isinstance(arguments.get("repair_plan"), dict) else {}
     question = str(arguments.get("question") or "").strip()
     options = arguments.get("options") if isinstance(arguments.get("options"), list) else []
     if verdict == "passed" and issues:
         raise ValueError("passed verdict cannot include issues")
-    if verdict == "local_repair" and not repair_plan:
-        raise ValueError("local_repair verdict requires repair_plan")
     if verdict == "user_decision" and not question:
         raise ValueError("user_decision verdict requires question")
-    return _validation_result(verdict, summary, changed_files, repair_plan, issues, question, options)
+    return _validation_result(verdict, summary, changed_files, {}, issues, question, options)
 
 
 def _normalized_validation_verdict(value: str) -> str:
@@ -650,47 +646,3 @@ def _checkpoint_question(
             {"id": "stop", "label": "Stop", "value": "Stop and summarize the current state."},
         ],
     }
-
-
-def _system_prompt(language: str) -> str:
-    return f"""\
-You are StratumCode's implementation runner. Write user-visible text in {language}.
-
-Apply the already authorized patch plan. Do not redesign the solution.
-Use read to obtain fresh snapshot_id values before modifying existing files.
-Use apply_patch for all file writes. Its authorization_id, plan_hash, purpose,
-reason, acceptance_ids, decision_ids, and project_fact_ids are injected by runtime;
-do not include them. Provide step_id, operation_summary, optional attempt_id, and files.
-For an existing
-empty file, use replace_exact with old_text="" and new_text set to the whole file.
-Each apply_patch call must use exactly one authorized implementation step_id.
-Do not combine step ids such as "IS1+IS2"; call apply_patch separately for IS1
-and IS2.
-
-If apply_patch reports STALE_SNAPSHOT, read the file again and retry once with
-the new snapshot. If authorization fails, stop and explain.
-"""
-
-
-def _validation_prompt(language: str) -> str:
-    return f"""\
-You are StratumCode's validation runner. Write user-visible text in {language}.
-
-Validate the patch after implementation. Do not edit files in this stage.
-Use code_nav for semantic checks, not only LSP diagnostics. Inspect changed
-identifiers and member accesses that could resolve incorrectly.
-
-Preserve explicit user contracts. If the user requested a signature such as
-wait(int time), changing the parameter to seconds is a contract conflict. Prefer
-reporting the conflict and the minimal repair direction, such as aliasing an
-import (import time as t) instead of renaming the requested parameter.
-
-Call code_nav at least once on a changed identifier before finalizing. If no LSP
-server is available, report that semantic validation could not be completed.
-
-Finish by calling finish_validation:
-{{"verdict":"passed|local_repair|redesign|missing_evidence|user_decision|inconclusive|failed","summary":"...","issues":[],"repair_plan":{{}}}}
-Use local_repair only when a minimal patch can fix the issue, and include a
-repair_plan with implementation_steps. Use passed only when changed behavior
-meets the acceptance criteria.
-"""

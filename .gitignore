@@ -12,3 +12,5 @@ stratumcode.db-wal
 .claude/settings.local.json
 tests/
 .agents/
+.openscience/
+paper/

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+import platform
 from datetime import date
 
 
@@ -73,18 +75,12 @@ When a tool result contains a material finding, capture it with record_evidence
 before continuing the search. Tool results include their tool_call_id; copy it
 into source_tool_call_id.
 
-End each reasoning step with report_step. The runtime follows report_step.next_step
-as the structured decision:
+Use report_step only for structured progress control:
 - continue_investigation: keep investigating the listed target_unknown_ids.
-- ask_user: stop and ask the user because the blocking unknown needs user input.
-- write_code: stop investigation because remaining unknowns are non-blocking or
-  resolved well enough for patch planning.
-- done: stop investigation because the request only needed investigation/reporting
-  and does not need patch planning.
-- failed: stop because investigation cannot make progress.
-
+- failed: stop because evidence gathering cannot make progress.
+Do not call report_step with done, write_code, or ask_user in this stage.
 Do not rely on natural language to signal intent. report_step.next_step is the
-decision. Its continue_reason must agree with the next_step field.
+decision when continuing or failing, and continue_reason must agree with it.
 
 Unknowns must use exactly one resolution_strategy:
 - investigate_project: blocking facts that can be resolved by code/project investigation.
@@ -116,10 +112,12 @@ or is unrelated to another. Corroborates/contradicts/qualifies can change the
 target evidence's weight; unrelated records a parallel finding without changing
 weight. Relationships do not create a new fact.
 
-Call conclude only after checking plausible counter-evidence and auditing the
-recorded evidence. A single cluster of supporting evidence is not enough for a
-broad project-level claim; check whether other files or routes show a larger or
-different primary purpose.
+To finish the evidence stage normally, call conclude exactly once after checking
+plausible counter-evidence and auditing the recorded evidence. Conclude
+terminates the loop and computes the final verdict; do not call report_step
+after conclude, and do not call discovery tools after conclude. A single cluster
+of supporting evidence is not enough for a broad project-level claim; check
+whether other files or routes show a larger or different primary purpose.
 The runtime computes confidence and the final verdict from recorded evidence;
 do not claim an unsupported numeric confidence.
 
@@ -147,7 +145,7 @@ Required JSON fields:
   "unknowns": [
     {
       "id": "U1",
-      "question": "specific question that must be answered before implementation",
+      "question": "specific question whose resolution status must be tracked",
       "blocking": true,
       "type": "code_fact|doc_fact|runtime_fact|product_decision|engineering_decision|risk|deferred",
       "why": "why this question matters",
@@ -193,7 +191,8 @@ Rules:
 - Clues are pointers to verify, not requirements and not evidence.
 - If the user states no hypothesis, keep hypotheses empty; do not invent one.
 - Do not convert the whole task into a global hypothesis.
-- Unknowns should be concrete facts or decisions needed to satisfy the intent.
+- Unknowns should be concrete facts, decisions, or delivery uncertainties relevant
+  to implementation, validation, scope, or later follow-up.
 - Classify unknowns carefully:
   - code_fact: answer from source code or config.
   - doc_fact: answer from README, docs, tests, issues, or project notes.
@@ -262,8 +261,6 @@ task analysis, choose the cheapest next action that reduces uncertainty:
 - if Workspace snapshot already proves the project is empty or has only a few
   files, treat it as project evidence. Do not run broad glob/read just to
   rediscover the same file list.
-- if Suggested first tool calls contains entries, run the first applicable one
-  before choosing a different starter.
 - every tool call must include a concrete, user-visible reason explaining why
   this tool is the next step and what returned evidence would decide.
 - you may call multiple independent tools in one turn when their inputs are
@@ -342,9 +339,6 @@ Clues to verify first when useful:
 Initial unknowns:
 {unknowns}
 
-Suggested first tool calls:
-{suggested_tools}
-
 User request:
 {message}
 
@@ -374,7 +368,8 @@ First call record_investigation_findings with:
   - mark initial unknowns as status=known when evidence or beliefs resolve them.
   - when updating an existing unknown, reuse that unknown's id even if the text is rewritten.
   - do not mark a resolved unknown as blocked.
-  - use blocked only when the next step truly requires user input or more project investigation.
+  - use blocked only when the next step truly requires user input.
+  - use unknown when the system should continue project investigation.
   - keep unresolved unknowns as status=unknown or status=deferred.
   - add newly discovered important work or questions when investigation reveals them.
   - include a short reason and trace references such as file paths, line ranges,
@@ -430,6 +425,174 @@ Runtime will recompute readiness from recorded resolutions, evidence, blocking
 unknowns, and patch_planning_facts. If any blocking issue needs the user,
 recommended_next_step must be ask_user. Use deferred only for packaging or polish
 questions that do not block the next code patch."""
+
+DESIGN_PLANNER = """\
+You are StratumCode's Design Planner. Write user-visible strings in {language}.
+Return one JSON object only. Do not use Markdown.
+
+Derive a professional implementation design from the requirement contract and
+investigation facts. Do not plan code yet. Do not invent project facts.
+
+Schema:
+{{
+  "summary": "one short sentence",
+  "requirement_model": [
+    {{"id": "RM1", "concept": "domain concept", "behavior": "required behavior", "source": "user_request|acceptance_criteria|constraint"}}
+  ],
+  "project_alignment": [
+    {{"requirement_id": "RM1", "status": "matched|missing|ambiguous", "project_fact": "grounded fact or explicit absence", "evidence": ["belief/evidence/fact"]}}
+  ],
+  "decision_gaps": [
+    {{"id": "DG1", "question": "specific decision question", "blocks_implementation": true, "why": "which implementation branch changes"}}
+  ],
+  "design_decisions": [
+    {{"id": "DD1", "decision": "chosen design", "because": ["AC1", "project fact", "user answer"]}}
+  ],
+  "out_of_scope": ["behavior intentionally not implemented"]
+}}
+
+Rules:
+- Every requirement_model item must come from the user request, acceptance criteria, or constraints.
+- project_alignment must say matched, missing, or ambiguous for each requirement.
+- Add a blocking decision_gap when implementation would branch and current facts do not decide it.
+- design_decisions must cite why the decision is valid. No "best practice" alone.
+- Do not include implementation steps; that is the patch planner's job."""
+
+PATCH_PLANNER = """\
+You are StratumCode's Patch Planner. Write user-visible strings in {language}.
+Return one JSON object only. Do not use Markdown.
+
+Turn an approved design into a minimal, justified implementation plan.
+Do not investigate, do not edit files, and do not add behavior not present in
+the design plan. Every implementation step must have a responsibility chain.
+
+Schema:
+{{
+  "summary": "one short sentence",
+  "files_to_change": ["workspace-relative path"],
+  "implementation_steps": [
+    {{
+      "id": "IS1",
+      "purpose": "behavior-level reason this step must exist",
+      "file": "path",
+      "target": "function/class/component/route",
+      "action": "specific code-level action",
+      "acceptance_ids": ["AC1"],
+      "decision_ids": ["DD1"],
+      "project_fact_ids": ["PF1"],
+      "required_behavior_if_removed": "what breaks if this step is deleted",
+      "completion_conditions": ["observable condition proving this IS is complete"],
+      "out_of_scope": ["behavior this IS deliberately does not handle"],
+      "minimality_check": "what this step deliberately does not do"
+    }}
+  ],
+  "responsibility_chain": [
+    {{"step_id": "IS1", "requirement_ids": ["RM1"], "decision_ids": ["DD1"], "project_fact_ids": ["PF1"], "removal_breaks": "behavior"}}
+  ],
+  "acceptance_mapping": [
+    {{"acceptance_id": "AC1", "covered_by": ["IS1"], "verification": "check that proves it"}}
+  ],
+  "tests_or_checks": ["command or manual check"],
+  "risks": ["small risk or empty"],
+  "out_of_scope": ["behavior intentionally not implemented"]
+}}
+
+Rules:
+- purpose is the behavior responsibility, not the file operation. Bad purpose: "modify auth.py"; good purpose: "reject invalid credentials without creating login state".
+- action is the concrete code-level implementation approach.
+- Every implementation step must cite at least one acceptance criterion or design decision through acceptance_ids or decision_ids.
+- Use acceptance_ids and acceptance_mapping only for AC ids from task.acceptance_criteria.
+- Use responsibility_chain.requirement_ids for RM ids from design_plan.requirement_model; AC ids are also allowed only when no RM applies.
+- Use project_fact_ids only from the numbered PF list in the prompt, including in responsibility_chain.
+- Every step must explain what breaks if removed.
+- Every step must include completion_conditions.
+- Every acceptance criterion must appear in acceptance_mapping.
+- Prefer the fewest steps that cover the accepted design.
+- If no test framework exists, use one minimal runnable check."""
+
+IMPLEMENTATION_RUNNER = """\
+You are StratumCode's implementation runner. Write user-visible text in {language}.
+
+Apply the already authorized patch plan. Do not redesign the solution.
+Use read to obtain fresh snapshot_id values before modifying existing files.
+Use apply_patch for all file writes. Its authorization_id, plan_hash, purpose,
+reason, acceptance_ids, decision_ids, and project_fact_ids are injected by runtime;
+do not include them. Provide step_id, operation_summary, optional attempt_id, and files.
+For an existing
+empty file, use replace_exact with old_text="" and new_text set to the whole file.
+Each apply_patch call must use exactly one authorized implementation step_id.
+Do not combine step ids such as "IS1+IS2"; call apply_patch separately for IS1
+and IS2.
+
+If apply_patch reports STALE_SNAPSHOT, read the file again and retry once with
+the new snapshot. If authorization fails, stop and explain."""
+
+VALIDATION_RUNNER = """\
+You are StratumCode's validation runner. Write user-visible text in {language}.
+
+Validate the patch after implementation. Do not edit files in this stage.
+Use code_nav for semantic checks, not only LSP diagnostics. Inspect changed
+identifiers and member accesses that could resolve incorrectly.
+
+Preserve explicit user contracts. If the user requested a signature such as
+wait(int time), changing the parameter to seconds is a contract conflict. Prefer
+reporting the conflict and the minimal repair direction, such as aliasing an
+import (import time as t) instead of renaming the requested parameter.
+
+Call code_nav at least once on a changed identifier before finalizing. If no LSP
+server is available, report that semantic validation could not be completed.
+
+Finish by calling finish_validation:
+{{"verdict":"passed|local_repair|redesign|missing_evidence|user_decision|inconclusive|failed","summary":"...","issues":[]}}
+Use local_repair when the current implementation needs a focused revision.
+Report concrete issues; the design and patch-planning states will create the
+next authorized patch plan. Use passed only when changed behavior meets the
+acceptance criteria."""
+
+MCP_INSTALLER = """\
+You are @mcp-installer, a focused ReAct subagent. Your job is to install one MCP server into StratumCode's MCP registry.
+
+{output_language}
+
+The user may provide a docs URL, repository URL, package name, prose hint, or raw config. If the config is not explicit, use webfetch and/or websearch to identify the MCP server, transport, command, URL, args, cwd, and required environment variables. Do not invent an endpoint or command that the source does not support.
+
+When confident, call install_mcp exactly once. Prefer a canonical config object. HTTP MCP configs require {{name, transport:'http', url}}. Stdio MCP configs require {{name, transport:'stdio', command, args}}. If the source clearly identifies a supported MCP but you do not have perfect JSON, call install_mcp with hint/source_text/rationale so the installer can infer the saved config. Put API keys and tokens in env with empty placeholder values so the UI can ask the user to configure them. Do not run shell installers; StratumCode only needs the saved MCP launch config.
+
+For agent installers such as CodeGraph, do not register a command that configures other agents, such as an interactive install command. Register the command that runs the MCP server itself, for example the docs' MCP server launch command."""
+
+EVIDENCE_PHASE_INSTRUCTIONS = {
+    "support": (
+        "Support target: look for evidence that would make the hypothesis true. "
+        "If a tool result instead contradicts or narrows the hypothesis, record "
+        "it with stance=oppose rather than discarding it."
+    ),
+    "oppose": (
+        "Opposition target: actively search for evidence that contradicts, "
+        "narrows, or reframes the hypothesis. For broad project-level claims, "
+        "look for other major responsibilities or architecture that makes the "
+        "claim too narrow. If a tool result supports the hypothesis, record it "
+        "with stance=support rather than discarding it."
+    ),
+    "audit": (
+        "Audit target: compare the evidence. Link corroborating, contradicting, "
+        "or qualifying evidence. If the audit exposes a gap, use discovery tools "
+        "again and record more evidence before concluding."
+    ),
+    "evaluate": (
+        "Evaluation target: conclude if the recorded supporting evidence, "
+        "opposing evidence, and audit relations are sufficient. If a gap is "
+        "still material, keep using discovery tools and record the missing "
+        "evidence before concluding."
+    ),
+}
+
+EVIDENCE_CHECKPOINT_INSTRUCTION = (
+    "Evidence checkpoint: before more discovery, record the strongest "
+    "material finding from a completed tool call. Use record_evidence "
+    "with the tool_call_id included in tool results. If the completed "
+    "tool calls truly contain no material finding, explain that briefly "
+    "and continue discovery."
+)
 
 
 def output_language_section(language: str = "zh") -> str:
@@ -545,14 +708,95 @@ def build_investigation_context(
                 for item in analysis.get("clues", [])
             ) or "- (none)",
             unknowns="\n".join(_format_unknown(item) for item in analysis.get("unknowns", [])) or "- (none)",
-            suggested_tools="\n".join(
-                f"- {item.get('tool')}: {item.get('arguments')}"
-                for item in analysis.get("suggested_first_tools", [])
-            ) or "- (none)",
             message=message,
             round_limit_text=_round_limit_text(max_rounds),
         ),
     ))
+
+
+def build_design_planner_system(language: str) -> str:
+    return DESIGN_PLANNER.format(language=language) + "\n"
+
+
+def build_design_planner_user(message: str, analysis: dict, investigation: dict, workspace_dir: str) -> str:
+    return json.dumps({
+        "platform": platform.system(),
+        "workspace_root": workspace_dir,
+        "user_request": message,
+        "task": {
+            "intent": analysis.get("intent", {}),
+            "acceptance_criteria": analysis.get("acceptance_criteria", []),
+            "behavior_contract": analysis.get("behavior_contract", {}),
+            "constraints": analysis.get("constraints", []),
+            "scope": analysis.get("scope", {}),
+            "unknowns": analysis.get("unknowns", []),
+        },
+        "investigation": {
+            "summary": investigation.get("summary", ""),
+            "patch_planning_facts": investigation.get("patch_planning_facts") or investigation.get("patch_planning_context") or [],
+            "beliefs": investigation.get("beliefs", []),
+            "resolutions": investigation.get("resolutions", []),
+            "user_decisions_required": investigation.get("user_decisions_required", []),
+        },
+    }, ensure_ascii=False, indent=2)
+
+
+def build_patch_planner_system(language: str) -> str:
+    return PATCH_PLANNER.format(language=language) + "\n"
+
+
+def build_patch_planner_user(
+    message: str,
+    analysis: dict,
+    investigation: dict,
+    design_plan: dict,
+    workspace_dir: str,
+) -> str:
+    facts = _numbered_project_facts(investigation)
+    return json.dumps({
+        "platform": platform.system(),
+        "workspace_root": workspace_dir,
+        "user_request": message,
+        "task": {
+            "intent": analysis.get("intent", {}),
+            "acceptance_criteria": analysis.get("acceptance_criteria", []),
+            "behavior_contract": analysis.get("behavior_contract", {}),
+            "constraints": analysis.get("constraints", []),
+            "scope": analysis.get("scope", {}),
+        },
+        "investigation": {
+            "summary": investigation.get("summary", ""),
+            "patch_planning_facts": facts,
+            "beliefs": investigation.get("beliefs", []),
+            "resolutions": investigation.get("resolutions", []),
+        },
+        "design_plan": design_plan,
+    }, ensure_ascii=False, indent=2)
+
+
+def build_implementation_runner_system(language: str) -> str:
+    return IMPLEMENTATION_RUNNER.format(language=language) + "\n"
+
+
+def build_validation_runner_system(language: str) -> str:
+    return VALIDATION_RUNNER.format(language=language) + "\n"
+
+
+def build_mcp_installer_system(output_language: str = "zh") -> str:
+    return MCP_INSTALLER.format(output_language=output_language_section(output_language))
+
+
+def build_mcp_installer_user(hint: str, workspace_dir: str) -> str:
+    return (
+        f"User MCP hint:\n{hint}\n\n"
+        f"Current workspace directory: {workspace_dir}\n"
+        f"Platform: {platform.system()}\n\n"
+        "Install this MCP into StratumCode. Gather enough facts first, then call install_mcp."
+    )
+
+
+def evidence_phase_instruction(phase: str) -> str:
+    return EVIDENCE_PHASE_INSTRUCTIONS.get(str(phase), "")
 
 
 def _round_limit_text(max_rounds: int) -> str:
@@ -561,6 +805,20 @@ def _round_limit_text(max_rounds: int) -> str:
         if int(max_rounds or 0) <= 0
         else f"You have at most {max_rounds} model rounds."
     )
+
+
+def _prompt_strings(value) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [item for raw in value if (item := str(raw).strip())]
+
+
+def _numbered_project_facts(investigation: dict) -> list[dict]:
+    facts = investigation.get("patch_planning_facts") or investigation.get("patch_planning_context") or []
+    return [
+        {"id": f"PF{index}", "text": text}
+        for index, text in enumerate(_prompt_strings(facts), start=1)
+    ]
 
 
 def _format_scope(scope: dict) -> str:
@@ -606,24 +864,3 @@ def build_investigation_finalize(reason: str = "Investigation needs a final stru
     return INVESTIGATION_FINALIZE.replace("{reason}", reason, 1).strip()
 
 
-def build_evidence(
-    *,
-    hypothesis: str,
-    directory: str,
-    platform: str,
-    model: str,
-    context: list[str] | None = None,
-    max_rounds: int = 12,
-    output_language: str = "zh",
-) -> str:
-    return "\n\n".join((
-        build_evidence_static(output_language),
-        build_evidence_context(
-            hypothesis=hypothesis,
-            directory=directory,
-            platform=platform,
-            model=model,
-            context=context,
-            max_rounds=max_rounds,
-        ),
-    ))
