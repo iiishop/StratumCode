@@ -10,6 +10,57 @@ LANGUAGES = {
     "ja": "Japanese",
 }
 DEFAULT_OUTPUT_LANGUAGE = "zh"
+DEFAULT_FONT_SCALE = 1.0
+ROUND_LIMITS = {
+    "task_analyzer_attempts": {
+        "label": "Task analyzer attempts",
+        "description": "Retry count for turning the user request into structured task JSON.",
+    },
+    "model_request_attempts": {
+        "label": "Model request attempts",
+        "description": "Retry count for transient provider HTTP failures.",
+    },
+    "investigation_rounds": {
+        "label": "Investigation rounds",
+        "description": "Model/tool rounds used while reading and understanding the workspace.",
+    },
+    "investigation_finalization_attempts": {
+        "label": "Investigation finalization attempts",
+        "description": "Retry count for producing the final structured investigation result.",
+    },
+    "evidence_rounds": {
+        "label": "Evidence rounds",
+        "description": "Model/tool rounds used by the hypothesis verifier.",
+    },
+    "evidence_empty_tool_rounds": {
+        "label": "Evidence empty-tool rounds",
+        "description": "Consecutive verifier rounds without tool calls before stopping.",
+    },
+    "implementation_rounds": {
+        "label": "Implementation rounds",
+        "description": "Model/tool rounds used while applying an authorized patch.",
+    },
+    "implementation_tool_error_rounds": {
+        "label": "Implementation error rounds",
+        "description": "Consecutive implementation rounds with only tool errors before asking.",
+    },
+    "validation_rounds": {
+        "label": "Validation rounds",
+        "description": "Model/tool rounds used by semantic validation.",
+    },
+    "design_json_attempts": {
+        "label": "Design JSON attempts",
+        "description": "Retry count for design planner JSON output.",
+    },
+    "patch_json_attempts": {
+        "label": "Patch JSON attempts",
+        "description": "Retry count for patch planner JSON output and repair.",
+    },
+    "installer_rounds": {
+        "label": "Installer rounds",
+        "description": "Model/tool rounds used by the MCP installer subagent.",
+    },
+}
 TEXT = {
     "en": {
         "answer_context": "User answered a pending agent question.",
@@ -133,12 +184,7 @@ def _init() -> None:
 
 
 def get_output_language() -> str:
-    _init()
-    with db.db_session() as conn:
-        row = conn.execute(
-            "SELECT value FROM app_settings WHERE key = 'output_language'"
-        ).fetchone()
-    value = row["value"] if row else DEFAULT_OUTPUT_LANGUAGE
+    value = _get("output_language", DEFAULT_OUTPUT_LANGUAGE)
     return value if value in LANGUAGES else DEFAULT_OUTPUT_LANGUAGE
 
 
@@ -146,28 +192,65 @@ def save_output_language(language: str) -> str:
     value = str(language or "").strip().casefold()
     if value not in LANGUAGES:
         raise ValueError("output_language must be en, zh, or ja")
-    _init()
-    with db.db_session() as conn:
-        conn.execute(
-            """
-            INSERT INTO app_settings (key, value, updated_at)
-            VALUES ('output_language', ?, ?)
-            ON CONFLICT(key) DO UPDATE SET
-                value = excluded.value,
-                updated_at = excluded.updated_at
-            """,
-            (value, time.time()),
-        )
+    _save("output_language", value)
     return value
+
+
+def get_font_scale() -> float:
+    try:
+        value = float(_get("font_scale", str(DEFAULT_FONT_SCALE)))
+    except (TypeError, ValueError):
+        value = DEFAULT_FONT_SCALE
+    return min(1.3, max(0.8, value))
+
+
+def save_font_scale(value) -> float:
+    try:
+        scale = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("font_scale must be a number") from exc
+    scale = min(1.3, max(0.8, scale))
+    _save("font_scale", str(scale))
+    return scale
+
+
+def get_round_limit(key: str) -> int:
+    if key not in ROUND_LIMITS:
+        raise ValueError(f"unknown round limit setting: {key}")
+    try:
+        return max(0, int(_get(key, "0")))
+    except (TypeError, ValueError):
+        return 0
+
+
+def save_round_limit(key: str, value) -> int:
+    if key not in ROUND_LIMITS:
+        raise ValueError(f"unknown round limit setting: {key}")
+    try:
+        limit = max(0, int(value))
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{key} must be a non-negative integer") from exc
+    _save(key, str(limit))
+    return limit
 
 
 def to_json() -> dict:
     language = get_output_language()
     return {
         "output_language": language,
+        "font_scale": get_font_scale(),
         "languages": [
             {"id": key, "label": label}
             for key, label in LANGUAGES.items()
+        ],
+        "round_limits": [
+            {
+                "key": key,
+                "label": meta["label"],
+                "description": meta["description"],
+                "value": get_round_limit(key),
+            }
+            for key, meta in ROUND_LIMITS.items()
         ],
     }
 
@@ -176,3 +259,28 @@ def text(key: str, **kwargs) -> str:
     language = get_output_language()
     template = TEXT.get(language, TEXT[DEFAULT_OUTPUT_LANGUAGE]).get(key, TEXT["en"].get(key, key))
     return template.format(**kwargs)
+
+
+def _get(key: str, default: str) -> str:
+    _init()
+    with db.db_session() as conn:
+        row = conn.execute(
+            "SELECT value FROM app_settings WHERE key = ?",
+            (key,),
+        ).fetchone()
+    return row["value"] if row else default
+
+
+def _save(key: str, value: str) -> None:
+    _init()
+    with db.db_session() as conn:
+        conn.execute(
+            """
+            INSERT INTO app_settings (key, value, updated_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(key) DO UPDATE SET
+                value = excluded.value,
+                updated_at = excluded.updated_at
+            """,
+            (key, value, time.time()),
+        )

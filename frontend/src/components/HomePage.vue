@@ -57,6 +57,8 @@ const msgRefs = reactive({})
 const isStreaming = ref(false)
 const restoring = ref(false)
 const textareaRef = ref(null)
+const copySessionStatus = ref('')
+let copySessionTimer
 
 /* ── mention state ── */
 const mentionFiles = ref([])
@@ -269,6 +271,50 @@ function snapshotState() {
   }
 }
 
+function sessionExport() {
+  return {
+    exported_at: new Date().toISOString(),
+    url: window.location.href,
+    session: props.session ? plain(props.session) : null,
+    activeWorkspace: props.activeWorkspace ? plain(props.activeWorkspace) : null,
+    draft: input.value,
+    agentStatus: plain(agentStatus),
+    state: snapshotState(),
+  }
+}
+
+async function writeClipboard(text) {
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(text)
+    return
+  }
+  const area = document.createElement('textarea')
+  area.value = text
+  area.setAttribute('readonly', '')
+  area.style.position = 'fixed'
+  area.style.left = '-9999px'
+  area.style.top = '0'
+  document.body.appendChild(area)
+  area.select()
+  try {
+    document.execCommand('copy')
+  } finally {
+    document.body.removeChild(area)
+  }
+}
+
+async function copyCurrentSession() {
+  clearTimeout(copySessionTimer)
+  try {
+    await writeClipboard(JSON.stringify(sessionExport(), null, 2))
+    copySessionStatus.value = 'Session copied'
+  } catch (error) {
+    copySessionStatus.value = `Copy failed: ${error?.message || 'clipboard unavailable'}`
+  } finally {
+    copySessionTimer = setTimeout(() => { copySessionStatus.value = '' }, 2200)
+  }
+}
+
 function scheduleSave() {
   if (!props.session?.id) return
   clearTimeout(saveTimer)
@@ -450,20 +496,23 @@ function applyTaskUpdate(update) {
     const id = item.id || `${item.kind || 'unknown'}:${text}`
     const trace = Array.isArray(item.trace) ? item.trace : []
     const existing = analysis.task_updates.find(row => sameTaskItem(row, { ...item, id, text, trace }))
+    const answers = mergeTaskAnswers(existing?.answers, item.answers)
     const next = {
       id: existing?.id || id,
+      target_id: item.target_id || existing?.target_id || '',
       kind: item.kind || 'unknown',
       text,
       status: item.status || 'updated',
       reason: item.reason || '',
       trace,
+      answers,
     }
     const before = existing ? { ...existing } : null
     const action = !existing
       ? 'add'
       : existing.status !== next.status
         ? 'status'
-        : existing.text !== next.text || existing.kind !== next.kind || existing.reason !== next.reason
+        : existing.text !== next.text || existing.kind !== next.kind || existing.reason !== next.reason || JSON.stringify(taskAnswers(existing.answers)) !== JSON.stringify(next.answers)
           ? 'update'
           : 'noop'
     if (existing) Object.assign(existing, next)
@@ -473,22 +522,39 @@ function applyTaskUpdate(update) {
   return changes.filter(change => change.action !== 'noop')
 }
 
-function normalizedTaskText(value) {
-  return String(value || '')
-    .replace(/[（(][^）)]*[）)]/g, '')
-    .replace(/[^\p{L}\p{N}]+/gu, '')
-    .toLowerCase()
+function taskAnswers(value) {
+  if (!Array.isArray(value)) return []
+  return value.map(answer => typeof answer === 'object' && answer !== null ? answer : { text: answer })
+    .map(answer => ({
+      source: String(answer.source || 'investigation'),
+      text: String(answer.text || answer.answer || '').trim(),
+      reason: String(answer.reason || ''),
+      trace: Array.isArray(answer.trace) ? answer.trace.map(String) : [],
+    }))
+    .filter(answer => answer.text)
 }
+
+function mergeTaskAnswers(oldAnswers, newAnswers) {
+  const merged = []
+  const seen = new Set()
+  for (const answer of [...taskAnswers(oldAnswers), ...taskAnswers(newAnswers)]) {
+    const key = `${answer.source}:${answer.text}`
+    if (seen.has(key)) continue
+    seen.add(key)
+    merged.push(answer)
+  }
+  return merged
+}
+
 
 function sameTaskItem(left, right) {
   if (!left || !right) return false
   if (sameTaskId(left.id, right.id)) return true
+  if (sameTaskId(left.id, right.target_id) || sameTaskId(right.id, left.target_id)) return true
   const leftTrace = Array.isArray(left.trace) ? left.trace : []
   const rightTrace = Array.isArray(right.trace) ? right.trace : []
   if ([left.id, ...leftTrace].some(leftId => [right.id, ...rightTrace].some(rightId => sameTaskId(leftId, rightId)))) return true
-  const a = normalizedTaskText(left.text)
-  const b = normalizedTaskText(right.text)
-  return Boolean(a && b && (a === b || a.includes(b) || b.includes(a)))
+  return false
 }
 
 function sameTaskId(left, right) {
@@ -509,7 +575,7 @@ function analysisForId(id) {
 }
 
 function analysisForQuestion(question) {
-  return analysisForId(question?.analysis_id) || activeTaskAnalysis.value
+  return analysisForId(question?.analysis_id) || question?.analysis || activeTaskAnalysis.value
 }
 
 /* ── animation helpers ──────────────────────────────────── */
@@ -632,7 +698,7 @@ onMounted(() => {
     gsap.fromTo('.chat__composer', { y: 12, autoAlpha: 0 }, { y: 0, autoAlpha: 1, duration: 0.46, ease: 'power2.out', delay: 0.16 })
   }, chatRef.value)
 })
-onUnmounted(() => { abortChat(); gsapCtx?.revert(); clearTimeout(saveTimer) })
+onUnmounted(() => { abortChat(); gsapCtx?.revert(); clearTimeout(saveTimer); clearTimeout(copySessionTimer) })
 
 watch(() => props.session?.id, (id) => {
   if (!id) {
@@ -839,6 +905,18 @@ watch(() => props.activeWorkspace?.id, () => {
             @input="onTextareaInput"
             :disabled="isStreaming"
           ></textarea>
+          <button
+            class="chat__copy-session"
+            type="button"
+            @click="copyCurrentSession"
+            aria-label="Copy full session"
+            title="Copy full session"
+          >
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round">
+              <path d="M8 8h10v12H8z"/>
+              <path d="M6 16H4V4h12v2"/>
+            </svg>
+          </button>
           <button class="chat__send" type="button" @click="send" :disabled="!input.trim() || isStreaming" aria-label="Send message">
             <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9">
               <path d="M12 19V5M6 11l6-6 6 6"/>
@@ -848,6 +926,7 @@ watch(() => props.activeWorkspace?.id, () => {
 
         <div class="chat__composer-meta">
           <span>Enter to send</span>
+          <span v-if="copySessionStatus">{{ copySessionStatus }}</span>
         </div>
 
         <FileMentionDropdown
@@ -1822,6 +1901,31 @@ watch(() => props.activeWorkspace?.id, () => {
   border-radius: 9px;
   color: #ffffff;
   background: var(--accent);
+}
+
+.chat__copy-session {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  align-self: flex-end;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  color: var(--text-muted);
+  background: #f8fbff;
+  cursor: pointer;
+  transition: color .12s ease, border-color .12s ease, background .12s ease, transform .1s ease;
+}
+
+.chat__copy-session:hover {
+  color: var(--accent-text);
+  border-color: var(--accent-border);
+  background: var(--accent-bg);
+}
+
+.chat__copy-session:active {
+  transform: scale(.95);
 }
 
 .chat__send:hover {

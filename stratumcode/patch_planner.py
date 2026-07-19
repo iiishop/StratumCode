@@ -1,13 +1,13 @@
 from __future__ import annotations
 
 import json
-import platform
 import re
 from collections.abc import Iterator
+from itertools import count
 from pathlib import Path
 from uuid import uuid4
 
-from . import app_settings, model_settings, patch_authorization, providers
+from . import app_settings, model_settings, patch_authorization, prompt, providers
 from .agent_runtime import (
     add_usage as _add_usage,
     call_model as _call_model,
@@ -18,7 +18,6 @@ from .agent_runtime import (
 )
 
 MAX_OUTPUT_TOKENS = 6144
-MAX_JSON_ATTEMPTS = 2
 
 
 def patch_planning_stream(
@@ -52,12 +51,13 @@ def patch_planning_stream(
     })
 
     messages = [
-        {"role": "system", "content": _system_prompt(app_settings.get_output_language())},
-        {"role": "user", "content": _user_prompt(message, analysis, investigation, design_plan, workspace_dir)},
+        {"role": "system", "content": prompt.build_patch_planner_system(app_settings.get_output_language())},
+        {"role": "user", "content": prompt.build_patch_planner_user(message, analysis, investigation, design_plan, workspace_dir)},
     ]
     plan = None
     last_error = None
-    for attempt in range(1, MAX_JSON_ATTEMPTS + 1):
+    attempts = app_settings.get_round_limit("patch_json_attempts")
+    for attempt in _attempt_indexes(attempts):
         assistant = _call_model(provider, model, messages, tools=[], max_tokens=MAX_OUTPUT_TOKENS)
         if usage := _usage_delta(pricing_rules, assistant.pop("_usage", {})):
             _add_usage(usage_total, usage)
@@ -84,11 +84,11 @@ def patch_planning_stream(
         })
         yield {"op": "update", "id": stage_id, "patch": {"state": "error", "phase": "patch_planning_failed"}}
         return
-    for repair_attempt in range(1, MAX_JSON_ATTEMPTS + 1):
+    for repair_attempt in _attempt_indexes(attempts):
         issues = validate_patch_plan(plan, analysis, design_plan, workspace_dir)
         if not issues:
             break
-        if repair_attempt == MAX_JSON_ATTEMPTS:
+        if attempts > 0 and repair_attempt == attempts:
             yield start_event(f"{run_id}-output", "output", {
                 "content": "Patch plan rejected by runtime validator:\n" + "\n".join(f"- {item}" for item in issues),
                 "streaming": False,
@@ -118,59 +118,9 @@ def patch_planning_stream(
     yield {"op": "done", "patch_plan": plan}
 
 
-def _system_prompt(language: str) -> str:
-    return f"""\
-You are StratumCode's Patch Planner. Write user-visible strings in {language}.
-Return one JSON object only. Do not use Markdown.
-
-Turn an approved design into a minimal, justified implementation plan.
-Do not investigate, do not edit files, and do not add behavior not present in
-the design plan. Every implementation step must have a responsibility chain.
-
-Schema:
-{{
-  "summary": "one short sentence",
-  "files_to_change": ["workspace-relative path"],
-  "implementation_steps": [
-    {{
-      "id": "IS1",
-      "purpose": "behavior-level reason this step must exist",
-      "file": "path",
-      "target": "function/class/component/route",
-      "action": "specific code-level action",
-      "acceptance_ids": ["AC1"],
-      "decision_ids": ["DD1"],
-      "project_fact_ids": ["PF1"],
-      "required_behavior_if_removed": "what breaks if this step is deleted",
-      "completion_conditions": ["observable condition proving this IS is complete"],
-      "out_of_scope": ["behavior this IS deliberately does not handle"],
-      "minimality_check": "what this step deliberately does not do"
-    }}
-  ],
-  "responsibility_chain": [
-    {{"step_id": "IS1", "requirement_ids": ["RM1"], "decision_ids": ["DD1"], "project_facts": ["fact"], "removal_breaks": "behavior"}}
-  ],
-  "acceptance_mapping": [
-    {{"acceptance_id": "AC1", "covered_by": ["IS1"], "verification": "check that proves it"}}
-  ],
-  "tests_or_checks": ["command or manual check"],
-  "risks": ["small risk or empty"],
-  "out_of_scope": ["behavior intentionally not implemented"]
-}}
-
-Rules:
-- purpose is the behavior responsibility, not the file operation. Bad purpose: "modify auth.py"; good purpose: "reject invalid credentials without creating login state".
-- action is the concrete code-level implementation approach.
-- Every implementation step must cite at least one acceptance criterion or design decision through acceptance_ids or decision_ids.
-- Use acceptance_ids and acceptance_mapping only for AC ids from task.acceptance_criteria.
-- Use responsibility_chain.requirement_ids for RM ids from design_plan.requirement_model; AC ids are also allowed only when no RM applies.
-- Use project_fact_ids only from the numbered PF list in the prompt.
-- Every step must explain what breaks if removed.
-- Every step must include completion_conditions.
-- Every acceptance criterion must appear in acceptance_mapping.
-- Prefer the fewest steps that cover the accepted design.
-- If no test framework exists, use one minimal runnable check.
-"""
+def _attempt_indexes(limit: int, start: int = 1):
+    limit = int(limit or 0)
+    return count(start) if limit <= 0 else range(start, start + limit)
 
 
 def validate_patch_plan(plan: dict, analysis: dict, design_plan: dict, workspace_dir: str) -> list[str]:
@@ -235,6 +185,8 @@ def validate_patch_plan(plan: dict, analysis: dict, design_plan: dict, workspace
         if not step.get("file"):
             issues.append(f"step {step_id} has no file")
             continue
+        if not step.get("target"):
+            issues.append(f"step {step_id} has no target")
         try:
             target = (workspace / step["file"]).resolve()
             if workspace not in (target, *target.parents):
@@ -252,6 +204,8 @@ def validate_patch_plan(plan: dict, analysis: dict, design_plan: dict, workspace
         if criteria_ids or decision_ids:
             if not (set(step.get("acceptance_ids") or []) & criteria_ids or set(step.get("decision_ids") or []) & decision_ids):
                 issues.append(f"step {step_id} does not cite a valid AC or design decision")
+        if fact_ids and not step.get("project_fact_ids"):
+            issues.append(f"step {step_id} has no project_fact_ids")
         for ref in step.get("acceptance_ids") or []:
             if ref not in criteria_ids:
                 issues.append(f"step {step_id} references unknown acceptance id: {ref}")
@@ -268,38 +222,22 @@ def validate_patch_plan(plan: dict, analysis: dict, design_plan: dict, workspace
     for item in plan.get("responsibility_chain", []):
         if item.get("step_id") not in step_ids:
             issues.append(f"responsibility_chain references unknown step: {item.get('step_id')}")
+        if not item.get("removal_breaks"):
+            issues.append(f"responsibility_chain {item.get('step_id') or '?'} has no removal_breaks")
+        if fact_ids and not item.get("project_fact_ids"):
+            issues.append(f"responsibility_chain {item.get('step_id') or '?'} has no project_fact_ids")
         for req in item.get("requirement_ids", []):
             if req not in criteria_ids and req not in requirement_ids:
                 issues.append(f"responsibility_chain references unknown requirement or acceptance id: {req}")
         for decision in item.get("decision_ids", []):
             if decision not in decision_ids:
                 issues.append(f"responsibility_chain references unknown design decision: {decision}")
+        for ref in item.get("project_fact_ids") or []:
+            if fact_ids and ref not in fact_ids:
+                issues.append(f"responsibility_chain references unknown project fact id: {ref}")
     if analysis.get("intent", {}).get("type") in {"feature", "bugfix"} and not plan.get("tests_or_checks"):
         issues.append("feature/bugfix patch plan requires at least one test or check")
     return issues
-
-
-def _user_prompt(message: str, analysis: dict, investigation: dict, design_plan: dict, workspace_dir: str) -> str:
-    facts = _project_facts(investigation)
-    return json.dumps({
-        "platform": platform.system(),
-        "workspace_root": workspace_dir,
-        "user_request": message,
-        "task": {
-            "intent": analysis.get("intent", {}),
-            "acceptance_criteria": analysis.get("acceptance_criteria", []),
-            "behavior_contract": analysis.get("behavior_contract", {}),
-            "constraints": analysis.get("constraints", []),
-            "scope": analysis.get("scope", {}),
-        },
-        "investigation": {
-            "summary": investigation.get("summary", ""),
-            "patch_planning_facts": facts,
-            "beliefs": investigation.get("beliefs", []),
-            "resolutions": investigation.get("resolutions", []),
-        },
-        "design_plan": design_plan,
-    }, ensure_ascii=False, indent=2)
 
 
 def _json_from_text(text: str) -> dict:
@@ -363,7 +301,7 @@ def _responsibility_chain(value) -> list[dict]:
             "step_id": str(item.get("step_id") or "").strip(),
             "requirement_ids": _strings(item.get("requirement_ids")),
             "decision_ids": _strings(item.get("decision_ids")),
-            "project_facts": _strings(item.get("project_facts")),
+            "project_fact_ids": _strings(item.get("project_fact_ids")),
             "removal_breaks": str(item.get("removal_breaks") or "").strip(),
         }
         for item in value

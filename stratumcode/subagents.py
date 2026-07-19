@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import json
-import platform
 import re
 from collections.abc import Iterator
+from itertools import count
 from uuid import uuid4
 
 from . import app_settings, hypothesis_verifier, mcp, model_settings, prompt, providers
@@ -23,10 +23,6 @@ from .agent_runtime import (
 from .subagent_catalog import normalize_agent_name
 from .tools import registry
 from .tools.spec import ToolResult
-
-
-MAX_INSTALLER_ROUNDS = 8
-
 
 def run_stream(agent: str, task: str, workspace_dir: str = ".") -> Iterator[dict]:
     name = normalize_agent_name(agent)
@@ -154,6 +150,11 @@ def _task_payload(task: str) -> dict:
     return payload if isinstance(payload, dict) else {"task": text}
 
 
+def _round_indexes(limit: int, start: int = 0):
+    limit = int(limit or 0)
+    return count(start) if limit <= 0 else range(start, start + limit)
+
+
 def _installer_setting() -> dict | None:
     return (
         model_settings.resolve(model_settings.DEFAULT_STAGE)
@@ -173,11 +174,11 @@ def _react_install(
     usage_total = _empty_usage(pricing_rules)
     observations: list[str] = []
     messages = [
-        {"role": "system", "content": _installer_system_prompt()},
-        {"role": "user", "content": _installer_user_prompt(hint, workspace_dir)},
+        {"role": "system", "content": prompt.build_mcp_installer_system(app_settings.get_output_language())},
+        {"role": "user", "content": prompt.build_mcp_installer_user(hint, workspace_dir)},
     ]
 
-    for round_index in range(MAX_INSTALLER_ROUNDS):
+    for round_index in _round_indexes(app_settings.get_round_limit("installer_rounds"), start=0):
         thinking_id = f"{run_id}-thinking-{round_index}"
         yield start_event(thinking_id, "thinking", {
             "text": "",
@@ -249,37 +250,6 @@ def _react_install(
                 return server
 
     return None
-
-
-def _installer_system_prompt() -> str:
-    return (
-        "You are @mcp-installer, a focused ReAct subagent. Your job is to install one MCP "
-        "server into StratumCode's MCP registry.\n\n"
-        f"{prompt.output_language_section(app_settings.get_output_language())}\n\n"
-        "The user may provide a docs URL, repository URL, package name, prose hint, or raw config. "
-        "If the config is not explicit, use webfetch and/or websearch to identify the MCP server, "
-        "transport, command, URL, args, cwd, and required environment variables. Do not invent an "
-        "endpoint or command that the source does not support.\n\n"
-        "When confident, call install_mcp exactly once. Prefer a canonical config object. HTTP "
-        "MCP configs require {name, transport:'http', url}. Stdio MCP configs require "
-        "{name, transport:'stdio', command, args}. If the source clearly identifies a supported "
-        "MCP but you do not have perfect JSON, call install_mcp with hint/source_text/rationale "
-        "so the installer can infer the saved config. Put API keys and tokens in env with empty "
-        "placeholder values so the UI can ask the user to configure them. Do not run shell "
-        "installers; StratumCode only needs the saved MCP launch config.\n\n"
-        "For agent installers such as CodeGraph, do not register a command that configures other "
-        "agents, such as an interactive install command. Register the command that runs the MCP "
-        "server itself, for example the docs' MCP server launch command."
-    )
-
-
-def _installer_user_prompt(hint: str, workspace_dir: str) -> str:
-    return (
-        f"User MCP hint:\n{hint}\n\n"
-        f"Current workspace directory: {workspace_dir}\n"
-        f"Platform: {platform.system()}\n\n"
-        "Install this MCP into StratumCode. Gather enough facts first, then call install_mcp."
-    )
 
 
 def _installer_tools() -> list[dict]:

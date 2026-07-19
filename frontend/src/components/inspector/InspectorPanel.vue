@@ -66,6 +66,7 @@ const analysisRows = computed(() => {
       kind: 'unknown',
       text: typeof item === 'string' ? item : item.question || item.text,
       status: item.blocking === false ? 'deferred' : 'unknown',
+      answers: item.answers,
     })),
   ].filter(item => item.text)
   return dedupeTaskRows(rows)
@@ -132,9 +133,8 @@ function behaviorTaskRows(analysis) {
 function dedupeTaskRows(rows) {
   const result = []
   const seen = new Map()
-  for (const row of rows) {
-    const textKey = `${row.kind}:${normalizedTaskText(row.text)}`
-    const key = row.kind === 'unknown' ? textKey : (row.id || textKey)
+  for (const [rowIndex, row] of rows.entries()) {
+    const key = row.id || `row:${rowIndex}`
     if (!seen.has(key)) {
       seen.set(key, result.length)
       result.push(row)
@@ -149,25 +149,43 @@ function dedupeTaskRows(rows) {
 function preferredTaskRow(left, right) {
   if (!left) return right
   const rank = { known: 5, blocked: 4, deferred: 3, updated: 2, added: 2, pending: 1, unknown: 0 }
-  return (rank[right.status] ?? 0) >= (rank[left.status] ?? 0) ? { ...left, ...right, id: left.id || right.id } : left
+  const merged = { ...left, ...right, id: left.id || right.id, answers: mergeTaskAnswers(left.answers, right.answers) }
+  return (rank[right.status] ?? 0) >= (rank[left.status] ?? 0) ? merged : { ...right, ...left, answers: merged.answers }
 }
 
-function normalizedTaskText(value) {
-  return String(value || '')
-    .replace(/[（(][^）)]*[）)]/g, '')
-    .replace(/[^\p{L}\p{N}]+/gu, '')
-    .toLowerCase()
+function taskAnswers(value) {
+  if (!Array.isArray(value)) return []
+  return value.map(answer => typeof answer === 'object' && answer !== null ? answer : { text: answer })
+    .map(answer => ({
+      source: String(answer.source || 'investigation'),
+      text: String(answer.text || answer.answer || '').trim(),
+      reason: String(answer.reason || ''),
+      trace: Array.isArray(answer.trace) ? answer.trace.map(String) : [],
+    }))
+    .filter(answer => answer.text)
 }
+
+function mergeTaskAnswers(oldAnswers, newAnswers) {
+  const merged = []
+  const seen = new Set()
+  for (const answer of [...taskAnswers(oldAnswers), ...taskAnswers(newAnswers)]) {
+    const key = `${answer.source}:${answer.text}`
+    if (seen.has(key)) continue
+    seen.add(key)
+    merged.push(answer)
+  }
+  return merged
+}
+
 
 function sameTaskItem(left, right) {
   if (!left || !right) return false
   if (sameTaskId(left.id, right.id)) return true
+  if (sameTaskId(left.id, right.target_id) || sameTaskId(right.id, left.target_id)) return true
   const leftTrace = Array.isArray(left.trace) ? left.trace : []
   const rightTrace = Array.isArray(right.trace) ? right.trace : []
   if ([left.id, ...leftTrace].some(leftId => [right.id, ...rightTrace].some(rightId => sameTaskId(leftId, rightId)))) return true
-  const a = normalizedTaskText(left.text)
-  const b = normalizedTaskText(right.text)
-  return Boolean(a && b && (a === b || a.includes(b) || b.includes(a)))
+  return false
 }
 
 function sameTaskId(left, right) {
@@ -540,6 +558,12 @@ function onWsRowLeave(el) {
                   <div class="tk-item-body">
                     <p class="tk-item-text">{{ item.text }}</p>
                     <small v-if="item.reason" class="tk-item-reason">{{ item.reason }}</small>
+                    <ul v-if="taskAnswers(item.answers).length" class="tk-item-answers">
+                      <li v-for="(answer, i) in taskAnswers(item.answers)" :key="`${answer.source}:${i}`">
+                        <b>{{ answer.source }}</b>
+                        <span>{{ answer.text }}</span>
+                      </li>
+                    </ul>
                     <div v-if="item.trace?.length" class="tk-item-trace">
                       <span v-for="(t, i) in item.trace" :key="i" class="tk-trace-step">
                         {{ t }}
@@ -833,6 +857,33 @@ function onWsRowLeave(el) {
   font-size: 8.5px;
   line-height: 1.35;
   overflow-wrap: anywhere;
+}
+
+.tk-item-answers {
+  display: grid;
+  gap: 3px;
+  margin: 2px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.tk-item-answers li {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 5px;
+  align-items: start;
+  color: #36506d;
+  font-size: 9px;
+  line-height: 1.35;
+}
+
+.tk-item-answers b {
+  padding: 1px 4px;
+  border-radius: 3px;
+  color: #1756d1;
+  background: rgba(23,86,209,.08);
+  font: 700 7.5px/1.3 var(--mono);
+  text-transform: uppercase;
 }
 
 .tk-item-trace {

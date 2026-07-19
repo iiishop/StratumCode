@@ -1,12 +1,12 @@
 from __future__ import annotations
 
 import json
-import platform
 import re
 from collections.abc import Iterator
+from itertools import count
 from uuid import uuid4
 
-from . import app_settings, model_settings, providers
+from . import app_settings, model_settings, prompt, providers
 from .agent_runtime import (
     add_usage as _add_usage,
     call_model as _call_model,
@@ -17,7 +17,6 @@ from .agent_runtime import (
 )
 
 MAX_OUTPUT_TOKENS = 6144
-MAX_JSON_ATTEMPTS = 2
 
 
 def design_planning_stream(
@@ -50,12 +49,12 @@ def design_planning_stream(
     })
 
     messages = [
-        {"role": "system", "content": _system_prompt(app_settings.get_output_language())},
-        {"role": "user", "content": _user_prompt(message, analysis, investigation, workspace_dir)},
+        {"role": "system", "content": prompt.build_design_planner_system(app_settings.get_output_language())},
+        {"role": "user", "content": prompt.build_design_planner_user(message, analysis, investigation, workspace_dir)},
     ]
     plan = None
     last_error = None
-    for attempt in range(1, MAX_JSON_ATTEMPTS + 1):
+    for attempt in _attempt_indexes(app_settings.get_round_limit("design_json_attempts")):
         assistant = _call_model(provider, model, messages, tools=[], max_tokens=MAX_OUTPUT_TOKENS)
         if usage := _usage_delta(pricing_rules, assistant.pop("_usage", {})):
             _add_usage(usage_total, usage)
@@ -98,12 +97,18 @@ def blocking_gap(plan: dict) -> dict | None:
     return next((gap for gap in plan.get("decision_gaps", []) if gap.get("blocks_implementation")), None)
 
 
+def _attempt_indexes(limit: int, start: int = 1):
+    limit = int(limit or 0)
+    return count(start) if limit <= 0 else range(start, start + limit)
+
+
 def validate_design_plan(plan: dict, analysis: dict, investigation: dict) -> list[str]:
     issues = []
     criteria = [item for item in analysis.get("acceptance_criteria", []) if isinstance(item, dict)]
     requirements = plan.get("requirement_model") or []
     alignments = plan.get("project_alignment") or []
     decisions = plan.get("design_decisions") or []
+    blocking_gaps = [item for item in plan.get("decision_gaps", []) if item.get("blocks_implementation")]
     requirement_ids = {item.get("id") for item in requirements if item.get("id")}
     aligned_ids = {item.get("requirement_id") for item in alignments if item.get("requirement_id")}
     if criteria and len(requirements) < len(criteria):
@@ -120,6 +125,13 @@ def validate_design_plan(plan: dict, analysis: dict, investigation: dict) -> lis
     for item in decisions:
         if not item.get("because"):
             issues.append(f"design decision {item.get('id') or item.get('decision') or '?'} has no because")
+    if len(blocking_gaps) > 1:
+        issues.append("design plan can ask at most one blocking decision question")
+    for item in blocking_gaps:
+        if not item.get("question"):
+            issues.append(f"blocking decision gap {item.get('id') or '?'} has no question")
+        if not item.get("recommended_answer"):
+            issues.append(f"blocking decision gap {item.get('id') or item.get('question') or '?'} has no recommended_answer")
     if not (investigation.get("patch_planning_facts") or investigation.get("patch_planning_context")):
         issues.append("design plan has no grounded investigation facts to rely on")
     return issues
@@ -156,6 +168,7 @@ def user_question(gap: dict, *, analysis_id: str, origin_message: str) -> dict:
     gap_id = gap.get("id") or "design-gap"
     question = gap.get("question") or "Please clarify this design decision."
     why = gap.get("why", "")
+    recommended = gap.get("recommended_answer") or "Use best engineering judgment."
     return {
         "id": gap_id,
         "analysis_id": analysis_id,
@@ -174,74 +187,20 @@ def user_question(gap: dict, *, analysis_id: str, origin_message: str) -> dict:
         },
         "options": [
             {
+                "id": "best_judgment",
                 "label": "Use best engineering judgment",
-                "description": f"Choose the smallest design supported by current facts: {question}",
+                "description": recommended,
+                "value": recommended,
             },
             {
+                "id": "continue_investigation",
                 "label": "Continue investigation",
                 "description": f"Do not decide yet; look for more project evidence: {question}",
+                "value": "Continue investigation.",
             },
         ],
         "custom_allowed": True,
     }
-
-
-def _system_prompt(language: str) -> str:
-    return f"""\
-You are StratumCode's Design Planner. Write user-visible strings in {language}.
-Return one JSON object only. Do not use Markdown.
-
-Derive a professional implementation design from the requirement contract and
-investigation facts. Do not plan code yet. Do not invent project facts.
-
-Schema:
-{{
-  "summary": "one short sentence",
-  "requirement_model": [
-    {{"id": "RM1", "concept": "domain concept", "behavior": "required behavior", "source": "user_request|acceptance_criteria|constraint"}}
-  ],
-  "project_alignment": [
-    {{"requirement_id": "RM1", "status": "matched|missing|ambiguous", "project_fact": "grounded fact or explicit absence", "evidence": ["belief/evidence/fact"]}}
-  ],
-  "decision_gaps": [
-    {{"id": "DG1", "question": "specific decision question", "blocks_implementation": true, "why": "which implementation branch changes"}}
-  ],
-  "design_decisions": [
-    {{"id": "DD1", "decision": "chosen design", "because": ["AC1", "project fact", "user answer"]}}
-  ],
-  "out_of_scope": ["behavior intentionally not implemented"]
-}}
-
-Rules:
-- Every requirement_model item must come from the user request, acceptance criteria, or constraints.
-- project_alignment must say matched, missing, or ambiguous for each requirement.
-- Add a blocking decision_gap when implementation would branch and current facts do not decide it.
-- design_decisions must cite why the decision is valid. No "best practice" alone.
-- Do not include implementation steps; that is the patch planner's job.
-"""
-
-
-def _user_prompt(message: str, analysis: dict, investigation: dict, workspace_dir: str) -> str:
-    return json.dumps({
-        "platform": platform.system(),
-        "workspace_root": workspace_dir,
-        "user_request": message,
-        "task": {
-            "intent": analysis.get("intent", {}),
-            "acceptance_criteria": analysis.get("acceptance_criteria", []),
-            "behavior_contract": analysis.get("behavior_contract", {}),
-            "constraints": analysis.get("constraints", []),
-            "scope": analysis.get("scope", {}),
-            "unknowns": analysis.get("unknowns", []),
-        },
-        "investigation": {
-            "summary": investigation.get("summary", ""),
-            "patch_planning_facts": investigation.get("patch_planning_facts") or investigation.get("patch_planning_context") or [],
-            "beliefs": investigation.get("beliefs", []),
-            "resolutions": investigation.get("resolutions", []),
-            "user_decisions_required": investigation.get("user_decisions_required", []),
-        },
-    }, ensure_ascii=False, indent=2)
 
 
 def _json_from_text(text: str) -> dict:
@@ -308,6 +267,7 @@ def _decision_gaps(value) -> list[dict]:
         {
             "id": str(item.get("id") or "").strip(),
             "question": str(item.get("question") or "").strip(),
+            "recommended_answer": str(item.get("recommended_answer") or "").strip(),
             "blocks_implementation": bool(item.get("blocks_implementation")),
             "why": str(item.get("why") or "").strip(),
         }

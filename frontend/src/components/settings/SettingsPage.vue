@@ -13,9 +13,18 @@ function setScale(value) {
   emit('save', 'font_scale', value)
 }
 
+function setRoundLimit(key, value) {
+  const parsed = Number.parseInt(value, 10)
+  emit('save', key, Number.isFinite(parsed) ? Math.max(0, parsed) : 0)
+}
+
 const scaleSteps = [0.8, 0.85, 0.9, 0.95, 1.0, 1.05, 1.1, 1.15, 1.2, 1.3]
 function scaleLabel(v) {
   return `${Math.round(v * 100)}%`
+}
+
+function roundLabel(value) {
+  return Number(value || 0) <= 0 ? 'unlimited' : `${value}`
 }
 </script>
 
@@ -66,6 +75,34 @@ function scaleLabel(v) {
           <span class="scale-value">{{ scaleLabel(settings.font_scale || 1) }}</span>
         </div>
       </div>
+
+      <div class="settings-row settings-row--stack">
+        <div>
+          <strong>Loop limits</strong>
+          <span>Set any value to 0 for unlimited model/tool rounds.</span>
+        </div>
+        <div class="round-grid">
+          <label
+            v-for="item in settings.round_limits || []"
+            :key="item.key"
+            class="round-limit"
+          >
+            <span>
+              <strong>{{ item.label }}</strong>
+              <em>{{ item.description }}</em>
+            </span>
+            <input
+              type="number"
+              min="0"
+              step="1"
+              :value="item.value || 0"
+              :disabled="saving"
+              @change="setRoundLimit(item.key, $event.target.value)"
+            />
+            <b>{{ roundLabel(item.value) }}</b>
+          </label>
+        </div>
+      </div>
     </section>
   </main>
 </template>
@@ -100,6 +137,10 @@ function scaleLabel(v) {
   border: 1px solid #dbe5f0;
   border-radius: 8px;
   background: #fff;
+}
+.settings-row--stack {
+  grid-template-columns: 1fr;
+  align-items: stretch;
 }
 .settings-row strong,
 .settings-row span {
@@ -160,9 +201,51 @@ function scaleLabel(v) {
   font: 700 11px/1 var(--mono);
   text-align: right;
 }
+.round-grid {
+  display: grid;
+  gap: 8px;
+}
+.round-limit {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 72px 70px;
+  gap: 10px;
+  align-items: center;
+  padding: 10px 0;
+  border-top: 1px solid #edf2f8;
+}
+.round-limit:first-child {
+  border-top: 0;
+}
+.round-limit em {
+  display: block;
+  margin-top: 3px;
+  color: #6e8197;
+  font-style: normal;
+  font-size: 10px;
+  line-height: 1.35;
+}
+.round-limit input {
+  width: 72px;
+  padding: 7px 8px;
+  border: 1px solid #d7e2ef;
+  border-radius: 7px;
+  color: #25435f;
+  font: 700 11px/1 var(--mono);
+}
+.round-limit input:disabled {
+  cursor: wait;
+  opacity: .55;
+}
+.round-limit b {
+  color: #1756d1;
+  font: 700 10px/1 var(--mono);
+  text-align: right;
+}
 @media (max-width: 720px) {
   .settings-page { padding: 24px 18px; }
   .settings-row { grid-template-columns: 1fr; }
   .language-picker { flex-wrap: wrap; }
+  .round-limit { grid-template-columns: 1fr 72px; }
+  .round-limit b { grid-column: 2; }
 }
 </style>

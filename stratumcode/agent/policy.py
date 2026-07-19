@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import StrEnum
 
+from .. import prompt
 from .evidence import EvidenceRun
 from .tools import CONTROL_TOOL_NAMES
 
@@ -15,41 +16,6 @@ class EvidencePhase(StrEnum):
     OPPOSE = "oppose"
     AUDIT = "audit"
     EVALUATE = "evaluate"
-
-
-PHASE_INSTRUCTIONS = {
-    EvidencePhase.SUPPORT: (
-        "Support target: look for evidence that would make the hypothesis true. "
-        "If a tool result instead contradicts or narrows the hypothesis, record "
-        "it with stance=oppose rather than discarding it."
-    ),
-    EvidencePhase.OPPOSE: (
-        "Opposition target: actively search for evidence that contradicts, "
-        "narrows, or reframes the hypothesis. For broad project-level claims, "
-        "look for other major responsibilities or architecture that makes the "
-        "claim too narrow. If a tool result supports the hypothesis, record it "
-        "with stance=support rather than discarding it."
-    ),
-    EvidencePhase.AUDIT: (
-        "Audit target: compare the evidence. Link corroborating, contradicting, "
-        "or qualifying evidence. If the audit exposes a gap, use discovery tools "
-        "again and record more evidence before concluding."
-    ),
-    EvidencePhase.EVALUATE: (
-        "Evaluation target: conclude if the recorded supporting evidence, "
-        "opposing evidence, and audit relations are sufficient. If a gap is "
-        "still material, keep using discovery tools and record the missing "
-        "evidence before concluding."
-    ),
-}
-
-CHECKPOINT_INSTRUCTION = (
-    "Evidence checkpoint: before more discovery, record the strongest "
-    "material finding from a completed tool call. Use record_evidence "
-    "with the tool_call_id included in tool results. If the completed "
-    "tool calls truly contain no material finding, explain that briefly "
-    "and continue discovery."
-)
 
 
 @dataclass
@@ -82,10 +48,10 @@ class EvidencePolicy:
             return (
                 self._working_tools(available_discovery),
                 "required",
-                CHECKPOINT_INSTRUCTION,
+                prompt.EVIDENCE_CHECKPOINT_INSTRUCTION,
             )
 
-        if instruction := PHASE_INSTRUCTIONS.get(self.phase):
+        if instruction := prompt.evidence_phase_instruction(self.phase.value):
             return (
                 self._working_tools(available_discovery),
                 "auto",
