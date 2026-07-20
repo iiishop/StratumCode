@@ -130,39 +130,43 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
           </button>
         </div>
 
-        <div v-if="activeWorkspace?.id === workspace.id" class="sb__children">
-          <div
-            v-for="session in sessions"
-            :key="session.id"
-            class="sb__session-row"
-            :class="{ 'is-active': activeSession?.id === session.id }"
-          >
-            <button class="sb__session" type="button" title="Open session" @click="emit('open-session', session.id)">
-              <span class="sb__session-name">{{ session.name }}</span>
-              <span class="sb__props">
-                <span v-if="tokenLabel(session)" class="sb__prop is-tokens">{{ tokenLabel(session) }}</span>
-                <span v-if="session.state?.provider || session.provider" class="sb__prop">{{ session.state?.provider || session.provider }}</span>
-              </span>
-            </button>
-            <span class="sb__session-actions">
-              <button class="sb__row-action" type="button" title="Rename" @click.stop="emit('rename-session', session.id)">
-                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-                  <path d="M17 3a2.85 2.85 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z" />
-                </svg>
-              </button>
-              <button class="sb__row-action is-danger" type="button" title="Delete" @click.stop="emit('delete-session', session.id)">
-                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-                  <path d="M3 6h18M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2" />
-                </svg>
-              </button>
-            </span>
-          </div>
+        <Transition name="sb-expand">
+          <div v-if="activeWorkspace?.id === workspace.id" class="sb__children">
+            <TransitionGroup name="sb-session" tag="div" class="sb__session-list">
+              <div
+                v-for="session in sessions"
+                :key="session.id"
+                class="sb__session-row"
+                :class="{ 'is-active': activeSession?.id === session.id }"
+              >
+                <button class="sb__session" type="button" title="Open session" @click="emit('open-session', session.id)">
+                  <span class="sb__session-name">{{ session.name }}</span>
+                  <span class="sb__props">
+                    <span v-if="tokenLabel(session)" class="sb__prop is-tokens">{{ tokenLabel(session) }}</span>
+                    <span v-if="session.state?.provider || session.provider" class="sb__prop">{{ session.state?.provider || session.provider }}</span>
+                  </span>
+                </button>
+                <span class="sb__session-actions">
+                  <button class="sb__row-action" type="button" title="Rename" @click.stop="emit('rename-session', session.id)">
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                      <path d="M17 3a2.85 2.85 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z" />
+                    </svg>
+                  </button>
+                  <button class="sb__row-action is-danger" type="button" title="Delete" @click.stop="emit('delete-session', session.id)">
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                      <path d="M3 6h18M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2" />
+                    </svg>
+                  </button>
+                </span>
+              </div>
 
-          <button v-if="!sessions.length" class="sb__empty" type="button" @click="createSession">
-            <span>No sessions</span>
-            <small>Create one to start</small>
-          </button>
-        </div>
+              <button v-if="!sessions.length" key="empty" class="sb__empty" type="button" @click="createSession">
+                <span>No sessions</span>
+                <small>Create one to start</small>
+              </button>
+            </TransitionGroup>
+          </div>
+        </Transition>
       </section>
 
       <button v-if="!workspaces.length" class="sb__empty sb__empty-workspace" type="button" @click="emit('add-workspace')">
@@ -460,6 +464,36 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
   padding-bottom: 2px;
 }
 
+.sb-expand-enter-active,
+.sb-expand-leave-active {
+  max-height: min(72vh, 720px);
+  overflow: hidden;
+  transform-origin: top;
+  transition:
+    max-height 240ms cubic-bezier(.16, 1, .3, 1),
+    opacity 170ms ease,
+    transform 240ms cubic-bezier(.16, 1, .3, 1);
+  will-change: max-height, opacity, transform;
+}
+
+.sb-expand-enter-from,
+.sb-expand-leave-to {
+  max-height: 0;
+  opacity: 0;
+  transform: translateY(-4px) scaleY(.985);
+}
+
+.sb-expand-enter-to,
+.sb-expand-leave-from {
+  max-height: min(72vh, 720px);
+  opacity: 1;
+  transform: translateY(0) scaleY(1);
+}
+
+.sb__session-list {
+  position: relative;
+}
+
 .sb__session-row {
   display: flex;
   min-width: 0;
@@ -470,6 +504,30 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
   padding-left: 24px;
   border-radius: 5px;
   transition: background 100ms ease;
+}
+
+.sb-session-enter-active,
+.sb-session-leave-active {
+  transition:
+    opacity 160ms ease,
+    transform 200ms cubic-bezier(.16, 1, .3, 1);
+  will-change: opacity, transform;
+}
+
+.sb-session-enter-from,
+.sb-session-leave-to {
+  opacity: 0;
+  transform: translateY(-5px);
+}
+
+.sb-session-move {
+  transition: transform 180ms cubic-bezier(.16, 1, .3, 1);
+}
+
+.sb-session-leave-active {
+  position: absolute;
+  right: 0;
+  left: 0;
 }
 
 .sb__session-row:hover,

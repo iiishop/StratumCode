@@ -1,7 +1,5 @@
 <script setup>
-import { computed, ref, onMounted } from 'vue'
-import { gsap } from 'gsap'
-import { animate } from 'animejs'
+import { computed } from 'vue'
 import HighlightedText from './HighlightedText.vue'
 
 const props = defineProps({
@@ -16,63 +14,7 @@ const props = defineProps({
 })
 
 const emit = defineEmits(['toggle'])
-const surface = ref(null)
 const expanded = computed(() => props.collapsible ? props.open : true)
-
-onMounted(() => {
-  if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) return
-  gsap.fromTo(
-    surface.value,
-    { autoAlpha: 0, y: 10, filter: 'blur(5px)' },
-    { autoAlpha: 1, y: 0, filter: 'blur(0px)', duration: .4, ease: 'power3.out', clearProps: 'filter' },
-  )
-})
-
-function moveSpotlight(event) {
-  const bounds = surface.value?.getBoundingClientRect()
-  if (!bounds) return
-  surface.value.style.setProperty('--spot-x', `${event.clientX - bounds.left}px`)
-  surface.value.style.setProperty('--spot-y', `${event.clientY - bounds.top}px`)
-}
-
-function expandEnter(el, done) {
-  if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
-    done()
-    return
-  }
-  el.style.overflow = 'hidden'
-  gsap.fromTo(el, { height: 0, autoAlpha: 0 }, {
-    height: el.scrollHeight,
-    autoAlpha: 1,
-    duration: .3,
-    ease: 'power3.out',
-    onComplete: () => {
-      gsap.set(el, { height: 'auto', clearProps: 'overflow' })
-      done()
-    },
-  })
-  animate(el.querySelector('.event-frame__body'), {
-    translateY: [-6, 0],
-    opacity: [0, 1],
-    duration: 260,
-    ease: 'outCubic',
-  })
-}
-
-function collapseLeave(el, done) {
-  if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
-    done()
-    return
-  }
-  el.style.overflow = 'hidden'
-  gsap.fromTo(el, { height: el.scrollHeight, autoAlpha: 1 }, {
-    height: 0,
-    autoAlpha: 0,
-    duration: .24,
-    ease: 'power2.inOut',
-    onComplete: done,
-  })
-}
 </script>
 
 <template>
@@ -80,7 +22,7 @@ function collapseLeave(el, done) {
     <div class="event-frame__rail">
       <span class="event-frame__node">{{ symbol }}</span>
     </div>
-    <div ref="surface" class="event-frame__surface" @pointermove="moveSpotlight">
+    <div class="event-frame__surface">
       <button
         class="event-frame__head"
         :class="{ 'is-static': !collapsible }"
@@ -95,7 +37,7 @@ function collapseLeave(el, done) {
         <span v-if="status" class="event-frame__status" :class="{ 'is-running': status === 'running' }">{{ status }}</span>
         <span v-if="collapsible" class="event-frame__chevron" :class="{ 'is-open': open }">⌄</span>
       </button>
-      <Transition @enter="expandEnter" @leave="collapseLeave">
+      <Transition name="event-frame-expand">
         <div v-show="expanded" class="event-frame__expand">
           <div class="event-frame__clip">
             <div class="event-frame__body"><slot /></div>
@@ -111,7 +53,7 @@ function collapseLeave(el, done) {
   --event: #1756d1;
   position: relative;
   display: grid;
-  grid-template-columns: 32px minmax(0, 1fr);
+  grid-template-columns: 36px minmax(0, 1fr);
   min-width: 0;
 }
 .event-frame--thinking { --event: #c48b00; }
@@ -143,17 +85,17 @@ function collapseLeave(el, done) {
   position: relative;
   display: flex;
   justify-content: center;
-  padding-top: 2px;
+  padding-top: 3px;
 }
 
 .event-frame__rail::after {
   position: absolute;
-  top: 28px;
-  bottom: -12px;
+  top: 31px;
+  bottom: -10px;
   left: 50%;
-  width: 1px;
+  width: 2px;
   content: "";
-  background: linear-gradient(180deg, color-mix(in srgb, var(--event) 22%, #b8cae8), transparent 88%);
+  background: linear-gradient(180deg, color-mix(in srgb, var(--event) 18%, #d8e3f4), rgba(216, 227, 244, .18));
 }
 .event-frame:last-child .event-frame__rail::after { display: none; }
 
@@ -161,14 +103,14 @@ function collapseLeave(el, done) {
   position: relative;
   z-index: 1;
   display: grid;
-  width: 24px;
-  height: 24px;
+  width: 28px;
+  height: 28px;
   place-items: center;
-  border: 1px solid color-mix(in srgb, var(--event) 28%, #e0e8f5);
-  border-radius: 7px;
+  border: 2px solid color-mix(in srgb, var(--event) 24%, #e0e8f5);
+  border-radius: 50%;
   color: var(--event);
   background: color-mix(in srgb, var(--event) 5%, #ffffff);
-  box-shadow: 0 0 0 5px color-mix(in srgb, var(--event) 5%, transparent);
+  box-shadow: 0 0 0 4px #f7f9fd;
   font: 800 10px/1 var(--mono, monospace);
   transition: box-shadow var(--transition, 180ms ease);
 }
@@ -187,15 +129,14 @@ function collapseLeave(el, done) {
 }
 
 .event-frame__surface {
-  --spot-x: 50%;
-  --spot-y: 0%;
   position: relative;
   min-width: 0;
   overflow: hidden;
-  border: 1px solid color-mix(in srgb, var(--event) 16%, #d4e0f2);
-  border-radius: 11px;
-  background: color-mix(in srgb, var(--event) 3%, #ffffff);
-  box-shadow: 0 3px 14px rgba(31, 68, 119, .038);
+  border: 1px solid color-mix(in srgb, var(--event) 13%, #d4e0f2);
+  border-radius: 8px;
+  background: linear-gradient(180deg, color-mix(in srgb, var(--event) 3%, #ffffff), #ffffff);
+  box-shadow: 0 2px 10px rgba(31, 68, 119, .032);
+  animation: event-frame-in 220ms cubic-bezier(.16, 1, .3, 1) both;
   transition: border-color .2s ease, box-shadow .2s ease, transform .2s ease;
 }
 
@@ -208,23 +149,11 @@ function collapseLeave(el, done) {
   opacity: .68;
 }
 
-.event-frame__surface::after {
-  position: absolute;
-  inset: 0;
-  content: "";
-  background: radial-gradient(300px circle at var(--spot-x) var(--spot-y), color-mix(in srgb, var(--event) 4%, transparent), transparent 70%);
-  opacity: 0;
-  transition: opacity .32s ease;
-  pointer-events: none;
-}
-
 .event-frame__surface:hover {
-  border-color: color-mix(in srgb, var(--event) 30%, #b8cae8);
-  box-shadow: 0 8px 22px rgba(31, 68, 119, .065);
+  border-color: color-mix(in srgb, var(--event) 26%, #b8cae8);
+  box-shadow: 0 6px 18px rgba(31, 68, 119, .058);
   transform: translateY(-1px);
 }
-
-.event-frame__surface:hover::after { opacity: 1; }
 
 .event-frame--accepted .event-frame__surface {
   border-color: color-mix(in srgb, var(--event) 36%, #a8d8c8);
@@ -239,10 +168,10 @@ function collapseLeave(el, done) {
 .event-frame__head {
   display: flex;
   width: 100%;
-  min-height: 46px;
+  min-height: 42px;
   align-items: center;
   gap: 10px;
-  padding: 10px 14px;
+  padding: 9px 14px;
   border: 0;
   color: var(--text-h, #102a5c);
   background: transparent;
@@ -253,32 +182,43 @@ function collapseLeave(el, done) {
 }
 .event-frame__head.is-static { cursor: default; }
 .event-frame__head:disabled { opacity: 1; }
+.event-frame__head:not(.is-static):hover {
+  background: color-mix(in srgb, var(--event) 4%, transparent);
+}
 
 .event-frame__titles {
-  display: grid;
+  display: flex;
   min-width: 0;
   flex: 1 1 auto;
-  gap: 2px;
+  align-items: center;
+  gap: 8px;
 }
 
 .event-frame__label {
+  flex: 0 0 auto;
   overflow: hidden;
-  color: var(--text-h, #102a5c);
-  font: 650 var(--font-ui, 12px)/1.3 var(--mono, monospace);
-  letter-spacing: .01em;
+  max-width: 180px;
+  padding: 2px 7px;
+  border-radius: 4px;
+  color: var(--event);
+  background: color-mix(in srgb, var(--event) 8%, transparent);
+  font: 760 9.5px/1.3 var(--mono, monospace);
+  letter-spacing: .06em;
   text-overflow: ellipsis;
+  text-transform: uppercase;
   white-space: nowrap;
 }
 
 .event-frame__titles small {
   display: flex;
-  min-height: 21px;
+  min-height: 18px;
   align-items: center;
   min-width: 0;
+  flex: 1;
   overflow: hidden;
   color: var(--text-muted, #71809c);
   font-size: var(--font-caption, 11px);
-  line-height: 21px;
+  line-height: 18px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -286,11 +226,11 @@ function collapseLeave(el, done) {
 .event-frame__status {
   flex: 0 0 auto;
   margin-left: auto;
-  padding: 2px 7px;
-  border-radius: 5px;
+  padding: 2px 6px;
+  border-radius: 4px;
   color: var(--event);
   background: color-mix(in srgb, var(--event) 8%, transparent);
-  font: 700 9px/1.3 var(--mono, monospace);
+  font: 700 8.5px/1.3 var(--mono, monospace);
   letter-spacing: .06em;
   text-transform: uppercase;
   white-space: nowrap;
@@ -314,9 +254,20 @@ function collapseLeave(el, done) {
 .event-frame__clip { min-height: 0; overflow: hidden; }
 
 .event-frame__body {
-  padding: 2px 14px 14px;
+  padding: 1px 14px 13px;
   min-width: 0;
   overflow-wrap: anywhere;
+}
+
+@keyframes event-frame-in {
+  from {
+    opacity: 0;
+    transform: translateY(7px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
 }
 
 @keyframes node-pulse {
@@ -331,11 +282,37 @@ function collapseLeave(el, done) {
   50% { box-shadow: 0 0 0 4px rgba(245, 200, 66, .16); }
 }
 
+.event-frame-expand-enter-active,
+.event-frame-expand-leave-active {
+  max-height: min(70vh, 720px);
+  overflow: hidden;
+  transition:
+    max-height 230ms cubic-bezier(.16, 1, .3, 1),
+    opacity 160ms ease,
+    transform 220ms cubic-bezier(.16, 1, .3, 1);
+  will-change: max-height, opacity, transform;
+}
+
+.event-frame-expand-enter-from,
+.event-frame-expand-leave-to {
+  max-height: 0;
+  opacity: 0;
+  transform: translateY(-5px);
+}
+
+.event-frame-expand-enter-to,
+.event-frame-expand-leave-from {
+  max-height: min(70vh, 720px);
+  opacity: 1;
+  transform: translateY(0);
+}
+
 @media (prefers-reduced-motion: reduce) {
   .event-frame__surface,
   .event-frame__chevron,
   .event-frame__expand,
   .event-frame__body { transition: none; }
+  .event-frame__surface { animation: none; }
   .event-frame__status.is-running { animation: none; }
   .event-frame:has(.event-frame__status.is-running) .event-frame__node { animation: none; }
 }
