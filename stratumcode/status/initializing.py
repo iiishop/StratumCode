@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from .. import sessions
+from .investigating import prepare_investigation
 from .session_memory import _select_session_memory, _session_context
 from .user_context import _answer_context, _workspace_snapshot
 
@@ -23,4 +24,5 @@ def handle(run):
     if run.analysis is None:
         run.transition(chat.ChatState.ANALYZING, "No prior analysis was supplied.")
     else:
-        run.transition(chat.ChatState.PREPARING_INVESTIGATION, "A prior analysis was supplied with the answer.")
+        yield from prepare_investigation(run)
+        run.transition(chat.ChatState.INVESTIGATING, "A prior analysis was supplied with the answer.")

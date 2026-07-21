@@ -12,7 +12,6 @@ from .agent_runtime import start_event
 class ChatState(StrEnum):
     INITIALIZING = "initializing"
     ANALYZING = "analyzing"
-    PREPARING_INVESTIGATION = "preparing_investigation"
     INVESTIGATING = "investigating"
     DESIGNING = "designing"
     WAITING_FOR_USER = "waiting_for_user"
@@ -25,9 +24,8 @@ class ChatState(StrEnum):
 
 
 _CHAT_TRANSITIONS = {
-    ChatState.INITIALIZING: {ChatState.ANALYZING, ChatState.PREPARING_INVESTIGATION, ChatState.FAILED},
-    ChatState.ANALYZING: {ChatState.PREPARING_INVESTIGATION, ChatState.FAILED},
-    ChatState.PREPARING_INVESTIGATION: {ChatState.INVESTIGATING, ChatState.FAILED},
+    ChatState.INITIALIZING: {ChatState.ANALYZING, ChatState.INVESTIGATING, ChatState.FAILED},
+    ChatState.ANALYZING: {ChatState.INVESTIGATING, ChatState.FAILED},
     ChatState.INVESTIGATING: {ChatState.INVESTIGATING, ChatState.DESIGNING, ChatState.WAITING_FOR_USER, ChatState.SAVING_SESSION, ChatState.COMPLETED, ChatState.FAILED},
     ChatState.DESIGNING: {ChatState.WAITING_FOR_USER, ChatState.PATCH_PLANNING, ChatState.SAVING_SESSION, ChatState.COMPLETED},
     ChatState.WAITING_FOR_USER: {ChatState.INVESTIGATING, ChatState.DESIGNING, ChatState.PATCH_PLANNING, ChatState.IMPLEMENTING, ChatState.VALIDATING, ChatState.SAVING_SESSION, ChatState.COMPLETED, ChatState.FAILED},

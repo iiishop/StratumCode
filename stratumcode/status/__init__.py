@@ -7,7 +7,6 @@ from . import (
     initializing,
     investigating,
     patch_planning,
-    preparing_investigation,
     saving_session,
     validating,
     waiting_for_user,
@@ -20,7 +19,6 @@ def handlers():
     return {
         ChatState.INITIALIZING: initializing.handle,
         ChatState.ANALYZING: analyzing.handle,
-        ChatState.PREPARING_INVESTIGATION: preparing_investigation.handle,
         ChatState.INVESTIGATING: investigating.handle,
         ChatState.DESIGNING: designing.handle,
         ChatState.WAITING_FOR_USER: waiting_for_user.handle,

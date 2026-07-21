@@ -3,6 +3,7 @@ from __future__ import annotations
 from uuid import uuid4
 
 from ..agent_runtime import start_event
+from .investigating import prepare_investigation
 from . import task_analysis
 
 
@@ -37,4 +38,5 @@ def handle(run):
         "state": "done",
         "phase": "analyzed",
     }}
-    run.transition(chat.ChatState.PREPARING_INVESTIGATION, "Task analysis completed.")
+    yield from prepare_investigation(run)
+    run.transition(chat.ChatState.INVESTIGATING, "Task analysis completed.")

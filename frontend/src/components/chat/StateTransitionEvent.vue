@@ -13,7 +13,6 @@ const messageEvents = inject('messageEvents', computed(() => []))
 const STATES = {
   initializing:             { label: 'Init',       icon: '\u25C8', color: '#94a3b8' },
   analyzing:                { label: 'Analyze',    icon: '\u25C9', color: '#f59e0b' },
-  preparing_investigation:  { label: 'Prep',       icon: '\u25C6', color: '#8b5cf6' },
   investigating:            { label: 'Investigate',icon: '\u25C8', color: '#3b82f6' },
   designing:                { label: 'Design',     icon: '\u2B21', color: '#10b981' },
   waiting_for_user:         { label: 'Wait',       icon: '?', color: '#eab308' },
@@ -139,7 +138,7 @@ onMounted(() => {
   transform: translateY(-50%);
   width: 0%;
   background: linear-gradient(90deg,
-    #94a3b8, #f59e0b, #8b5cf6, #3b82f6, #10b981, #eab308, #f97316, #06b6d4, #6366f1
+    #94a3b8, #f59e0b, #3b82f6, #10b981, #eab308, #f97316, #06b6d4, #6366f1
   );
 }
 
