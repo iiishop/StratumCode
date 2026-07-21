@@ -2,9 +2,10 @@ from __future__ import annotations
 
 from uuid import uuid4
 
-from .. import checkpoint, investigator
+from .. import investigator
 from ..agent_runtime import start_event
 from ..status.task_analysis import IMPLEMENTATION_INTENT_TYPES, _message_requests_implementation
+from . import clearify
 from .task_contract import _analysis_context, run_request
 from .task_updates import (
     _beliefs_as_knowledge,
@@ -99,33 +100,41 @@ def handle(run):
                 "items": run.analysis["task_updates"],
             })
             if pending_question:
-                checkpoint.prepare_question(
-                    pending_question["data"],
+                run.last_investigation = last_investigation
+                yield event
+                yield clearify.ask_event(
+                    run,
+                    pending_question,
                     resume_state=chat.ChatState.INVESTIGATING,
                     analysis=run.analysis,
                     investigation=last_investigation,
                 )
-                yield pending_question
                 pending_question = None
+                return
         yield event
     run.last_investigation = last_investigation
     if pending_question:
-        checkpoint.prepare_question(
-            pending_question["data"],
+        yield clearify.ask_event(
+            run,
+            pending_question,
             resume_state=chat.ChatState.INVESTIGATING,
             analysis=run.analysis,
             investigation=run.last_investigation,
         )
-        yield pending_question
+        return
     next_step = ((run.last_investigation or {}).get("step_result") or {}).get("next_step")
     has_blocked_task = _has_task_status(run.last_investigation, "blocked")
     has_unknown_task = _has_task_status(run.last_investigation, "unknown")
-    if pending_question:
-        run.transition(chat.ChatState.WAITING_FOR_USER, "Investigation needs user input.")
-    elif next_step == "done":
+    if next_step == "done":
         run.transition(chat._chat_finish_state(run), "Investigation ended without an implementation path.")
     elif next_step == "ask_user" or has_blocked_task:
-        run.transition(chat.ChatState.WAITING_FOR_USER, "Investigation needs user input.")
+        yield clearify.ask(
+            run,
+            _fallback_question(run, request),
+            resume_state=chat.ChatState.INVESTIGATING,
+            analysis=run.analysis,
+            investigation=run.last_investigation,
+        )
     elif run.last_investigation and _investigation_allows_patch(run.last_investigation) and _wants_implementation(run.analysis, request):
         run.transition(chat.ChatState.DESIGNING, "Investigation is ready for implementation planning.")
     elif next_step == "continue_investigation" or has_unknown_task:
@@ -170,3 +179,22 @@ def _has_task_status(investigation: dict | None, status: str) -> bool:
         if item.get("status") == status:
             return True
     return False
+
+
+def _fallback_question(run, request: str) -> dict:
+    question = next(
+        (
+            str(item.get("text") or item.get("question") or "").strip()
+            for item in (run.last_investigation or {}).get("task_updates", [])
+            if isinstance(item, dict) and item.get("status") in {"blocked", "unknown"}
+        ),
+        "",
+    ) or "Please clarify the next decision."
+    return {
+        "id": f"question-{uuid4().hex[:8]}",
+        "analysis_id": run.analysis["id"],
+        "question": question,
+        "origin_message": request,
+        "reason": (run.last_investigation or {}).get("summary", ""),
+        "why_it_matters": "The investigation needs your answer before it can continue.",
+    }

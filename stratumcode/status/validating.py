@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from uuid import uuid4
 
-from .. import checkpoint, implementation_runner
-from ..agent_runtime import start_event
+from .. import implementation_runner
+from . import clearify
 from .task_contract import run_request
 
 
@@ -27,8 +27,9 @@ def handle(run):
         changed_files=changed_files,
     ):
         if event.get("op") == "start" and event.get("event") == "user_question":
-            checkpoint.prepare_question(
-                event["data"],
+            yield clearify.ask_event(
+                run,
+                event,
                 resume_state=chat.ChatState.VALIDATING,
                 analysis=run.analysis,
                 investigation=run.last_investigation,
@@ -37,18 +38,14 @@ def handle(run):
                 implementation_result=run.implementation_result,
                 validation_result=run.validation_result,
             )
-            run.transition(chat.ChatState.WAITING_FOR_USER, "Validation needs user input.")
-            yield event
             return
         if event.get("op") == "done" and isinstance(event.get("validation_result"), dict):
             run.validation_result = event["validation_result"]
         yield event
     if run.state == chat.ChatState.VALIDATING:
         next_state = _state_after_validation(run)
-        if next_state == chat.ChatState.WAITING_FOR_USER:
-            question_event = _validation_user_question(run)
-            run.transition(next_state, "Validation completed and requires user input.")
-            yield question_event
+        if next_state == "clearify":
+            yield _validation_user_question(run)
             return
         elif next_state in {chat.ChatState.DESIGNING, chat.ChatState.INVESTIGATING}:
             _add_validation_context(run)
@@ -66,7 +63,7 @@ def _state_after_validation(run):
     if verdict == "missing_evidence":
         return chat.ChatState.INVESTIGATING
     if verdict == "user_decision":
-        return chat.ChatState.WAITING_FOR_USER
+        return "clearify"
     return chat.ChatState.FAILED
 
 
@@ -84,7 +81,8 @@ def _validation_user_question(run) -> dict:
         "options": result.get("options") or [],
         "custom_allowed": True,
     }
-    checkpoint.prepare_question(
+    return clearify.ask(
+        run,
         question,
         resume_state=chat.ChatState.VALIDATING,
         analysis=run.analysis,
@@ -93,8 +91,8 @@ def _validation_user_question(run) -> dict:
         patch_plan=run.patch_plan,
         implementation_result=run.implementation_result,
         validation_result=run.validation_result,
+        event_id=f"{run.analysis['id']}-validation-question",
     )
-    return start_event(f"{run.analysis['id']}-validation-question", "user_question", question)
 
 
 def _add_validation_context(run) -> None:

@@ -6,7 +6,7 @@ from . import sessions
 from .status.session_memory import _select_session_memory, _session_context
 from .status.task_contract import _ensure_task_contract, request_from_analysis, run_request
 from .status.task_updates import _normalize_task_updates
-from .status.user_context import _answer_context, _answered_task_update, _continuation_context, _prior_findings
+from .status.user_context import _answer_context, _answered_task_update, _continuation_context, _design_plan_with_answer, _prior_findings
 
 
 def prepare_question(
@@ -49,7 +49,19 @@ def answer_resume_state(answer: dict, chat_state, transitions) -> object | None:
         state = chat_state(raw)
     except ValueError:
         return None
-    return state if state in transitions[chat_state.WAITING_FOR_USER] else None
+    return state if state in transitions else None
+
+
+def resume_from_answer(run, answer: dict, chat_state, transitions) -> None:
+    resume_state = answer_resume_state(answer, chat_state, transitions)
+    restore_context(run, answer)
+    if resume_state:
+        run.state = resume_state
+    else:
+        run.state = chat_state.SAVING_SESSION if run.session_id and run.last_investigation else chat_state.COMPLETED
+    if run.state == chat_state.PATCH_PLANNING:
+        run.design_plan = _design_plan_with_answer(run.design_plan or {}, answer)
+    run.answer = None
 
 
 def restore_context(run, answer: dict) -> None:

@@ -15,7 +15,6 @@ const STATES = {
   analyzing:                { label: 'Analyze',    icon: '\u25C9', color: '#f59e0b' },
   investigating:            { label: 'Investigate',icon: '\u25C8', color: '#3b82f6' },
   designing:                { label: 'Design',     icon: '\u2B21', color: '#10b981' },
-  waiting_for_user:         { label: 'Wait',       icon: '?', color: '#eab308' },
   patch_planning:           { label: 'Plan',       icon: '\u25EB', color: '#f97316' },
   implementing:             { label: 'Implement',  icon: '\u2B22', color: '#06b6d4' },
   validating:               { label: 'Validate',   icon: '\u25CE', color: '#14b8a6' },
@@ -138,7 +137,7 @@ onMounted(() => {
   transform: translateY(-50%);
   width: 0%;
   background: linear-gradient(90deg,
-    #94a3b8, #f59e0b, #3b82f6, #10b981, #eab308, #f97316, #06b6d4, #6366f1
+    #94a3b8, #f59e0b, #3b82f6, #10b981, #f97316, #06b6d4, #6366f1
   );
 }
 

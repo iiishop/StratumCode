@@ -9,7 +9,6 @@ from . import (
     patch_planning,
     saving_session,
     validating,
-    waiting_for_user,
 )
 
 
@@ -21,7 +20,6 @@ def handlers():
         ChatState.ANALYZING: analyzing.handle,
         ChatState.INVESTIGATING: investigating.handle,
         ChatState.DESIGNING: designing.handle,
-        ChatState.WAITING_FOR_USER: waiting_for_user.handle,
         ChatState.PATCH_PLANNING: patch_planning.handle,
         ChatState.IMPLEMENTING: implementing.handle,
         ChatState.VALIDATING: validating.handle,

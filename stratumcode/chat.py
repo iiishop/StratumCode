@@ -14,7 +14,6 @@ class ChatState(StrEnum):
     ANALYZING = "analyzing"
     INVESTIGATING = "investigating"
     DESIGNING = "designing"
-    WAITING_FOR_USER = "waiting_for_user"
     PATCH_PLANNING = "patch_planning"
     IMPLEMENTING = "implementing"
     VALIDATING = "validating"
@@ -26,12 +25,11 @@ class ChatState(StrEnum):
 _CHAT_TRANSITIONS = {
     ChatState.INITIALIZING: {ChatState.ANALYZING, ChatState.INVESTIGATING, ChatState.FAILED},
     ChatState.ANALYZING: {ChatState.INVESTIGATING, ChatState.FAILED},
-    ChatState.INVESTIGATING: {ChatState.INVESTIGATING, ChatState.DESIGNING, ChatState.WAITING_FOR_USER, ChatState.SAVING_SESSION, ChatState.COMPLETED, ChatState.FAILED},
-    ChatState.DESIGNING: {ChatState.WAITING_FOR_USER, ChatState.PATCH_PLANNING, ChatState.SAVING_SESSION, ChatState.COMPLETED},
-    ChatState.WAITING_FOR_USER: {ChatState.INVESTIGATING, ChatState.DESIGNING, ChatState.PATCH_PLANNING, ChatState.IMPLEMENTING, ChatState.VALIDATING, ChatState.SAVING_SESSION, ChatState.COMPLETED, ChatState.FAILED},
+    ChatState.INVESTIGATING: {ChatState.INVESTIGATING, ChatState.DESIGNING, ChatState.SAVING_SESSION, ChatState.COMPLETED, ChatState.FAILED},
+    ChatState.DESIGNING: {ChatState.PATCH_PLANNING, ChatState.SAVING_SESSION, ChatState.COMPLETED},
     ChatState.PATCH_PLANNING: {ChatState.IMPLEMENTING, ChatState.SAVING_SESSION, ChatState.COMPLETED},
-    ChatState.IMPLEMENTING: {ChatState.VALIDATING, ChatState.WAITING_FOR_USER, ChatState.SAVING_SESSION, ChatState.COMPLETED},
-    ChatState.VALIDATING: {ChatState.DESIGNING, ChatState.INVESTIGATING, ChatState.WAITING_FOR_USER, ChatState.SAVING_SESSION, ChatState.COMPLETED, ChatState.FAILED},
+    ChatState.IMPLEMENTING: {ChatState.VALIDATING, ChatState.SAVING_SESSION, ChatState.COMPLETED},
+    ChatState.VALIDATING: {ChatState.DESIGNING, ChatState.INVESTIGATING, ChatState.SAVING_SESSION, ChatState.COMPLETED, ChatState.FAILED},
     ChatState.SAVING_SESSION: {ChatState.COMPLETED, ChatState.FAILED},
 }
 _TERMINAL_CHAT_STATES = {ChatState.COMPLETED, ChatState.FAILED}
@@ -64,6 +62,7 @@ class ChatRun:
     answered_task: dict | None = None
     error: str = ""
     transition_events: list[dict] = field(default_factory=list)
+    awaiting_user: bool = False
 
     def transition(self, next_state: ChatState, reason: str = "") -> None:
         if next_state not in _CHAT_TRANSITIONS.get(self.state, set()):
@@ -111,12 +110,12 @@ def _chat_events(run: ChatRun) -> Iterator[dict]:
     state_handlers = handlers()
     while run.state not in _TERMINAL_CHAT_STATES:
         try:
-            if run.state == ChatState.WAITING_FOR_USER and not run.answer:
-                break
             events = state_handlers[run.state](run)
             if events is not None:
                 yield from events
             yield from run.pop_transition_events()
+            if run.awaiting_user:
+                break
         except Exception as exc:
             run.error = str(exc)
             yield start_event(f"error-{uuid4().hex[:8]}", "output", {
@@ -152,11 +151,12 @@ def stream(request: dict, workspace_dir: str = ".") -> Iterator[dict]:
         message = str(answer["origin_message"]).strip()
     if answer:
         answer = dict(answer)
-        answer["resume_state"] = str(answer.get("resume_state") or (checkpoint.answer_resume_state(answer, ChatState, _CHAT_TRANSITIONS) or "")).strip()
-        if answer.get("resume_state"):
+        resume_state = checkpoint.answer_resume_state(answer, ChatState, _CHAT_TRANSITIONS)
+        answer["resume_state"] = str(answer.get("resume_state") or (resume_state or "")).strip()
+        if resume_state:
             if analysis and "analysis" not in answer:
                 answer["analysis"] = analysis
-            return _chat_events(ChatRun(
+            run = ChatRun(
                 message=message,
                 context=context,
                 workspace_dir=workspace_dir,
@@ -165,8 +165,10 @@ def stream(request: dict, workspace_dir: str = ".") -> Iterator[dict]:
                 analysis=analysis,
                 prior_analysis=prior_analysis,
                 session_id=request.get("session_id"),
-                state=ChatState.WAITING_FOR_USER,
-            ))
+                state=resume_state,
+            )
+            checkpoint.resume_from_answer(run, answer, ChatState, _CHAT_TRANSITIONS)
+            return _chat_events(run)
     return analyzed_stream(
         message,
         context,

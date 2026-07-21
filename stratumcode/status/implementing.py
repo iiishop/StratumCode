@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from .. import checkpoint, implementation_runner
+from .. import implementation_runner
+from . import clearify
 from .task_contract import run_request
 
 
@@ -14,8 +15,9 @@ def handle(run):
         workspace_dir=run.workspace_dir,
     ):
         if event.get("op") == "start" and event.get("event") == "user_question":
-            checkpoint.prepare_question(
-                event["data"],
+            yield clearify.ask_event(
+                run,
+                event,
                 resume_state=chat.ChatState.IMPLEMENTING,
                 analysis=run.analysis,
                 investigation=run.last_investigation,
@@ -24,8 +26,6 @@ def handle(run):
                 implementation_result=run.implementation_result,
                 validation_result=run.validation_result,
             )
-            run.transition(chat.ChatState.WAITING_FOR_USER, "Implementation needs user input.")
-            yield event
             return
         if event.get("op") == "done" and isinstance(event.get("implementation"), dict):
             run.implementation_result = event["implementation"]

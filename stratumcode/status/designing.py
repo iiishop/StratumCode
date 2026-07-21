@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from .. import checkpoint, design_planner
-from ..agent_runtime import start_event
+from .. import design_planner
+from . import clearify
 from .task_contract import run_request
 
 
@@ -35,14 +35,15 @@ def handle(run):
             "design_plan": run.design_plan,
             "investigation": run.last_investigation,
         })
-        checkpoint.prepare_question(
+        yield clearify.ask(
+            run,
             question,
             resume_state=chat.ChatState.PATCH_PLANNING,
             analysis=run.analysis,
             investigation=run.last_investigation,
             design_plan=run.design_plan,
+            event_id=f"{run.analysis['id']}-design-question",
         )
-        yield start_event(f"{run.analysis['id']}-design-question", "user_question", question)
-        run.transition(chat.ChatState.WAITING_FOR_USER, "Design planning needs user input.")
+        return
     else:
         run.transition(chat.ChatState.PATCH_PLANNING, "Design plan has no blocking gaps.")

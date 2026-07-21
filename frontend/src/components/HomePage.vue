@@ -6,6 +6,7 @@ import { useChatStream } from '../composables/useChatStream'
 import FileReference from './FileReference.vue'
 import FileMentionDropdown from './FileMentionDropdown.vue'
 import InspectorPanel from './inspector/InspectorPanel.vue'
+import { extractInlineFileRefs, languageFromPath, tokenizeInlineFileRefs } from '../lib/fileRefs'
 
 const props = defineProps({
   session: { type: Object, default: null },
@@ -66,6 +67,7 @@ const mentionFilesLoaded = ref(false)
 const mentionActive = ref(false)
 const mentionSearch = ref('')
 const mentionStartPos = ref(-1)
+const mentionTrigger = ref('@')
 const mentionDropdownTop = ref(0)
 const mentionDropdownLeft = ref(0)
 
@@ -87,13 +89,15 @@ function mentionInsert(path) {
   const ta = textareaRef.value
   const before = ta.value.substring(0, mentionStartPos.value)
   const after = ta.value.substring(ta.selectionStart)
-  input.value = before + after
+  const inline = mentionTrigger.value === '#'
+  const inserted = inline ? `#${path}` : ''
+  input.value = before + inserted + after
   mentionActive.value = false
   mentionSearch.value = ''
   mentionStartPos.value = -1
-  addToFileContext(path)
+  if (!inline) addToFileContext(path)
   nextTick(() => {
-    const pos = before.length
+    const pos = before.length + inserted.length
     ta.setSelectionRange(pos, pos)
     ta.focus()
   })
@@ -101,8 +105,7 @@ function mentionInsert(path) {
 
 function addToFileContext(path) {
   if (fileContext.find(f => f.path === path)) return
-  const ext = path.includes('.') ? path.split('.').pop().toLowerCase() : ''
-  fileContext.push({ path, lang: ext || 'text' })
+  fileContext.push({ path, lang: languageFromPath(path) })
 }
 
 function onTextareaInput() {
@@ -111,16 +114,19 @@ function onTextareaInput() {
   const cursor = ta.selectionStart
   const text = ta.value
   const atPos = text.lastIndexOf('@', cursor)
-  if (atPos < 0 || (atPos > 0 && /\w/.test(text[atPos - 1]))) {
+  const hashPos = text.lastIndexOf('#', cursor)
+  const triggerPos = Math.max(atPos, hashPos)
+  if (triggerPos < 0 || (triggerPos > 0 && /\w/.test(text[triggerPos - 1]))) {
     mentionActive.value = false
     return
   }
-  const between = text.substring(atPos + 1, cursor)
+  const between = text.substring(triggerPos + 1, cursor)
   if (/\s/.test(between)) {
     mentionActive.value = false
     return
   }
-  mentionStartPos.value = atPos
+  mentionStartPos.value = triggerPos
+  mentionTrigger.value = text[triggerPos]
   mentionSearch.value = between
   mentionActive.value = true
   const rect = ta.getBoundingClientRect()
@@ -382,6 +388,14 @@ function removeContextFile(p) {
   if (i !== -1) fileContext.splice(i, 1)
 }
 
+function contextPathsFor(text) {
+  const paths = [
+    ...extractInlineFileRefs(text).map(file => file.path),
+    ...fileContext.map(file => file.path),
+  ]
+  return [...new Set(paths)]
+}
+
 function questionEventFor(answer) {
   for (const message of messages) {
     const event = message.events?.find(item => item.type === 'user_question' && item.data?.id === answer.question_id)
@@ -400,7 +414,14 @@ async function send(answer = null) {
   }
   const text = input.value.trim()
   if (!text || isStreaming.value) return
-  messages.push({ id: Date.now(), role: 'user', content: text, time: timeNow(), files: plain(fileContext) })
+  messages.push({
+    id: Date.now(),
+    role: 'user',
+    content: text,
+    time: timeNow(),
+    files: plain(fileContext),
+    inlineFiles: extractInlineFileRefs(text),
+  })
   const message = reactive({ id: Date.now() + 1, role: 'assistant', time: timeNow(), events: [] })
   messages.push(message)
   input.value = ''
@@ -414,7 +435,7 @@ async function send(answer = null) {
     const origin = structuredAnswer?.origin_message || taskAnalysis?.origin_message || text
     const request = {
       message: origin,
-      context: fileContext.map(file => file.path),
+      context: contextPathsFor(origin),
       session_id: props.session?.id,
     }
     if (structuredAnswer) {
@@ -459,7 +480,7 @@ async function continueAfterAnswer(answer) {
     const origin = answer.origin_message || taskAnalysis?.origin_message || answer.question || ''
     const request = {
       message: origin,
-      context: fileContext.map(file => file.path),
+      context: contextPathsFor(origin),
       session_id: props.session?.id,
       answer: { ...answer, origin_message: origin },
     }
@@ -483,6 +504,10 @@ async function continueAfterAnswer(answer) {
 
 function answerQuestion(answer) {
   continueAfterAnswer(answer)
+}
+
+function userContentParts(message) {
+  return message.inlineFiles?.length ? tokenizeInlineFileRefs(message.content) : [{ type: 'text', text: message.content }]
 }
 
 function applyTaskUpdate(update) {
@@ -811,7 +836,14 @@ watch(() => props.activeWorkspace?.id, () => {
                     :language="f.lang"
                   />
                 </div>
-                {{ m.content }}
+                <template v-for="(part, i) in userContentParts(m)" :key="i">
+                  <FileReference
+                    v-if="part.type === 'file'"
+                    :path="part.path"
+                    :language="part.lang"
+                  />
+                  <span v-else>{{ part.text }}</span>
+                </template>
               </div>
               <TransitionGroup v-else name="timeline-event" tag="div" class="chat__timeline">
                 <ChatEvent
