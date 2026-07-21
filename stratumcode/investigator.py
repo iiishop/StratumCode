@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import ast
 import json
 import platform
 import re
 from collections.abc import Iterator
 from itertools import count
+from pathlib import Path
 from uuid import uuid4
 
 from . import app_settings, model_settings, prompt, providers
@@ -26,6 +28,7 @@ from .tools import registry
 FINALIZATION_OUTPUT_TOKENS = 4096
 INVESTIGATION_TOOLS = ("glob", "grep", "read", "code_nav", "python_static_check", "websearch", "webfetch", "subagent")
 MAX_HYPOTHESIS_VERIFIER_CALLS = 2
+MAX_REPEATED_TOOL_ERRORS = 3
 DISCOVERY_BATCH_OBSERVATIONS = 3
 FINDING_FIELDS = (
     "beliefs",
@@ -104,6 +107,9 @@ def investigation_stream(
     finalization_reason = "Investigation model stopped before finish_investigation; summarizing observed facts."
     pending_observation_ids: list[str] = []
     hypothesis_verifier_calls = 0
+    repeated_tool_error_name = ""
+    repeated_tool_error_count = 0
+    stop_investigation = False
 
     for round_index in _round_indexes(max_rounds, start=0):
         thinking_id = f"{run_id}-thinking-{round_index}"
@@ -174,10 +180,30 @@ def investigation_stream(
                 arguments = _tool_arguments(function.get("arguments"))
                 if name not in allowed_tool_names:
                     if len(pending_observation_ids) >= DISCOVERY_BATCH_OBSERVATIONS:
-                        raise ValueError(
-                            f"tool not allowed until the current discovery batch is recorded: {name}. "
-                            "Call record_investigation_findings first."
-                        )
+                        output = json.dumps({
+                            "error": "discovery_batch_needs_recording",
+                            "retryable": True,
+                            "required_tool": "record_investigation_findings",
+                            "pending_observation_ids": pending_observation_ids[-6:],
+                            "message": (
+                                "Record the current discovery batch before calling more discovery tools. "
+                                "Call record_investigation_findings next, then finish_investigation if the task contract is covered."
+                            ),
+                        }, ensure_ascii=False)
+                        yield start_event(call_id, _tool_event_type(name), {
+                            "name": name or "invalid",
+                            "description": "Investigation tool",
+                            "status": "error",
+                            "open": False,
+                            "input": json.dumps(arguments, ensure_ascii=False, indent=2),
+                            "output": output,
+                        })
+                        messages.append({
+                            "role": "tool",
+                            "tool_call_id": call_id,
+                            "content": output,
+                        })
+                        continue
                     raise ValueError(f"tool not allowed at this investigation step: {name}")
                 if name == "record_investigation_findings":
                     _require_control_reason(arguments, name)
@@ -231,6 +257,8 @@ def investigation_stream(
                 cache_key = _tool_cache_key(name, arguments)
                 if cache_key in tool_cache:
                     output = tool_cache[cache_key]
+                    repeated_tool_error_name = ""
+                    repeated_tool_error_count = 0
                     yield start_event(call_id, _tool_event_type(name), {
                         "name": name,
                         "description": "Investigation tool",
@@ -251,25 +279,60 @@ def investigation_stream(
                     })
                     continue
                 output = yield from _run_tool_stream(name, call_id, arguments, workspace_dir, analysis)
+                repeated_tool_error_name = ""
+                repeated_tool_error_count = 0
                 tool_cache[cache_key] = output
                 observations.append(_tool_observation(name, call_id, output))
                 pending_observation_ids.append(call_id)
             except Exception as exc:
-                output = tool_error_json(exc, name)
+                raw_arguments = function.get("arguments") or "{}"
+                partial_arguments = _partial_tool_arguments(raw_arguments)
+                if name == "record_investigation_findings" and _has_finding_fields(partial_arguments):
+                    recorded_findings = _merge_recorded_findings(recorded_findings, partial_arguments)
+                    pending_observation_ids.clear()
+                output = _tool_repair_error_json(exc, name, raw_arguments, partial_arguments)
+                error_name = name or "invalid"
+                if error_name == repeated_tool_error_name:
+                    repeated_tool_error_count += 1
+                else:
+                    repeated_tool_error_name = error_name
+                    repeated_tool_error_count = 1
                 yield start_event(call_id, _tool_event_type(name), {
                     "name": name or "invalid",
                     "description": "Investigation tool",
                     "status": "error",
                     "open": False,
-                    "input": function.get("arguments") or "{}",
+                    "input": raw_arguments,
                     "output": output,
                 })
+                if repeated_tool_error_count >= MAX_REPEATED_TOOL_ERRORS:
+                    finalization_reason = (
+                        "Runtime recovered after repeated tool argument errors: "
+                        f"{name or 'invalid'} failed with {exc}."
+                    )
+                    if name == "record_investigation_findings":
+                        final = _runtime_recovered_investigation(
+                            finalization_reason,
+                            analysis,
+                            observations,
+                            recorded_findings,
+                        )
+                    stop_investigation = True
             messages.append({
                 "role": "tool",
                 "tool_call_id": call_id,
                 "content": output,
             })
+            if stop_investigation:
+                yield start_event(f"{run_id}-safety-repeated-tool-error", "safety_stop", {
+                    "reason": "repeated_tool_error",
+                    "message": finalization_reason,
+                    "tool": name or "invalid",
+                })
+                break
         if final is not None:
+            break
+        if stop_investigation:
             break
     else:
         finalization_reason = "Investigation step limit reached. Summarizing observed facts."
@@ -287,6 +350,7 @@ def investigation_stream(
             recorded_findings=recorded_findings,
             reason=finalization_reason,
         )
+    final = _attach_runtime_structured_findings(final, analysis, workspace_dir, observations)
     final["observations"] = observations + [
         item for item in final.get("observations", [])
         if isinstance(item, dict)
@@ -382,6 +446,83 @@ def _tool_cache_key(name: str, arguments: dict) -> str:
         if key not in ignored
     }
     return f"{name}:{json.dumps(comparable, ensure_ascii=False, sort_keys=True)}"
+
+
+def _tool_repair_error_json(exc: Exception, tool_name: str, raw_arguments: str, partial_arguments: dict) -> str:
+    try:
+        payload = json.loads(tool_error_json(exc, tool_name))
+    except json.JSONDecodeError:
+        payload = {"error": {"message": str(exc), "tool": tool_name or "invalid"}}
+    error = payload.setdefault("error", {})
+    error["partial_arguments"] = partial_arguments
+    error["missing_fields"] = _missing_fields_from_error(str(exc))
+    error["repair_instruction"] = (
+        "Reuse partial_arguments. Return only the same tool call with missing/invalid fields corrected; "
+        "do not restart discovery or repeat the identical arguments."
+    )
+    return json.dumps(payload, ensure_ascii=False)
+
+
+def _missing_fields_from_error(message: str) -> list[str]:
+    fields = []
+    lowered = message.casefold()
+    for field in ("reason", "target_unknown_ids", "summary", "recommended_next_step"):
+        if field in lowered:
+            fields.append(field)
+    return fields
+
+
+def _partial_tool_arguments(raw: str | None) -> dict:
+    text = (raw or "{}").strip()
+    try:
+        value = json.loads(text)
+        return value if isinstance(value, dict) else {}
+    except json.JSONDecodeError:
+        return _partial_json_object(text)
+
+
+def _partial_json_object(text: str) -> dict:
+    decoder = json.JSONDecoder()
+    result = {}
+    index = _skip_ws(text, 0)
+    if index >= len(text) or text[index] != "{":
+        return result
+    index += 1
+    while True:
+        index = _skip_ws(text, index)
+        if index >= len(text) or text[index] == "}":
+            return result
+        try:
+            key, index = decoder.raw_decode(text, index)
+        except json.JSONDecodeError:
+            return result
+        if not isinstance(key, str):
+            return result
+        index = _skip_ws(text, index)
+        if index >= len(text) or text[index] != ":":
+            return result
+        index = _skip_ws(text, index + 1)
+        try:
+            value, index = decoder.raw_decode(text, index)
+        except json.JSONDecodeError:
+            return result
+        result[key] = value
+        index = _skip_ws(text, index)
+        if index >= len(text) or text[index] == "}":
+            return result
+        if text[index] != ",":
+            return result
+        index += 1
+
+
+def _skip_ws(text: str, index: int) -> int:
+    while index < len(text) and text[index].isspace():
+        index += 1
+    return index
+
+
+def _has_finding_fields(arguments: dict) -> bool:
+    return any(isinstance(arguments.get(field), list) for field in FINDING_FIELDS)
 
 
 def _is_hypothesis_verifier_call(name: str, arguments: dict) -> bool:
@@ -625,6 +766,11 @@ def _finalize_investigation(
     last_arguments: dict | None = None
 
     attempts = app_settings.get_round_limit("investigation_finalization_attempts")
+    repeated_tool_error_name = ""
+    repeated_tool_error_count = 0
+    repeated_finalization_error_key = ""
+    repeated_finalization_error_count = 0
+    stop_finalization = False
     for attempt in _round_indexes(attempts, start=0):
         thinking_id = f"{run_id}-thinking-final-{attempt}"
         yield start_event(thinking_id, "thinking", {
@@ -687,11 +833,30 @@ def _finalize_investigation(
                     "content": json.dumps({"recorded": True}, ensure_ascii=False),
                 })
             except Exception as exc:
+                last_error = f"record_investigation_findings arguments were invalid: {exc}"
+                raw_arguments = function.get("arguments") or "{}"
+                partial_arguments = _partial_tool_arguments(raw_arguments)
+                if _has_finding_fields(partial_arguments):
+                    recorded_findings = _merge_recorded_findings(
+                        recorded_findings or _empty_recorded_findings(),
+                        partial_arguments,
+                    )
+                if repeated_tool_error_name == "record_investigation_findings":
+                    repeated_tool_error_count += 1
+                else:
+                    repeated_tool_error_name = "record_investigation_findings"
+                    repeated_tool_error_count = 1
                 messages.append({
                     "role": "tool",
                     "tool_call_id": call_id,
-                    "content": tool_error_json(exc, "record_investigation_findings"),
+                    "content": _tool_repair_error_json(
+                        exc,
+                        "record_investigation_findings",
+                        raw_arguments,
+                        partial_arguments,
+                    ),
                 })
+                stop_finalization = repeated_tool_error_count >= MAX_REPEATED_TOOL_ERRORS
 
         if finish_call:
             call_id = finish_call.get("id") or f"call-{uuid4().hex[:8]}"
@@ -706,11 +871,26 @@ def _finalize_investigation(
                 )
             except Exception as exc:
                 last_error = f"finish_investigation arguments were invalid: {exc}"
+                raw_arguments = function.get("arguments") or "{}"
+                partial_arguments = _partial_tool_arguments(raw_arguments)
+                if partial_arguments:
+                    last_arguments = partial_arguments
+                if repeated_tool_error_name == "finish_investigation":
+                    repeated_tool_error_count += 1
+                else:
+                    repeated_tool_error_name = "finish_investigation"
+                    repeated_tool_error_count = 1
                 messages.append({
                     "role": "tool",
                     "tool_call_id": call_id,
-                    "content": tool_error_json(ValueError(last_error), "finish_investigation"),
+                    "content": _tool_repair_error_json(
+                        ValueError(last_error),
+                        "finish_investigation",
+                        raw_arguments,
+                        partial_arguments,
+                    ),
                 })
+                stop_finalization = repeated_tool_error_count >= MAX_REPEATED_TOOL_ERRORS
             else:
                 messages.append({
                     "role": "tool",
@@ -722,6 +902,32 @@ def _finalize_investigation(
             last_error = "Investigation finalization must use record_investigation_findings and finish_investigation tool calls."
         else:
             last_error = "Investigation finalization started before finish_investigation was called."
+
+        failure_key = json.dumps({
+            "error": last_error,
+            "content": content,
+            "tool_calls": bool(tool_calls),
+        }, ensure_ascii=False, sort_keys=True)
+        if failure_key == repeated_finalization_error_key:
+            repeated_finalization_error_count += 1
+        else:
+            repeated_finalization_error_key = failure_key
+            repeated_finalization_error_count = 1
+
+        if stop_finalization:
+            return _runtime_recovered_investigation(
+                last_error or "Investigation finalization repeated the same invalid tool call.",
+                analysis,
+                observations or [],
+                recorded_findings or _empty_recorded_findings(),
+            )
+        if repeated_finalization_error_count >= MAX_REPEATED_TOOL_ERRORS:
+            return _runtime_recovered_investigation(
+                last_error or "Investigation finalization repeated the same invalid response.",
+                analysis,
+                observations or [],
+                recorded_findings or _empty_recorded_findings(),
+            )
 
         if attempts <= 0 or attempt < attempts - 1:
             messages.append({
@@ -763,14 +969,60 @@ def _finalize_investigation(
             }],
         }
 
+    return _runtime_recovered_investigation(
+        last_error or "finish_investigation did not produce a usable result.",
+        analysis,
+        observations or [],
+        recorded_findings or _empty_recorded_findings(),
+    )
+
+
+def _runtime_recovered_investigation(
+    reason: str,
+    analysis: dict | None,
+    observations: list[dict],
+    recorded_findings: dict,
+) -> dict:
+    facts = _runtime_patch_facts(observations, recorded_findings)
+    wants_patch = _wants_implementation(analysis or {}, "")
     return {
-        "summary": last_content or "Investigation finalization did not produce a final summary.",
-        "ready_for_patch_planning": False,
-        "runtime_failure": True,
-        "beliefs": [],
-        "open_questions": [last_error or "finish_investigation did not produce a usable result."],
-        "patch_planning_context": [],
+        "summary": "Runtime recovered from repeated invalid investigation tool arguments.",
+        "ready_for_patch_planning": bool(wants_patch and facts),
+        "runtime_recovered": True,
+        "recovery_reason": reason,
+        "beliefs": recorded_findings.get("beliefs", []),
+        "resolutions": recorded_findings.get("resolutions", []),
+        "unknowns": [],
+        "open_questions": [reason],
+        "patch_planning_facts": facts,
+        "patch_planning_context": facts,
     }
+
+
+def _runtime_patch_facts(observations: list[dict], recorded_findings: dict) -> list[str]:
+    facts = []
+    for belief in recorded_findings.get("beliefs", []):
+        if isinstance(belief, dict) and belief.get("statement"):
+            facts.append(str(belief["statement"]))
+    for resolution in recorded_findings.get("resolutions", []):
+        if isinstance(resolution, dict) and resolution.get("answer"):
+            facts.append(str(resolution["answer"]))
+    for item in observations:
+        if isinstance(item, dict) and item.get("summary"):
+            facts.append(f"{item.get('tool') or 'tool'}: {item['summary']}")
+    return _dedupe_strings(facts)[:20]
+
+
+def _dedupe_strings(values: list[str]) -> list[str]:
+    result = []
+    seen = set()
+    for value in values:
+        text = " ".join(str(value or "").split())
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        result.append(text)
+    return result
 
 
 def _run_tool_stream(name: str, call_id: str, arguments: dict, workspace_dir: str, analysis: dict | None = None) -> Iterator[dict]:
@@ -876,7 +1128,16 @@ def _target_unknown_ids(arguments: dict) -> list[str]:
         raw = [raw]
     if not isinstance(raw, list):
         return []
-    return [item for value in raw if (item := str(value).strip())]
+    return [item for value in raw if (item := _normalize_unknown_id(value))]
+
+
+def _normalize_unknown_id(value) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    if ":" in text:
+        text = text.rsplit(":", 1)[-1].strip()
+    return text
 
 
 def _tool_observation(name: str, call_id: str, output: str) -> dict:
@@ -901,6 +1162,192 @@ def _tool_observation(name: str, call_id: str, output: str) -> dict:
 def _short_observation(value) -> str:
     text = " ".join(str(value or "").split())
     return text[:240]
+
+
+def _attach_runtime_structured_findings(final: dict, analysis: dict | None, workspace_dir: str, observations: list[dict]) -> dict:
+    findings = _runtime_structured_findings(analysis, workspace_dir)
+    if not findings:
+        return final
+    result = dict(final)
+    result["structured_findings"] = findings
+    if findings.get("patch_planning_facts"):
+        existing = _string_list(result.get("patch_planning_facts") or result.get("patch_planning_context"))
+        result["patch_planning_facts"] = _dedupe_strings(existing + findings["patch_planning_facts"])
+        result["patch_planning_context"] = result["patch_planning_facts"]
+    if _wants_implementation(analysis or {}, "") and not result.get("unknowns") and result.get("patch_planning_facts"):
+        result["ready_for_patch_planning"] = True
+    return result
+
+
+def _runtime_structured_findings(analysis: dict | None, workspace_dir: str) -> dict:
+    if not _looks_like_refactor_task(analysis):
+        return {}
+    root = Path(workspace_dir)
+    if not root.exists():
+        return {}
+    files = [
+        path for path in sorted(root.rglob("*.py"))
+        if path.is_file() and _is_runtime_scan_file(path, root)
+    ]
+    modules = [_python_module_runtime_facts(path, root) for path in files]
+    modules = [item for item in modules if item]
+    duplicate_candidates = _duplicate_candidates(modules)
+    dead_code_candidates = _dead_code_candidates(modules)
+    refactor_candidates = duplicate_candidates + dead_code_candidates
+    return {
+        "schema_version": 1,
+        "source": "runtime_static_analysis",
+        "duplicate_candidates": duplicate_candidates,
+        "dead_code_candidates": dead_code_candidates,
+        "refactor_candidates": refactor_candidates,
+        "patch_planning_facts": _candidate_patch_facts(refactor_candidates),
+    }
+
+
+def _looks_like_refactor_task(analysis: dict | None) -> bool:
+    text = " ".join([
+        str(((analysis or {}).get("intent") or {}).get("type") or ""),
+        str(((analysis or {}).get("intent") or {}).get("summary") or ""),
+        " ".join(str(item.get("text") or "") for item in (analysis or {}).get("acceptance_criteria", []) if isinstance(item, dict)),
+    ]).casefold()
+    return any(term in text for term in ("refactor", "duplicate", "dead code", "公共", "重复", "死代码", "复用"))
+
+
+def _is_runtime_scan_file(path: Path, root: Path) -> bool:
+    parts = {part.casefold() for part in path.relative_to(root).parts}
+    return not parts.intersection({"__pycache__", ".git", ".venv", "venv", "node_modules"})
+
+
+def _python_module_runtime_facts(path: Path, root: Path) -> dict:
+    try:
+        source = path.read_text(encoding="utf-8", errors="replace")
+        tree = ast.parse(source)
+    except (OSError, SyntaxError):
+        return {}
+    rel = path.relative_to(root).as_posix()
+    imported = {}
+    loaded_names = set()
+    defs = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                imported[alias.asname or alias.name.split(".", 1)[0]] = node.lineno
+        elif isinstance(node, ast.ImportFrom):
+            for alias in node.names:
+                if alias.name != "*":
+                    imported[alias.asname or alias.name] = node.lineno
+        elif isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load):
+            loaded_names.add(node.id)
+    for child in ast.iter_child_nodes(tree):
+        if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            defs.append(_function_fact(child, rel, source, loaded_names))
+        elif isinstance(child, ast.ClassDef):
+            defs.append({
+                "name": child.name,
+                "kind": "class",
+                "file": rel,
+                "line": child.lineno,
+                "used_in_file": child.name in loaded_names,
+                "fingerprint": "",
+            })
+    return {
+        "path": rel,
+        "imports": [
+            {"name": name, "line": line, "used": name in loaded_names}
+            for name, line in imported.items()
+        ],
+        "defs": defs,
+    }
+
+
+def _function_fact(node: ast.AST, rel: str, source: str, loaded_names: set[str]) -> dict:
+    body_dump = _function_body_fingerprint(node)
+    return {
+        "name": getattr(node, "name", ""),
+        "kind": "function",
+        "file": rel,
+        "line": getattr(node, "lineno", 0),
+        "used_in_file": getattr(node, "name", "") in loaded_names,
+        "fingerprint": body_dump,
+        "source": ast.get_source_segment(source, node) or "",
+    }
+
+
+def _function_body_fingerprint(node: ast.AST) -> str:
+    body = list(getattr(node, "body", []))
+    if body and isinstance(body[0], ast.Expr) and isinstance(getattr(body[0], "value", None), ast.Constant):
+        if isinstance(body[0].value.value, str):
+            body = body[1:]
+    return ast.dump(ast.Module(body=body, type_ignores=[]), include_attributes=False)
+
+
+def _duplicate_candidates(modules: list[dict]) -> list[dict]:
+    by_name: dict[str, list[dict]] = {}
+    for module in modules:
+        for definition in module.get("defs", []):
+            if definition.get("kind") == "function" and definition.get("name"):
+                by_name.setdefault(definition["name"], []).append(definition)
+    candidates = []
+    index = 1
+    for name, defs in sorted(by_name.items()):
+        if len(defs) < 2:
+            continue
+        fingerprints = {item.get("fingerprint") or "" for item in defs}
+        kind = "exact_duplicate" if len(fingerprints) == 1 else "similar_variant"
+        safe_action = "extract" if kind == "exact_duplicate" else "review"
+        candidates.append({
+            "id": f"DUP{index}",
+            "kind": kind,
+            "symbol": name,
+            "files": [{"path": item["file"], "line": item["line"]} for item in defs],
+            "safe_action": safe_action,
+            "risk": "low" if kind == "exact_duplicate" else "medium",
+            "reason": (
+                "Function bodies are identical across files after ignoring docstrings."
+                if kind == "exact_duplicate"
+                else "Function name repeats but body differs; review whether a parameterized helper preserves behavior."
+            ),
+        })
+        index += 1
+    return candidates
+
+
+def _dead_code_candidates(modules: list[dict]) -> list[dict]:
+    project_refs = set()
+    for module in modules:
+        for item in module.get("imports", []):
+            if item.get("used"):
+                project_refs.add(item.get("name"))
+        for definition in module.get("defs", []):
+            if definition.get("used_in_file"):
+                project_refs.add(definition.get("name"))
+    candidates = []
+    index = 1
+    for module in modules:
+        for item in module.get("imports", []):
+            if item.get("used"):
+                continue
+            candidates.append({
+                "id": f"DEAD{index}",
+                "kind": "unused_import",
+                "symbol": item.get("name", ""),
+                "files": [{"path": module["path"], "line": item.get("line", 0)}],
+                "safe_action": "remove",
+                "risk": "low",
+                "reason": "Imported name is not loaded in this module.",
+            })
+            index += 1
+    return candidates
+
+
+def _candidate_patch_facts(candidates: list[dict]) -> list[str]:
+    facts = []
+    for item in candidates:
+        files = ", ".join(f"{file.get('path')}:{file.get('line')}" for file in item.get("files", [])[:5])
+        facts.append(
+            f"{item.get('id')} {item.get('kind')} {item.get('symbol')} action={item.get('safe_action')} risk={item.get('risk')} files={files}"
+        )
+    return facts
 
 
 def _tool_event_type(name: str) -> str:
@@ -1022,6 +1469,17 @@ def _finish_payload(
         patch_context=patch_context,
     )
     ready = readiness["ready"]
+    if not ready and model_ready and patch_context and not any(
+        item.get("blocking") and item.get("resolution_strategy") == "ask_user"
+        for item in unknowns
+    ):
+        ready = True
+        readiness = {**readiness, "ready": True, "runtime_override": "patch_facts_present"}
+        for item in unknowns:
+            if item.get("blocking"):
+                item["blocking"] = False
+                item["resolution_strategy"] = "deferred"
+        repairs.append("Allowed patch planning from grounded patch facts and deferred remaining investigate_project unknowns")
     return {
         "summary": str(arguments.get("summary") or "").strip(),
         "ready_for_patch_planning": ready,

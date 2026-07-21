@@ -65,80 +65,67 @@ HYPOTHESIS_SECTION = """\
 {round_limit_text}"""
 
 TASK_ANALYZER = """\
-You are StratumCode's Task Analyzer. Convert a free-form user request into one
-JSON object. Do not call tools. Do not include Markdown.
+You are StratumCode's Task Analyzer. Write user-visible strings in {language}.
+Return one compact JSON object only. Do not call tools. Do not use Markdown.
 
-Required JSON fields:
-{
-  "intent": {
-    "type": "feature|bugfix|refactor|question|investigation|other",
-    "summary": "one sentence describing the result the user wants"
-  },
-  "acceptance_criteria": [
-    {"id": "AC1", "text": "observable behavior that must be true when done"}
+The runtime owns the final task-analysis JSON, all ids, acceptance mapping,
+defaults, and schema normalization. You only fill content for the requested
+output_contract.
+
+For intent_scope:
+{{
+  "intent_type": "feature|bugfix|refactor|question|investigation|other",
+  "summary": "one sentence describing the result the user wants",
+  "constraints": ["explicit hard requirement"],
+  "clues": [
+    {{"kind": "file|line|symbol|route|other", "value": "literal clue", "path": "", "line": 0, "symbol": "", "note": ""}}
   ],
-  "unknowns": [
-    {
-      "id": "U1",
-      "question": "specific question whose resolution status must be tracked",
-      "blocking": true,
-      "type": "code_fact|doc_fact|runtime_fact|product_decision|engineering_decision|risk|deferred",
-      "why": "why this question matters",
-      "resolution_strategy": "investigate_project|ask_user|deferred",
-      "acceptance_criteria_ids": ["AC1"]
-    }
+  "hypotheses": [
+    {{"text": "claim explicitly implied by the user", "certainty": "certain|uncertain|guess"}}
   ]
-}
+}}
 
-Optional fields. Include only when useful:
-{
-  "behavior_contract": {
+For acceptance_contract:
+{{
+  "acceptance_criteria": ["observable behavior that must be true when done"],
+  "behavior_contract": {{
     "inputs": ["user/system inputs involved in the behavior"],
     "outputs": ["observable outputs or state changes"],
     "success_behaviors": ["what happens on the successful path"],
     "failure_behaviors": ["what happens on expected failure paths"],
     "boundaries": ["explicit non-goals, edge cases, and scope limits"]
-  },
-  "constraints": ["explicit hard requirements from the user"],
-  "scope": {
+  }},
+  "scope": {{
     "in": ["work explicitly required now"],
     "out": ["work explicitly not required"],
     "undecided": ["product or user decisions not yet settled"]
-  },
-  "hypotheses": [
-    {"text": "claim or assumption to verify", "certainty": "certain|uncertain|guess"}
-  ],
-  "clues": [
-    {
-      "kind": "file|line|symbol|route|other",
-      "value": "literal clue from the user",
-      "path": "optional workspace-relative path",
-      "line": 0,
-      "symbol": "optional function/class/route name",
-      "note": "optional short note"
-    }
-  ],
-}
+  }}
+}}
+
+For unknowns:
+{{
+  "unknown_content": [
+    {{
+      "question": "specific question whose resolution status must be tracked",
+      "blocking": true,
+      "type": "code_fact|doc_fact|runtime_fact|product_decision|engineering_decision|risk|deferred",
+      "why": "why this question matters",
+      "resolution_strategy": "investigate_project|ask_user|deferred",
+      "acceptance_slots": [1]
+    }}
+  ]
+}}
 
 Rules:
-- Preserve explicit constraints exactly enough that later code work cannot
-  violate them.
+- Do not write AC/U ids; use 1-based acceptance_slots when needed.
+- Preserve explicit constraints exactly enough that later code work cannot violate them.
 - Clues are pointers to verify, not requirements and not evidence.
 - If the user states no hypothesis, keep hypotheses empty; do not invent one.
-- Do not convert the whole task into a global hypothesis.
 - Unknowns should be concrete facts, decisions, or delivery uncertainties relevant
   to implementation, validation, scope, or later follow-up.
 - Prefer one acceptance criterion and one to three concrete unknowns.
 - Use ask_user only for user-visible product decisions; runtime normalizes
-  deferred, engineering, and invalid strategy combinations.
-- Output JSON only. If unsure, return only intent, acceptance_criteria, and unknowns."""
-
-TASK_ANALYZER_USER = """\
-Workspace root: {directory}
-User-selected context: {context}
-
-User request:
-{message}"""
+  deferred, engineering, and invalid strategy combinations."""
 
 INVESTIGATION_STAGE = """\
 ## Current stage: investigate before patch planning
@@ -210,36 +197,48 @@ unknowns, task status semantics, and patch-planning readiness."""
 
 DESIGN_PLANNER = """\
 You are StratumCode's Design Planner. Write user-visible strings in {language}.
-Return one JSON object only. Do not use Markdown.
+Return one compact JSON object only. Do not use Markdown.
 
 Derive a professional implementation design from the requirement contract and
 investigation facts. Do not plan code yet. Do not invent project facts.
 
-Schema:
+The runtime owns the final design JSON, all ids, and all schema normalization.
+You only fill content for the runtime-provided slots.
+
+Return the shape requested by output_contract.
+
+For a requirement_alignment slot:
+{{
+  "concept": "domain concept",
+  "behavior": "required behavior",
+  "alignment_status": "matched|missing|ambiguous",
+  "project_fact": "grounded fact or explicit absence",
+  "evidence": ["belief/evidence/fact"]
+}}
+
+For the decision pass:
 {{
   "summary": "one short sentence",
-  "requirement_model": [
-    {{"id": "RM1", "concept": "domain concept", "behavior": "required behavior", "source": "user_request|acceptance_criteria|constraint"}}
+  "decision_content": [
+    {{"decision": "chosen design", "because": ["requirement reason", "project fact", "user answer"], "variant_strategy": "required only for action=review candidates: how existing behavioral differences stay preserved"}}
   ],
-  "project_alignment": [
-    {{"requirement_id": "RM1", "status": "matched|missing|ambiguous", "project_fact": "grounded fact or explicit absence", "evidence": ["belief/evidence/fact"]}}
-  ],
-  "decision_gaps": [
-    {{"id": "DG1", "question": "specific decision question", "recommended_answer": "safest default answer", "blocks_implementation": true, "why": "which implementation branch changes"}}
-  ],
-  "design_decisions": [
-    {{"id": "DD1", "decision": "chosen design", "because": ["AC1", "project fact", "user answer"]}}
+  "gap_content": [
+    {{"question": "specific decision question", "recommended_answer": "safest default answer", "blocks_implementation": true, "why": "which implementation branch changes"}}
   ],
   "out_of_scope": ["behavior intentionally not implemented"]
 }}
 
 Rules:
-- Every requirement_model item must come from the user request, acceptance criteria, or constraints.
-- project_alignment must say matched, missing, or ambiguous for each requirement.
+- Do not write ids. Do not copy runtime_skeleton ids into your output.
+- project alignment must say matched, missing, or ambiguous for each requirement slot.
 - Add a blocking decision_gap when implementation would branch and current facts do not decide it.
 - Before finalizing design_decisions, stress-test the design branch by branch.
 - If a question can be answered from investigation facts or project code, resolve
   it as a design_decision instead of asking the user.
+- When investigation.structured_findings exists, treat it as runtime-classified
+  facts: action=extract candidates may be extracted directly; action=review
+  candidates need an explicit behavior-preserving design; action=skip candidates
+  must be skipped or explicitly designed around, never described as identical.
 - Ask at most one blocking decision question at a time.
 - Each blocking decision_gap must include recommended_answer and why that answer
   is the safest default.
@@ -248,37 +247,36 @@ Rules:
 
 PATCH_PLANNER = """\
 You are StratumCode's Patch Planner. Write user-visible strings in {language}.
-Return one JSON object only. Do not use Markdown.
+Return one compact JSON object only. Do not use Markdown.
 
 Turn an approved design into a minimal, justified implementation plan.
 Do not investigate, do not edit files, and do not add behavior not present in
 the design plan. Every implementation step must have a responsibility chain.
 
-Schema:
+The runtime owns the final patch-plan JSON, all ids, responsibility-chain
+slots, acceptance mapping slots, project facts, and schema normalization.
+You only fill content for the current runtime_slot.
+
+Output shape:
 {{
-  "summary": "one short sentence",
-  "files_to_change": ["workspace-relative path"],
-  "implementation_steps": [
+  "needed": true,
+  "skip_reason": "why this design decision needs no code change when needed is false",
+  "step_content": [
     {{
-      "id": "IS1",
+      "file": "workspace-relative path",
       "purpose": "behavior-level reason this step must exist",
-      "file": "path",
       "target": "function/class/component/route",
       "action": "specific code-level action",
-      "acceptance_ids": ["AC1"],
-      "decision_ids": ["DD1"],
-      "project_fact_ids": ["PF1"],
+      "acceptance_slots": [1],
+      "project_fact_slots": [1],
       "required_behavior_if_removed": "what breaks if this step is deleted",
-      "completion_conditions": ["observable condition proving this IS is complete"],
-      "out_of_scope": ["behavior this IS deliberately does not handle"],
+      "completion_conditions": ["observable condition proving this step is complete"],
+      "out_of_scope": ["behavior this step deliberately does not handle"],
       "minimality_check": "what this step deliberately does not do"
     }}
   ],
-  "responsibility_chain": [
-    {{"step_id": "IS1", "requirement_ids": ["RM1"], "decision_ids": ["DD1"], "project_fact_ids": ["PF1"], "removal_breaks": "behavior"}}
-  ],
-  "acceptance_mapping": [
-    {{"acceptance_id": "AC1", "covered_by": ["IS1"], "verification": "check that proves it"}}
+  "acceptance_verification": [
+    {{"acceptance_slot": 1, "verification": "check that proves the acceptance criterion"}}
   ],
   "tests_or_checks": ["command or manual check"],
   "risks": ["small risk or empty"],
@@ -287,8 +285,16 @@ Schema:
 
 Rules:
 - Keep the plan minimal: the fewest steps that cover the approved design.
+- If the current runtime_slot needs no code change, return needed=false,
+  step_content=[], and a concrete skip_reason.
+- Do not write implementation step ids or responsibility_chain objects.
+- Do not write AC/DD/PF ids. Use only 1-based acceptance_slots,
+  and project_fact_slots from runtime_skeleton. The current design decision is
+  bound by runtime_slot; do not write decision_slots.
+- Respect safe_action from investigation.structured_findings when present; do
+  not plan extraction for action=skip candidates. action=review candidates may
+  be planned only when the design chose a behavior-preserving variant strategy.
 - Make each purpose describe behavior, not just the file operation.
-- Use only IDs present in the task, design plan, and numbered project facts.
 - Include one runnable check or the smallest manual check when no test framework exists.
 The runtime validates coverage, responsibility chains, IDs, files, and required fields."""
 
@@ -390,25 +396,86 @@ def build_task_analyzer(output_language: str = "zh") -> str:
     return "\n\n".join(section.strip() for section in (
         PERSONA,
         output_language_section(output_language),
-        TASK_ANALYZER,
+        TASK_ANALYZER.format(language=output_language),
     ))
 
 
-def build_task_analyzer_user(
+def build_task_intent_slot_user(
     *,
     message: str,
     directory: str,
     context: list[str] | None = None,
     error: str = "",
 ) -> str:
-    body = TASK_ANALYZER_USER.format(
-        directory=directory,
-        context=", ".join(context or []) or "(none)",
+    return _task_analyzer_slot_user(
         message=message,
+        directory=directory,
+        context=context,
+        output_contract="intent_scope",
+        runtime_skeleton={},
+        error=error,
     )
+
+
+def build_task_acceptance_slot_user(
+    *,
+    message: str,
+    directory: str,
+    context: list[str] | None = None,
+    intent_slot: dict | None = None,
+    error: str = "",
+) -> str:
+    return _task_analyzer_slot_user(
+        message=message,
+        directory=directory,
+        context=context,
+        output_contract="acceptance_contract",
+        runtime_skeleton={"intent": intent_slot or {}},
+        error=error,
+    )
+
+
+def build_task_unknowns_slot_user(
+    *,
+    message: str,
+    directory: str,
+    context: list[str] | None = None,
+    intent_slot: dict | None = None,
+    acceptance_slots: list[dict] | None = None,
+    error: str = "",
+) -> str:
+    return _task_analyzer_slot_user(
+        message=message,
+        directory=directory,
+        context=context,
+        output_contract="unknowns",
+        runtime_skeleton={
+            "intent": intent_slot or {},
+            "acceptance_slots": acceptance_slots or [],
+        },
+        error=error,
+    )
+
+
+def _task_analyzer_slot_user(
+    *,
+    message: str,
+    directory: str,
+    context: list[str] | None,
+    output_contract: str,
+    runtime_skeleton: dict,
+    error: str = "",
+) -> str:
+    payload = {
+        "workspace_root": directory,
+        "user_selected_context": context or [],
+        "user_request": message,
+        "output_contract": output_contract,
+        "runtime_skeleton": runtime_skeleton,
+    }
     if error:
-        body += f"\n\nPrevious output failed validation: {error}\nReturn corrected JSON only."
-    return body
+        payload["previous_invalid_output"] = error
+    return json.dumps(payload, ensure_ascii=False, indent=2)
 
 
 def build_evidence_context(
@@ -490,11 +557,52 @@ def build_design_planner_system(language: str) -> str:
     return DESIGN_PLANNER.format(language=language) + "\n"
 
 
-def build_design_planner_user(message: str, analysis: dict, investigation: dict, workspace_dir: str) -> str:
+def build_design_requirement_slot_user(
+    message: str,
+    analysis: dict,
+    investigation: dict,
+    workspace_dir: str,
+    *,
+    slot_index: int,
+    criterion: dict,
+) -> str:
     return json.dumps({
         "platform": platform.system(),
         "workspace_root": workspace_dir,
         "user_request": message,
+        "output_contract": "requirement_alignment",
+        "runtime_slot": {
+            "index": slot_index,
+            "source_acceptance_text": str(criterion.get("text") or ""),
+        },
+        "task": {
+            "intent": analysis.get("intent", {}),
+            "acceptance_criterion": criterion,
+            "behavior_contract": analysis.get("behavior_contract", {}),
+            "constraints": analysis.get("constraints", []),
+            "scope": analysis.get("scope", {}),
+        },
+        "investigation": {
+            "summary": investigation.get("summary", ""),
+            "patch_planning_facts": investigation.get("patch_planning_facts") or investigation.get("patch_planning_context") or [],
+            "structured_findings": investigation.get("structured_findings", {}),
+            "beliefs": investigation.get("beliefs", []),
+            "resolutions": investigation.get("resolutions", []),
+        },
+    }, ensure_ascii=False, indent=2)
+
+
+def build_design_decision_slots_user(message: str, analysis: dict, investigation: dict, workspace_dir: str, slots: list[dict]) -> str:
+    return json.dumps({
+        "platform": platform.system(),
+        "workspace_root": workspace_dir,
+        "user_request": message,
+        "output_contract": "decision_pass",
+        "runtime_skeleton": {
+            "requirement_slots": slots,
+            "decision_content": "Return only decisions that are actually needed.",
+            "gap_content": "Return at most one blocking gap.",
+        },
         "task": {
             "intent": analysis.get("intent", {}),
             "acceptance_criteria": analysis.get("acceptance_criteria", []),
@@ -506,6 +614,7 @@ def build_design_planner_user(message: str, analysis: dict, investigation: dict,
         "investigation": {
             "summary": investigation.get("summary", ""),
             "patch_planning_facts": investigation.get("patch_planning_facts") or investigation.get("patch_planning_context") or [],
+            "structured_findings": investigation.get("structured_findings", {}),
             "beliefs": investigation.get("beliefs", []),
             "resolutions": investigation.get("resolutions", []),
             "user_decisions_required": investigation.get("user_decisions_required", []),
@@ -517,18 +626,40 @@ def build_patch_planner_system(language: str) -> str:
     return PATCH_PLANNER.format(language=language) + "\n"
 
 
-def build_patch_planner_user(
+def build_patch_step_slot_user(
     message: str,
     analysis: dict,
     investigation: dict,
     design_plan: dict,
     workspace_dir: str,
+    *,
+    slot_index: int,
+    decision: dict,
 ) -> str:
     facts = _numbered_project_facts(investigation)
+    criteria = analysis.get("acceptance_criteria", []) if isinstance(analysis.get("acceptance_criteria"), list) else []
     return json.dumps({
         "platform": platform.system(),
         "workspace_root": workspace_dir,
         "user_request": message,
+        "output_contract": "patch_step_for_design_decision",
+        "runtime_slot": {
+            "decision_slot": slot_index,
+            "decision": str(decision.get("decision") or ""),
+            "because": decision.get("because", []),
+        },
+        "runtime_skeleton": {
+            "acceptance_slots": [
+                {"index": index, "text": str(item.get("text") or "")}
+                for index, item in enumerate(criteria, start=1)
+                if isinstance(item, dict)
+            ],
+            "project_fact_slots": [
+                {"index": index, "text": str(item.get("text") or "")}
+                for index, item in enumerate(facts, start=1)
+                if isinstance(item, dict)
+            ],
+        },
         "task": {
             "intent": analysis.get("intent", {}),
             "acceptance_criteria": analysis.get("acceptance_criteria", []),
@@ -539,10 +670,31 @@ def build_patch_planner_user(
         "investigation": {
             "summary": investigation.get("summary", ""),
             "patch_planning_facts": facts,
+            "structured_findings": investigation.get("structured_findings", {}),
             "beliefs": investigation.get("beliefs", []),
             "resolutions": investigation.get("resolutions", []),
         },
         "design_plan": design_plan,
+        "output_shape": {
+            "needed": True,
+            "skip_reason": "why no code change is needed when needed is false",
+            "step_content": [{
+                "file": "workspace-relative path",
+                "purpose": "why this step exists",
+                "target": "function/class/component/route",
+                "action": "specific code-level action",
+                "acceptance_slots": [1],
+                "project_fact_slots": [1],
+                "required_behavior_if_removed": "what breaks if omitted",
+                "completion_conditions": ["observable completion condition"],
+                "out_of_scope": ["not handled by this step"],
+                "minimality_check": "what this step deliberately avoids",
+            }],
+            "tests_or_checks": ["command or manual check"],
+            "risks": ["small risk or empty"],
+            "out_of_scope": ["behavior intentionally not implemented"],
+            "acceptance_verification": [{"acceptance_slot": 1, "verification": "check"}],
+        },
     }, ensure_ascii=False, indent=2)
 
 

@@ -23,31 +23,41 @@ def _normalize_path(path: str) -> str:
     return str(root)
 
 
-def ensure_default(fallback_path: str) -> None:
+def initialize(fallback_path: str) -> None:
     _ensure_table()
     path = _normalize_path(fallback_path)
     with db_session() as db:
-        rows = db.execute("SELECT id, path, is_active FROM workspaces").fetchall()
-        for row in rows:
-            if not Path(row["path"]).is_dir():
-                db.execute("DELETE FROM workspaces WHERE id = ?", (row["id"],))
-        remaining = db.execute(
+        rows = db.execute(
             "SELECT id, is_active FROM workspaces ORDER BY id"
         ).fetchall()
-        if not remaining:
+        if not rows:
             db.execute(
                 "INSERT INTO workspaces (name, path, is_active) VALUES (?, ?, 1)",
                 (Path(path).name or path, path),
             )
-        elif not any(row["is_active"] for row in remaining):
+        elif not any(row["is_active"] for row in rows):
             db.execute(
                 "UPDATE workspaces SET is_active = 1 WHERE id = ?",
-                (remaining[0]["id"],),
+                (rows[0]["id"],),
             )
 
 
+def ensure_default(fallback_path: str) -> None:
+    initialize(fallback_path)
+
+
+def reconcile(fallback_path: str) -> None:
+    initialize(fallback_path)
+    with db_session() as db:
+        rows = db.execute("SELECT id, path FROM workspaces ORDER BY id").fetchall()
+        for row in rows:
+            if not Path(row["path"]).is_dir():
+                db.execute("DELETE FROM workspaces WHERE id = ?", (row["id"],))
+    initialize(fallback_path)
+
+
 def list_all(fallback_path: str) -> list[dict]:
-    ensure_default(fallback_path)
+    _ensure_table()
     with db_session() as db:
         rows = db.execute(
             "SELECT id, name, path, is_active, created_at FROM workspaces ORDER BY is_active DESC, id"
@@ -56,15 +66,14 @@ def list_all(fallback_path: str) -> list[dict]:
 
 
 def active(fallback_path: str) -> dict:
-    ensure_default(fallback_path)
+    _ensure_table()
     with db_session() as db:
         row = db.execute(
             "SELECT id, name, path, is_active, created_at FROM workspaces "
             "WHERE is_active = 1 ORDER BY id LIMIT 1"
         ).fetchone()
     if row is None:
-        activate(list_all(fallback_path)[0]["id"])
-        return active(fallback_path)
+        raise ValueError("workspace not initialized")
     return {**dict(row), "is_active": True}
 
 
@@ -118,7 +127,7 @@ def activate_path(path: str) -> dict:
 
 
 def delete(workspace_id: int, fallback_path: str) -> None:
-    ensure_default(fallback_path)
+    initialize(fallback_path)
     with db_session() as db:
         row = db.execute(
             "SELECT is_active FROM workspaces WHERE id = ?", (workspace_id,)

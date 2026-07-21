@@ -18,6 +18,7 @@ from .agent_runtime import (
 )
 
 MAX_OUTPUT_TOKENS = 6144
+DEFAULT_PATCH_JSON_ATTEMPTS = 3
 
 
 def patch_planning_stream(
@@ -50,68 +51,84 @@ def patch_planning_stream(
         "inherited": setting["inherited"],
     })
 
-    messages = [
-        {"role": "system", "content": prompt.build_patch_planner_system(app_settings.get_output_language())},
-        {"role": "user", "content": prompt.build_patch_planner_user(message, analysis, investigation, design_plan, workspace_dir)},
+    system = {"role": "system", "content": prompt.build_patch_planner_system(app_settings.get_output_language())}
+    step_content = []
+    tests_or_checks = []
+    risks = []
+    out_of_scope = []
+    acceptance_verification = {}
+    skipped_decision_slots = []
+    decisions = [
+        item for item in design_plan.get("design_decisions", [])
+        if isinstance(item, dict)
     ]
-    plan = None
-    last_error = None
-    attempts = app_settings.get_round_limit("patch_json_attempts")
-    for attempt in _attempt_indexes(attempts):
-        assistant = _call_model(provider, model, messages, tools=[], max_tokens=MAX_OUTPUT_TOKENS)
-        if usage := _usage_delta(pricing_rules, assistant.pop("_usage", {})):
-            _add_usage(usage_total, usage)
-            yield start_event(f"{run_id}-usage-{attempt}", "usage", {"delta": usage, "total": usage_total})
-        text = _content_text(assistant.get("content"))
-        try:
-            plan = _normalize_plan(_json_from_text(text))
-            plan["project_facts"] = _project_facts(investigation)
-            break
-        except (json.JSONDecodeError, ValueError) as exc:
-            last_error = exc
-            messages.extend([
-                {"role": "assistant", "content": text[:4000]},
-                {"role": "user", "content": (
-                    "The previous response was not valid JSON: "
-                    f"{exc}. Return a compact valid JSON object only. "
-                    "Keep arrays short and do not include Markdown."
+    for index, decision in enumerate(decisions, start=1):
+        slot = yield from _content_json_stream(
+            provider,
+            model,
+            [
+                system,
+                {"role": "user", "content": prompt.build_patch_step_slot_user(
+                    message,
+                    analysis,
+                    investigation,
+                    design_plan,
+                    workspace_dir,
+                    slot_index=index,
+                    decision=decision,
                 )},
-            ])
-    if plan is None:
+            ],
+            pricing_rules,
+            usage_total,
+            run_id,
+            f"decision-{index}",
+        )
+        if not slot:
+            continue
+        tests_or_checks.extend(_strings(slot.get("tests_or_checks")))
+        risks.extend(_strings(slot.get("risks")))
+        out_of_scope.extend(_strings(slot.get("out_of_scope")))
+        _merge_acceptance_verification(acceptance_verification, slot.get("acceptance_verification"))
+        if slot.get("needed") is False:
+            skipped_decision_slots.append({
+                "decision_slot": index,
+                "reason": str(slot.get("skip_reason") or "Model marked this design decision as requiring no code change.").strip(),
+            })
+            continue
+        for step in slot.get("step_content") or []:
+            if isinstance(step, dict):
+                patched = dict(step)
+                patched["decision_slots"] = [index]
+                step_content.append(patched)
+    plan_content = {
+        "summary": _patch_summary(step_content),
+        "step_content": step_content,
+        "tests_or_checks": tests_or_checks,
+        "risks": risks,
+        "out_of_scope": out_of_scope,
+        "acceptance_verification": [
+            {"acceptance_slot": key, "verification": value}
+            for key, value in sorted(acceptance_verification.items())
+        ],
+        "skipped_decision_slots": skipped_decision_slots,
+    }
+    try:
+        plan = _plan_from_content(plan_content, analysis, design_plan, investigation)
+    except ValueError as exc:
         yield start_event(f"{run_id}-output", "output", {
-            "content": f"Patch planning failed to produce valid JSON after retry: {last_error}",
+            "content": f"Patch planning failed to produce usable step content: {exc}",
             "streaming": False,
         })
         yield {"op": "update", "id": stage_id, "patch": {"state": "error", "phase": "patch_planning_failed"}}
         return
-    for repair_attempt in _attempt_indexes(attempts):
-        issues = validate_patch_plan(plan, analysis, design_plan, workspace_dir)
-        if not issues:
-            break
-        if attempts > 0 and repair_attempt == attempts:
-            yield start_event(f"{run_id}-output", "output", {
-                "content": "Patch plan rejected by runtime validator:\n" + "\n".join(f"- {item}" for item in issues),
-                "streaming": False,
-            })
-            yield {"op": "update", "id": stage_id, "patch": {"state": "error", "phase": "patch_validation_failed"}}
-            return
-        messages.extend([
-            {"role": "assistant", "content": json.dumps(plan, ensure_ascii=False)},
-            {"role": "user", "content": (
-                "The runtime validator rejected the patch plan:\n"
-                + "\n".join(f"- {item}" for item in issues)
-                + "\nReturn a corrected compact JSON object only. Do not invent IDs; use AC ids for acceptance_ids/acceptance_mapping, RM ids for responsibility_chain.requirement_ids, and DD ids for decision_ids."
-            )},
-        ])
-        assistant = _call_model(provider, model, messages, tools=[], max_tokens=MAX_OUTPUT_TOKENS)
-        if usage := _usage_delta(pricing_rules, assistant.pop("_usage", {})):
-            _add_usage(usage_total, usage)
-            yield start_event(f"{run_id}-usage-repair-{repair_attempt}", "usage", {"delta": usage, "total": usage_total})
-        try:
-            plan = _normalize_plan(_json_from_text(_content_text(assistant.get("content"))))
-            plan["project_facts"] = _project_facts(investigation)
-        except (json.JSONDecodeError, ValueError) as exc:
-            plan = {**plan, "_repair_error": str(exc)}
+    issues = validate_patch_plan(plan, analysis, design_plan, workspace_dir, investigation)
+    if issues:
+        yield start_event(f"{run_id}-output", "output", {
+            "content": "Patch plan rejected by runtime validator:\n" + "\n".join(f"- {item}" for item in issues),
+            "streaming": False,
+        })
+        yield {"op": "update", "id": stage_id, "patch": {"state": "error", "phase": "patch_validation_failed"}}
+        return
     plan["execution_authorization"] = patch_authorization.create_authorization(plan, workspace_dir)
     yield start_event(f"{run_id}-plan", "patch_plan", plan)
     yield {"op": "update", "id": stage_id, "patch": {"state": "done", "phase": "patch_planned"}}
@@ -123,7 +140,7 @@ def _attempt_indexes(limit: int, start: int = 1):
     return count(start) if limit <= 0 else range(start, start + limit)
 
 
-def validate_patch_plan(plan: dict, analysis: dict, design_plan: dict, workspace_dir: str) -> list[str]:
+def validate_patch_plan(plan: dict, analysis: dict, design_plan: dict, workspace_dir: str, investigation: dict | None = None) -> list[str]:
     issues = []
     criteria_ids = {
         str(item.get("id") or "").strip()
@@ -135,6 +152,15 @@ def validate_patch_plan(plan: dict, analysis: dict, design_plan: dict, workspace
         for item in design_plan.get("design_decisions", [])
         if isinstance(item, dict) and str(item.get("id") or "").strip()
     }
+    skipped_decision_ids = {
+        str(item.get("decision_id") or "").strip()
+        for item in plan.get("runtime_skipped_decisions") or []
+        if isinstance(item, dict) and str(item.get("decision_id") or "").strip()
+    }
+    unknown_skipped_decisions = sorted(skipped_decision_ids - decision_ids)
+    if unknown_skipped_decisions:
+        issues.append("runtime_skipped_decisions references unknown design decisions: " + ", ".join(unknown_skipped_decisions))
+    required_decision_ids = decision_ids - skipped_decision_ids
     requirement_ids = {
         str(item.get("id") or "").strip()
         for item in design_plan.get("requirement_model", [])
@@ -146,6 +172,7 @@ def validate_patch_plan(plan: dict, analysis: dict, design_plan: dict, workspace
         if isinstance(item, dict) and str(item.get("id") or "").strip()
     }
     steps = plan.get("implementation_steps") or []
+    no_patch_plan = not steps and bool(skipped_decision_ids)
     seen_step_ids = set()
     duplicate_step_ids = set()
     for item in steps:
@@ -170,6 +197,8 @@ def validate_patch_plan(plan: dict, analysis: dict, design_plan: dict, workspace
     for item in plan.get("acceptance_mapping", []):
         if item.get("acceptance_id") not in criteria_ids:
             issues.append(f"acceptance_mapping references unknown acceptance id: {item.get('acceptance_id')}")
+        if not item.get("covered_by") and not no_patch_plan:
+            issues.append(f"acceptance_mapping {item.get('acceptance_id') or '?'} has no covered_by steps")
         missing_steps = [step for step in item.get("covered_by", []) if step not in step_ids]
         if missing_steps:
             issues.append("acceptance_mapping references unknown steps: " + ", ".join(missing_steps))
@@ -215,10 +244,38 @@ def validate_patch_plan(plan: dict, analysis: dict, design_plan: dict, workspace
         for ref in step.get("project_fact_ids") or []:
             if fact_ids and ref not in fact_ids:
                 issues.append(f"step {step_id} references unknown project fact id: {ref}")
+        for symbol in _structured_skip_symbols(investigation or {}):
+            text = " ".join([
+                str(step.get("purpose") or ""),
+                str(step.get("target") or ""),
+                str(step.get("action") or ""),
+                " ".join(step.get("completion_conditions") or []),
+            ])
+            if _extracts_symbol(text, symbol):
+                issues.append(f"step {step_id} tries to extract runtime skip candidate: {symbol}")
+        for symbol in _structured_review_symbols(investigation or {}):
+            text = " ".join([
+                str(step.get("purpose") or ""),
+                str(step.get("target") or ""),
+                str(step.get("action") or ""),
+                " ".join(step.get("completion_conditions") or []),
+            ])
+            if _extracts_symbol(text, symbol):
+                if not _step_has_review_strategy(step, symbol, design_plan):
+                    issues.append(f"step {step_id} extracts review candidate without a behavior-preserving design strategy: {symbol}")
     chain_steps = {item.get("step_id") for item in plan.get("responsibility_chain", [])}
     missing_chain = sorted(step_ids - chain_steps)
     if missing_chain:
         issues.append("implementation steps missing responsibility_chain: " + ", ".join(missing_chain))
+    covered_decisions = {
+        ref
+        for step in steps
+        for ref in step.get("decision_ids", [])
+        if ref
+    }
+    missing_decisions = sorted(required_decision_ids - covered_decisions)
+    if missing_decisions:
+        issues.append("design decisions missing implementation step coverage: " + ", ".join(missing_decisions))
     for item in plan.get("responsibility_chain", []):
         if item.get("step_id") not in step_ids:
             issues.append(f"responsibility_chain references unknown step: {item.get('step_id')}")
@@ -240,87 +297,248 @@ def validate_patch_plan(plan: dict, analysis: dict, design_plan: dict, workspace
     return issues
 
 
+def _structured_skip_symbols(investigation: dict) -> list[str]:
+    return _structured_symbols_by_action(investigation, "skip")
+
+
+def _structured_review_symbols(investigation: dict) -> list[str]:
+    return _structured_symbols_by_action(investigation, "review")
+
+
+def _structured_symbols_by_action(investigation: dict, action: str) -> list[str]:
+    structured = investigation.get("structured_findings")
+    if not isinstance(structured, dict):
+        return []
+    candidates = structured.get("refactor_candidates") or structured.get("duplicate_candidates") or []
+    return [
+        str(item.get("symbol") or "").strip()
+        for item in candidates
+        if isinstance(item, dict)
+        and str(item.get("safe_action") or "").strip() == action
+        and str(item.get("symbol") or "").strip()
+    ]
+
+
+def _step_has_review_strategy(step: dict, symbol: str, design_plan: dict) -> bool:
+    decision_ids = set(step.get("decision_ids") or [])
+    for item in design_plan.get("design_decisions") or []:
+        if not isinstance(item, dict) or item.get("id") not in decision_ids:
+            continue
+        if not str(item.get("variant_strategy") or "").strip():
+            continue
+        decision_text = " ".join([
+            str(item.get("decision") or ""),
+            " ".join(item.get("because") or []),
+            str(item.get("variant_strategy") or ""),
+        ])
+        if symbol.casefold() in decision_text.casefold():
+            return True
+    return False
+
+
+def _extracts_symbol(text: str, symbol: str) -> bool:
+    lowered = str(text or "").casefold()
+    return symbol.casefold() in lowered and any(
+        word in lowered
+        for word in ("extract", "shared", "common", "utility", "helper", "提取", "公共", "复用", "共享")
+    )
+
+
 def _json_from_text(text: str) -> dict:
     text = (text or "").strip()
     if text.startswith("```"):
         text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text, flags=re.IGNORECASE).strip()
     data = json.loads(text)
     if not isinstance(data, dict):
-        raise ValueError("patch plan must be a JSON object")
+        raise ValueError("patch content must be a JSON object")
     return data
 
 
-def _normalize_plan(data: dict) -> dict:
+def _content_json_stream(
+    provider: dict,
+    model: str,
+    messages: list[dict],
+    pricing_rules,
+    usage_total: dict,
+    run_id: str,
+    label: str,
+) -> Iterator[dict]:
+    last_invalid_key = ""
+    repeated_invalid = 0
+    attempts = app_settings.get_round_limit("patch_json_attempts") or DEFAULT_PATCH_JSON_ATTEMPTS
+    for attempt in _attempt_indexes(attempts):
+        assistant = _call_model(provider, model, messages, tools=[], max_tokens=MAX_OUTPUT_TOKENS)
+        if usage := _usage_delta(pricing_rules, assistant.pop("_usage", {})):
+            _add_usage(usage_total, usage)
+            yield start_event(f"{run_id}-usage-{label}-{attempt}", "usage", {"delta": usage, "total": usage_total})
+        text = _content_text(assistant.get("content"))
+        try:
+            return _json_from_text(text)
+        except (json.JSONDecodeError, ValueError) as exc:
+            invalid_key = f"{text[:1000]}::{exc}"
+            repeated_invalid = repeated_invalid + 1 if invalid_key == last_invalid_key else 1
+            last_invalid_key = invalid_key
+            messages.extend([
+                {"role": "assistant", "content": text[:4000]},
+                {"role": "user", "content": (
+                    "The previous response was not valid content JSON: "
+                    f"{exc}. Return only the requested slot content JSON. "
+                    "Do not write ids, final plan fields, or Markdown."
+                )},
+            ])
+            if repeated_invalid >= DEFAULT_PATCH_JSON_ATTEMPTS:
+                return None
+    return None
+
+
+def _patch_summary(steps: list[dict]) -> str:
+    files = sorted({str(step.get("file") or "").strip() for step in steps if isinstance(step, dict) and step.get("file")})
+    if not files:
+        return "No code changes planned."
+    return "Plan focused changes in " + ", ".join(files[:6]) + ("." if len(files) <= 6 else ", ...")
+
+
+def _merge_acceptance_verification(target: dict[int, str], value) -> None:
+    if not isinstance(value, list):
+        return
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        try:
+            slot = int(item.get("acceptance_slot"))
+        except (TypeError, ValueError):
+            continue
+        text = str(item.get("verification") or "").strip()
+        if slot > 0 and text and slot not in target:
+            target[slot] = text
+
+
+def _acceptance_verification_map(value) -> dict[int, str]:
+    result: dict[int, str] = {}
+    _merge_acceptance_verification(result, value)
+    return result
+
+
+def _skipped_decisions(value, design_plan: dict) -> list[dict]:
+    decision_ids = _known_ids(design_plan.get("design_decisions"))
+    result = []
+    if not isinstance(value, list):
+        return result
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        try:
+            index = int(item.get("decision_slot"))
+        except (TypeError, ValueError):
+            continue
+        if 1 <= index <= len(decision_ids):
+            result.append({
+                "decision_id": decision_ids[index - 1],
+                "reason": str(item.get("reason") or "").strip(),
+            })
+    return result
+
+
+def _plan_from_content(data: dict, analysis: dict, design_plan: dict, investigation: dict) -> dict:
+    facts = _project_facts(investigation)
+    steps = _runtime_steps(data.get("step_content"), analysis, design_plan, facts)
+    skipped_decisions = _skipped_decisions(data.get("skipped_decision_slots"), design_plan)
+    if not steps and not skipped_decisions:
+        raise ValueError("step_content must contain at least one implementation step")
+    step_ids = [step["id"] for step in steps]
+    criteria = [
+        item for item in analysis.get("acceptance_criteria", [])
+        if isinstance(item, dict) and str(item.get("id") or "").strip()
+    ]
+    verification = _acceptance_verification_map(data.get("acceptance_verification"))
     return {
         "summary": str(data.get("summary") or "").strip(),
-        "files_to_change": _strings(data.get("files_to_change")),
-        "implementation_steps": _implementation_steps(data.get("implementation_steps")),
-        "project_facts": _project_facts(data),
-        "responsibility_chain": _responsibility_chain(data.get("responsibility_chain")),
-        "acceptance_mapping": _acceptance_mapping(data.get("acceptance_mapping")),
+        "files_to_change": sorted({step["file"] for step in steps if step.get("file")}),
+        "implementation_steps": steps,
+        "project_facts": facts,
+        "responsibility_chain": [
+            {
+                "step_id": step["id"],
+                "requirement_ids": step.get("acceptance_ids") or [],
+                "decision_ids": step.get("decision_ids") or [],
+                "project_fact_ids": step.get("project_fact_ids") or [],
+                "removal_breaks": step.get("required_behavior_if_removed") or step.get("purpose") or "",
+            }
+            for step in steps
+        ],
+        "acceptance_mapping": [
+            {
+                "acceptance_id": str(item.get("id") or "").strip(),
+                "covered_by": [step["id"] for step in steps if str(item.get("id") or "").strip() in set(step.get("acceptance_ids") or [])],
+                "verification": verification.get(index + 1, "") or "Run the listed checks and confirm the requested behavior.",
+            }
+            for index, item in enumerate(criteria)
+        ],
         "tests_or_checks": _strings(data.get("tests_or_checks")),
         "risks": _strings(data.get("risks")),
         "out_of_scope": _strings(data.get("out_of_scope")),
+        "runtime_skipped_decisions": skipped_decisions,
     }
+
+
+def _runtime_steps(value, analysis: dict, design_plan: dict, facts: list[dict]) -> list[dict]:
+    if not isinstance(value, list):
+        return []
+    criteria_ids = _known_ids(analysis.get("acceptance_criteria"))
+    decision_ids = _known_ids(design_plan.get("design_decisions"))
+    fact_ids = _known_ids(facts)
+    steps = []
+    for index, item in enumerate(value, start=1):
+        if not isinstance(item, dict) or not item.get("file"):
+            continue
+        acceptance_ids = _slot_ids(item.get("acceptance_slots"), criteria_ids)
+        decision_refs = _slot_ids(item.get("decision_slots"), decision_ids)
+        fact_refs = _slot_ids(item.get("project_fact_slots"), fact_ids)
+        steps.append({
+            "id": f"IS{index}",
+            "purpose": str(item.get("purpose") or "").strip(),
+            "file": str(item.get("file") or "").strip(),
+            "target": str(item.get("target") or "").strip(),
+            "action": str(item.get("action") or "").strip(),
+            "acceptance_ids": acceptance_ids,
+            "decision_ids": decision_refs,
+            "project_fact_ids": fact_refs or (fact_ids if len(fact_ids) == 1 else []),
+            "required_behavior_if_removed": str(item.get("required_behavior_if_removed") or "").strip(),
+            "completion_conditions": _strings(item.get("completion_conditions")),
+            "out_of_scope": _strings(item.get("out_of_scope")),
+            "minimality_check": str(item.get("minimality_check") or "").strip(),
+        })
+    return steps
+
+
+def _slot_ids(value, ids: list[str]) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    result = []
+    for raw in value:
+        try:
+            index = int(raw)
+        except (TypeError, ValueError):
+            continue
+        if 1 <= index <= len(ids):
+            result.append(ids[index - 1])
+    return result
+
+
+def _known_ids(value) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [
+        str(item.get("id") or "").strip()
+        for item in value
+        if isinstance(item, dict) and str(item.get("id") or "").strip()
+    ]
 
 
 def _strings(value) -> list[str]:
     if not isinstance(value, list):
         return []
     return [item for raw in value if (item := str(raw).strip())]
-
-
-def _implementation_steps(value) -> list[dict]:
-    if not isinstance(value, list):
-        return []
-    return [
-        {
-            "id": str(item.get("id") or "").strip(),
-            "purpose": str(item.get("purpose") or "").strip(),
-            "file": str(item.get("file") or "").strip(),
-            "target": str(item.get("target") or "").strip(),
-            "action": str(item.get("action") or "").strip(),
-            "acceptance_ids": _strings(item.get("acceptance_ids")),
-            "decision_ids": _strings(item.get("decision_ids")),
-            "project_fact_ids": _strings(item.get("project_fact_ids")),
-            "required_behavior_if_removed": str(item.get("required_behavior_if_removed") or "").strip(),
-            "completion_conditions": _strings(item.get("completion_conditions")),
-            "out_of_scope": _strings(item.get("out_of_scope")),
-            "minimality_check": str(item.get("minimality_check") or "").strip(),
-        }
-        for item in value
-        if isinstance(item, dict) and (item.get("action") or item.get("file"))
-    ]
-
-
-def _responsibility_chain(value) -> list[dict]:
-    if not isinstance(value, list):
-        return []
-    return [
-        {
-            "step_id": str(item.get("step_id") or "").strip(),
-            "requirement_ids": _strings(item.get("requirement_ids")),
-            "decision_ids": _strings(item.get("decision_ids")),
-            "project_fact_ids": _strings(item.get("project_fact_ids")),
-            "removal_breaks": str(item.get("removal_breaks") or "").strip(),
-        }
-        for item in value
-        if isinstance(item, dict) and (item.get("step_id") or item.get("removal_breaks"))
-    ]
-
-
-def _acceptance_mapping(value) -> list[dict]:
-    if not isinstance(value, list):
-        return []
-    return [
-        {
-            "acceptance_id": str(item.get("acceptance_id") or item.get("id") or "").strip(),
-            "covered_by": _strings(item.get("covered_by")),
-            "verification": str(item.get("verification") or item.get("plan") or "").strip(),
-        }
-        for item in value
-        if isinstance(item, dict) and (item.get("acceptance_id") or item.get("id") or item.get("verification"))
-    ]
 
 
 def _project_facts(investigation: dict) -> list[dict]:

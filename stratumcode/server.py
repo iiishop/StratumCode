@@ -15,6 +15,11 @@ _FILE_PREVIEW_BYTES = 64_000
 _IGNORED_DIRS = {".git", ".venv", "venv", "node_modules", "dist", "__pycache__", ".pytest_cache"}
 
 
+class _StratumThreadingHTTPServer(ThreadingHTTPServer):
+    daemon_threads = False
+    block_on_close = True
+
+
 class _Handler(SimpleHTTPRequestHandler):
     """静态文件 + /api/* 路由合一的请求处理器。"""
 
@@ -368,7 +373,7 @@ class _Handler(SimpleHTTPRequestHandler):
         try:
             result = asyncio.run(tool.execute(
                 {"path": path, "start_line": 1, "end_line": _FILE_PREVIEW_LINES},
-                {"directory": self._workspace_path()},
+                {"directory": self._workspace_path(), "skip_lsp": True},
             ))
         except PermissionError as exc:
             self._json({"error": str(exc)}, 403)
@@ -416,4 +421,4 @@ def create(static_dir: str, port: int = 0, workspace_dir: str | None = None) -> 
             **kwargs,
         )
 
-    return ThreadingHTTPServer(("localhost", port), handler)
+    return _StratumThreadingHTTPServer(("localhost", port), handler)

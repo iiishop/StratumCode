@@ -105,6 +105,7 @@ def _add_validation_context(run) -> None:
             loc = f" ({issue.get('file')}:{issue.get('line')})" if issue.get("file") else ""
             lines.append(f"- {issue.get('severity', 'issue')}: {issue.get('summary', '')}{loc}")
     lines = [line for line in lines if line]
+    repair_facts = _validation_repair_facts(result)
     run.continuation_context = run.continuation_context + lines
     run.findings = run.findings + lines
     if not isinstance(run.last_investigation, dict):
@@ -116,8 +117,51 @@ def _add_validation_context(run) -> None:
     context = run.last_investigation.get("patch_planning_context")
     if not isinstance(context, list):
         context = []
-    run.last_investigation["patch_planning_context"] = context + lines
+    run.last_investigation["patch_planning_context"] = context + lines + repair_facts
+    facts = run.last_investigation.get("patch_planning_facts")
+    if not isinstance(facts, list):
+        facts = []
+    run.last_investigation["patch_planning_facts"] = facts + repair_facts
+    structured = run.last_investigation.get("structured_findings")
+    if not isinstance(structured, dict):
+        structured = {}
+    structured["validation_repair_candidates"] = _validation_repair_candidates(result)
+    run.last_investigation["structured_findings"] = structured
     run.last_investigation["summary"] = " ".join(
         part for part in [run.last_investigation.get("summary", ""), result.get("summary", "")]
         if part
     )
+
+
+def _validation_repair_facts(result: dict) -> list[str]:
+    facts = []
+    for index, issue in enumerate(result.get("issues", []) if isinstance(result.get("issues"), list) else [], start=1):
+        if not isinstance(issue, dict):
+            continue
+        loc = f"{issue.get('file')}:{issue.get('line')}" if issue.get("file") else ""
+        facts.append(
+            " ".join(part for part in [
+                f"VAL{index}",
+                str(issue.get("severity") or "issue"),
+                loc,
+                str(issue.get("summary") or ""),
+            ] if part)
+        )
+    return facts
+
+
+def _validation_repair_candidates(result: dict) -> list[dict]:
+    candidates = []
+    for index, issue in enumerate(result.get("issues", []) if isinstance(result.get("issues"), list) else [], start=1):
+        if not isinstance(issue, dict):
+            continue
+        candidates.append({
+            "id": f"VAL{index}",
+            "kind": "validation_repair",
+            "severity": issue.get("severity") or "issue",
+            "file": issue.get("file") or "",
+            "line": issue.get("line") or 0,
+            "safe_action": "repair",
+            "reason": issue.get("summary") or "",
+        })
+    return candidates

@@ -40,8 +40,14 @@ async def _read(params: dict, ctx: dict) -> ToolResult:
     selection = lines[start:end]
     stat = p.stat()
     snapshot = snapshot_file(p, root)
-    lsp_status = lsp.touch_file(str(p.relative_to(root)), str(ctx.get("directory", ".")))
-    diagnostics = _format_diagnostics(p, lsp.diagnostics_for(p))
+    if ctx.get("skip_lsp"):
+        lsp_status = {"checked": False, "server": "", "error": ""}
+        diagnostics = ""
+        diagnostic_count = 0
+    else:
+        lsp_status = lsp.touch_file(str(p.relative_to(root)), str(ctx.get("directory", ".")))
+        diagnostics = _format_diagnostics(p, lsp.diagnostics_for(p))
+        diagnostic_count = len(lsp.diagnostics_for(p))
     output = "\n".join(selection)
     if diagnostics:
         output += "\n\n<lsp-diagnostics>\n" + diagnostics + "\n</lsp-diagnostics>"
@@ -57,7 +63,7 @@ async def _read(params: dict, ctx: dict) -> ToolResult:
         mtime_ns=stat.st_mtime_ns,
         size=stat.st_size,
         total_lines=len(lines),
-        diagnostics=len(lsp.diagnostics_for(p)),
+        diagnostics=diagnostic_count,
         lsp_checked=bool(lsp_status.get("checked")),
         lsp_server=lsp_status.get("server", ""),
         lsp_error=lsp_status.get("error", ""),

@@ -191,7 +191,7 @@ def _observations_freshness(state: dict) -> list[dict]:
     for raw in state.get("observations", []):
         item = dict(raw)
         path = item.get("path")
-        fresh = not bool(path)
+        fresh = False
         if path and os.path.exists(path):
             stat = os.stat(path)
             fresh = item.get("mtime_ns") == stat.st_mtime_ns and item.get("size") == stat.st_size

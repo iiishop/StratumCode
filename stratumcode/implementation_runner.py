@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import ast
 import json
 from collections.abc import Iterator
 from itertools import count
+from pathlib import Path
 from uuid import uuid4
 
 from . import app_settings, model_settings, prompt, providers
@@ -18,8 +20,9 @@ from .agent_runtime import (
 )
 from .tools import registry
 
-IMPLEMENTATION_TOOLS = ("read", "apply_patch", "patch_history", "rollback_patch")
+IMPLEMENTATION_TOOLS = ("read", "apply_patch")
 VALIDATION_TOOLS = ("read", "code_nav")
+MAX_VALIDATION_ROUNDS = 3
 
 
 def implementation_stream(
@@ -67,10 +70,13 @@ def implementation_stream(
     tools = _implementation_tools()
     final_text = ""
     consecutive_error_rounds = 0
+    no_patch_rounds = 0
     applied_steps: set[str] = set()
     changed_files: list[str] = []
     required_steps = _required_step_ids(patch_plan)
     patch_required = bool(required_steps)
+    patch_call_count = 0
+    patch_call_limit = max(len(required_steps) + 8, 12)
 
     tool_error_limit = app_settings.get_round_limit("implementation_tool_error_rounds")
     for round_index in _round_indexes(app_settings.get_round_limit("implementation_rounds")):
@@ -91,9 +97,18 @@ def implementation_stream(
                     f"Missing step ids: {', '.join(missing_steps)}."
                 )})
                 continue
+            condition_issues = _completion_condition_issues(patch_plan, workspace_dir, applied_steps)
+            if condition_issues:
+                messages.append({"role": "user", "content": (
+                    "Implementation is not complete. These completion conditions are still false:\n"
+                    + "\n".join(f"- {item}" for item in condition_issues)
+                    + "\nApply a focused repair patch using the affected authorized step id."
+                )})
+                continue
             break
 
         round_had_success = False
+        round_applied_patch = False
         for call in tool_calls:
             function = call.get("function") or {}
             name = function.get("name") or ""
@@ -101,9 +116,25 @@ def implementation_stream(
             try:
                 arguments = _tool_arguments(function.get("arguments"))
                 arguments = _prepare_tool_arguments(name, arguments, patch_plan)
+                if name == "apply_patch":
+                    patch_call_count += 1
+                    if patch_call_count > patch_call_limit:
+                        missing_steps = _missing_steps(required_steps, applied_steps)
+                        yield start_event(f"{run_id}-patch-budget-checkpoint", "user_question", _checkpoint_question(
+                            analysis.get("id", ""),
+                            message,
+                            "Implementation exceeded the patch application budget without completing the authorized plan. "
+                            f"Applied step ids: {', '.join(sorted(applied_steps))}. "
+                            f"Missing step ids: {', '.join(missing_steps)}.",
+                            checkpoint_phase="implementation_patch_budget_checkpoint",
+                            patch_plan=patch_plan,
+                        ))
+                        yield {"op": "update", "id": stage_id, "patch": {"state": "waiting", "phase": "implementation_patch_budget_checkpoint"}}
+                        return
                 output = yield from _run_tool(name, call_id, arguments, workspace_dir)
                 round_had_success = round_had_success or not _tool_failed(output)
-                if name == "apply_patch" and not _tool_failed(output):
+                if name == "apply_patch" and (not _tool_failed(output) or _patch_already_applied(output)):
+                    round_applied_patch = True
                     applied_steps.add(str(arguments.get("step_id") or "").strip())
                     changed_files.extend(_patch_files_from_output(output))
             except Exception as exc:
@@ -122,6 +153,36 @@ def implementation_stream(
                 })
             messages.append({"role": "tool", "tool_call_id": call_id, "content": output})
         consecutive_error_rounds = 0 if round_had_success else consecutive_error_rounds + 1
+        if patch_required and not round_applied_patch:
+            no_patch_rounds += 1
+            missing_steps = _missing_steps(required_steps, applied_steps)
+            if no_patch_rounds == 3:
+                messages.append({"role": "user", "content": (
+                    "Stop reading files unless a stale snapshot error requires it. "
+                    "Apply the authorized patch now. Missing step ids: "
+                    f"{', '.join(missing_steps)}."
+                )})
+            elif no_patch_rounds >= 6:
+                checkpoint_reason = (
+                    "Implementation repeatedly inspected files without applying any authorized patch step."
+                    if not applied_steps
+                    else "Implementation applied some patch steps but stopped making progress on the remaining authorized steps."
+                )
+                yield start_event(f"{run_id}-no-patch-checkpoint", "user_question", _checkpoint_question(
+                    analysis.get("id", ""),
+                    message,
+                    checkpoint_reason + (
+                        f" Applied step ids: {', '.join(sorted(applied_steps))}. "
+                        f"Missing step ids: {', '.join(missing_steps)}."
+                        if applied_steps else ""
+                    ),
+                    checkpoint_phase="implementation_no_patch_checkpoint",
+                    patch_plan=patch_plan,
+                ))
+                yield {"op": "update", "id": stage_id, "patch": {"state": "waiting", "phase": "implementation_no_patch_checkpoint"}}
+                return
+        elif round_applied_patch:
+            no_patch_rounds = 0
         if tool_error_limit and consecutive_error_rounds >= tool_error_limit:
             yield start_event(f"{run_id}-tool-error-checkpoint", "user_question", _checkpoint_question(
                 analysis.get("id", ""),
@@ -154,6 +215,17 @@ def implementation_stream(
             patch_plan=patch_plan,
         ))
         yield {"op": "update", "id": stage_id, "patch": {"state": "waiting", "phase": "implementation_checkpoint"}}
+        return
+    condition_issues = _completion_condition_issues(patch_plan, workspace_dir, applied_steps)
+    if condition_issues:
+        yield start_event(f"{run_id}-checkpoint", "user_question", _checkpoint_question(
+            analysis.get("id", ""),
+            message,
+            "Implementation stopped with unmet completion conditions:\n" + "\n".join(f"- {item}" for item in condition_issues),
+            checkpoint_phase="implementation_completion_checkpoint",
+            patch_plan=patch_plan,
+        ))
+        yield {"op": "update", "id": stage_id, "patch": {"state": "waiting", "phase": "implementation_completion_checkpoint"}}
         return
 
     yield start_event(f"{run_id}-output", "output", {
@@ -224,6 +296,104 @@ def _required_step_ids(patch_plan: dict) -> set[str]:
 
 def _missing_steps(required: set[str], applied: set[str]) -> list[str]:
     return sorted(required - applied)
+
+
+def _completion_condition_issues(patch_plan: dict, workspace_dir: str, applied_steps: set[str]) -> list[str]:
+    root = Path(workspace_dir or ".").resolve()
+    issues = []
+    for step in patch_plan.get("implementation_steps") or []:
+        if not isinstance(step, dict):
+            continue
+        step_id = str(step.get("id") or "").strip()
+        if step_id not in applied_steps:
+            continue
+        rel = str(step.get("file") or "").strip()
+        path = (root / rel).resolve() if rel else root
+        for condition in step.get("completion_conditions") or []:
+            issue = _completion_condition_issue(step_id, rel, path, str(condition or ""))
+            if issue:
+                issues.append(issue)
+    return issues
+
+
+def _completion_condition_issue(step_id: str, rel: str, path: Path, condition: str) -> str:
+    lowered = condition.casefold()
+    exists = path.exists()
+    if _means_file_absent(lowered) and exists:
+        return f"{step_id}: expected {rel} to be absent ({condition})"
+    if _means_file_present(lowered) and not exists:
+        return f"{step_id}: expected {rel} to exist ({condition})"
+    literals = _backtick_literals(condition)
+    if not literals or not path.is_file():
+        return ""
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return f"{step_id}: could not read {rel} to verify {condition}"
+    if _means_literal_absent(lowered):
+        present = [literal for literal in literals if _literal_present(literal, text)]
+        if present:
+            return f"{step_id}: {rel} still contains {', '.join(present)}"
+    elif _means_literal_present(lowered):
+        missing = [literal for literal in literals if not _literal_present(literal, text)]
+        if missing:
+            return f"{step_id}: {rel} is missing {', '.join(missing)}"
+    return ""
+
+
+def _backtick_literals(text: str) -> list[str]:
+    values = []
+    parts = str(text or "").split("`")
+    for index in range(1, len(parts), 2):
+        literal = parts[index].strip()
+        if literal:
+            values.append(literal)
+    return values
+
+
+def _literal_present(literal: str, text: str) -> bool:
+    if literal in text:
+        return True
+    return _from_import_present(literal, text)
+
+
+def _from_import_present(literal: str, text: str) -> bool:
+    literal = literal.strip()
+    if not literal.startswith("from ") or " import " not in literal:
+        return False
+    module, names_text = literal[5:].split(" import ", 1)
+    names = {item.strip().split(" as ", 1)[0] for item in names_text.split(",") if item.strip()}
+    if not module.strip() or not names:
+        return False
+    try:
+        tree = ast.parse(text)
+    except SyntaxError:
+        return False
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module == module.strip():
+            imported = {alias.name for alias in node.names}
+            if names <= imported:
+                return True
+    return False
+
+
+def _means_file_absent(text: str) -> bool:
+    return ("不存在" in text and "包含" not in text) or any(
+        term in text
+        for term in ("file does not exist", "file not exist", "file absent", "file deleted")
+    )
+
+
+def _means_file_present(text: str) -> bool:
+    return any(term in text for term in ("存在", "exists", "present")) and not _means_file_absent(text)
+
+
+def _means_literal_absent(text: str) -> bool:
+    return any(term in text for term in ("不再包含", "不包含", "no longer contains", "does not contain", "not contain", "absent", "removed"))
+
+
+def _means_literal_present(text: str) -> bool:
+    return any(term in text for term in ("包含", "contains", "include", "present"))
 
 
 def _round_indexes(limit: int, start: int = 1):
@@ -438,6 +608,15 @@ def _tool_failed(output: str) -> bool:
     return bool(metadata.get("error_code") or data.get("error"))
 
 
+def _patch_already_applied(output: str) -> bool:
+    try:
+        data = json.loads(output or "{}")
+    except json.JSONDecodeError:
+        return False
+    metadata = data.get("metadata") if isinstance(data.get("metadata"), dict) else {}
+    return metadata.get("code") == "PATCH_ATTEMPT_ALREADY_APPLIED"
+
+
 def _code_nav_validated(output: str) -> bool:
     try:
         data = json.loads(output or "{}")
@@ -500,7 +679,7 @@ def _validation_stream(
     tools = _validation_tools()
     semantic_checked = False
     validation_result = None
-    for round_index in _round_indexes(app_settings.get_round_limit("validation_rounds")):
+    for round_index in _round_indexes(app_settings.get_round_limit("validation_rounds") or MAX_VALIDATION_ROUNDS):
         assistant = _call_model(provider, model, messages, tools=tools)
         if usage := _usage_delta(pricing_rules, assistant.pop("_usage", {})):
             _add_usage(usage_total, usage)

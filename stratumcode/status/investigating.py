@@ -100,13 +100,13 @@ def handle(run):
         run.transition(chat._chat_finish_state(run), "Investigation ended without an implementation path.")
     elif next_step == "ask_user" or has_blocked_task:
         run.transition(chat.ChatState.WAITING_FOR_USER, "Investigation needs user input.")
+    elif run.last_investigation and _investigation_allows_patch(run.last_investigation) and _wants_implementation(run.analysis, request):
+        run.transition(chat.ChatState.DESIGNING, "Investigation is ready for implementation planning.")
     elif next_step == "continue_investigation" or has_unknown_task:
         run.findings = _merge_findings(run.findings, _investigation_continuation_findings(run.last_investigation))
         run.transition(chat.ChatState.INVESTIGATING, "Investigation requested another pass.")
     elif next_step == "failed":
         run.transition(chat.ChatState.FAILED, "Investigation failed.")
-    elif run.last_investigation and _investigation_allows_patch(run.last_investigation) and _wants_implementation(run.analysis, request):
-        run.transition(chat.ChatState.DESIGNING, "Investigation is ready for implementation planning.")
     else:
         run.transition(chat._chat_finish_state(run), "Investigation ended without an implementation path.")
 
@@ -119,7 +119,13 @@ def _wants_implementation(analysis: dict, message: str = "") -> bool:
 
 
 def _investigation_allows_patch(investigation: dict) -> bool:
-    if _has_open_tasks(investigation):
+    if _has_task_status(investigation, "blocked"):
+        return False
+    if _has_task_status(investigation, "unknown") and not (
+        investigation.get("runtime_recovered") and (
+            investigation.get("patch_planning_facts") or investigation.get("patch_planning_context")
+        )
+    ):
         return False
     step = investigation.get("step_result") if isinstance(investigation.get("step_result"), dict) else {}
     return bool(investigation.get("ready_for_patch_planning") or step.get("next_step") == "write_code")

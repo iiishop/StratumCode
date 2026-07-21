@@ -52,6 +52,7 @@ def main():
             "npm run build", cwd=str(FRONTEND_DIR), shell=True, check=True,
         )
 
+    workspaces.reconcile(str(WORKSPACE_DIR))
     workspace = workspaces.active(str(WORKSPACE_DIR))["path"]
     server = create_server(DIST_DIR, workspace_dir=workspace)
     port = server.server_address[1]
@@ -63,6 +64,7 @@ def main():
 
 def main_dev():
     api_port = _free_port()
+    workspaces.reconcile(str(WORKSPACE_DIR))
     workspace = workspaces.active(str(WORKSPACE_DIR))["path"]
     server = create_server(DIST_DIR, api_port, workspace_dir=workspace)  # API only, 静态文件走 Vite
     threading.Thread(target=server.serve_forever, daemon=True).start()

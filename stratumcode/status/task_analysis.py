@@ -30,7 +30,7 @@ TASK_UNKNOWN_TYPE_ALIASES = {
 }
 TASK_UNKNOWN_STRATEGIES = {"investigate_project", "ask_user", "deferred"}
 IMPLEMENTATION_INTENT_TYPES = {"feature", "bugfix", "refactor"}
-LOGGER = logging.getLogger(__name__)
+DEFAULT_TASK_SLOT_ATTEMPTS = 3
 
 
 def _message_requests_implementation(message: str) -> bool:
@@ -53,76 +53,256 @@ def analyze_task(message: str, context: list[str], workspace_dir: str, session_c
 
     provider = setting["provider"]
     model = setting["model_id"]
-    last_error = ""
-    last_raw = ""
     analyzer_errors = []
-    best_partial = None
-    attempt_limit = app_settings.get_round_limit("task_analyzer_attempts")
-    for attempt in _attempt_indexes(attempt_limit):
-        messages = [
-            {"role": "system", "content": prompt.build_task_analyzer(app_settings.get_output_language())},
-            {
-                "role": "user",
-                "content": prompt.build_task_analyzer_user(
-                    message=message,
-                    directory=workspace_dir,
-                    context=context + _session_context_lines(session_context),
-                    error=_analyzer_retry_context(last_error, last_raw),
-                ),
-            },
-        ]
-        assistant = call_model(
-            provider,
-            model,
-            messages,
-            tools=[],
-        )
-        last_raw = content_text(assistant.get("content"))
-        try:
-            if assistant.get("tool_calls"):
-                raise ValueError("tool calls are not allowed")
-            analysis = _validate_task_analysis(_json_object(last_raw))
-            analysis["model"] = model
-            analysis["provider"] = provider["name"]
-            analysis["analyzer_attempts"] = attempt
-            if analyzer_errors:
-                analysis["analyzer_errors"] = analyzer_errors
-            analysis["evidence_hypothesis"] = _analysis_hypothesis(message, analysis)
-            return analysis
-        except ValueError as exc:
-            last_error = str(exc)
-            analyzer_errors.append(last_error)
-            LOGGER.warning(
-                "task analyzer attempt failed",
-                extra={
-                    "attempt": attempt,
-                    "error": last_error,
-                    "finish_reason": assistant.get("finish_reason"),
-                    "raw_excerpt": last_raw[:4000],
-                },
-            )
-            best_partial = _partial_task_analysis(last_raw, message, context, last_error) or best_partial
-    analysis = best_partial or _minimal_task_analysis(message, context, last_raw)
+    slot_context = context + _session_context_lines(session_context)
+    system = {"role": "system", "content": prompt.build_task_analyzer(app_settings.get_output_language())}
+    intent_slot, errors = _task_slot_json(
+        provider,
+        model,
+        call_model,
+        content_text,
+        [
+            system,
+            {"role": "user", "content": prompt.build_task_intent_slot_user(
+                message=message,
+                directory=workspace_dir,
+                context=slot_context,
+            )},
+        ],
+        "intent_scope",
+    )
+    analyzer_errors.extend(errors)
+    acceptance_slot, errors = _task_slot_json(
+        provider,
+        model,
+        call_model,
+        content_text,
+        [
+            system,
+            {"role": "user", "content": prompt.build_task_acceptance_slot_user(
+                message=message,
+                directory=workspace_dir,
+                context=slot_context,
+                intent_slot=intent_slot,
+            )},
+        ],
+        "acceptance_contract",
+    )
+    analyzer_errors.extend(errors)
+    acceptance_slots = _runtime_acceptance_slots(acceptance_slot, message, context)
+    unknowns_slot, errors = _task_slot_json(
+        provider,
+        model,
+        call_model,
+        content_text,
+        [
+            system,
+            {"role": "user", "content": prompt.build_task_unknowns_slot_user(
+                message=message,
+                directory=workspace_dir,
+                context=slot_context,
+                intent_slot=intent_slot,
+                acceptance_slots=acceptance_slots,
+            )},
+        ],
+        "unknowns",
+    )
+    analyzer_errors.extend(errors)
+    try:
+        analysis = _validate_task_analysis(_analysis_from_slots(
+            message,
+            context,
+            intent_slot or {},
+            acceptance_slot or {},
+            unknowns_slot or {},
+        ))
+    except ValueError as exc:
+        analyzer_errors.append(str(exc))
+        analysis = _minimal_task_analysis(message, context)
     analysis["model"] = model
     analysis["provider"] = provider["name"]
-    analysis["analyzer_attempts"] = attempt_limit
-    analysis["analyzer_errors"] = analyzer_errors
-    analysis["analyzer_error"] = (
-        f"task analyzer partial recovery after validation failures: {last_error}"
-        if best_partial else
-        f"task analyzer minimal recovery after invalid JSON: {last_error}"
-    )
+    analysis["analyzer_attempts"] = len([item for item in (intent_slot, acceptance_slot, unknowns_slot) if item])
+    if analyzer_errors:
+        analysis["analyzer_errors"] = analyzer_errors
+        analysis["recovered_from_partial_analyzer_output"] = True
+        analysis["analyzer_error"] = "minimal recovery: task analyzer slot recovery used runtime defaults for invalid or missing content"
     analysis["evidence_hypothesis"] = _analysis_hypothesis(message, analysis)
     return analysis
 
 
-def _analyzer_retry_context(error: str, raw: str) -> str:
-    if not error:
-        return ""
-    raw = (raw or "").strip()
-    if not raw:
-        return error
-    return f"{error}\nPrevious raw output excerpt:\n{raw[:2000]}"
+def _task_slot_json(provider: dict, model: str, call_model, content_text, messages: list[dict], label: str) -> tuple[dict | None, list[str]]:
+    errors = []
+    last_invalid_key = ""
+    repeated_invalid = 0
+    attempts = app_settings.get_round_limit("task_analyzer_attempts") or DEFAULT_TASK_SLOT_ATTEMPTS
+    for attempt in _attempt_indexes(attempts):
+        assistant = call_model(provider, model, messages, tools=[])
+        raw = content_text(assistant.get("content"))
+        try:
+            if assistant.get("tool_calls"):
+                raise ValueError("tool calls are not allowed")
+            return _json_object(raw), errors
+        except ValueError as exc:
+            error = f"{label}: {exc}"
+            errors.append(error)
+            LOGGER.warning(
+                "task analyzer slot failed",
+                extra={
+                    "slot": label,
+                    "attempt": attempt,
+                    "error": str(exc),
+                    "finish_reason": assistant.get("finish_reason"),
+                    "raw_excerpt": raw[:4000],
+                },
+            )
+            invalid_key = f"{raw[:1000]}::{exc}"
+            repeated_invalid = repeated_invalid + 1 if invalid_key == last_invalid_key else 1
+            last_invalid_key = invalid_key
+            messages.extend([
+                {"role": "assistant", "content": raw[:4000]},
+                {"role": "user", "content": (
+                    "The previous response was not valid slot JSON: "
+                    f"{exc}. Return only the requested output_contract JSON. "
+                    "Do not write final task-analysis ids, schema wrappers, or Markdown."
+                )},
+            ])
+            if repeated_invalid >= DEFAULT_TASK_SLOT_ATTEMPTS:
+                return None, errors
+    return None, errors
+
+
+def _analysis_from_slots(message: str, context: list[str], intent_slot: dict, acceptance_slot: dict, unknowns_slot: dict) -> dict:
+    fallback = _fallback_task_analysis(message, context)
+    intent_data = intent_slot.get("intent") if isinstance(intent_slot.get("intent"), dict) else intent_slot
+    acceptance_data = acceptance_slot or intent_slot
+    unknown_data = unknowns_slot or intent_slot
+    intent_type = str(intent_data.get("intent_type") or intent_data.get("type") or fallback["intent"]["type"]).strip().casefold()
+    if intent_type not in TASK_INTENT_TYPES:
+        intent_type = fallback["intent"]["type"]
+    summary = str(intent_data.get("summary") or fallback["intent"]["summary"]).strip()
+    acceptance = _runtime_acceptance_slots(acceptance_data, message, context)
+    data = {
+        "intent": {"type": intent_type, "summary": summary},
+        "acceptance_criteria": acceptance,
+        "behavior_contract": _slot_behavior_contract(acceptance_data, fallback),
+        "constraints": _slot_string_list(intent_data.get("constraints"), fallback["constraints"]),
+        "scope": _slot_scope(acceptance_data, fallback),
+        "hypotheses": _slot_hypotheses(intent_data.get("hypotheses")),
+        "clues": _unique_clues(_slot_clues(intent_data.get("clues")) + fallback["clues"]),
+        "unknowns": _runtime_unknowns(unknown_data, acceptance, fallback),
+    }
+    return data
+
+
+def _runtime_acceptance_slots(data: dict | None, message: str, context: list[str]) -> list[dict]:
+    fallback = _fallback_task_analysis(message, context)["acceptance_criteria"]
+    value = (data or {}).get("acceptance_criteria")
+    if value is None:
+        value = (data or {}).get("acceptance")
+    items = []
+    if isinstance(value, list):
+        for raw in value:
+            text = str(raw.get("text") or raw.get("description") or "") if isinstance(raw, dict) else str(raw)
+            text = text.strip()
+            if text:
+                items.append({"id": f"AC{len(items) + 1}", "text": text})
+    return items or fallback
+
+
+def _runtime_unknowns(data: dict, acceptance: list[dict], fallback: dict) -> list[dict]:
+    raw = data.get("unknown_content")
+    if raw is None:
+        raw = data.get("unknowns")
+    if not isinstance(raw, list):
+        return fallback["unknowns"]
+    criteria_ids = [item["id"] for item in acceptance]
+    items = []
+    for raw_item in raw[:5]:
+        if isinstance(raw_item, dict):
+            question = str(raw_item.get("question") or raw_item.get("text") or raw_item.get("description") or "").strip()
+            unknown_type = str(raw_item.get("type") or "code_fact").strip().casefold()
+            strategy = str(raw_item.get("resolution_strategy") or "investigate_project").strip().casefold()
+            why = str(raw_item.get("why") or raw_item.get("reason") or "").strip()
+            accepted_ids = _slot_ids(raw_item.get("acceptance_slots"), criteria_ids)
+            blocking = bool(raw_item.get("blocking", True))
+        else:
+            question = str(raw_item).strip()
+            unknown_type = "code_fact"
+            strategy = "investigate_project"
+            why = ""
+            accepted_ids = criteria_ids
+            blocking = True
+        if not question:
+            continue
+        unknown_type = TASK_UNKNOWN_TYPE_ALIASES.get(unknown_type, unknown_type)
+        if unknown_type not in TASK_UNKNOWN_TYPES:
+            unknown_type = "code_fact"
+        if strategy not in TASK_UNKNOWN_STRATEGIES:
+            strategy = "investigate_project"
+        unknown_type, strategy, blocking = _normalize_unknown_policy(unknown_type, strategy, blocking)
+        items.append({
+            "id": f"U{len(items) + 1}",
+            "question": question,
+            "blocking": blocking,
+            "type": unknown_type,
+            "why": why,
+            "resolution_strategy": strategy,
+            "acceptance_criteria_ids": accepted_ids or criteria_ids,
+        })
+    return items or fallback["unknowns"]
+
+
+def _slot_ids(value, ids: list[str]) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    result = []
+    for raw in value:
+        try:
+            index = int(raw)
+        except (TypeError, ValueError):
+            continue
+        if 1 <= index <= len(ids):
+            result.append(ids[index - 1])
+    return result
+
+
+def _slot_behavior_contract(data: dict, fallback: dict) -> dict:
+    if "behavior_contract" not in data:
+        return fallback["behavior_contract"]
+    try:
+        parsed = _behavior_contract(data.get("behavior_contract"))
+    except ValueError:
+        return _behavior_contract({})
+    return parsed or fallback["behavior_contract"]
+
+
+def _slot_scope(data: dict, fallback: dict) -> dict:
+    try:
+        parsed = _scope(data.get("scope"))
+    except ValueError:
+        return fallback["scope"]
+    return parsed or fallback["scope"]
+
+
+def _slot_string_list(value, fallback: list[str]) -> list[str]:
+    try:
+        return _string_list(value, "slot")
+    except ValueError:
+        return fallback
+
+
+def _slot_hypotheses(value) -> list[dict]:
+    try:
+        return _hypotheses(value)
+    except ValueError:
+        return []
+
+
+def _slot_clues(value) -> list[dict]:
+    try:
+        return _clues(value)
+    except ValueError:
+        return []
 
 
 def _attempt_indexes(limit: int, start: int = 1):
@@ -210,72 +390,6 @@ def _implementation_unknown(request: str) -> str:
     return f"Which existing code path controls this behavior: {target}?"
 
 
-def _partial_task_analysis(raw: str, message: str, context: list[str], error: str) -> dict | None:
-    try:
-        data = _json_object(raw)
-    except ValueError:
-        return None
-    fallback = _fallback_task_analysis(message, context)
-    result = dict(fallback)
-
-    intent = data.get("intent")
-    if isinstance(intent, dict):
-        summary = str(intent.get("summary") or "").strip()
-        intent_type = str(intent.get("type") or fallback["intent"]["type"]).strip().casefold()
-        if intent_type not in TASK_INTENT_TYPES:
-            intent_type = fallback["intent"]["type"]
-        if summary:
-            result["intent"] = {"type": intent_type, "summary": summary}
-
-    for key, parser in (
-        ("acceptance_criteria", _acceptance_criteria),
-        ("constraints", lambda value: _string_list(value, "constraints")),
-        ("hypotheses", _hypotheses),
-    ):
-        if key in data:
-            try:
-                result[key] = parser(data.get(key))
-            except ValueError:
-                pass
-
-    if "behavior_contract" in data:
-        try:
-            parsed = _behavior_contract(data.get("behavior_contract"))
-            result["behavior_contract"] = {
-                key: parsed.get(key) or fallback["behavior_contract"].get(key) or []
-                for key in fallback["behavior_contract"]
-            }
-        except ValueError:
-            pass
-
-    if "scope" in data:
-        try:
-            parsed = _scope(data.get("scope"))
-            result["scope"] = {
-                key: parsed.get(key) or fallback["scope"].get(key) or []
-                for key in fallback["scope"]
-            }
-        except ValueError:
-            pass
-
-    if "clues" in data:
-        try:
-            parsed = _clues(data.get("clues"))
-            result["clues"] = _unique_clues(parsed + fallback["clues"])
-        except ValueError:
-            pass
-
-    if "unknowns" in data:
-        try:
-            result["unknowns"] = _limited_unknowns(data.get("unknowns"), result.get("acceptance_criteria"))
-        except ValueError:
-            pass
-
-    result["recovered_from_partial_analyzer_output"] = True
-    result["partial_recovery_error"] = error
-    return result
-
-
 def _fallback_task_analysis(message: str, context: list[str]) -> dict:
     text = " ".join(str(message or "").split()).strip()
     lowered = text.casefold()
@@ -308,7 +422,7 @@ def _fallback_task_analysis(message: str, context: list[str]) -> dict:
         "unknowns": [
             {
                 "id": "U1",
-                "question": "Which existing files and project conventions are relevant to this request?",
+                "question": _implementation_unknown(text),
                 "blocking": True,
                 "type": "code_fact",
                 "why": "Implementation or answer must be grounded in the current workspace.",

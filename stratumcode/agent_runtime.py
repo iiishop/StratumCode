@@ -13,8 +13,10 @@ from .agent.tools import agent_tools
 from .agent.policy import DISCOVERY_TOOLS
 
 MAX_MODEL_OUTPUT_TOKENS = 2048
+DEFAULT_MODEL_REQUEST_ATTEMPTS = 3
 MODEL_RETRY_STATUS_CODES = {429, 502, 503, 504}
 MODEL_RETRY_DELAYS = (0.5, 1.0)
+MODEL_STREAM_DEADLINE_SECONDS = 180
 _NON_THINKING_TOOL_CHOICE_MODELS: set[str] = set()
 
 
@@ -38,7 +40,7 @@ def call_model(
         "Authorization": f"Bearer {provider['api_key']}",
         "Content-Type": "application/json",
     }
-    attempts = app_settings.get_round_limit("model_request_attempts")
+    attempts = app_settings.get_round_limit("model_request_attempts") or DEFAULT_MODEL_REQUEST_ATTEMPTS
     data = None
     for attempt in _attempt_indexes(attempts, start=0):
         payload = _payload(provider, model, messages, tools, max_tokens, tool_choice)
@@ -99,8 +101,8 @@ def _call_codex_responses(provider: dict, model: str, messages: list[dict], tool
     )
     try:
         with urlopen(req, timeout=90) as response:
-            raw = response.read()
             content_type = response.headers.get("Content-Type", "")
+            raw = _read_response_body(response, content_type)
             data = _responses_data(raw, content_type)
     except HTTPError as exc:
         detail = exc.read().decode("utf-8", errors="replace")[:1000]
@@ -113,6 +115,38 @@ def _call_codex_responses(provider: dict, model: str, messages: list[dict], tool
     message = _responses_message(data)
     message["_usage"] = _responses_usage(data.get("usage") or {})
     return message
+
+
+def _read_response_body(response, content_type: str) -> bytes:
+    if "text/event-stream" not in str(content_type or ""):
+        return response.read()
+    deadline = time.monotonic() + MODEL_STREAM_DEADLINE_SECONDS
+    blocks = []
+    current = []
+    while True:
+        if time.monotonic() > deadline:
+            raise TimeoutError("provider stream did not complete before deadline")
+        line = response.readline()
+        if not line:
+            if current:
+                blocks.append(b"".join(current))
+            break
+        current.append(line)
+        if line in (b"\n", b"\r\n"):
+            block = b"".join(current)
+            blocks.append(block)
+            if _sse_terminal_event(block):
+                break
+            current = []
+    return b"".join(blocks)
+
+
+def _sse_terminal_event(block: bytes) -> bool:
+    text = block.decode("utf-8", errors="replace")
+    return any(
+        line.strip() in {"event: response.completed", "event: response.failed", "event: response.incomplete"}
+        for line in text.splitlines()
+    )
 
 
 def _responses_input(messages: list[dict]) -> list[dict]:
