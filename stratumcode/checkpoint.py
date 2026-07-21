@@ -52,35 +52,36 @@ def answer_resume_state(answer: dict, chat_state, transitions) -> object | None:
     return state if state in transitions else None
 
 
-def resume_from_answer(run, answer: dict, chat_state, transitions) -> None:
-    resume_state = answer_resume_state(answer, chat_state, transitions)
-    restore_context(run, answer)
-    if resume_state:
-        run.state = resume_state
-    else:
-        run.state = chat_state.SAVING_SESSION if run.session_id and run.last_investigation else chat_state.COMPLETED
-    if run.state == chat_state.PATCH_PLANNING:
-        run.design_plan = _design_plan_with_answer(run.design_plan or {}, answer)
-    run.answer = None
+# -- restore_context 的阶段函数 ------------------------------------------------
+
+_FIELD_MAP: list[tuple[str, type, str | None]] = [
+    ("analysis",             dict, None),
+    ("investigation",        dict, "last_investigation"),
+    ("design_plan",          dict, None),
+    ("patch_plan",           dict, None),
+    ("implementation_result", dict, None),
+    ("validation_result",    dict, None),
+]
 
 
-def restore_context(run, answer: dict) -> None:
-    if isinstance(answer.get("analysis"), dict):
-        run.analysis = answer["analysis"]
-    if isinstance(answer.get("investigation"), dict):
-        run.last_investigation = answer["investigation"]
-    if isinstance(answer.get("design_plan"), dict):
-        run.design_plan = answer["design_plan"]
-    if isinstance(answer.get("patch_plan"), dict):
-        run.patch_plan = answer["patch_plan"]
-    if isinstance(answer.get("implementation_result"), dict):
-        run.implementation_result = answer["implementation_result"]
-    if isinstance(answer.get("validation_result"), dict):
-        run.validation_result = answer["validation_result"]
+def _hydrate_fields(run, answer: dict) -> None:
+    """将 answer 中的已验证字段赋值到 run 上。"""
+    for source_key, expected_type, target_attr in _FIELD_MAP:
+        value = answer.get(source_key)
+        if isinstance(value, expected_type):
+            setattr(run, target_attr or source_key, value)
+
+
+def _hydrate_changed_files(run, answer: dict) -> None:
+    """填充 changed_files：优先 answer 中的列表，fallback 到 implementation_result。"""
     if isinstance(answer.get("changed_files"), list):
         run.changed_files = [str(path) for path in answer["changed_files"]]
     elif run.implementation_result and isinstance(run.implementation_result.get("changed_files"), list):
         run.changed_files = [str(path) for path in run.implementation_result["changed_files"]]
+
+
+def _normalize_analysis(run, answer: dict) -> None:
+    """保证 analysis 非空、补齐 id/origin_message，并合并 answer 附带的上下文。"""
     if run.analysis is None:
         run.analysis = {}
     run.analysis = _ensure_task_contract(run.analysis)
@@ -89,6 +90,10 @@ def restore_context(run, answer: dict) -> None:
     answer_context = _answer_context(answer)
     if answer_context:
         run.context = run.context + answer_context
+
+
+def _enrich_session(run, answer: dict) -> None:
+    """加载 session 状态，计算记忆筛选、任务更新、findings 和 continuation_context。"""
     try:
         state = sessions.get(run.session_id)["state"] if run.session_id else {}
     except ValueError:
@@ -104,3 +109,23 @@ def restore_context(run, answer: dict) -> None:
         )
     run.findings = _prior_findings(run.analysis, answer)
     run.continuation_context = _continuation_context(answer, run.selected_session_context)
+
+
+def restore_context(run, answer: dict) -> None:
+    """从 answer 恢复 run 的完整上下文：字段赋值 → 文件列表 → analysis 规范化 → session 富化。"""
+    _hydrate_fields(run, answer)
+    _hydrate_changed_files(run, answer)
+    _normalize_analysis(run, answer)
+    _enrich_session(run, answer)
+
+
+def resume_from_answer(run, answer: dict, chat_state, transitions) -> None:
+    resume_state = answer_resume_state(answer, chat_state, transitions)
+    restore_context(run, answer)
+    if resume_state:
+        run.state = resume_state
+    else:
+        run.state = chat_state.SAVING_SESSION if run.session_id and run.last_investigation else chat_state.COMPLETED
+    if run.state == chat_state.PATCH_PLANNING:
+        run.design_plan = _design_plan_with_answer(run.design_plan or {}, answer)
+    run.answer = None
