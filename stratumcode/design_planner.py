@@ -278,7 +278,6 @@ def _analysis_authorizes_behavior_preserving_refactor(analysis: dict) -> bool:
     ))
     return has_reuse_scope and preserves_behavior
 
-
 def _gap_is_authorized_refactor_choice(gap: dict) -> bool:
     text = " ".join(
         str(gap.get(key) or "")
@@ -310,7 +309,6 @@ def _gap_is_authorized_refactor_choice(gap: dict) -> bool:
         "保持",
     ))
     return asks_for_shared_extraction and preserves_behavior
-
 
 def _variant_strategy_from_gap(gap: dict, investigation: dict) -> str:
     text = " ".join(
@@ -467,72 +465,6 @@ def _unauthorized_public_identifier_reason(decision: dict, allowed_refactor_symb
     if any(symbol and symbol in text for symbol in allowed_refactor_symbols):
         return ""
     return "it targets public identifiers not authorized by structured investigation findings"
-
-
-def _legacy_user_question(gap: dict, *, analysis_id: str, origin_message: str) -> dict:
-    gap_id = gap.get("id") or "design-gap"
-    question = gap.get("question") or "请明确这个设计决策？"
-    return {
-        "id": gap_id,
-        "analysis_id": analysis_id,
-        "question": question,
-        "origin_message": origin_message,
-        "reason": gap.get("why", ""),
-        "why_it_matters": gap.get("why", ""),
-        "blocks_next_step": "patch_planning",
-        "target_unknown_ids": [gap_id],
-        "unknown_id": gap_id,
-        "linked_unknown": {
-            "id": gap_id,
-            "question": question,
-            "blocking": True,
-            "resolution_strategy": "ask_user",
-        },
-        "options": [
-            {"label": "采用最佳实践", "description": f"按当前项目事实选择最小实现：{question}"},
-            {"label": "继续调查", "description": f"暂不做选择，继续寻找项目证据：{question}"},
-        ],
-        "custom_allowed": True,
-    }
-
-
-def user_question(gap: dict, *, analysis_id: str, origin_message: str) -> dict:
-    gap_id = gap.get("id") or "design-gap"
-    question = gap.get("question") or "Please clarify this design decision."
-    why = gap.get("why", "")
-    recommended = gap.get("recommended_answer") or "Use best engineering judgment."
-    return {
-        "id": gap_id,
-        "analysis_id": analysis_id,
-        "question": question,
-        "origin_message": origin_message,
-        "reason": why,
-        "why_it_matters": why,
-        "blocks_next_step": "patch_planning",
-        "target_unknown_ids": [gap_id],
-        "unknown_id": gap_id,
-        "linked_unknown": {
-            "id": gap_id,
-            "question": question,
-            "blocking": True,
-            "resolution_strategy": "ask_user",
-        },
-        "options": [
-            {
-                "id": "best_judgment",
-                "label": "Use best engineering judgment",
-                "description": recommended,
-                "value": recommended,
-            },
-            {
-                "id": "continue_investigation",
-                "label": "Continue investigation",
-                "description": f"Do not decide yet; look for more project evidence: {question}",
-                "value": "Continue investigation.",
-            },
-        ],
-        "custom_allowed": True,
-    }
 
 
 def _json_from_text(text: str) -> dict:

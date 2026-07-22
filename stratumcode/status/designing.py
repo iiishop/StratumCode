@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from .. import design_planner
-from . import clearify
+from ..agent_runtime import start_event
 from .task_contract import run_request
 
 
@@ -25,25 +25,10 @@ def handle(run):
         return
     gap = design_planner.blocking_gap(run.design_plan)
     if gap:
-        question = design_planner.user_question(
-            gap,
-            analysis_id=run.analysis["id"],
-            origin_message=request,
-        )
-        question.update({
-            "checkpoint_phase": "design_checkpoint",
-            "design_plan": run.design_plan,
-            "investigation": run.last_investigation,
+        yield start_event(f"{run.analysis['id']}-design-blocked", "output", {
+            "content": f"Design planning needs a decision but legacy checkpoint is disabled: {gap.get('question') or gap.get('why') or gap.get('id')}",
+            "streaming": False,
         })
-        yield clearify.ask(
-            run,
-            question,
-            resume_state=chat.ChatState.PATCH_PLANNING,
-            analysis=run.analysis,
-            investigation=run.last_investigation,
-            design_plan=run.design_plan,
-            event_id=f"{run.analysis['id']}-design-question",
-        )
+        run.transition(chat._chat_finish_state(run), "Design planning hit a blocking gap.")
         return
-    else:
-        run.transition(chat.ChatState.PATCH_PLANNING, "Design plan has no blocking gaps.")
+    run.transition(chat.ChatState.PATCH_PLANNING, "Design plan has no blocking gaps.")

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from .. import implementation_runner
-from . import clearify
+from ..agent_runtime import start_event
 from .task_contract import run_request
 
 
@@ -15,17 +15,12 @@ def handle(run):
         workspace_dir=run.workspace_dir,
     ):
         if event.get("op") == "start" and event.get("event") == "user_question":
-            yield clearify.ask_event(
-                run,
-                event,
-                resume_state=chat.ChatState.IMPLEMENTING,
-                analysis=run.analysis,
-                investigation=run.last_investigation,
-                design_plan=run.design_plan,
-                patch_plan=run.patch_plan,
-                implementation_result=run.implementation_result,
-                validation_result=run.validation_result,
-            )
+            question = (event.get("data") or {}).get("question") or "Implementation requested a legacy checkpoint."
+            yield start_event(f"{event.get('id', 'implementation-question')}-unsupported", "output", {
+                "content": f"Legacy checkpoint is disabled: {question}",
+                "streaming": False,
+            })
+            run.transition(chat.ChatState.FAILED, "Implementation emitted a legacy user question.")
             return
         if event.get("op") == "done" and isinstance(event.get("implementation"), dict):
             run.implementation_result = event["implementation"]

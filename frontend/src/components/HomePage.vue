@@ -430,17 +430,10 @@ async function send(answer = null) {
   inspectorTab.value = 'evidence'
   nextTick(() => { scrollBottom(); animateLast() })
   try {
-    const structuredAnswer = answer
-    const taskAnalysis = structuredAnswer ? analysisForQuestion(structuredAnswer) : null
-    const origin = structuredAnswer?.origin_message || taskAnalysis?.origin_message || text
     const request = {
-      message: origin,
-      context: contextPathsFor(origin),
+      message: text,
+      context: contextPathsFor(text),
       session_id: props.session?.id,
-    }
-    if (structuredAnswer) {
-      request.answer = { ...structuredAnswer, origin_message: origin }
-      if (taskAnalysis) request.analysis = plain(taskAnalysis)
     }
     await chatStream(message, request)
   } catch (error) {
@@ -462,48 +455,33 @@ async function send(answer = null) {
 async function continueAfterAnswer(answer) {
   if (!answer) return
   const { message, event } = questionEventFor(answer)
-  if (!message || isStreaming.value) return
+  if (!message || !event?.data?.clearify_tool) return
   if (event?.data) Object.assign(event.data, {
     answer_status: 'submitted',
     selected_option_id: answer.selected_option_id,
     selected_option_label: answer.selected_option_label,
     response: answer.response,
   })
-  isStreaming.value = true
-  Object.assign(agentStatus, { state: 'running', phase: 'continuing', contextUsed: 0 })
-  inspectorTab.value = 'evidence'
-  const continuation = reactive({ id: Date.now() + 1, role: 'assistant', time: timeNow(), events: [] })
-  messages.push(continuation)
-  nextTick(() => { scrollBottom(); animateLast() })
-  try {
-    const taskAnalysis = analysisForQuestion(answer)
-    const origin = answer.origin_message || taskAnalysis?.origin_message || answer.question || ''
-    const request = {
-      message: origin,
-      context: contextPathsFor(origin),
-      session_id: props.session?.id,
-      answer: { ...answer, origin_message: origin },
-    }
-    if (taskAnalysis) request.analysis = plain(taskAnalysis)
-    await chatStream(continuation, request)
-  } catch (error) {
-    if (error.name !== 'AbortError') {
-      continuation.events.push({
-        id: `${continuation.id}-answer-error`,
-        type: 'output',
-        data: reactive({ content: `Chat failed: ${error.message}`, streaming: false }),
-      })
-    }
-  } finally {
-    isStreaming.value = false
-    agentStatus.state = 'idle'
-    scheduleSave()
-    nextTick(scrollBottom)
-  }
+  const response = await fetch('/api/chat/answer', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(answer),
+  })
+  const data = await response.json().catch(() => ({}))
+  if (!response.ok) throw new Error(data.error || `Answer submit failed (${response.status})`)
 }
 
-function answerQuestion(answer) {
-  continueAfterAnswer(answer)
+async function answerQuestion(answer) {
+  try {
+    await continueAfterAnswer(answer)
+  } catch (error) {
+    const { message } = questionEventFor(answer)
+    message?.events?.push({
+      id: `${message.id}-answer-submit-error`,
+      type: 'output',
+      data: reactive({ content: `Answer submit failed: ${error.message}`, streaming: false }),
+    })
+  }
 }
 
 function userContentParts(message) {
@@ -599,10 +577,6 @@ function analysisForId(id) {
   return id ? taskAnalyses.find(analysis => analysis.id === id) : null
 }
 
-function analysisForQuestion(question) {
-  return analysisForId(question?.analysis_id) || question?.analysis || activeTaskAnalysis.value
-}
-
 /* ── animation helpers ──────────────────────────────────── */
 
 function animSmoothScroll() {
@@ -650,7 +624,7 @@ function onAgentPacket(packet, type, data) {
     const analysis = analysisForId(data.analysis_id) || activeTaskAnalysis.value
     data.analysis_id ||= analysis?.id || ''
     data.origin_message ||= analysis?.origin_message || ''
-    data.answer_status ||= 'waiting'
+    data.answer_status ||= 'pending'
   } else if (packet.op === 'start' && type === 'evidence') {
     const run = currentEvidenceRun()
     if (!run) return

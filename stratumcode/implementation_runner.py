@@ -120,16 +120,13 @@ def implementation_stream(
                     patch_call_count += 1
                     if patch_call_count > patch_call_limit:
                         missing_steps = _missing_steps(required_steps, applied_steps)
-                        yield start_event(f"{run_id}-patch-budget-checkpoint", "user_question", _checkpoint_question(
-                            analysis.get("id", ""),
-                            message,
+                        reason = (
                             "Implementation exceeded the patch application budget without completing the authorized plan. "
                             f"Applied step ids: {', '.join(sorted(applied_steps))}. "
-                            f"Missing step ids: {', '.join(missing_steps)}.",
-                            checkpoint_phase="implementation_patch_budget_checkpoint",
-                            patch_plan=patch_plan,
-                        ))
-                        yield {"op": "update", "id": stage_id, "patch": {"state": "waiting", "phase": "implementation_patch_budget_checkpoint"}}
+                            f"Missing step ids: {', '.join(missing_steps)}."
+                        )
+                        yield start_event(f"{run_id}-patch-budget-checkpoint", "output", _checkpoint_output(reason))
+                        yield {"op": "update", "id": stage_id, "patch": {"state": "failed", "phase": "implementation_patch_budget_checkpoint"}}
                         return
                 output = yield from _run_tool(name, call_id, arguments, workspace_dir)
                 round_had_success = round_had_success or not _tool_failed(output)
@@ -168,64 +165,45 @@ def implementation_stream(
                     if not applied_steps
                     else "Implementation applied some patch steps but stopped making progress on the remaining authorized steps."
                 )
-                yield start_event(f"{run_id}-no-patch-checkpoint", "user_question", _checkpoint_question(
-                    analysis.get("id", ""),
-                    message,
-                    checkpoint_reason + (
+                reason = checkpoint_reason + (
                         f" Applied step ids: {', '.join(sorted(applied_steps))}. "
                         f"Missing step ids: {', '.join(missing_steps)}."
                         if applied_steps else ""
-                    ),
-                    checkpoint_phase="implementation_no_patch_checkpoint",
-                    patch_plan=patch_plan,
-                ))
-                yield {"op": "update", "id": stage_id, "patch": {"state": "waiting", "phase": "implementation_no_patch_checkpoint"}}
+                    )
+                yield start_event(f"{run_id}-no-patch-checkpoint", "output", _checkpoint_output(reason))
+                yield {"op": "update", "id": stage_id, "patch": {"state": "failed", "phase": "implementation_no_patch_checkpoint"}}
                 return
         elif round_applied_patch:
             no_patch_rounds = 0
         if tool_error_limit and consecutive_error_rounds >= tool_error_limit:
-            yield start_event(f"{run_id}-tool-error-checkpoint", "user_question", _checkpoint_question(
-                analysis.get("id", ""),
-                message,
-                "Implementation hit repeated tool errors. The patch plan or file path likely needs correction.",
+            yield start_event(f"{run_id}-tool-error-checkpoint", "output", _checkpoint_output(
+                "Implementation hit repeated tool errors. The patch plan or file path likely needs correction."
             ))
-            yield {"op": "update", "id": stage_id, "patch": {"state": "waiting", "phase": "implementation_tool_error_checkpoint"}}
+            yield {"op": "update", "id": stage_id, "patch": {"state": "failed", "phase": "implementation_tool_error_checkpoint"}}
             return
     else:
         missing_steps = _missing_steps(required_steps, applied_steps)
         if missing_steps:
-            yield start_event(f"{run_id}-checkpoint", "user_question", _checkpoint_question(
-                analysis.get("id", ""),
-                message,
-                "Implementation reached its checkpoint before applying every authorized patch step.",
-                checkpoint_phase="implementation_checkpoint",
-                patch_plan=patch_plan,
+            yield start_event(f"{run_id}-checkpoint", "output", _checkpoint_output(
+                "Implementation reached its checkpoint before applying every authorized patch step."
             ))
-            yield {"op": "update", "id": stage_id, "patch": {"state": "waiting", "phase": "implementation_checkpoint"}}
+            yield {"op": "update", "id": stage_id, "patch": {"state": "failed", "phase": "implementation_checkpoint"}}
             return
         final_text = "Implementation patching reached its checkpoint; continuing with validation."
 
     missing_steps = _missing_steps(required_steps, applied_steps)
     if missing_steps:
-        yield start_event(f"{run_id}-checkpoint", "user_question", _checkpoint_question(
-            analysis.get("id", ""),
-            message,
-            "Implementation stopped before applying every authorized patch step.",
-            checkpoint_phase="implementation_checkpoint",
-            patch_plan=patch_plan,
+        yield start_event(f"{run_id}-checkpoint", "output", _checkpoint_output(
+            "Implementation stopped before applying every authorized patch step."
         ))
-        yield {"op": "update", "id": stage_id, "patch": {"state": "waiting", "phase": "implementation_checkpoint"}}
+        yield {"op": "update", "id": stage_id, "patch": {"state": "failed", "phase": "implementation_checkpoint"}}
         return
     condition_issues = _completion_condition_issues(patch_plan, workspace_dir, applied_steps)
     if condition_issues:
-        yield start_event(f"{run_id}-checkpoint", "user_question", _checkpoint_question(
-            analysis.get("id", ""),
-            message,
-            "Implementation stopped with unmet completion conditions:\n" + "\n".join(f"- {item}" for item in condition_issues),
-            checkpoint_phase="implementation_completion_checkpoint",
-            patch_plan=patch_plan,
+        yield start_event(f"{run_id}-checkpoint", "output", _checkpoint_output(
+            "Implementation stopped with unmet completion conditions:\n" + "\n".join(f"- {item}" for item in condition_issues)
         ))
-        yield {"op": "update", "id": stage_id, "patch": {"state": "waiting", "phase": "implementation_completion_checkpoint"}}
+        yield {"op": "update", "id": stage_id, "patch": {"state": "failed", "phase": "implementation_completion_checkpoint"}}
         return
 
     yield start_event(f"{run_id}-output", "output", {
@@ -394,7 +372,6 @@ def _means_literal_absent(text: str) -> bool:
 
 def _means_literal_present(text: str) -> bool:
     return any(term in text for term in ("包含", "contains", "include", "present"))
-
 
 def _round_indexes(limit: int, start: int = 1):
     limit = int(limit or 0)
@@ -734,15 +711,10 @@ def _validation_stream(
         if validation_result is not None:
             break
     else:
-        yield start_event(f"{run_id}-checkpoint", "user_question", _checkpoint_question(
-            analysis.get("id", ""),
-            message,
-            "Semantic validation reached its checkpoint before a clear pass/fail result.",
-            checkpoint_phase="validation_checkpoint",
-            patch_plan=patch_plan,
-            changed_files=changed_files,
+        yield start_event(f"{run_id}-checkpoint", "output", _checkpoint_output(
+            "Semantic validation reached its checkpoint before a clear pass/fail result."
         ))
-        yield {"op": "update", "id": stage_id, "patch": {"state": "waiting", "phase": "validation_checkpoint"}}
+        yield {"op": "update", "id": stage_id, "patch": {"state": "failed", "phase": "validation_checkpoint"}}
         return None
     yield start_event(f"{run_id}-output", "output", {
         "content": validation_result["summary"],
@@ -800,28 +772,8 @@ def _normalized_validation_verdict(value: str) -> str:
     } else "inconclusive"
 
 
-def _checkpoint_question(
-    analysis_id: str,
-    origin_message: str,
-    reason: str,
-    *,
-    checkpoint_phase: str = "",
-    patch_plan: dict | None = None,
-    changed_files: list[str] | None = None,
-) -> dict:
+def _checkpoint_output(reason: str) -> dict:
     return {
-        "id": f"checkpoint-{uuid4().hex[:8]}",
-        "analysis_id": analysis_id,
-        "question": reason,
-        "title": "Continue this run?",
-        "summary": reason,
-        "origin_message": origin_message,
-        "checkpoint_phase": checkpoint_phase,
-        "patch_plan": patch_plan or {},
-        "changed_files": changed_files or [],
-        "answer_status": "waiting",
-        "options": [
-            {"id": "continue", "label": "Continue", "value": "Continue from this checkpoint."},
-            {"id": "stop", "label": "Stop", "value": "Stop and summarize the current state."},
-        ],
+        "content": f"{reason}\n\nlegacy checkpoint is disabled; rerun with clearer instructions if needed.",
+        "streaming": False,
     }

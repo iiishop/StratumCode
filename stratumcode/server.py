@@ -5,7 +5,7 @@ from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-from . import app_settings, chat, lsp, mcp, model_settings, providers, sessions, subagents, workspaces
+from . import app_settings, chat, clearify_runtime, lsp, mcp, model_settings, providers, sessions, subagents, workspaces
 from .tools import registry
 
 
@@ -75,6 +75,7 @@ _ROUTES: dict[tuple[str, str], object] = {
     ("POST", "/api/workspaces/delete"):     lambda h, b: (workspaces.delete(int(b["id"]), h.workspace_dir), h._json({"ok": True})),
     ("POST", "/api/tools/run"):             lambda h, b: h._handle_run(b),
     ("POST", "/api/chat"):                  lambda h, b: h._handle_chat(b),
+    ("POST", "/api/chat/answer"):           lambda h, b: h._handle_chat_answer(b),
     ("POST", "/api/subagents/mcp-install"): lambda h, b: h._handle_mcp_install(b),
     ("POST", "/api/files/preview"):         lambda h, b: h._handle_file_preview(b),
 }
@@ -257,6 +258,16 @@ class _Handler(SimpleHTTPRequestHandler):
                 self.wfile.flush()
             except (BrokenPipeError, ConnectionResetError):
                 pass
+
+    def _handle_chat_answer(self, body: dict):
+        question_id = str(body.get("question_id") or "").strip()
+        if not question_id:
+            self._json({"error": "question_id is required"}, 400)
+            return
+        if not clearify_runtime.answer(question_id, body):
+            self._json({"error": "unknown clearify question"}, 404)
+            return
+        self._json({"ok": True})
 
     def _handle_mcp_install(self, body: dict):
         hint = body.get("hint", "")

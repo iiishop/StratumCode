@@ -41,9 +41,7 @@ class ChatRun:
     context: list[str]
     workspace_dir: str
     max_rounds: int | None = None
-    answer: dict | None = None
     analysis: dict | None = None
-    prior_analysis: dict | None = None
     session_id: int | None = None
     state: ChatState = ChatState.INITIALIZING
     session_context: dict = field(default_factory=dict)
@@ -62,7 +60,6 @@ class ChatRun:
     answered_task: dict | None = None
     error: str = ""
     transition_events: list[dict] = field(default_factory=list)
-    awaiting_user: bool = False
 
     def transition(self, next_state: ChatState, reason: str = "") -> None:
         if next_state not in _CHAT_TRANSITIONS.get(self.state, set()):
@@ -87,9 +84,7 @@ def analyzed_stream(
     context: list[str],
     workspace_dir: str,
     max_rounds: int | None = None,
-    answer: dict | None = None,
     analysis: dict | None = None,
-    prior_analysis: dict | None = None,
     session_id: int | None = None,
 ) -> Iterator[dict]:
     yield from _chat_events(ChatRun(
@@ -97,9 +92,7 @@ def analyzed_stream(
         context=context,
         workspace_dir=workspace_dir,
         max_rounds=max_rounds,
-        answer=answer,
         analysis=analysis,
-        prior_analysis=prior_analysis,
         session_id=session_id,
     ))
 
@@ -114,8 +107,6 @@ def _chat_events(run: ChatRun) -> Iterator[dict]:
             if events is not None:
                 yield from events
             yield from run.pop_transition_events()
-            if run.awaiting_user:
-                break
         except Exception as exc:
             run.error = str(exc)
             yield start_event(f"error-{uuid4().hex[:8]}", "output", {
@@ -133,8 +124,6 @@ def _chat_finish_state(run: ChatRun) -> ChatState:
 
 
 def stream(request: dict, workspace_dir: str = ".") -> Iterator[dict]:
-    from . import checkpoint
-
     message = request.get("message", "").strip()
     if not message:
         raise ValueError("message is required")
@@ -144,38 +133,12 @@ def stream(request: dict, workspace_dir: str = ".") -> Iterator[dict]:
     max_rounds = request.get("max_rounds")
     if max_rounds is not None:
         max_rounds = min(50, max(0, int(max_rounds)))
-    answer = request.get("answer") if isinstance(request.get("answer"), dict) else None
-    prior_analysis = request.get("analysis") if answer and isinstance(request.get("analysis"), dict) else None
-    analysis = prior_analysis if answer else None
-    if answer and str(answer.get("origin_message") or "").strip():
-        message = str(answer["origin_message"]).strip()
-    if answer:
-        answer = dict(answer)
-        resume_state = checkpoint.answer_resume_state(answer, ChatState, _CHAT_TRANSITIONS)
-        answer["resume_state"] = str(answer.get("resume_state") or (resume_state or "")).strip()
-        if resume_state:
-            if analysis and "analysis" not in answer:
-                answer["analysis"] = analysis
-            run = ChatRun(
-                message=message,
-                context=context,
-                workspace_dir=workspace_dir,
-                max_rounds=max_rounds,
-                answer=answer,
-                analysis=analysis,
-                prior_analysis=prior_analysis,
-                session_id=request.get("session_id"),
-                state=resume_state,
-            )
-            checkpoint.resume_from_answer(run, answer, ChatState, _CHAT_TRANSITIONS)
-            return _chat_events(run)
+    if "answer" in request:
+        raise ValueError("chat answer resume is no longer supported; use /api/chat/answer for clearify tool replies")
     return analyzed_stream(
         message,
         context,
         workspace_dir,
         max_rounds=max_rounds,
-        answer=answer,
-        analysis=analysis,
-        prior_analysis=prior_analysis,
         session_id=request.get("session_id"),
     )

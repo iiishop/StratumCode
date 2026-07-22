@@ -10,7 +10,7 @@ from itertools import count
 from pathlib import Path
 from uuid import uuid4
 
-from . import app_settings, model_settings, prompt, providers
+from . import app_settings, clearify_runtime, model_settings, prompt, providers
 from .agent.tools import openai_tool_schema
 from .agent_runtime import (
     add_usage as _add_usage,
@@ -26,7 +26,7 @@ from .agent_runtime import (
 from .tools import registry
 
 FINALIZATION_OUTPUT_TOKENS = 4096
-INVESTIGATION_TOOLS = ("glob", "grep", "read", "code_nav", "python_static_check", "websearch", "webfetch", "subagent")
+INVESTIGATION_TOOLS = ("glob", "grep", "read", "code_nav", "python_static_check", "websearch", "webfetch", "subagent", "clearify")
 MAX_HYPOTHESIS_VERIFIER_CALLS = 2
 MAX_REPEATED_TOOL_ERRORS = 3
 DISCOVERY_BATCH_OBSERVATIONS = 3
@@ -141,12 +141,11 @@ def investigation_stream(
                 "done": True,
                 "open": False,
             }}
-            yield start_event(f"{run_id}-provider-checkpoint", "user_question", _provider_checkpoint_question(
-                reason,
-                origin_message=message,
-                analysis_id=analysis.get("id", ""),
-            ))
-            yield {"op": "update", "id": stage_id, "patch": {"state": "waiting", "phase": "provider_checkpoint"}}
+            yield start_event(f"{run_id}-provider-error", "output", {
+                "content": f"Provider request failed: {reason}",
+                "streaming": False,
+            })
+            yield {"op": "update", "id": stage_id, "patch": {"state": "failed", "phase": "provider_error"}}
             return
         if usage := _usage_delta(pricing_rules, assistant.pop("_usage", {})):
             _add_usage(usage_total, usage)
@@ -247,6 +246,35 @@ def investigation_stream(
                         "content": json.dumps(final, ensure_ascii=False),
                     })
                     break
+                if name == "clearify":
+                    _validate_tool_contract(
+                        name,
+                        target_unknown_ids=_target_unknown_ids(arguments),
+                        reason=str(arguments.get("reason") or "").strip(),
+                        orientation=bool(arguments.get("orientation", False)),
+                        analysis=analysis,
+                    )
+                    question_id = clearify_runtime.create_pending()
+                    yield start_event(question_id, "user_question", _clearify_question(
+                        arguments,
+                        question_id=question_id,
+                        analysis=analysis,
+                    ))
+                    output = _clearify_tool_result(clearify_runtime.wait(question_id))
+                    yield start_event(call_id, "tool", {
+                        "name": name,
+                        "description": "Ask the user for clarification",
+                        "status": "done",
+                        "open": False,
+                        "input": json.dumps(arguments, ensure_ascii=False, indent=2),
+                        "output": output,
+                    })
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": call_id,
+                        "content": output,
+                    })
+                    continue
                 if _is_hypothesis_verifier_call(name, arguments):
                     if hypothesis_verifier_calls >= MAX_HYPOTHESIS_VERIFIER_CALLS:
                         raise ValueError(
@@ -370,7 +398,15 @@ def investigation_stream(
             "items": final["task_updates"],
         })
     if step["next_step"] == "ask_user":
-        yield start_event(f"{run_id}-user-question", "user_question", _user_question(final, step, message, analysis.get("id", "")))
+        yield start_event(f"{run_id}-legacy-question", "output", {
+            "content": "Investigation requested legacy checkpoint. The model must call the clearify tool instead.",
+            "streaming": False,
+        })
+        final["step_result"] = {
+            **step,
+            "next_step": "failed",
+            "continue_reason": "Legacy checkpoint is disabled; clearify must be used as a tool.",
+        }
         yield {"op": "done", "investigation": final}
         return
     yield start_event(f"{run_id}-output", "output", {
@@ -1023,6 +1059,60 @@ def _dedupe_strings(values: list[str]) -> list[str]:
         seen.add(text)
         result.append(text)
     return result
+
+
+def _clearify_question(
+    arguments: dict,
+    *,
+    question_id: str,
+    analysis: dict | None,
+) -> dict:
+    target_ids = _target_unknown_ids(arguments)
+    question = str(arguments.get("question") or "").strip()
+    if not question:
+        raise ValueError("clearify requires question")
+    options = _clearify_options(arguments.get("options"))
+    return {
+        "id": question_id,
+        "question_id": question_id,
+        "analysis_id": (analysis or {}).get("id", ""),
+        "unknown_id": target_ids[0] if target_ids else "",
+        "question": question,
+        "options": options[:3],
+        "origin_message": (analysis or {}).get("origin_message", ""),
+        "clearify_tool": True,
+        "tool_name": "clearify",
+    }
+
+
+def _clearify_options(raw_options) -> list[dict]:
+    if not isinstance(raw_options, list) or len(raw_options) != 3:
+        raise ValueError("clearify requires exactly three options")
+    options = []
+    for index, raw in enumerate(raw_options, start=1):
+        if not isinstance(raw, dict):
+            raise ValueError("clearify options must be objects")
+        label = str(raw.get("label") or raw.get("value") or "").strip()
+        value = str(raw.get("value") or label).strip()
+        if not label or not value:
+            raise ValueError("clearify option label and value are required")
+        option = dict(raw)
+        option["id"] = str(option.get("id") or f"option_{index}").strip()
+        option["label"] = label
+        option["value"] = value
+        options.append(option)
+    return options
+
+
+def _clearify_tool_result(answer: dict | None) -> str:
+    answer = answer or {}
+    response = str(answer.get("response") or answer.get("text") or "").strip()
+    return json.dumps({
+        "question": answer.get("question") or "",
+        "selected_option_id": answer.get("selected_option_id") or "",
+        "selected_option_label": answer.get("selected_option_label") or "",
+        "answer": response,
+    }, ensure_ascii=False)
 
 
 def _run_tool_stream(name: str, call_id: str, arguments: dict, workspace_dir: str, analysis: dict | None = None) -> Iterator[dict]:
@@ -1826,7 +1916,6 @@ def _looks_like_question(value: str) -> bool:
     text = str(value or "")
     return "?" in text or "？" in text
 
-
 def _merge_unknowns(items: list[dict]) -> list[dict]:
     merged = {}
     by_question = {}
@@ -2163,188 +2252,6 @@ def _wants_implementation(analysis: dict, message: str = "") -> bool:
         "create", "add", "implement", "change", "update", "adjust", "make", "set", "do not", "don't",
     )
     return any(word in lowered for word in keywords)
-
-
-def _provider_checkpoint_question(reason: str, *, origin_message: str = "", analysis_id: str = "") -> dict:
-    return {
-        "id": f"provider-{uuid4().hex[:8]}",
-        "analysis_id": analysis_id,
-        "question": "Provider request failed during investigation. Continue this run?",
-        "origin_message": origin_message,
-        "reason": reason,
-        "why_it_matters": "The model provider did not return a usable investigation response.",
-        "blocks_next_step": "investigation",
-        "unknown_id": "",
-        "linked_unknown": {},
-        "options": [
-            {"id": "continue", "label": "Continue", "value": "Retry the investigation from this checkpoint."},
-            {"id": "stop", "label": "Stop", "value": "Stop and keep the current state."},
-        ],
-        "custom_allowed": False,
-        "checkpoint_phase": "investigation_provider_checkpoint",
-    }
-
-
-def _user_question(final: dict, step: dict, origin_message: str = "", analysis_id: str = "") -> dict:
-    unknown = _best_ask_user_unknown(final)
-    unknown_id = (unknown or {}).get("id", "")
-    question = _display_question_for_unknown(unknown, final)
-    if not question or question == (unknown or {}).get("id"):
-        question = "请明确这个实现决策？"
-    if _is_placeholder_question(question, unknown_id):
-        fallback_questions = final.get("open_questions") or [step["continue_reason"]]
-        question = next(
-            (
-                str(item).strip()
-                for item in fallback_questions
-                if not _is_placeholder_question(str(item), unknown_id)
-            ),
-            "",
-        )
-    if _is_placeholder_question(question, unknown_id):
-        question = "\u8bf7\u660e\u786e\u4e0b\u9762\u8fd9\u4e2a\u5b9e\u73b0\u51b3\u7b56\uff1f"
-    options = _question_options(question)
-    reason = (unknown or {}).get("why") or ""
-    return {
-        "id": unknown_id or "question",
-        "analysis_id": analysis_id,
-        "question": question,
-        "origin_message": origin_message,
-        "reason": reason,
-        "why_it_matters": (
-            app_settings.text("resolves_unknown", id=unknown_id)
-            if unknown_id
-            else app_settings.text("resolves_open")
-        ),
-        "blocks_next_step": "patch_planning",
-        "target_unknown_ids": [unknown_id] if unknown_id else list(step.get("target_unknown_ids") or []),
-        "unknown_id": unknown_id,
-        "linked_unknown": unknown or {},
-        "related_beliefs": _related_dict_items(question, final.get("beliefs") or [], ("statement", "status"), limit=3),
-        "related_open_questions": _related_text_items(question, final.get("open_questions") or [], limit=3),
-        "patch_planning_context_refs": _related_text_items(
-            question,
-            final.get("patch_planning_context") or [],
-            limit=3,
-            fallback=True,
-        ),
-        "options": options,
-        "custom_allowed": True,
-    }
-
-
-def _related_dict_items(question: str, items: list, fields: tuple[str, ...], *, limit: int) -> list[dict]:
-    scored: list[tuple[int, int, dict]] = []
-    q_tokens = _tokens(question)
-    for index, item in enumerate(items):
-        if not isinstance(item, dict):
-            continue
-        haystack = " ".join(str(item.get(field) or "") for field in fields)
-        score = len(q_tokens & _tokens(haystack))
-        if score:
-            scored.append((score, -index, item))
-    scored.sort(reverse=True)
-    return [item for _, _, item in scored[:limit]]
-
-
-def _related_text_items(question: str, items: list, *, limit: int, fallback: bool = False) -> list[str]:
-    q_tokens = _tokens(question)
-    scored: list[tuple[int, int, str]] = []
-    normalized: list[str] = []
-    current = " ".join(str(question or "").split()).casefold()
-    for index, item in enumerate(items):
-        text = str(item).strip()
-        if not text:
-            continue
-        if " ".join(text.split()).casefold() == current:
-            continue
-        normalized.append(text)
-        score = len(q_tokens & _tokens(text))
-        if score:
-            scored.append((score, -index, text))
-    scored.sort(reverse=True)
-    if scored:
-        return [item for _, _, item in scored[:limit]]
-    return normalized[:limit] if fallback else []
-
-
-def _tokens(value: str) -> set[str]:
-    return set(re.findall(r"[a-z0-9_]{3,}|[\u4e00-\u9fff]{2,}", str(value).casefold()))
-
-
-def _question_options(question: str) -> list[dict]:
-    text = question.casefold()
-    if any(word in text for word in ("keyboard", "trigger", "modifier", "hotkey", "key")):
-        return [
-            {
-                "id": "any_key",
-                "label": app_settings.text("any_key_label"),
-                "value": app_settings.text("any_key_value"),
-            },
-            {
-                "id": "modifiers_only",
-                "label": app_settings.text("modifiers_only_label"),
-                "value": app_settings.text("modifiers_only_value"),
-                "recommended": True,
-            },
-            {
-                "id": "continue_research",
-                "label": app_settings.text("research_more_label"),
-                "value": app_settings.text("research_hotkey_value"),
-            },
-        ]
-    if any(word in text for word in ("pyobjc", "quartz", "applescript", "window manipulation")):
-        return [
-            {
-                "id": "pyobjc_quartz",
-                "label": app_settings.text("pyobjc_label"),
-                "value": app_settings.text("pyobjc_value"),
-                "recommended": True,
-            },
-            {
-                "id": "applescript",
-                "label": app_settings.text("applescript_label"),
-                "value": app_settings.text("applescript_value"),
-            },
-            {
-                "id": "research_more",
-                "label": app_settings.text("research_more_label"),
-                "value": app_settings.text("research_window_value"),
-            },
-        ]
-    if any(word in text for word in ("password", "hash")):
-        return [
-            {
-                "id": "hash_passwords",
-                "label": app_settings.text("hash_passwords_label"),
-                "value": app_settings.text("hash_passwords_value"),
-                "recommended": True,
-            },
-            {
-                "id": "prototype_only",
-                "label": app_settings.text("prototype_only_label"),
-                "value": app_settings.text("prototype_only_value"),
-            },
-            {
-                "id": "ask_details",
-                "label": app_settings.text("ask_details_label"),
-                "value": app_settings.text("ask_details_value"),
-            },
-        ]
-    return [
-        {
-            "id": "best_practice",
-            "label": app_settings.text("best_practice_label"),
-            "value": app_settings.text("best_practice_value", question=question),
-            "recommended": True,
-        },
-        {
-            "id": "continue_research",
-            "label": app_settings.text("research_more_label"),
-            "value": app_settings.text("research_decision_value", question=question),
-        },
-    ]
-
 
 def _unknowns(value) -> list[dict]:
     if not isinstance(value, list):

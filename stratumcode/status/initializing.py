@@ -3,7 +3,7 @@ from __future__ import annotations
 from .. import sessions
 from .investigating import prepare_investigation
 from .session_memory import _select_session_memory, _session_context
-from .user_context import _answer_context, _workspace_snapshot
+from .user_context import _workspace_snapshot
 
 
 def handle(run):
@@ -18,9 +18,6 @@ def handle(run):
     workspace_context = _workspace_snapshot(run.workspace_dir)
     if workspace_context:
         run.context = workspace_context + run.context
-    answer_context = _answer_context(run.answer)
-    if answer_context:
-        run.context = run.context + answer_context
     if run.analysis is None:
         run.transition(chat.ChatState.ANALYZING, "No prior analysis was supplied.")
     else:

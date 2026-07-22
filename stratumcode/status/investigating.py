@@ -5,7 +5,6 @@ from uuid import uuid4
 from .. import investigator
 from ..agent_runtime import start_event
 from ..status.task_analysis import IMPLEMENTATION_INTENT_TYPES, _message_requests_implementation
-from . import clearify
 from .task_contract import _analysis_context, run_request
 from .task_updates import (
     _beliefs_as_knowledge,
@@ -20,7 +19,6 @@ from .session_memory import _session_context_lines
 from .session_memory import _attach_session_relationship, _select_session_memory
 from .task_contract import _ensure_task_contract
 from .task_updates import _seed_task_updates
-from .user_context import _answered_task_update, _continuation_context, _prior_findings
 
 
 def prepare_investigation(run):
@@ -31,16 +29,12 @@ def prepare_investigation(run):
     run.selected_session_context = _select_session_memory(request, run.analysis, run.session_context)
     _attach_session_relationship(run.analysis, run.session_context.get("tasks", []))
     seeded_tasks = _seed_task_updates(run.analysis, run.session_context.get("tasks", []))
-    run.answered_task = _answered_task_update(run.analysis["id"], run.answer)
     run.analysis["task_updates"] = _normalize_task_updates(
         run.analysis["id"],
-        run.analysis.get("task_updates", []) + seeded_tasks + ([run.answered_task] if run.answered_task else []),
+        run.analysis.get("task_updates", []) + seeded_tasks,
         run.session_context.get("tasks", []),
     )
-    if not run.answer:
-        yield start_event(f"task-analysis-{uuid4().hex[:8]}", "task_analysis", run.analysis)
-    run.findings = _prior_findings(run.prior_analysis, run.answer)
-    run.continuation_context = _continuation_context(run.answer, run.selected_session_context)
+    yield start_event(f"task-analysis-{uuid4().hex[:8]}", "task_analysis", run.analysis)
 
 
 def handle(run):
@@ -71,10 +65,13 @@ def handle(run):
         if event.get("event") == "task_update":
             event["data"]["items"] = _normalize_task_updates(
                 run.analysis["id"],
-                run.analysis.get("task_updates", []) + event["data"].get("items", []) + ([run.answered_task] if run.answered_task else []),
+                run.analysis.get("task_updates", []) + event["data"].get("items", []),
                 [],
             )
             run.analysis["task_updates"] = event["data"]["items"]
+        if event.get("op") == "start" and event.get("event") == "user_question" and event.get("data", {}).get("clearify_tool"):
+            yield event
+            continue
         if event.get("op") == "start" and event.get("event") == "user_question":
             pending_question = event
             continue
@@ -82,7 +79,7 @@ def handle(run):
             last_investigation = event["investigation"]
             last_investigation["task_updates"] = _normalize_task_updates(
                 run.analysis["id"],
-                run.analysis.get("task_updates", []) + last_investigation.get("task_updates", []) + ([run.answered_task] if run.answered_task else []),
+                run.analysis.get("task_updates", []) + last_investigation.get("task_updates", []),
                 run.session_context.get("tasks", []),
             )
             last_investigation["task_updates"] = _finalize_task_statuses(last_investigation["task_updates"], last_investigation)
@@ -102,25 +99,15 @@ def handle(run):
             if pending_question:
                 run.last_investigation = last_investigation
                 yield event
-                yield clearify.ask_event(
-                    run,
-                    pending_question,
-                    resume_state=chat.ChatState.INVESTIGATING,
-                    analysis=run.analysis,
-                    investigation=last_investigation,
-                )
+                yield _unsupported_user_question(pending_question)
+                run.transition(chat.ChatState.FAILED, "Investigation emitted a legacy user question.")
                 pending_question = None
                 return
         yield event
     run.last_investigation = last_investigation
     if pending_question:
-        yield clearify.ask_event(
-            run,
-            pending_question,
-            resume_state=chat.ChatState.INVESTIGATING,
-            analysis=run.analysis,
-            investigation=run.last_investigation,
-        )
+        yield _unsupported_user_question(pending_question)
+        run.transition(chat.ChatState.FAILED, "Investigation emitted a legacy user question.")
         return
     next_step = ((run.last_investigation or {}).get("step_result") or {}).get("next_step")
     has_blocked_task = _has_task_status(run.last_investigation, "blocked")
@@ -128,13 +115,11 @@ def handle(run):
     if next_step == "done":
         run.transition(chat._chat_finish_state(run), "Investigation ended without an implementation path.")
     elif next_step == "ask_user" or has_blocked_task:
-        yield clearify.ask(
-            run,
-            _fallback_question(run, request),
-            resume_state=chat.ChatState.INVESTIGATING,
-            analysis=run.analysis,
-            investigation=run.last_investigation,
-        )
+        yield start_event(f"{run.analysis['id']}-unsupported-question", "output", {
+            "content": "Investigation requested legacy checkpoint. Use the clearify tool instead.",
+            "streaming": False,
+        })
+        run.transition(chat.ChatState.FAILED, "Legacy checkpoint is disabled.")
     elif run.last_investigation and _investigation_allows_patch(run.last_investigation) and _wants_implementation(run.analysis, request):
         run.transition(chat.ChatState.DESIGNING, "Investigation is ready for implementation planning.")
     elif next_step == "continue_investigation" or has_unknown_task:
@@ -179,6 +164,15 @@ def _has_task_status(investigation: dict | None, status: str) -> bool:
         if item.get("status") == status:
             return True
     return False
+
+
+def _unsupported_user_question(event: dict) -> dict:
+    data = event.get("data") if isinstance(event.get("data"), dict) else {}
+    question = str(data.get("question") or "A legacy user question was requested.").strip()
+    return start_event(f"{event.get('id', 'legacy-question')}-unsupported", "output", {
+        "content": f"Legacy checkpoint is disabled: {question}",
+        "streaming": False,
+    })
 
 
 def _fallback_question(run, request: str) -> dict:
