@@ -498,7 +498,7 @@ function applyTaskUpdate(update) {
     if (!text) continue
     const id = item.id || `${item.kind || 'unknown'}:${text}`
     const trace = Array.isArray(item.trace) ? item.trace : []
-    const existing = analysis.task_updates.find(row => sameTaskItem(row, { ...item, id, text, trace }))
+    const existing = analysis.task_updates.find(row => sameTaskItem(row, { ...item, id, text, trace }, analysis.id))
     const answers = mergeTaskAnswers(existing?.answers, item.answers)
     const next = {
       id: existing?.id || id,
@@ -550,27 +550,38 @@ function mergeTaskAnswers(oldAnswers, newAnswers) {
 }
 
 
-function sameTaskItem(left, right) {
+function sameTaskItem(left, right, analysisId = '') {
   if (!left || !right) return false
-  if (sameTaskId(left.id, right.id)) return true
-  if (sameTaskId(left.id, right.target_id) || sameTaskId(right.id, left.target_id)) return true
+  if (sameTaskId(left.id, right.id, analysisId)) return true
+  if (sameTaskId(left.id, right.target_id, analysisId) || sameTaskId(right.id, left.target_id, analysisId)) return true
   const leftTrace = Array.isArray(left.trace) ? left.trace : []
   const rightTrace = Array.isArray(right.trace) ? right.trace : []
-  if ([left.id, ...leftTrace].some(leftId => [right.id, ...rightTrace].some(rightId => sameTaskId(leftId, rightId)))) return true
+  if ([left.id, ...leftTrace].some(leftId => [right.id, ...rightTrace].some(rightId => sameTaskId(leftId, rightId, analysisId)))) return true
   return false
 }
 
-function sameTaskId(left, right) {
+function sameTaskId(left, right, analysisId = '') {
   left = String(left || '')
   right = String(right || '')
   if (!left || !right) return false
   if (left === right) return true
-  if (left.includes(':') && right.includes(':')) return false
+  const leftScope = taskIdScope(left)
+  const rightScope = taskIdScope(right)
+  if (leftScope && rightScope) return false
+  if (leftScope && leftScope !== analysisId) return false
+  if (rightScope && rightScope !== analysisId) return false
   return taskIdTail(left) === taskIdTail(right)
 }
 
+function taskIdScope(value) {
+  const text = String(value || '')
+  const prefix = text.includes(':') ? text.split(':')[0] : ''
+  return prefix.startsWith('task-') ? prefix : ''
+}
+
 function taskIdTail(value) {
-  return String(value || '').split(':').pop()
+  const text = String(value || '')
+  return taskIdScope(text) ? text.split(':').slice(1).join(':') : text
 }
 
 function analysisForId(id) {

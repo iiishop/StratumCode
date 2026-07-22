@@ -143,8 +143,9 @@ Principles:
   audits. Reuse previous observations before repeating discovery.
 - Use hypothesis-verifier only for an atomic inference that matters to the
   planned patch and is not directly observed.
-- Record grounded findings as concise beliefs, resolutions, answers, and task
-  updates. Then finish with patch_planning_facts when code work should continue.
+- Call record_investigation_findings with only a reason when observations should
+  be recorded. The runtime will request finding slots. Then finish with
+  patch_planning_facts when code work should continue.
 
 The runtime enforces tool targeting, allowed transitions, evidence references,
 task status semantics, and readiness for patch planning."""
@@ -183,8 +184,9 @@ INVESTIGATION_FINALIZE = """\
 
 Use only the tool results already present in this conversation.
 
-First call record_investigation_findings with concise beliefs, resolutions,
-answers, user_decisions_required, new_unknowns, and task_updates.
+First call record_investigation_findings with only a reason. The runtime will
+request beliefs, resolutions, answers, user_decisions_required, new_unknowns,
+and still-open unknowns one slot at a time. The runtime derives task_updates.
 
 Then call finish_investigation with reason, summary, recommended_next_step, and
 patch_planning_facts when code work should continue.

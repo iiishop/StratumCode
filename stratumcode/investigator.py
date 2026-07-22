@@ -23,9 +23,11 @@ from .agent_runtime import (
     tool_error_json,
     usage_delta as _usage_delta,
 )
+from .json2slots import JSONValue, json2slots
 from .tools import registry
 
 FINALIZATION_OUTPUT_TOKENS = 4096
+RECORD_SLOT_OUTPUT_TOKENS = 1536
 INVESTIGATION_TOOLS = ("glob", "grep", "read", "code_nav", "python_static_check", "websearch", "webfetch", "subagent", "clearify")
 MAX_HYPOTHESIS_VERIFIER_CALLS = 2
 MAX_REPEATED_TOOL_ERRORS = 3
@@ -206,6 +208,20 @@ def investigation_stream(
                     raise ValueError(f"tool not allowed at this investigation step: {name}")
                 if name == "record_investigation_findings":
                     _require_control_reason(arguments, name)
+                    if not _has_finding_fields(arguments):
+                        arguments = yield from _record_findings_by_slots(
+                            provider=provider,
+                            model=model,
+                            messages=messages[:-1],
+                            pricing_rules=pricing_rules,
+                            usage_total=usage_total,
+                            run_id=run_id,
+                            reason=str(arguments.get("reason") or "").strip(),
+                            analysis=analysis,
+                            observations=observations,
+                            recorded_findings=recorded_findings,
+                            pending_observation_ids=pending_observation_ids,
+                        )
                     recorded_findings = _merge_recorded_findings(recorded_findings, arguments)
                     pending_observation_ids.clear()
                     task_updates = _record_task_updates(arguments)
@@ -624,139 +640,138 @@ def _previous_context(observations: list[dict] | None, knowledge: list[dict] | N
 def _record_findings_tool_schema() -> dict:
     return openai_tool_schema(
         "record_investigation_findings",
-        "Record grounded investigation findings incrementally before finishing.",
+        "Start runtime slot-based recording of grounded findings before finishing.",
         {
             "type": "object",
             "properties": {
                 "reason": {
                     "type": "string",
-                    "description": "Visible one-sentence reason for recording these findings now.",
-                },
-                "beliefs": {
-                    "type": "array",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "id": {"type": "string"},
-                            "statement": {"type": "string"},
-                            "status": {
-                                "type": "string",
-                                "enum": [
-                                    "unverified",
-                                    "plausible",
-                                    "supported",
-                                    "strongly_supported",
-                                    "runtime_confirmed",
-                                    "contradicted",
-                                    "invalidated",
-                                ],
-                            },
-                            "evidence": {
-                                "type": "array",
-                                "items": {"type": "string"},
-                                "description": "Exact observation ids/tool_call_ids only, never file paths, line ranges, UI titles, or prose summaries.",
-                            },
-                        },
-                        "required": ["statement", "status"],
-                    },
-                },
-                "resolutions": {
-                    "type": "array",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "unknown_id": {"type": "string"},
-                            "status": {
-                                "type": "string",
-                                "enum": ["resolved", "partially_resolved", "needs_user", "deferred"],
-                            },
-                            "answer": {"type": "string"},
-                            "evidence": {
-                                "type": "array",
-                                "items": {"type": "string"},
-                                "description": "Exact observation ids/tool_call_ids only. Prefer belief_ids for summarized conclusions.",
-                            },
-                            "belief_ids": {
-                                "type": "array",
-                                "items": {"type": "string"},
-                                "description": "Ids of beliefs recorded in this or a prior record_investigation_findings call, e.g. B1.",
-                            },
-                            "reason": {"type": "string"},
-                        },
-                        "required": ["unknown_id", "status"],
-                    },
-                },
-                "new_unknowns": {
-                    "type": "array",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "id": {"type": "string"},
-                            "question": {"type": "string"},
-                            "blocking": {"type": "boolean"},
-                            "resolution_strategy": {
-                                "type": "string",
-                                "enum": ["investigate_project", "ask_user", "deferred"],
-                            },
-                        },
-                        "required": ["id", "question", "blocking", "resolution_strategy"],
-                    },
-                },
-                "user_decisions_required": {"type": "array", "items": {"type": "string"}},
-                "unknowns": {
-                    "type": "array",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "id": {"type": "string"},
-                            "question": {"type": "string"},
-                            "blocking": {"type": "boolean"},
-                            "resolution_strategy": {
-                                "type": "string",
-                                "enum": ["investigate_project", "ask_user", "deferred"],
-                            },
-                        },
-                        "required": ["id", "question", "blocking", "resolution_strategy"],
-                    },
-                },
-                "task_updates": {
-                    "type": "array",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "id": {"type": "string"},
-                            "kind": {
-                                "type": "string",
-                                "enum": ["goal", "constraint", "hypothesis", "clue", "unknown", "work"],
-                            },
-                            "text": {"type": "string"},
-                            "status": {
-                                "type": "string",
-                                "enum": ["unknown", "known", "deferred", "blocked", "added", "updated"],
-                            },
-                            "reason": {"type": "string"},
-                            "answers": {
-                                "type": "array",
-                                "items": {
-                                    "type": "object",
-                                    "properties": {
-                                        "source": {"type": "string", "enum": ["investigation", "user"]},
-                                        "text": {"type": "string"},
-                                        "reason": {"type": "string"},
-                                        "trace": {"type": "array", "items": {"type": "string"}},
-                                    },
-                                    "required": ["text"],
-                                },
-                            },
-                            "trace": {"type": "array", "items": {"type": "string"}},
-                        },
-                        "required": ["text", "status"],
-                    },
+                    "description": "One short reason why current observations should be recorded now. Do not include findings JSON; runtime will request slots.",
                 },
             },
             "required": ["reason"],
         },
     )
+
+
+def _record_findings_by_slots(
+    *,
+    provider: dict,
+    model: str,
+    messages: list[dict],
+    pricing_rules: list[dict],
+    usage_total: dict,
+    run_id: str,
+    reason: str,
+    analysis: dict,
+    observations: list[dict],
+    recorded_findings: dict,
+    pending_observation_ids: list[str],
+) -> Iterator[dict]:
+    slot_messages = list(messages)
+    slot_messages.append({"role": "user", "content": _record_slot_context(
+        reason,
+        analysis,
+        observations,
+        recorded_findings,
+        pending_observation_ids,
+    )})
+    usage_events: list[dict] = []
+
+    def ask(path: str, prompt_text: str) -> JSONValue:
+        slot_messages.append({"role": "user", "content": _record_slot_prompt(path, prompt_text)})
+        assistant = _call_model(provider, model, slot_messages, tools=[], max_tokens=RECORD_SLOT_OUTPUT_TOKENS)
+        if usage := _usage_delta(pricing_rules, assistant.pop("_usage", {})):
+            _add_usage(usage_total, usage)
+            usage_events.append(start_event(
+                f"{run_id}-usage-record-slot-{len(usage_events)}",
+                "usage",
+                {"delta": usage, "total": usage_total},
+            ))
+        raw = _content_text(assistant.get("content"))
+        slot_messages.append({"role": "assistant", "content": raw})
+        return raw
+
+    filled = json2slots(_record_slot_template(), ask)
+    for event in usage_events:
+        yield event
+    result = {"reason": reason}
+    for field in FINDING_FIELDS:
+        value = filled.get(field) if isinstance(filled, dict) else None
+        result[field] = value if isinstance(value, list) else []
+    return result
+
+
+def _record_slot_template() -> dict[str, JSONValue]:
+    return {field: "____" for field in FINDING_FIELDS if field != "task_updates"}
+
+
+def _record_slot_context(
+    reason: str,
+    analysis: dict,
+    observations: list[dict],
+    recorded_findings: dict,
+    pending_observation_ids: list[str],
+) -> str:
+    payload = {
+        "mode": "record_investigation_findings_slots",
+        "record_reason": reason,
+        "cache_policy": "Append only. Fill one slot per request. Do not return the full record JSON.",
+        "task": {
+            "intent": analysis.get("intent", {}),
+            "unknowns": analysis.get("unknowns", []),
+            "acceptance_criteria": analysis.get("acceptance_criteria", []),
+        },
+        "pending_observation_ids": list(pending_observation_ids),
+        "observations": [
+            {
+                "id": item.get("id", ""),
+                "tool": item.get("tool", ""),
+                "title": item.get("title", ""),
+                "summary": item.get("summary", ""),
+            }
+            for item in observations[-12:]
+        ],
+        "already_recorded": {
+            field: len(recorded_findings.get(field, []))
+            for field in FINDING_FIELDS
+        },
+    }
+    return json.dumps(payload, ensure_ascii=False, sort_keys=True)
+
+
+def _record_slot_prompt(path: str, prompt_text: str) -> str:
+    payload = {
+        "slot": path,
+        "instruction": prompt_text,
+        "contract": _record_slot_contract(path),
+        "empty_value": [],
+    }
+    return json.dumps(payload, ensure_ascii=False, sort_keys=True)
+
+
+def _record_slot_contract(path: str) -> str:
+    contracts = {
+        "beliefs": (
+            "Return a JSON array of objects with statement, status, evidence. "
+            "status is one of unverified, plausible, supported, strongly_supported, runtime_confirmed, contradicted, invalidated. "
+            "evidence must use exact observation ids/tool_call_ids only."
+        ),
+        "resolutions": (
+            "Return a JSON array of objects with unknown_id, status, answer, evidence, belief_ids, reason. "
+            "status is resolved, partially_resolved, needs_user, or deferred."
+        ),
+        "new_unknowns": (
+            "Return a JSON array of new unknown objects with id, question, blocking, resolution_strategy. "
+            "resolution_strategy is investigate_project, ask_user, or deferred."
+        ),
+        "unknowns": (
+            "Return a JSON array of still-open unknown objects with id, question, blocking, resolution_strategy. "
+            "Use [] if current findings resolve or defer them."
+        ),
+        "user_decisions_required": "Return a JSON array of user decision question strings.",
+    }
+    return contracts.get(path, "Return the JSON value for this slot only.")
 
 
 def _finish_tool_schema() -> dict:
@@ -859,6 +874,20 @@ def _finalize_investigation(
             try:
                 record_arguments = _tool_arguments(function.get("arguments"))
                 _require_control_reason(record_arguments, "record_investigation_findings")
+                if not _has_finding_fields(record_arguments):
+                    record_arguments = yield from _record_findings_by_slots(
+                        provider=provider,
+                        model=model,
+                        messages=messages[:-1],
+                        pricing_rules=pricing_rules,
+                        usage_total=usage_total,
+                        run_id=run_id,
+                        reason=str(record_arguments.get("reason") or "").strip(),
+                        analysis=analysis or {},
+                        observations=observations or [],
+                        recorded_findings=recorded_findings or _empty_recorded_findings(),
+                        pending_observation_ids=[],
+                    )
                 recorded_findings = _merge_recorded_findings(
                     recorded_findings or _empty_recorded_findings(),
                     record_arguments,

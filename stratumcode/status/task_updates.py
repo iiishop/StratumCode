@@ -70,12 +70,18 @@ def _task_item(item_id: str, kind: str, text: str, status: str, *, parent_id: st
 
 def _normalize_task_updates(analysis_id: str, updates: list[dict], existing: list[dict] | None = None) -> list[dict]:
     result = []
-    prior = [dict(item) for item in existing or [] if isinstance(item, dict)]
+    prior = [_normalize_existing_task(analysis_id, item) for item in existing or [] if isinstance(item, dict)]
+    prior = [item for item in prior if item]
     for raw in updates or []:
         if not isinstance(raw, dict) or not str(raw.get("text") or "").strip():
             continue
+        if goal := _prior_goal_by_id(prior, str(raw.get("id") or "")):
+            if not any(_same_task_id(item.get("id"), goal.get("id"), analysis_id) for item in result):
+                result.append(goal)
+            continue
         item = dict(raw)
         item["id"] = _scoped_id(analysis_id, str(item.get("id") or ""))
+        item["target_id"] = _scoped_id(analysis_id, str(item.get("target_id") or ""))
         item.setdefault("kind", "unknown")
         item.setdefault("status", "updated")
         item.setdefault("reason", "")
@@ -139,26 +145,57 @@ def _resolved_unknown_ids(investigation: dict) -> set[str]:
     }
 
 
+def _normalize_existing_task(analysis_id: str, item: dict) -> dict | None:
+    item_id = str(item.get("id") or "")
+    if item.get("kind") == "goal":
+        return dict(item)
+    if item_id.startswith(f"{analysis_id}:"):
+        result = dict(item)
+        result["target_id"] = _scoped_id(analysis_id, str(result.get("target_id") or ""))
+        return result
+    return None
+
+
+def _prior_goal_by_id(prior: list[dict], item_id: str) -> dict | None:
+    if not item_id:
+        return None
+    return next((dict(item) for item in prior if item.get("kind") == "goal" and item.get("id") == item_id), None)
+
+
 def _same_task(left: dict, right: dict) -> bool:
-    if _same_task_id(left.get("id"), right.get("id")):
+    analysis_id = _task_id_scope(right.get("id")) or _task_id_scope(left.get("id"))
+    if _same_task_id(left.get("id"), right.get("id"), analysis_id):
         return True
-    if _same_task_id(left.get("id"), right.get("target_id")) or _same_task_id(right.get("id"), left.get("target_id")):
+    if _same_task_id(left.get("id"), right.get("target_id"), analysis_id) or _same_task_id(right.get("id"), left.get("target_id"), analysis_id):
         return True
     return False
 
 
+def _task_id_scope(value: str | None) -> str:
+    value = str(value or "")
+    prefix = value.split(":", 1)[0] if ":" in value else ""
+    return prefix if prefix.startswith("task-") else ""
+
+
 def _task_id_tail(value: str | None) -> str:
-    return str(value or "").rsplit(":", 1)[-1]
+    value = str(value or "")
+    return value.split(":", 1)[1] if _task_id_scope(value) else value
 
 
-def _same_task_id(left: str | None, right: str | None) -> bool:
+def _same_task_id(left: str | None, right: str | None, analysis_id: str = "") -> bool:
     left = str(left or "")
     right = str(right or "")
     if not left or not right:
         return False
     if left == right:
         return True
-    if ":" in left and ":" in right:
+    left_scope = _task_id_scope(left)
+    right_scope = _task_id_scope(right)
+    if left_scope and right_scope:
+        return False
+    if left_scope and left_scope != analysis_id:
+        return False
+    if right_scope and right_scope != analysis_id:
         return False
     return _task_id_tail(left) == _task_id_tail(right)
 
@@ -198,7 +235,7 @@ def _merge_answers(old, new) -> list[dict]:
 def _scoped_id(analysis_id: str, item_id: str) -> str:
     if not item_id:
         return ""
-    return item_id if ":" in item_id else f"{analysis_id}:{item_id}"
+    return f"{analysis_id}:{_task_id_tail(item_id)}"
 
 
 def _scoped_items(analysis_id: str, items: list[dict]) -> list[dict]:

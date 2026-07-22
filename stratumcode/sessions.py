@@ -308,7 +308,9 @@ def _same_task(left: dict, right: dict) -> bool:
 
 
 def _task_id_tail(value: str | None) -> str:
-    return str(value or "").rsplit(":", 1)[-1]
+    value = str(value or "")
+    prefix = value.split(":", 1)[0] if ":" in value else ""
+    return value.split(":", 1)[1] if prefix.startswith("task-") else value
 
 
 def _same_task_id(left: str | None, right: str | None) -> bool:
@@ -318,9 +320,13 @@ def _same_task_id(left: str | None, right: str | None) -> bool:
         return False
     if left == right:
         return True
-    if ":" in left and ":" in right:
+    if _has_task_scope(left) or _has_task_scope(right):
         return False
     return _task_id_tail(left) == _task_id_tail(right)
+
+
+def _has_task_scope(value: str) -> bool:
+    return ":" in value and value.split(":", 1)[0].startswith("task-")
 
 
 def _status_rank(status: str | None) -> int:
