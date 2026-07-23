@@ -7,6 +7,7 @@ import HomePage from './components/HomePage.vue'
 import StageModelSettings from './components/providers/StageModelSettings.vue'
 import McpPage from './components/mcp/McpPage.vue'
 import LspPage from './components/lsp/LspPage.vue'
+import SkillsPage from './components/skills/SkillsPage.vue'
 import SettingsPage from './components/settings/SettingsPage.vue'
 import { useMcp } from './composables/useMcp'
 import { useLsp } from './composables/useLsp'
@@ -44,6 +45,7 @@ const currentTitle = computed(() => ({
   providers: 'Providers',
   mcp: 'MCP',
   lsp: 'LSP',
+  skills: 'Skills',
   settings: 'Settings',
 })[currentView.value] || 'Workspace')
 const workspaceLabel = computed(() => activeWorkspace.value?.name || 'No workspace')
@@ -789,6 +791,7 @@ watch(currentView, (v) => {
         @enable="lspStore.enable"
         @configure="lspStore.configure"
       />
+      <SkillsPage v-if="currentView === 'skills'" />
       <SettingsPage
         v-if="currentView === 'settings'"
         :settings="appSettings"

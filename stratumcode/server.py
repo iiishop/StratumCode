@@ -5,7 +5,7 @@ from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-from . import app_settings, chat, clearify_runtime, lsp, mcp, model_settings, providers, sessions, subagents, workspaces
+from . import app_settings, chat, clearify_runtime, lsp, mcp, model_settings, providers, sessions, skills, subagents, workspaces
 from .tools import registry
 
 
@@ -66,6 +66,7 @@ _ROUTES: dict[tuple[str, str], object] = {
         "active": workspaces.active(h.workspace_dir),
     }),
     ("GET", "/api/mcp"):             lambda h, b: (mcp.load_enabled(), h._json({"items": mcp.list_all()})),
+    ("GET", "/api/skills"):          lambda h, b: h._json(skills.list_local()),
     ("GET", "/api/files/list"):      lambda h, b: h._handle_file_list(),
     ("GET", "/api/tools"):           lambda h, b: (mcp.load_enabled(), h._json([t.to_json() for t in registry.list_all()])),
 
@@ -80,6 +81,11 @@ _ROUTES: dict[tuple[str, str], object] = {
     ("POST", "/api/chat"):                  lambda h, b: h._handle_chat(b),
     ("POST", "/api/chat/answer"):           lambda h, b: h._handle_chat_answer(b),
     ("POST", "/api/subagents/mcp-install"): lambda h, b: h._handle_mcp_install(b),
+    ("POST", "/api/skills/search"):         lambda h, b: h._json(skills.search(str(b.get("query") or ""))),
+    ("POST", "/api/skills/add"):            lambda h, b: h._json(skills.add(str(b.get("source") or ""))),
+    ("POST", "/api/skills/create"):         lambda h, b: h._json(skills.create(str(b.get("name") or ""), str(b.get("description") or ""), str(b.get("content") or ""))),
+    ("POST", "/api/skills/preview"):        lambda h, b: h._json(skills.preview(str(b.get("path") or ""), str(b.get("source") or ""))),
+    ("POST", "/api/skills/runtime/install"):lambda h, b: h._json({"runtime": skills.install_runtime()}),
     ("POST", "/api/files/preview"):         lambda h, b: h._handle_file_preview(b),
 }
 

@@ -26,6 +26,7 @@ const NAV = [
   { id: 'providers', label: 'Providers', icon: 'M4 8h16M4 13h16M4 18h16' },
   { id: 'mcp', label: 'MCP', icon: 'M8 8h8M8 12h8M8 16h8 M5 5h14v14H5z' },
   { id: 'lsp', label: 'LSP', icon: 'M8 5h8v14H8z M11 10h2 M11 14h2' },
+  { id: 'skills', label: 'Skills', icon: 'M5 5h14v5H5z M5 14h6v5H5z M15 14h4v5h-4z' },
   { id: 'settings', label: 'Settings', icon: 'M12 9a3 3 0 1 0 0 6 3 3 0 0 0 0-6z' },
 ]
 

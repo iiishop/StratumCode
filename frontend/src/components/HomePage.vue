@@ -56,6 +56,7 @@ const msgList = ref(null)
 const messages = reactive([])
 const msgRefs = reactive({})
 const isStreaming = ref(false)
+const currentChatState = ref('initializing')
 const restoring = ref(false)
 const textareaRef = ref(null)
 const copySessionStatus = ref('')
@@ -426,6 +427,7 @@ async function send(answer = null) {
   messages.push(message)
   input.value = ''
   isStreaming.value = true
+  currentChatState.value = 'initializing'
   Object.assign(agentStatus, { state: 'running', phase: 'starting', contextUsed: 0 })
   inspectorTab.value = 'evidence'
   nextTick(() => { scrollBottom(); animateLast() })
@@ -450,6 +452,26 @@ async function send(answer = null) {
     scheduleSave()
     nextTick(scrollBottom)
   }
+}
+
+function stopChat() {
+  if (!isStreaming.value) return
+  abortChat()
+  const message = [...messages].reverse().find(item => item.role === 'assistant')
+  message?.events?.push({
+    id: `${message.id}-stopped`,
+    type: 'state_transition',
+    data: reactive({
+      from_state: currentChatState.value || 'initializing',
+      to_state: 'completed',
+      reason: 'Stopped by user.',
+    }),
+    createdAt: Date.now(),
+  })
+  isStreaming.value = false
+  Object.assign(agentStatus, { state: 'idle', phase: 'completed' })
+  scheduleSave()
+  nextTick(scrollBottom)
 }
 
 async function continueAfterAnswer(answer) {
@@ -582,6 +604,8 @@ function onAgentPacket(packet, type, data) {
       model: data.model || '',
       contextLength: data.context_length || null,
     })
+  } else if (packet.op === 'start' && type === 'state_transition') {
+    currentChatState.value = data.to_state || currentChatState.value
   } else if (type === 'hypothesis' && data) {
     const run = currentEvidenceRun()
     if (!run) return
@@ -845,8 +869,19 @@ watch(() => props.activeWorkspace?.id, () => {
               <path d="M6 16H4V4h12v2"/>
             </svg>
           </button>
-          <button class="chat__send" type="button" @click="send" :disabled="!input.trim() || isStreaming" aria-label="Send message">
-            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9">
+          <button
+            class="chat__send"
+            :class="{ 'is-stop': isStreaming }"
+            type="button"
+            @click="isStreaming ? stopChat() : send()"
+            :disabled="!isStreaming && !input.trim()"
+            :aria-label="isStreaming ? 'Stop run' : 'Send message'"
+            :title="isStreaming ? 'Stop run' : 'Send message'"
+          >
+            <svg v-if="isStreaming" width="13" height="13" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+              <rect x="6" y="6" width="12" height="12" rx="2"/>
+            </svg>
+            <svg v-else width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" aria-hidden="true">
               <path d="M12 19V5M6 11l6-6 6 6"/>
             </svg>
           </button>
@@ -1166,6 +1201,11 @@ watch(() => props.activeWorkspace?.id, () => {
   transition: background 0.12s, transform 0.1s;
 }
 .chat__send:hover { background: var(--accent-text); }
+.chat__send.is-stop {
+  border-color: var(--err);
+  background: var(--err);
+}
+.chat__send.is-stop:hover { background: #b91c1c; }
 .chat__send:active { transform: scale(0.95); }
 .chat__send:disabled { opacity: 0.35; cursor: default; transform: none; }
 
@@ -1858,6 +1898,15 @@ watch(() => props.activeWorkspace?.id, () => {
 
 .chat__send:hover {
   background: var(--accent-hover);
+}
+
+.chat__send.is-stop {
+  border-color: var(--err);
+  background: var(--err);
+}
+
+.chat__send.is-stop:hover {
+  background: #b91c1c;
 }
 
 .chat__composer-meta {
