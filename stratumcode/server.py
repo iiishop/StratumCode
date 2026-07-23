@@ -84,6 +84,7 @@ _ROUTES: dict[tuple[str, str], object] = {
     ("POST", "/api/skills/search"):         lambda h, b: h._json(skills.search(str(b.get("query") or ""))),
     ("POST", "/api/skills/add"):            lambda h, b: h._json(skills.add(str(b.get("source") or ""))),
     ("POST", "/api/skills/create"):         lambda h, b: h._json(skills.create(str(b.get("name") or ""), str(b.get("description") or ""), str(b.get("content") or ""))),
+    ("POST", "/api/skills/delete"):         lambda h, b: h._json(skills.delete(str(b.get("path") or ""))),
     ("POST", "/api/skills/preview"):        lambda h, b: h._json(skills.preview(str(b.get("path") or ""), str(b.get("source") or ""))),
     ("POST", "/api/skills/runtime/install"):lambda h, b: h._json({"runtime": skills.install_runtime()}),
     ("POST", "/api/files/preview"):         lambda h, b: h._handle_file_preview(b),

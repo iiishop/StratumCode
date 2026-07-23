@@ -380,11 +380,7 @@ def _fallback_task_analysis(message: str, context: list[str]) -> dict:
         intent_type = "bugfix"
     elif _message_requests_implementation(text):
         intent_type = "feature"
-    clues = []
-    for index, item in enumerate(context or [], start=1):
-        value = str(item).strip()
-        if value:
-            clues.append({"kind": "file", "value": value, "path": value, "line": 0, "symbol": "", "note": "user-provided context"})
+    clues = _fallback_clues(context)
     return {
         "intent": {"type": intent_type, "summary": text[:160] or "Handle the user request."},
         "acceptance_criteria": [
@@ -413,6 +409,26 @@ def _fallback_task_analysis(message: str, context: list[str]) -> dict:
             }
         ],
     }
+
+
+def _fallback_clues(context: list[str]) -> list[dict]:
+    clues = []
+    for item in context or []:
+        raw = str(item)
+        value = raw.strip()
+        if value and not _workspace_snapshot_line(raw):
+            clues.append({"kind": "file", "value": value, "path": value, "line": 0, "symbol": "", "note": "user-provided context"})
+    return clues
+
+
+def _workspace_snapshot_line(value: str) -> bool:
+    raw = value.rstrip()
+    text = raw.strip()
+    if text == "Workspace snapshot:":
+        return True
+    if text.startswith(("- root:", "- visible files:", "- visible directories:", "- files:")):
+        return True
+    return raw.startswith("  - ") and bool(re.search(r"\(\d+ bytes(?: / empty)?\)$", text))
 
 
 def _validate_task_analysis(data: dict) -> dict:

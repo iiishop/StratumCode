@@ -1,5 +1,5 @@
 <script setup>
-import { computed, nextTick, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { gsap } from 'gsap'
 import { animate, stagger } from 'animejs'
 
@@ -36,6 +36,8 @@ const root = ref(null)
 const confidenceBar = ref(null)
 const workspaceName = ref('')
 const workspacePath = ref('')
+const copyTaskStatus = ref('')
+let copyTaskTimer
 const percent = computed(() => Math.round((props.run.confidence ?? .5) * 100))
 const supportCount = computed(() => props.run.evidence.filter(item => item.stance === 'support').length)
 const opposeCount = computed(() => props.run.evidence.filter(item => item.stance === 'oppose').length)
@@ -47,11 +49,25 @@ const phases = [
   ['evaluate', 'Evaluate'],
 ]
 const tabs = ['evidence', 'sessions', 'workspace', 'mcp', 'subagents', 'tasks', 'tools']
+const taskGroupKinds = ['goal', 'work', 'acceptance', 'behavior', 'boundary', 'constraint', 'hypothesis', 'unknown']
+const taskKindLabels = {
+  goal: 'Goals',
+  work: 'Work',
+  acceptance: 'Acceptance criteria',
+  behavior: 'Behavior contract',
+  boundary: 'Boundaries',
+  constraint: 'Constraints',
+  hypothesis: 'Hypotheses',
+  unknown: 'Unknowns',
+}
 const analysisRows = computed(() => {
   const analysis = props.taskAnalysis
   if (!analysis) return []
   const updates = Array.isArray(analysis.task_updates) ? analysis.task_updates : []
-  if (updates.length) return updates.filter(item => item?.text)
+  if (updates.length) return dedupeTaskRows([
+    ...updates.filter(item => item?.text && item.kind !== 'clue'),
+    ...missingUnknownRows(analysis, updates),
+  ])
   const rows = [
     { kind: 'goal', text: analysis.intent?.summary, status: 'goal' },
     ...(analysis.acceptance_criteria || []).map(item => ({ id: item.id, kind: 'acceptance', text: item.text, status: 'pending' })),
@@ -65,7 +81,7 @@ const analysisRows = computed(() => {
       answers: item.answers,
     })),
   ].filter(item => item.text)
-  return rows
+  return dedupeTaskRows(rows)
 })
 const remainingTaskCount = computed(() => analysisRows.value.filter(item =>
   ['unknown', 'blocked', 'added', 'updated'].includes(item.status || '')
@@ -84,7 +100,7 @@ const taskProgressPercent = computed(() =>
 )
 
 const groupedTasks = computed(() => {
-  const groups = { goal: [], acceptance: [], behavior: [], boundary: [], constraint: [], unknown: [] }
+  const groups = Object.fromEntries(taskGroupKinds.map(kind => [kind, []]))
   for (const row of analysisRows.value) {
     const kind = row.kind || 'unknown'
     if (groups[kind]) groups[kind].push(row)
@@ -94,7 +110,74 @@ const groupedTasks = computed(() => {
 })
 
 function taskKindLabel(kind) {
-  return { goal: 'Goals', acceptance: 'Acceptance criteria', behavior: 'Behavior contract', boundary: 'Boundaries', constraint: 'Constraints', unknown: 'Unknowns' }[kind] || kind
+  return taskKindLabels[kind] || kind
+}
+
+function dedupeTaskRows(rows) {
+  const seen = new Set()
+  return rows.filter(row => {
+    const key = row.id || `${row.kind || 'unknown'}:${row.text}`
+    if (seen.has(key)) return false
+    seen.add(key)
+    return true
+  })
+}
+
+function missingUnknownRows(analysis, rows) {
+  const present = new Set(rows.map(row => String(row.id || '').split(':').pop()))
+  return (analysis.unknowns || [])
+    .filter(item => item?.id && !present.has(item.id))
+    .map(item => ({
+      id: `${analysis.id || 'task'}:${item.id}`,
+      kind: 'unknown',
+      text: item.question || item.text,
+      status: item.blocking === false ? 'deferred' : 'unknown',
+      answers: item.answers,
+    }))
+    .filter(item => item.text)
+}
+
+function taskCopyPayload() {
+  const { task_updates, clues, ...task } = props.taskAnalysis || {}
+  return {
+    copied_at: new Date().toISOString(),
+    task,
+    rows: analysisRows.value,
+    clue_count: Array.isArray(clues) ? clues.length : 0,
+  }
+}
+
+async function writeClipboard(text) {
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(text)
+    return
+  }
+  const area = document.createElement('textarea')
+  area.value = text
+  area.setAttribute('readonly', '')
+  area.style.position = 'fixed'
+  area.style.left = '-9999px'
+  area.style.top = '0'
+  document.body.appendChild(area)
+  area.select()
+  try {
+    document.execCommand('copy')
+  } finally {
+    document.body.removeChild(area)
+  }
+}
+
+async function copyCurrentTask() {
+  if (!props.taskAnalysis) return
+  clearTimeout(copyTaskTimer)
+  try {
+    await writeClipboard(JSON.stringify(taskCopyPayload(), null, 2))
+    copyTaskStatus.value = 'Copied'
+  } catch {
+    copyTaskStatus.value = 'Copy failed'
+  } finally {
+    copyTaskTimer = setTimeout(() => { copyTaskStatus.value = '' }, 1800)
+  }
 }
 
 function taskStatusIcon(status) {
@@ -139,6 +222,7 @@ onMounted(() => {
     gsap.fromTo(root.value, { x: 24, autoAlpha: 0 }, { x: 0, autoAlpha: 1, duration: .42, ease: 'power3.out' })
   }
 })
+onUnmounted(() => clearTimeout(copyTaskTimer))
 
 watch(percent, (value, previous = 50) => {
   if (!confidenceBar.value) return
@@ -432,7 +516,15 @@ function onWsRowLeave(el) {
       </template>
 
       <template v-else-if="tab === 'tasks'">
-        <div class="inspector__section-head"><strong>Tasks</strong><span>{{ remainingTaskCount }} remaining</span></div>
+        <div class="inspector__section-head">
+          <strong>Tasks</strong>
+          <div class="inspector__section-actions">
+            <span>{{ remainingTaskCount }} remaining</span>
+            <button type="button" class="section-action" :disabled="!taskAnalysis" @click="copyCurrentTask">
+              {{ copyTaskStatus || 'Copy task' }}
+            </button>
+          </div>
+        </div>
 
         <!-- progress bar -->
         <div v-if="taskProgressTotal" class="tk-progress">
@@ -624,7 +716,9 @@ function onWsRowLeave(el) {
 .relation-list,.verdict-card { margin-top: 10px; padding: 11px; border: 1px solid #d8e2ef; border-radius: 10px; background: #fff; }.relation-list > strong { font-size: 10px; }.relation-list div { display: flex; align-items: center; gap: 6px; margin-top: 7px; font: 8.5px/1 var(--mono); }.relation-list i { flex: 1; height: 1px; color: #6658c7; background: #c9c3ef; text-align: center; }
 .verdict-card { border-top: 3px solid #1756d1; }.verdict-card.is-supported { border-top-color: #11866f; }.verdict-card.is-refuted { border-top-color: #c44747; }.verdict-card small { color: #8798ac; font: 700 8px/1 var(--mono); text-transform: uppercase; }.verdict-card strong { display: block; margin: 4px 0; font-size: 16px; text-transform: capitalize; }.verdict-card p { margin: 0; color: #566d88; font-size: 10px; line-height: 1.5; }
 .inspector__section-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin: 2px 2px 10px; }.inspector__section-head strong { font-size: 12px; }.inspector__section-head span { color: #8294aa; font: 9px/1 var(--mono); }
+.inspector__section-actions { display: flex; align-items: center; gap: 8px; }
 .section-action { height: 24px; padding: 0 8px; border: 1px solid #bfd0ea; border-radius: 6px; color: #1756d1; background: #eef4ff; font: 700 9px/1 var(--mono); cursor: pointer; }
+.section-action:disabled { opacity: .45; cursor: default; }
 /* ---- tasks redesign ---- */
 .tk-progress {
   display: flex;

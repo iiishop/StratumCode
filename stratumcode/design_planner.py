@@ -129,6 +129,7 @@ def normalize_design_plan(plan: dict, analysis: dict, investigation: dict) -> di
         "design_decisions": [dict(item) for item in plan.get("design_decisions", []) if isinstance(item, dict)],
         "runtime_warnings": list(plan.get("runtime_warnings") or []),
     }
+    _fill_empty_project_alignments(plan, investigation)
     if not _analysis_authorizes_behavior_preserving_refactor(analysis):
         return plan
     allowed_refactor_symbols = set(_structured_refactor_symbols(investigation))
@@ -213,6 +214,8 @@ def validate_design_plan(plan: dict, analysis: dict, investigation: dict) -> lis
     for item in alignments:
         if item.get("status") == "matched" and not item.get("evidence"):
             issues.append(f"matched alignment {item.get('requirement_id') or '?'} has no evidence")
+        if item.get("status") == "ambiguous" and not item.get("project_fact") and not item.get("evidence") and _project_facts(investigation):
+            issues.append(f"ambiguous alignment {item.get('requirement_id') or '?'} ignored investigation facts")
     for item in decisions:
         if not item.get("because"):
             issues.append(f"design decision {item.get('id') or item.get('decision') or '?'} has no because")
@@ -335,6 +338,46 @@ def _fill_review_variant_strategies(plan: dict, investigation: dict) -> None:
             plan.setdefault("runtime_warnings", []).append(
                 f"Runtime filled variant_strategy for review candidate in design decision {decision.get('id') or '?'}."
             )
+
+
+def _fill_empty_project_alignments(plan: dict, investigation: dict) -> None:
+    facts = _project_facts(investigation)
+    if not facts:
+        return
+    fact_text = "; ".join(item["text"] for item in facts[:3])
+    evidence = [item["id"] for item in facts]
+    for item in plan.get("project_alignment") or []:
+        if not isinstance(item, dict):
+            continue
+        if item.get("status") != "ambiguous" or item.get("project_fact") or item.get("evidence"):
+            continue
+        item["status"] = _status_from_fact_text(fact_text)
+        item["project_fact"] = fact_text
+        item["evidence"] = evidence
+        plan.setdefault("runtime_warnings", []).append(
+            f"Runtime filled project_alignment {item.get('requirement_id') or '?'} from investigation facts."
+        )
+
+
+def _project_facts(investigation: dict) -> list[dict]:
+    raw_facts = investigation.get("patch_planning_facts") or investigation.get("patch_planning_context") or []
+    facts = []
+    for index, raw in enumerate(raw_facts, start=1):
+        if isinstance(raw, dict):
+            text = str(raw.get("text") or raw.get("fact") or raw.get("statement") or "").strip()
+            fact_id = str(raw.get("id") or f"PF{index}").strip()
+        else:
+            text = str(raw or "").strip()
+            fact_id = f"PF{index}"
+        if text:
+            facts.append({"id": fact_id, "text": text})
+    return facts
+
+
+def _status_from_fact_text(text: str) -> str:
+    lower = text.casefold()
+    missing_terms = ("missing", "absent", "does not", "doesn't", "without", "lacks", "not found", "缺少", "不存在", "没有", "未找到")
+    return "missing" if any(term in lower for term in missing_terms) else "matched"
 
 
 def _analysis_text(analysis: dict) -> str:

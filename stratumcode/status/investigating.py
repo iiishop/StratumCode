@@ -220,6 +220,8 @@ def _has_task_status(investigation: dict | None, status: str) -> bool:
     for item in investigation.get("task_updates", []) if isinstance(investigation.get("task_updates"), list) else []:
         if not isinstance(item, dict):
             continue
+        if item.get("kind") == "hypothesis":
+            continue
         if item.get("status") == status:
             return True
     return False

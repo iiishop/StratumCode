@@ -41,16 +41,12 @@ def _seed_task_updates(analysis: dict, existing: list[dict] | None = None) -> li
         for index, (prefix, kind, text) in enumerate(behavior_rows, start=1)
     )
     items.extend(
-        _task_item(f"{task_id}:H{index}", "hypothesis", item["text"], "unknown", parent_id=root_goal)
+        _task_item(f"{task_id}:H{index}", "hypothesis", item["text"], "pending", parent_id=root_goal)
         for index, item in enumerate(analysis.get("hypotheses", []), start=1)
-    )
-    items.extend(
-        _task_item(f"{task_id}:L{index}", "clue", clue.get("path") or clue.get("value"), "pending", parent_id=root_goal)
-        for index, clue in enumerate(analysis.get("clues", []), start=1)
     )
     parent = f"{task_id}:work" if analysis.get("root_goal_id") else root_goal
     items.extend(
-        _task_item(f"{task_id}:{item.get('id') or f'U{index}'}", "unknown", item.get("question", ""), "unknown", parent_id=parent)
+        _task_item(f"{task_id}:{item.get('id') or f'U{index}'}", "unknown", item.get("question", ""), _unknown_task_status(item), parent_id=parent)
         for index, item in enumerate(analysis.get("unknowns", []), start=1)
     )
     return _normalize_task_updates(task_id, items, existing or [])
@@ -84,6 +80,8 @@ def _normalize_task_updates(analysis_id: str, updates: list[dict], existing: lis
     for raw in updates or []:
         if not isinstance(raw, dict) or not str(raw.get("text") or "").strip():
             continue
+        if raw.get("kind") == "clue":
+            continue
         if goal := _prior_goal_by_id(prior, str(raw.get("id") or "")):
             if not any(_same_task_id(item.get("id"), goal.get("id"), analysis_id) for item in result):
                 result.append(goal)
@@ -99,10 +97,8 @@ def _normalize_task_updates(analysis_id: str, updates: list[dict], existing: lis
         matched = next((row for row in prior + result if _same_task(row, item, analysis_id)), None)
         if matched:
             if matched.get("kind") == "goal":
-                item = dict(matched)
-                item["trace"] = [str(entry) for entry in item.get("trace", [])] if isinstance(item.get("trace"), list) else []
-                item["answers"] = _answers(item.get("answers"))
-                result.append(item)
+                if not any(_same_task(row, matched, analysis_id) for row in result):
+                    result.append(dict(matched))
                 continue
             item["id"] = matched.get("id") or item["id"]
             if _status_rank(item.get("status")) < _status_rank(matched.get("status")):

@@ -10,7 +10,7 @@ const intentType = computed(() => props.event.intent?.type || 'other')
 const constraints = computed(() => props.event.constraints || [])
 const acceptance = computed(() => props.event.acceptance_criteria || [])
 const hypotheses = computed(() => props.event.hypotheses || [])
-const clues = computed(() => props.event.clues || [])
+const clues = computed(() => (props.event.clues || []).filter(clue => !isWorkspaceSnapshotClue(clue)))
 const unknowns = computed(() => props.event.unknowns || [])
 const analyzerErrors = computed(() => props.event.analyzer_errors || [])
 const hasAnalyzerDiagnostics = computed(() => props.event.analyzer_error || analyzerErrors.value.length || props.event.recovered_from_partial_analyzer_output)
@@ -35,6 +35,14 @@ const behaviorRows = computed(() => {
 
 const showBehavior = ref(false)
 const showScope = ref(false)
+
+function isWorkspaceSnapshotClue(clue) {
+  const raw = String(clue?.path || clue?.value || '')
+  const text = raw.trim()
+  if (text === 'Workspace snapshot:') return true
+  if (text.startsWith('- root:') || text.startsWith('- visible files:') || text.startsWith('- visible directories:') || text.startsWith('- files:')) return true
+  return /^-\s+.+\s+\(\d+ bytes(?: \/ empty)?\)$/.test(text)
+}
 
 function certaintyLabel(c) {
   return { certain: 'Certain', uncertain: 'Unsure', guess: 'Guess' }[c] || c

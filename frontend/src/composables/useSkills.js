@@ -80,6 +80,21 @@ export function useSkills() {
     }
   }
 
+  async function remove(item) {
+    const path = item?.path || ''
+    busy.value = path
+    error.value = ''
+    try {
+      const data = await request('/skills/delete', { path })
+      local.value = data.items || []
+      preview.value = null
+    } catch (reason) {
+      error.value = reason.message
+    } finally {
+      busy.value = ''
+    }
+  }
+
   async function installRuntime() {
     busy.value = 'runtime'
     error.value = ''
@@ -106,7 +121,7 @@ export function useSkills() {
     }
   }
 
-  return { local, results, roots, preview, runtime, loading, searching, busy, error, load, search, add, create, installRuntime, show }
+  return { local, results, roots, preview, runtime, loading, searching, busy, error, load, search, add, create, remove, installRuntime, show }
 }
 
 function sourceFor(item) {

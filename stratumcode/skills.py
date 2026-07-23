@@ -124,6 +124,23 @@ description: {description.strip()}
     return {"skill": _skill_from_file(target / "SKILL.md", SKILL_ROOT, "stratumcode")}
 
 
+def delete(path: str) -> dict:
+    path = path.strip()
+    if not path:
+        raise ValueError("path is required")
+    skill_file = _skill_file(Path(path))
+    skill_dir = skill_file.parent.resolve()
+    root = SKILL_ROOT.resolve()
+    try:
+        skill_dir.relative_to(root)
+    except ValueError as exc:
+        raise ValueError("only StratumCode skills can be deleted") from exc
+    if skill_dir == root:
+        raise ValueError("refusing to delete skill root")
+    shutil.rmtree(skill_dir)
+    return list_local()
+
+
 def preview(path: str = "", source: str = "") -> dict:
     if path:
         skill_file = _skill_file(Path(path))
