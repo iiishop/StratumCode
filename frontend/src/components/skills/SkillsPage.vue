@@ -1,22 +1,39 @@
 <script setup>
-import { onMounted, reactive, ref } from 'vue'
-import SkillList from './SkillList.vue'
+import { computed, nextTick, onMounted, reactive, ref } from 'vue'
+import { gsap } from 'gsap'
 import { useSkills } from '../../composables/useSkills'
+import SkillEditor from './SkillEditor.vue'
 
 const store = useSkills()
 const query = ref('')
 const source = ref('')
 const showCreate = ref(false)
+const selectedKey = ref('')
 const form = reactive({ name: '', description: '', content: '' })
+
+const feedItems = computed(() => [
+  ...store.results.value.map(item => ({ ...item, feed_kind: 'remote' })),
+  ...store.local.value.map(item => ({ ...item, feed_kind: 'local' })),
+])
+
+const hasPreview = computed(() => Boolean(selectedKey.value))
+
+const previewContent = computed({
+  get: () => store.preview.value?.content || '',
+  set: value => {
+    if (store.preview.value) store.preview.value = { ...store.preview.value, content: value }
+  },
+})
 
 onMounted(store.load)
 
 function doSearch() {
-  if (query.value.trim()) store.search(query.value.trim())
+  const text = query.value.trim()
+  if (text) store.search(text)
 }
 
 async function addSource(value = source.value) {
-  const text = value.trim()
+  const text = String(value || '').trim()
   if (!text) return
   await store.add(text)
   if (text === source.value.trim()) source.value = ''
@@ -29,355 +46,275 @@ async function createSkill() {
   form.content = ''
   showCreate.value = false
 }
+
+function itemKey(item) {
+  return `${item.feed_kind}-${item.id || item.path || item.package || item.name || ''}`
+}
+
+function sourceFor(item) {
+  return item.package || item.url || item.path || ''
+}
+function sourceLabel(item) {
+  return String(item.source_label || item.source || (item.installed ? 'local' : 'remote'))
+}
+
+let _switching = false
+
+async function selectSkill(item) {
+  const sameKey = selectedKey.value === itemKey(item)
+  if (sameKey) return
+
+  // if already previewing another skill: close first
+  if (hasPreview.value && !_switching) {
+    _switching = true
+    await animatePreviewOut()
+  }
+
+  // if same skill clicked again, just close (handled by toggle — but we don't toggle here)
+  selectedKey.value = itemKey(item)
+  await store.show(item)
+  await nextTick()
+  await animatePreviewIn()
+  _switching = false
+}
+
+/* ---- GSAP ---- */
+async function animatePreviewOut() {
+  const preview = document.querySelector('.sp__preview')
+  const feed = document.querySelector('.sp__feed')
+  if (!preview) return new Promise(r => r())
+  return new Promise(resolve => {
+    gsap.to(preview, { opacity: 0, x: 24, duration: .16, ease: 'power2.in', onComplete: resolve })
+    if (feed) gsap.to(feed, { x: 0, duration: .16, ease: 'power2.in' })
+  })
+}
+
+async function animatePreviewIn() {
+  await nextTick()
+  const preview = document.querySelector('.sp__preview')
+  const feed = document.querySelector('.sp__feed')
+  if (!preview) return
+  gsap.fromTo(preview,
+    { opacity: 0, x: 24 },
+    { opacity: 1, x: 0, duration: .24, ease: 'power2.out' }
+  )
+  if (feed) {
+    gsap.to(feed, { x: -8, duration: .24, ease: 'power2.out' })
+  }
+}
 </script>
 
 <template>
-  <main class="skills-page">
-    <section class="skills-page__head">
-      <div>
-        <h1>Skills</h1>
-        <p>Search, add, and preview skills. Runtime loading is intentionally separate.</p>
+  <main class="sp" :class="{ 'sp--preview': hasPreview }">
+    <section class="sp__feed">
+      <div class="sp__head">
+        <span class="sp__title">Skills</span>
+        <div class="sp__head-actions">
+          <button type="button" class="sp__btn sp__btn--pri" @click="showCreate = true">New skill</button>
+        </div>
       </div>
-      <button type="button" @click="showCreate = true">Create skill</button>
-    </section>
 
-    <section v-if="!store.runtime.value.available" class="skills-page__runtime">
-      <div>
-        <strong>Node.js runtime missing</strong>
-        <span>Remote skill search and package install need npx. Local SKILL.md import still works.</span>
-      </div>
-      <button type="button" :disabled="store.busy.value === 'runtime'" @click="store.installRuntime">
-        {{ store.busy.value === 'runtime' ? 'Installing' : 'Install Node.js' }}
-      </button>
-    </section>
-
-    <section class="skills-page__tools">
-      <form class="skills-page__search" @submit.prevent="doSearch">
-        <input v-model="query" placeholder="Search skills..." />
-        <button type="submit" :disabled="store.searching.value || !store.runtime.value.available || !query.trim()">
-          {{ store.searching.value ? 'Searching' : 'Search' }}
+      <div v-if="!store.runtime.value.available" class="sp__runtime">
+        <span>npx unavailable — remote search disabled</span>
+        <button type="button" class="sp__btn sp__btn--pri" :disabled="store.busy.value === 'runtime'" @click="store.installRuntime">
+          {{ store.busy.value === 'runtime' ? 'Installing' : 'Install Node.js' }}
         </button>
-      </form>
-      <form class="skills-page__add" @submit.prevent="addSource()">
-        <input v-model="source" placeholder="owner/repo@skill, URL, or local SKILL.md path" />
-        <button type="submit" :disabled="!!store.busy.value || !source.trim()">
-          {{ store.busy.value ? 'Adding' : 'Add' }}
-        </button>
-      </form>
-    </section>
-
-    <p v-if="store.error.value" class="skills-page__error">{{ store.error.value }}</p>
-
-    <section class="skills-page__grid">
-      <div class="skills-page__lists">
-        <SkillList
-          title="Local skills"
-          :items="store.local.value"
-          :loading="store.loading.value"
-          empty="No local skills found."
-          @preview="store.show"
-        />
-        <SkillList
-          title="Search results"
-          :items="store.results.value"
-          :loading="store.searching.value"
-          :busy="store.busy.value"
-          empty="Search to find skills."
-          can-add
-          @preview="store.show"
-          @add="addSource"
-        />
       </div>
 
-      <aside class="skills-page__preview">
-        <header>
-          <strong>Preview</strong>
-          <span v-if="store.preview.value?.truncated">truncated</span>
-        </header>
-        <pre v-if="store.preview.value?.content">{{ store.preview.value.content }}</pre>
-        <p v-else>Select a skill to preview its SKILL.md.</p>
-      </aside>
+      <div class="sp__tools">
+        <input v-model="query" placeholder="Search skills..." @keydown.enter="doSearch" />
+        <input v-model="source" placeholder="Add URL, package, or path..." @keydown.enter="addSource()" />
+      </div>
+
+      <p v-if="store.error.value" class="sp__error">{{ store.error.value }}</p>
+
+      <div class="sp__list">
+        <button
+          v-for="item in feedItems"
+          :key="itemKey(item)"
+          type="button"
+          class="sp__item"
+          :class="{ 'is-selected': selectedKey === itemKey(item) }"
+          @click="selectSkill(item)"
+        >
+          <span class="sp__item-name">{{ item.name }}</span>
+          <span class="sp__item-desc">{{ item.description || item.package || item.path }}</span>
+          <span class="sp__item-src">{{ sourceLabel(item) }}</span>
+          <span class="sp__item-kind">{{ item.feed_kind === 'remote' ? 'remote' : '' }}</span>
+          <button
+            v-if="item.feed_kind === 'remote' && !item.installed"
+            type="button"
+            class="sp__btn sp__btn--pri sp__item-add"
+            :disabled="store.busy.value === sourceFor(item)"
+            @click.stop="addSource(sourceFor(item))"
+          >
+            {{ store.busy.value === sourceFor(item) ? 'Adding' : 'Add' }}
+          </button>
+        </button>
+        <p v-if="!feedItems.length && !store.loading.value && !store.searching.value" class="sp__empty">
+          No skills. Search the registry or create one.
+        </p>
+      </div>
     </section>
 
-    <div v-if="showCreate" class="skills-modal">
-      <form class="skills-modal__panel" @submit.prevent="createSkill">
-        <header>
-          <div>
-            <h2>Create skill</h2>
-            <p>This creates a local SKILL.md for later wiring.</p>
-          </div>
-          <button type="button" @click="showCreate = false">Close</button>
-        </header>
-        <label>
+    <!-- preview: prose mirror editor -->
+    <aside v-if="hasPreview" class="sp__preview">
+      <div class="sp__preview-head">
+        <span>Preview</span>
+        <span v-if="store.preview.value?.truncated">truncated</span>
+      </div>
+      <SkillEditor :key="selectedKey" v-model="previewContent" />
+    </aside>
+
+    <!-- create modal -->
+    <div v-if="showCreate" class="sp__modal" @click.self="showCreate = false">
+      <form class="sp__modal-panel" @submit.prevent="createSkill">
+        <div class="sp__modal-head">
+          <span>Create skill</span>
+          <button type="button" class="sp__btn" @click="showCreate = false">Cancel</button>
+        </div>
+        <label class="sp__field">
           <span>Name</span>
           <input v-model="form.name" placeholder="my-skill" required />
         </label>
-        <label>
+        <label class="sp__field">
           <span>Description</span>
           <input v-model="form.description" placeholder="What this skill helps with" />
         </label>
-        <label>
-          <span>SKILL.md</span>
-          <textarea v-model="form.content" spellcheck="false" placeholder="Leave empty to generate a minimal file."></textarea>
+        <label class="sp__field">
+          <span>Content</span>
+          <SkillEditor v-model="form.content" class="sp__create-editor" />
         </label>
-        <footer>
-          <button type="button" @click="showCreate = false">Cancel</button>
-          <button type="submit" :disabled="store.busy.value === 'create'">
+        <div class="sp__modal-actions">
+          <button type="button" class="sp__btn" @click="showCreate = false">Cancel</button>
+          <button type="submit" class="sp__btn sp__btn--pri" :disabled="store.busy.value === 'create'">
             {{ store.busy.value === 'create' ? 'Creating' : 'Create' }}
           </button>
-        </footer>
+        </div>
       </form>
     </div>
   </main>
 </template>
 
 <style scoped>
-.skills-page {
-  width: min(1180px, 100%);
+/* ---- PAGE ---- */
+.sp {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 0;
+  gap: 0;
+  width: min(1440px, 100%);
   margin: 0 auto;
-  padding: 42px 52px 72px;
+  padding: 40px 44px 72px;
+  transition: grid-template-columns 280ms ease;
 }
 
-.skills-page__head,
-.skills-page__runtime,
-.skills-page__tools,
-.skills-page__search,
-.skills-page__add,
-.skills-page__preview header,
-.skills-modal__panel header,
-.skills-modal__panel footer {
+.sp--preview {
+  grid-template-columns: minmax(220px, 1fr) minmax(480px, 2fr);
+}
+
+/* ---- HEAD ---- */
+.sp__head {
   display: flex;
-  align-items: center;
-}
-
-.skills-page__head {
+  align-items: baseline;
   justify-content: space-between;
-  gap: 20px;
   margin-bottom: 24px;
 }
-
-.skills-page__runtime {
-  justify-content: space-between;
-  gap: 16px;
-  margin-bottom: 18px;
-  padding: 11px 12px;
-  border: 1px solid var(--warn-border, #e7bf37);
-  border-radius: var(--radius);
-  background: var(--warn-bg);
-}
-
-.skills-page__runtime div {
-  display: grid;
-  gap: 3px;
-}
-
-.skills-page__runtime strong {
-  color: var(--text-h);
-  font-size: 12px;
-}
-
-.skills-page__runtime span {
-  color: var(--warn);
-  font: 10px/1.4 var(--mono);
-}
-
-.skills-page h1 {
-  margin: 0;
-  color: var(--text-h);
-  font: 570 34px/1.05 var(--heading);
-}
-
-.skills-page p {
-  margin: 7px 0 0;
+.sp__title {
+  font: 500 15px var(--mono);
   color: var(--text-muted);
-  font-size: 12px;
-  line-height: 1.55;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+}
+.sp__head-actions { display: flex; gap: 8px; }
+
+/* ---- BUTTONS ---- */
+.sp__btn {
+  height: 30px; padding: 0 11px;
+  border: 1px solid var(--border); border-radius: 6px;
+  color: var(--text-h); background: var(--bg-raised);
+  font: 600 10px/1 var(--mono); cursor: pointer; white-space: nowrap;
+  transition: border-color .12s, background .12s;
+}
+.sp__btn:hover { border-color: var(--accent-border); }
+.sp__btn--pri { border-color: var(--accent); color: #fff; background: var(--accent); }
+.sp__btn--pri:hover { background: var(--accent-hover); }
+.sp__btn:disabled { opacity: .4; cursor: default; }
+
+/* ---- RUNTIME ---- */
+.sp__runtime {
+  display: flex; align-items: center; justify-content: space-between; gap: 14px;
+  margin-bottom: 14px; padding: 9px 12px;
+  border: 1px solid var(--warn-border, #e7bf37); border-radius: 7px;
+  background: var(--warn-bg); font: 11px var(--mono); color: var(--warn);
 }
 
-.skills-page button,
-.skills-modal__panel button {
-  height: 32px;
-  padding: 0 12px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  color: var(--text-h);
-  background: #fff;
-  font: 650 10px/1 var(--mono);
-  cursor: pointer;
-  white-space: nowrap;
+/* ---- TOOLS ---- */
+.sp__tools { display: flex; gap: 8px; margin-bottom: 16px; }
+.sp__tools input {
+  flex: 1; min-width: 0; height: 34px;
+  border: 1px solid var(--border); border-radius: 6px; padding: 0 10px;
+  color: var(--text-h); background: var(--bg-raised);
+  font: 12px/1.4 var(--mono); outline: none; transition: border-color .12s;
+}
+.sp__tools input:focus { border-color: var(--accent-border); }
+.sp__tools input::placeholder { color: var(--text-muted); }
+
+/* ---- ERROR ---- */
+.sp__error {
+  margin: 0 0 10px; padding: 7px 10px;
+  border: 1px solid var(--err-border); border-radius: 6px;
+  color: var(--err); background: var(--err-bg); font-size: 11px;
 }
 
-.skills-page__head > button,
-.skills-page__runtime button,
-.skills-page__tools button,
-.skills-modal__panel footer button:last-child {
-  border-color: var(--accent);
-  color: #fff;
-  background: var(--accent);
+/* ---- LIST ---- */
+.sp__list { display: flex; flex-direction: column; }
+.sp__item {
+  display: flex; align-items: center; gap: 12px; min-height: 48px; padding: 10px 12px;
+  border: 0; border-bottom: 1px solid var(--border);
+  background: transparent; text-align: left; cursor: pointer;
+  transition: background .1s; font: inherit; color: inherit;
+}
+.sp__item:hover { background: var(--accent-bg); }
+.sp__item.is-selected { background: var(--accent-bg); border-bottom-color: var(--accent-border); }
+.sp__item-name { font: 500 13px/1.2 var(--sans); color: var(--text-h); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.sp__item-desc { flex: 1; min-width: 0; font: 11px/1.4 var(--mono); color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sp__item-src { font: 9px var(--mono); color: var(--text-muted); border: 1px solid var(--border); border-radius: 4px; padding: 2px 6px; white-space: nowrap; flex-shrink: 0; }
+.sp__item-kind { font: 9px var(--mono); color: var(--warn); flex-shrink: 0; }
+.sp__item-add { flex-shrink: 0; height: 26px; font-size: 9px; padding: 0 10px; }
+.sp__empty { padding: 32px 12px; color: var(--text-muted); font: 12px var(--mono); }
+
+/* ---- PREVIEW ---- */
+.sp__preview {
+  position: sticky; top: 24px; align-self: start;
+  padding: 0 0 0 12px; min-width: 0;
+}
+.sp__preview-head {
+  display: flex; align-items: center; justify-content: space-between;
+  margin-bottom: 10px; font: 10px var(--mono); color: var(--text-muted);
+}
+.sp__preview-head span:first-child { font-weight: 600; color: var(--text-h); }
+
+/* create modal editor */
+.sp__create-editor {
+  max-height: 320px;
 }
 
-.skills-page button:disabled,
-.skills-modal__panel button:disabled {
-  opacity: .45;
-  cursor: default;
-}
+/* ---- MODAL ---- */
+.sp__modal { position: fixed; inset: 0; display: grid; place-items: center; padding: 20px; background: rgba(15,23,42,.28); z-index: 30; }
+.sp__modal-panel { display: flex; flex-direction: column; gap: 14px; width: min(600px,100%); padding: 22px; border: 1px solid var(--border-strong); border-radius: 10px; background: var(--bg-raised); box-shadow: var(--shadow-md); }
+.sp__modal-head { display: flex; align-items: center; justify-content: space-between; font: 500 16px/1.2 var(--sans); color: var(--text-h); }
+.sp__modal-actions { display: flex; gap: 8px; justify-content: flex-end; }
+.sp__field { display: flex; flex-direction: column; gap: 5px; }
+.sp__field span { font: 10px var(--mono); color: var(--text-muted); }
+.sp__field input, .sp__field textarea { width: 100%; border: 1px solid var(--border); border-radius: 6px; padding: 8px 10px; color: var(--text-h); background: var(--bg); font: 12px/1.4 var(--mono); outline: none; }
+.sp__field input:focus, .sp__field textarea:focus { border-color: var(--accent-border); }
+.sp__field textarea { min-height: 180px; resize: vertical; }
 
-.skills-page__tools {
-  gap: 12px;
-  margin-bottom: 18px;
-}
-
-.skills-page__search,
-.skills-page__add {
-  min-width: 0;
-  flex: 1;
-  gap: 8px;
-}
-
-.skills-page input,
-.skills-modal__panel input,
-.skills-modal__panel textarea {
-  width: 100%;
-  min-width: 0;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  color: var(--text-h);
-  background: #fff;
-  font: 12px/1.4 var(--mono);
-  outline: none;
-}
-
-.skills-page input,
-.skills-modal__panel input {
-  height: 34px;
-  padding: 0 10px;
-}
-
-.skills-page input:focus,
-.skills-modal__panel input:focus,
-.skills-modal__panel textarea:focus {
-  border-color: var(--accent-border);
-  box-shadow: 0 0 0 3px var(--accent-bg);
-}
-
-.skills-page__error {
-  padding: 9px 10px;
-  border: 1px solid var(--err-border);
-  border-radius: var(--radius-sm);
-  color: var(--err);
-  background: var(--err-bg);
-}
-
-.skills-page__grid {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(320px, .75fr);
-  gap: 22px;
-}
-
-.skills-page__lists {
-  display: grid;
-  gap: 26px;
-  min-width: 0;
-}
-
-.skills-page__preview {
-  min-width: 0;
-  border-top: 1px solid var(--border-strong);
-  padding-top: 14px;
-}
-
-.skills-page__preview header {
-  justify-content: space-between;
-  margin-bottom: 10px;
-}
-
-.skills-page__preview strong {
-  color: var(--text-h);
-  font-size: 13px;
-}
-
-.skills-page__preview span {
-  color: var(--warn);
-  font: 9px/1 var(--mono);
-}
-
-.skills-page__preview pre {
-  max-height: min(68vh, 780px);
-  margin: 0;
-  overflow: auto;
-  padding: 12px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  color: var(--text-h);
-  background: #fff;
-  font: 11px/1.55 var(--mono);
-  white-space: pre-wrap;
-}
-
-.skills-modal {
-  position: fixed;
-  inset: 0;
-  display: grid;
-  place-items: center;
-  padding: 20px;
-  background: rgba(15, 23, 42, .24);
-  z-index: 20;
-}
-
-.skills-modal__panel {
-  display: grid;
-  gap: 14px;
-  width: min(720px, 100%);
-  padding: 18px;
-  border: 1px solid var(--border-strong);
-  border-radius: var(--radius);
-  background: #fff;
-  box-shadow: var(--shadow-md);
-}
-
-.skills-modal__panel header,
-.skills-modal__panel footer {
-  justify-content: space-between;
-  gap: 12px;
-}
-
-.skills-modal__panel h2 {
-  margin: 0;
-  color: var(--text-h);
-  font: 560 18px/1.2 var(--heading);
-}
-
-.skills-modal__panel label {
-  display: grid;
-  gap: 6px;
-}
-
-.skills-modal__panel label span {
-  color: var(--text-muted);
-  font-size: 10px;
-  font-weight: 550;
-}
-
-.skills-modal__panel textarea {
-  min-height: 220px;
-  padding: 10px;
-  resize: vertical;
-}
-
-@media (max-width: 900px) {
-  .skills-page {
-    padding: 30px 18px 52px;
-  }
-
-  .skills-page__tools,
-  .skills-page__runtime,
-  .skills-page__head {
-    align-items: stretch;
-    flex-direction: column;
-  }
-
-  .skills-page__grid {
-    grid-template-columns: 1fr;
-  }
+@media (max-width: 860px) {
+  .sp { grid-template-columns: 1fr; padding: 28px 18px 52px; }
+  .sp--preview { grid-template-columns: 1fr; gap: 20px; }
+  .sp__preview { position: static; padding-left: 0; }
+  .sp__tools { flex-direction: column; }
+  .sp__item { flex-wrap: wrap; }
 }
 </style>

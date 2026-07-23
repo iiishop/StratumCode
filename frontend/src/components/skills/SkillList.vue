@@ -17,7 +17,7 @@ const sorted = computed(() => {
   const items = [...props.items]
   return items.sort((a, b) => {
     if (sortKey.value === 'installed') return Number(b.installed) - Number(a.installed) || byName(a, b)
-    if (sortKey.value === 'source') return String(a.source || '').localeCompare(String(b.source || '')) || byName(a, b)
+    if (sortKey.value === 'source') return sourceLabel(a).localeCompare(sourceLabel(b)) || byName(a, b)
     return byName(a, b)
   })
 })
@@ -28,6 +28,10 @@ function byName(a, b) {
 
 function addSource(item) {
   return item.package || item.url || item.path || ''
+}
+
+function sourceLabel(item) {
+  return String(item.source_label || item.source || (item.installed ? 'local' : 'remote'))
 }
 </script>
 
@@ -55,7 +59,7 @@ function addSource(item) {
           <small>{{ item.description || item.package || item.path || item.url }}</small>
         </span>
       </button>
-      <span class="skill-item__meta">{{ item.installed ? 'local' : item.source || 'remote' }}</span>
+      <span class="skill-item__meta">{{ sourceLabel(item) }}</span>
       <button
         v-if="canAdd && !item.installed"
         type="button"

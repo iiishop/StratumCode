@@ -4,15 +4,24 @@ import os
 import re
 import shutil
 import subprocess
+from datetime import date, datetime
 from pathlib import Path
 from shutil import which
 from urllib.request import urlopen
 
+import yaml
+
 SKILL_ROOT = Path.home() / ".local" / "share" / "stratumcode" / "skills"
 SKILL_ROOTS = [
-    SKILL_ROOT,
-    Path.home() / ".codex" / "skills",
-    Path.home() / ".agents" / "skills",
+    ("stratumcode", SKILL_ROOT),
+    ("codex", Path.home() / ".codex" / "skills"),
+    ("agents", Path.home() / ".agents" / "skills"),
+    ("opencode", Path.home() / ".config" / "opencode" / "skills"),
+    ("opencode", Path.home() / ".opencode" / "skills"),
+    ("hermes", Path.home() / ".config" / "hermes" / "skills"),
+    ("hermes", Path.home() / ".hermes" / "skills"),
+    ("claude", Path.home() / ".claude" / "skills"),
+    ("cursor", Path.home() / ".cursor" / "skills"),
 ]
 _MAX_PREVIEW_BYTES = 96_000
 _SKILL_SPEC_RE = re.compile(r"(?P<package>[\w.-]+/[\w.-]+@[\w.-]+)")
@@ -21,11 +30,13 @@ _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 
 def list_local() -> dict:
     items = []
-    for root in SKILL_ROOTS:
-        items.extend(_skills_in(root))
+    for source, root in SKILL_ROOTS:
+        items.extend(_skills_in(root, source))
+    items = _dedupe_skills(items)
     return {
         "items": sorted(items, key=lambda item: item["name"].casefold()),
-        "roots": [str(root) for root in SKILL_ROOTS],
+        "roots": [str(root) for _, root in SKILL_ROOTS],
+        "root_sources": [{"source": source, "path": str(root)} for source, root in SKILL_ROOTS],
         "runtime": runtime_status(),
     }
 
@@ -62,6 +73,8 @@ def search(query: str) -> dict:
             [npx, "skills", "find", query],
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=45,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
@@ -108,7 +121,7 @@ description: {description.strip()}
 # {slug}
 """
     (target / "SKILL.md").write_text(body + ("\n" if not body.endswith("\n") else ""), encoding="utf-8")
-    return {"skill": _skill_from_file(target / "SKILL.md", SKILL_ROOT)}
+    return {"skill": _skill_from_file(target / "SKILL.md", SKILL_ROOT, "stratumcode")}
 
 
 def preview(path: str = "", source: str = "") -> dict:
@@ -133,59 +146,93 @@ def preview(path: str = "", source: str = "") -> dict:
     return {"path": source, "content": command, "truncated": False}
 
 
-def _skills_in(root: Path) -> list[dict]:
+def _skills_in(root: Path, source: str) -> list[dict]:
     if not root.is_dir():
         return []
     result = []
     for entry in root.iterdir():
         skill_file = _skill_file(entry, missing_ok=True)
         if skill_file:
-            result.append(_skill_from_file(skill_file, root))
+            result.append(_skill_from_file(skill_file, root, source))
     return result
 
 
-def _skill_from_file(skill_file: Path, root: Path) -> dict:
+def _skill_from_file(skill_file: Path, root: Path, source: str = "local") -> dict:
     meta = _read_frontmatter(skill_file)
-    name = meta.get("name") or skill_file.parent.name
+    name = str(meta.get("name") or skill_file.parent.name)
     return {
         "id": str(skill_file.parent),
         "name": name,
-        "description": meta.get("description", ""),
+        "description": str(meta.get("description") or ""),
         "path": str(skill_file.parent),
         "skill_file": str(skill_file),
         "root": str(root),
-        "source": "local",
-        "package": meta.get("package", ""),
+        "source": source,
+        "source_label": source,
+        "source_path": str(root),
+        "package": str(meta.get("package") or ""),
+        "metadata": meta,
         "installed": True,
         "updated_at": skill_file.stat().st_mtime,
     }
 
 
-def _read_frontmatter(path: Path) -> dict[str, str]:
+def _dedupe_skills(items: list[dict]) -> list[dict]:
+    seen = set()
+    result = []
+    for item in items:
+        key = _skill_key(item)
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(item)
+    return result
+
+
+def _skill_key(item: dict) -> str:
+    value = item.get("package") or item.get("name") or item.get("path") or item.get("id") or ""
+    return str(value).casefold()
+
+
+def _read_frontmatter(path: Path) -> dict:
     try:
         return _read_frontmatter_text(path.read_text(encoding="utf-8", errors="replace"))
     except OSError:
         return {}
 
 
-def _read_frontmatter_text(content: str) -> dict[str, str]:
+def _read_frontmatter_text(content: str) -> dict:
     lines = content.splitlines()
     if not lines or lines[0].strip() != "---":
         return {}
-    meta = {}
+    meta_lines = []
     for line in lines[1:]:
         if line.strip() == "---":
             break
-        key, sep, value = line.partition(":")
-        if sep:
-            meta[key.strip()] = value.strip().strip("\"'")
-    return meta
+        meta_lines.append(line)
+    try:
+        parsed = yaml.safe_load("\n".join(meta_lines)) or {}
+    except yaml.YAMLError:
+        return {}
+    return _json_safe(parsed) if isinstance(parsed, dict) else {}
 
 
-def _parse_find_output(output: str) -> list[dict]:
+def _json_safe(value):
+    if isinstance(value, dict):
+        return {str(key): _json_safe(val) for key, val in value.items()}
+    if isinstance(value, list):
+        return [_json_safe(item) for item in value]
+    if isinstance(value, tuple | set):
+        return [_json_safe(item) for item in value]
+    if isinstance(value, date | datetime):
+        return value.isoformat()
+    return value
+
+
+def _parse_find_output(output: str | None) -> list[dict]:
     items = []
     current = None
-    for raw_line in output.splitlines():
+    for raw_line in (output or "").splitlines():
         line = _ANSI_RE.sub("", raw_line).strip()
         match = _SKILL_SPEC_RE.search(line)
         if match:
@@ -199,6 +246,7 @@ def _parse_find_output(output: str) -> list[dict]:
                 "description": "",
                 "package": package,
                 "source": "remote",
+                "source_label": "skills.sh",
                 "url": "",
                 "installed": False,
             }
@@ -218,6 +266,8 @@ def _add_with_cli(source: str) -> None:
         [npx, "skills", "add", source, "-g", "-y"],
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         timeout=120,
     )
     if result.returncode != 0:
@@ -302,6 +352,8 @@ def _winget_install(package_id: str, label: str) -> None:
         ],
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         timeout=600,
     )
     if result.returncode != 0:
