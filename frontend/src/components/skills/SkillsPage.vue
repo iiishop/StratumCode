@@ -57,6 +57,15 @@ function sourceFor(item) {
 function sourceLabel(item) {
   return String(item.source_label || item.source || (item.installed ? 'local' : 'remote'))
 }
+function canDelete(item) {
+  return item.feed_kind === 'local' && sourceLabel(item) === 'stratumcode'
+}
+async function deleteSkill(item) {
+  if (!window.confirm(`Delete skill "${item.name}"?`)) return
+  const key = itemKey(item)
+  await store.remove(item)
+  if (selectedKey.value === key) selectedKey.value = ''
+}
 
 let _switching = false
 
@@ -123,6 +132,11 @@ async function animatePreviewIn() {
 
       <div class="sp__tools">
         <input v-model="query" placeholder="Search skills..." @keydown.enter="doSearch" />
+        <button
+          type="button"
+          class="sp__btn sp__btn--pri"
+          @click="doSearch"
+        >Search</button>
         <input v-model="source" placeholder="Add URL, package, or path..." @keydown.enter="addSource()" />
       </div>
 
@@ -149,6 +163,15 @@ async function animatePreviewIn() {
             @click.stop="addSource(sourceFor(item))"
           >
             {{ store.busy.value === sourceFor(item) ? 'Adding' : 'Add' }}
+          </button>
+          <button
+            v-if="canDelete(item)"
+            type="button"
+            class="sp__btn sp__btn--danger sp__item-add"
+            :disabled="store.busy.value === item.path"
+            @click.stop="deleteSkill(item)"
+          >
+            {{ store.busy.value === item.path ? 'Deleting' : 'Delete' }}
           </button>
         </button>
         <p v-if="!feedItems.length && !store.loading.value && !store.searching.value" class="sp__empty">
@@ -238,6 +261,8 @@ async function animatePreviewIn() {
 .sp__btn:hover { border-color: var(--accent-border); }
 .sp__btn--pri { border-color: var(--accent); color: #fff; background: var(--accent); }
 .sp__btn--pri:hover { background: var(--accent-hover); }
+.sp__btn--danger { border-color: var(--err-border); color: var(--err); background: var(--err-bg); }
+.sp__btn--danger:hover { border-color: var(--err); }
 .sp__btn:disabled { opacity: .4; cursor: default; }
 
 /* ---- RUNTIME ---- */
