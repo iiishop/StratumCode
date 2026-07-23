@@ -7,7 +7,14 @@ from itertools import count
 
 from .. import app_settings, model_settings, prompt
 from ..agent_runtime import call_model as _runtime_call_model, content_text as _runtime_content_text
-from .task_contract import _ensure_task_contract
+from .task_contract import (
+    _acceptance_criteria,
+    _behavior_contract,
+    _ensure_task_contract,
+    _limited_unknowns,
+    _scope,
+    _string_list,
+)
 from .session_memory import _session_context_lines
 
 LOGGER = logging.getLogger(__name__)
@@ -15,20 +22,6 @@ LOGGER = logging.getLogger(__name__)
 TASK_INTENT_TYPES = {"feature", "bugfix", "refactor", "question", "investigation", "other"}
 TASK_CERTAINTIES = {"certain", "uncertain", "guess"}
 TASK_CLUE_KINDS = {"file", "line", "symbol", "route", "other"}
-TASK_UNKNOWN_TYPES = {
-    "code_fact",
-    "doc_fact",
-    "runtime_fact",
-    "product_decision",
-    "engineering_decision",
-    "risk",
-    "deferred",
-}
-TASK_UNKNOWN_TYPE_ALIASES = {
-    "codebase_fact": "code_fact",
-    "user_decision": "product_decision",
-}
-TASK_UNKNOWN_STRATEGIES = {"investigate_project", "ask_user", "deferred"}
 IMPLEMENTATION_INTENT_TYPES = {"feature", "bugfix", "refactor"}
 DEFAULT_TASK_SLOT_ATTEMPTS = 3
 
@@ -220,36 +213,25 @@ def _runtime_unknowns(data: dict, acceptance: list[dict], fallback: dict) -> lis
     for raw_item in raw[:5]:
         if isinstance(raw_item, dict):
             question = str(raw_item.get("question") or raw_item.get("text") or raw_item.get("description") or "").strip()
-            unknown_type = str(raw_item.get("type") or "code_fact").strip().casefold()
-            strategy = str(raw_item.get("resolution_strategy") or "investigate_project").strip().casefold()
-            why = str(raw_item.get("why") or raw_item.get("reason") or "").strip()
-            accepted_ids = _slot_ids(raw_item.get("acceptance_slots"), criteria_ids)
-            blocking = bool(raw_item.get("blocking", True))
+            if not question:
+                continue
+            items.append({
+                "id": f"U{len(items) + 1}",
+                "question": question,
+                "blocking": bool(raw_item.get("blocking", True)),
+                "type": str(raw_item.get("type") or "code_fact").strip().casefold(),
+                "why": str(raw_item.get("why") or raw_item.get("reason") or "").strip(),
+                "resolution_strategy": str(raw_item.get("resolution_strategy") or "investigate_project").strip().casefold(),
+                "acceptance_criteria_ids": _slot_ids(raw_item.get("acceptance_slots"), criteria_ids),
+            })
         else:
             question = str(raw_item).strip()
-            unknown_type = "code_fact"
-            strategy = "investigate_project"
-            why = ""
-            accepted_ids = criteria_ids
-            blocking = True
-        if not question:
-            continue
-        unknown_type = TASK_UNKNOWN_TYPE_ALIASES.get(unknown_type, unknown_type)
-        if unknown_type not in TASK_UNKNOWN_TYPES:
-            unknown_type = "code_fact"
-        if strategy not in TASK_UNKNOWN_STRATEGIES:
-            strategy = "investigate_project"
-        unknown_type, strategy, blocking = _normalize_unknown_policy(unknown_type, strategy, blocking)
-        items.append({
-            "id": f"U{len(items) + 1}",
-            "question": question,
-            "blocking": blocking,
-            "type": unknown_type,
-            "why": why,
-            "resolution_strategy": strategy,
-            "acceptance_criteria_ids": accepted_ids or criteria_ids,
-        })
-    return items or fallback["unknowns"]
+            if question:
+                items.append(question)
+    try:
+        return _limited_unknowns(items, acceptance) or fallback["unknowns"]
+    except ValueError:
+        return fallback["unknowns"]
 
 
 def _slot_ids(value, ids: list[str]) -> list[str]:
@@ -463,124 +445,6 @@ def _optional_field(parser, fallback):
         return parser()
     except ValueError:
         return fallback
-
-
-def _acceptance_criteria(value) -> list[dict]:
-    if value is None:
-        return []
-    if not isinstance(value, list):
-        raise ValueError("acceptance_criteria must be an array")
-    items = []
-    for index, raw in enumerate(value, start=1):
-        if isinstance(raw, dict):
-            text = str(raw.get("text") or raw.get("description") or "").strip()
-            item_id = str(raw.get("id") or f"AC{index}").strip()
-        else:
-            text = str(raw).strip()
-            item_id = f"AC{index}"
-        if text:
-            items.append({"id": item_id or f"AC{index}", "text": text})
-    return items
-
-
-def _behavior_contract(value) -> dict:
-    if value is None:
-        value = {}
-    if not isinstance(value, dict):
-        raise ValueError("behavior_contract must be an object")
-    return {
-        "inputs": _string_list(value.get("inputs"), "behavior_contract.inputs"),
-        "outputs": _string_list(value.get("outputs"), "behavior_contract.outputs"),
-        "success_behaviors": _string_list(value.get("success_behaviors"), "behavior_contract.success_behaviors"),
-        "failure_behaviors": _string_list(value.get("failure_behaviors"), "behavior_contract.failure_behaviors"),
-        "boundaries": _string_list(value.get("boundaries"), "behavior_contract.boundaries"),
-    }
-
-
-def _scope(value) -> dict:
-    if value is None:
-        value = {}
-    if not isinstance(value, dict):
-        raise ValueError("scope must be an object")
-    return {
-        "in": _string_list(value.get("in"), "scope.in"),
-        "out": _string_list(value.get("out"), "scope.out"),
-        "undecided": _string_list(value.get("undecided"), "scope.undecided"),
-    }
-
-
-def _limited_unknowns(value, criteria=None) -> list[dict]:
-    unknowns = _unknowns(value, criteria)
-    if len(unknowns) > 5:
-        raise ValueError("unknowns must contain at most 5 items")
-    return unknowns
-
-
-def _unknowns(value, criteria=None) -> list[dict]:
-    if value is None:
-        return []
-    if not isinstance(value, list):
-        raise ValueError("unknowns must be an array")
-    criteria_ids = [item["id"] for item in _acceptance_criteria(criteria)]
-    items = []
-    for index, raw in enumerate(value, start=1):
-        if isinstance(raw, dict):
-            question = str(raw.get("question") or raw.get("text") or raw.get("description") or "").strip()
-            item_id = str(raw.get("id") or f"U{index}").strip()
-            unknown_type = str(raw.get("type") or "code_fact").strip().casefold()
-            strategy = str(raw.get("resolution_strategy") or "investigate_project").strip().casefold()
-            accepted_ids = raw.get("acceptance_criteria_ids")
-            if not isinstance(accepted_ids, list):
-                accepted_ids = []
-            accepted_ids = [str(item).strip() for item in accepted_ids if str(item).strip()]
-            blocking = bool(raw.get("blocking", True))
-            why = str(raw.get("why") or raw.get("reason") or "").strip()
-        else:
-            question = str(raw).strip()
-            item_id = f"U{index}"
-            unknown_type = "code_fact"
-            strategy = "investigate_project"
-            accepted_ids = criteria_ids
-            blocking = True
-            why = ""
-        if not question:
-            continue
-        unknown_type = TASK_UNKNOWN_TYPE_ALIASES.get(unknown_type, unknown_type)
-        if unknown_type not in TASK_UNKNOWN_TYPES:
-            unknown_type = "code_fact"
-        if strategy not in TASK_UNKNOWN_STRATEGIES:
-            strategy = "investigate_project"
-        unknown_type, strategy, blocking = _normalize_unknown_policy(unknown_type, strategy, blocking)
-        if criteria_ids:
-            accepted_ids = [item for item in accepted_ids if item in criteria_ids] or criteria_ids
-        items.append({
-            "id": item_id or f"U{index}",
-            "question": question,
-            "blocking": blocking,
-            "type": unknown_type,
-            "why": why,
-            "resolution_strategy": strategy,
-            "acceptance_criteria_ids": accepted_ids,
-        })
-    return items
-
-
-def _normalize_unknown_policy(unknown_type: str, strategy: str, blocking: bool) -> tuple[str, str, bool]:
-    if unknown_type == "deferred" or strategy == "deferred" or not blocking:
-        return "deferred", "deferred", False
-    if strategy == "ask_user":
-        if unknown_type != "product_decision":
-            return unknown_type, "investigate_project", True
-        return unknown_type, strategy, True
-    return unknown_type, strategy, bool(blocking)
-
-
-def _string_list(value, field: str) -> list[str]:
-    if value is None:
-        return []
-    if not isinstance(value, list):
-        raise ValueError(f"{field} must be an array")
-    return [str(item).strip() for item in value if str(item).strip()]
 
 
 def _hypotheses(value) -> list[dict]:

@@ -276,61 +276,9 @@ def _merge_by_id(old: list[dict], new: list[dict]) -> list[dict]:
 
 
 def _merge_by_task(old: list[dict], new: list[dict]) -> list[dict]:
-    merged = [item for item in old if isinstance(item, dict)]
-    for item in new:
-        if not isinstance(item, dict) or not item.get("text"):
-            continue
-        index = next((i for i, row in enumerate(merged) if _same_task(row, item)), None)
-        if index is None:
-            merged.append(item)
-            continue
-        if merged[index].get("kind") == "goal":
-            continue
-        if _status_rank(item.get("status")) < _status_rank(merged[index].get("status")):
-            item = {**item, "status": merged[index].get("status")}
-        merged[index] = {**merged[index], **item, "id": merged[index].get("id") or item.get("id")}
-    return merged
+    from .status.task_updates import _merge_task_items
 
-
-def _same_task(left: dict, right: dict) -> bool:
-    if _same_task_id(left.get("id"), right.get("id")):
-        return True
-    if _same_task_id(left.get("id"), right.get("target_id")) or _same_task_id(right.get("id"), left.get("target_id")):
-        return True
-    left_trace = left.get("trace") if isinstance(left.get("trace"), list) else []
-    right_trace = right.get("trace") if isinstance(right.get("trace"), list) else []
-    left_ids = [left.get("id"), *left_trace]
-    right_ids = [right.get("id"), *right_trace]
-    return any(_same_task_id(left_id, right_id) for left_id in left_ids for right_id in right_ids)
-
-
-    return re.sub(r"\W+", "", re.sub(r"[（(][^）)]*[）)]", "", value or "")).casefold()
-
-
-def _task_id_tail(value: str | None) -> str:
-    value = str(value or "")
-    prefix = value.split(":", 1)[0] if ":" in value else ""
-    return value.split(":", 1)[1] if prefix.startswith("task-") else value
-
-
-def _same_task_id(left: str | None, right: str | None) -> bool:
-    left = str(left or "")
-    right = str(right or "")
-    if not left or not right:
-        return False
-    if left == right:
-        return True
-    if _has_task_scope(left) or _has_task_scope(right):
-        return False
-    return _task_id_tail(left) == _task_id_tail(right)
-
-
-def _has_task_scope(value: str) -> bool:
-    return ":" in value and value.split(":", 1)[0].startswith("task-")
-
-
-def _status_rank(status: str | None) -> int:
-    return {"unknown": 0, "pending": 0, "added": 1, "updated": 1, "deferred": 2, "blocked": 2, "active": 2, "known": 3}.get(status or "", 0)
+    return _merge_task_items(old, new)
 
 
 def _cap_observations(observations: list[dict], knowledge: list[dict]) -> list[dict]:

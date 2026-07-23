@@ -24,6 +24,8 @@ from .agent_runtime import (
     usage_delta as _usage_delta,
 )
 from .json2slots import JSONValue, json2slots
+from .status.task_contract import _unknowns as _contract_unknowns
+from .status.task_updates import _unknown_task_status
 from .tools import registry
 
 FINALIZATION_OUTPUT_TOKENS = 4096
@@ -261,6 +263,14 @@ def investigation_stream(
                         "tool_call_id": call_id,
                         "content": json.dumps(final, ensure_ascii=False),
                     })
+                    if final.get("resolution_repair"):
+                        finalization_reason = "Investigation findings need explicit resolutions before finalizing."
+                        messages.append({
+                            "role": "user",
+                            "content": _resolution_repair_prompt(final["resolution_repair"]),
+                        })
+                        final = None
+                        stop_investigation = True
                     break
                 if name == "clearify":
                     _validate_tool_contract(
@@ -703,7 +713,7 @@ def _record_findings_by_slots(
 
 
 def _record_slot_template() -> dict[str, JSONValue]:
-    return {field: "____" for field in FINDING_FIELDS if field != "task_updates"}
+    return {field: "____" for field in FINDING_FIELDS if field not in {"task_updates", "unknowns"}}
 
 
 def _record_slot_context(
@@ -764,10 +774,6 @@ def _record_slot_contract(path: str) -> str:
         "new_unknowns": (
             "Return a JSON array of new unknown objects with id, question, blocking, resolution_strategy. "
             "resolution_strategy is investigate_project, ask_user, or deferred."
-        ),
-        "unknowns": (
-            "Return a JSON array of still-open unknown objects with id, question, blocking, resolution_strategy. "
-            "Use [] if current findings resolve or defer them."
         ),
         "user_decisions_required": "Return a JSON array of user decision question strings.",
     }
@@ -962,6 +968,13 @@ def _finalize_investigation(
                     "tool_call_id": call_id,
                     "content": json.dumps(final, ensure_ascii=False),
                 })
+                if final.get("resolution_repair") and (attempts <= 0 or attempt < attempts - 1):
+                    last_error = "Investigation findings need explicit resolutions before finalizing."
+                    messages.append({
+                        "role": "user",
+                        "content": _resolution_repair_prompt(final["resolution_repair"]),
+                    })
+                    continue
                 return final
         elif content:
             last_error = "Investigation finalization must use record_investigation_findings and finish_investigation tool calls."
@@ -1507,6 +1520,92 @@ def _tool_arguments(raw: str | None) -> dict:
     return arguments
 
 
+def _resolution_repair_request(
+    arguments: dict,
+    initial_unknowns: list[dict],
+    explicit_resolutions: list[dict],
+    beliefs: list[dict],
+    patch_context: list[str],
+) -> dict | None:
+    initial_ids = [item["id"] for item in initial_unknowns if item.get("blocking")]
+    if not initial_ids:
+        return None
+    resolution_ids = {item["unknown_id"] for item in explicit_resolutions}
+    missing = [unknown_id for unknown_id in initial_ids if unknown_id not in resolution_ids]
+    if not missing:
+        return None
+    misplaced = _misplaced_resolution_ids(arguments.get("unknowns"), initial_ids)
+    if not _has_resolution_repair_signal(arguments, explicit_resolutions, beliefs, patch_context, misplaced):
+        return None
+    return {
+        "next_step": "repair_findings",
+        "missing_resolution_ids": missing,
+        "misplaced_resolution_ids": misplaced,
+        "instruction": (
+            "Reuse existing evidence. Do not call discovery tools. "
+            "Call record_investigation_findings with explicit resolutions for these ids."
+        ),
+    }
+
+
+def _has_resolution_repair_signal(
+    arguments: dict,
+    explicit_resolutions: list[dict],
+    beliefs: list[dict],
+    patch_context: list[str],
+    misplaced_resolution_ids: list[str],
+) -> bool:
+    if explicit_resolutions or beliefs or patch_context or misplaced_resolution_ids:
+        return True
+    if arguments.get("ready_for_patch_planning"):
+        return True
+    if str(arguments.get("recommended_next_step") or "").strip() == "patch_planning":
+        return True
+    if _string_list(arguments.get("user_decisions_required")):
+        return True
+    return any(
+        isinstance(item, dict)
+        and (
+            str(item.get("status") or "").strip() in {"known", "deferred", "blocked", "resolved"}
+            or bool(str(item.get("text") or "").strip())
+        )
+        for item in arguments.get("task_updates") or []
+    )
+
+
+def _misplaced_resolution_ids(value, initial_ids: list[str]) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    initial_id_set = set(initial_ids)
+    misplaced = set()
+    for raw in value:
+        if not isinstance(raw, dict):
+            continue
+        unknown_id = str(raw.get("unknown_id") or raw.get("id") or "").strip()
+        status = str(raw.get("status") or "").strip()
+        if unknown_id in initial_id_set and status in {"resolved", "known", "done", "complete", "completed"}:
+            misplaced.add(unknown_id)
+    return [unknown_id for unknown_id in initial_ids if unknown_id in misplaced]
+
+
+def _resolution_repair_prompt(repair: dict) -> str:
+    missing = ", ".join(str(item) for item in repair.get("missing_resolution_ids", []) if str(item).strip())
+    misplaced = ", ".join(str(item) for item in repair.get("misplaced_resolution_ids", []) if str(item).strip())
+    lines = [
+        "Previous finalization needs findings repair, not more investigation.",
+        f"Missing explicit resolution ids: {missing or 'none'}",
+    ]
+    if misplaced:
+        lines.append(f"These ids look like resolved answers were written into unknowns instead: {misplaced}")
+    lines.extend([
+        "Do not call discovery tools or read more files.",
+        "Call record_investigation_findings with explicit resolutions for every missing id.",
+        "Each resolution must include unknown_id, status, answer, evidence or belief_ids, and reason.",
+        "Then call finish_investigation again with the same final summary and next step.",
+    ])
+    return "\n".join(lines)
+
+
 def _finish_payload(
     arguments: dict,
     *,
@@ -1549,7 +1648,8 @@ def _finish_payload(
             for index, question in enumerate(_clean_questions(open_questions), start=1)
         ]
     beliefs = _beliefs(arguments.get("beliefs"))
-    resolutions = _resolutions(arguments.get("resolutions"))
+    explicit_resolutions = _resolutions(arguments.get("resolutions"))
+    resolutions = list(explicit_resolutions)
     resolutions = _complete_resolutions(resolutions, initial_unknowns, unknowns)
     if repair_conflicts:
         resolutions = _drop_invalid_resolution_refs(resolutions, beliefs, observations or [], repairs)
@@ -1588,10 +1688,14 @@ def _finish_payload(
         patch_context=patch_context,
     )
     ready = readiness["ready"]
+    hard_readiness_reasons = [
+        reason for reason in readiness.get("reasons", [])
+        if reason.endswith(":not_resolved") or reason.endswith(":missing_evidence")
+    ]
     if not ready and model_ready and patch_context and not any(
         item.get("blocking") and item.get("resolution_strategy") == "ask_user"
         for item in unknowns
-    ):
+    ) and not hard_readiness_reasons:
         ready = True
         readiness = {**readiness, "ready": True, "runtime_override": "patch_facts_present"}
         for item in unknowns:
@@ -1599,7 +1703,14 @@ def _finish_payload(
                 item["blocking"] = False
                 item["resolution_strategy"] = "deferred"
         repairs.append("Allowed patch planning from grounded patch facts and deferred remaining investigate_project unknowns")
-    return {
+    repair_request = _resolution_repair_request(
+        arguments,
+        initial_unknowns,
+        explicit_resolutions,
+        beliefs,
+        patch_context,
+    )
+    final = {
         "summary": str(arguments.get("summary") or "").strip(),
         "ready_for_patch_planning": ready,
         "beliefs": beliefs,
@@ -1615,6 +1726,9 @@ def _finish_payload(
         "readiness": readiness,
         "protocol_repairs": repairs,
     }
+    if repair_request:
+        final["resolution_repair"] = repair_request
+    return final
 
 
 def _empty_recorded_findings() -> dict:
@@ -1836,7 +1950,15 @@ def _runtime_readiness(
             continue
         resolution = by_id.get(item["id"])
         if not resolution or resolution.get("status") != "resolved":
-            reasons.append(f"{item['id']}:not_resolved")
+            if (
+                resolution
+                and item.get("resolution_strategy") == "investigate_project"
+                and resolution.get("answer")
+                and not (resolution.get("evidence") or resolution.get("belief_ids"))
+            ):
+                reasons.append(f"{item['id']}:missing_evidence")
+            else:
+                reasons.append(f"{item['id']}:not_resolved")
             continue
         if item.get("resolution_strategy") == "investigate_project" and not (
             resolution.get("evidence") or resolution.get("belief_ids")
@@ -2170,15 +2292,6 @@ def _task_updates(value, beliefs, unknowns: list[dict], resolutions: list[dict] 
     return updates[:8]
 
 
-def _unknown_task_status(item: dict) -> str:
-    strategy = item.get("resolution_strategy")
-    if strategy == "ask_user":
-        return "blocked"
-    if strategy == "deferred" or not item.get("blocking"):
-        return "deferred"
-    return "unknown"
-
-
 def _step_result(final: dict, *, implementation_intent: bool = True) -> dict:
     if final.get("runtime_failure"):
         return {
@@ -2285,33 +2398,10 @@ def _wants_implementation(analysis: dict, message: str = "") -> bool:
 def _unknowns(value) -> list[dict]:
     if not isinstance(value, list):
         return []
-    items = []
-    for index, raw in enumerate(value, start=1):
-        if isinstance(raw, str):
-            text = raw.strip()
-            if text:
-                items.append({
-                    "id": f"U{index}",
-                    "question": text,
-                    "blocking": True,
-                    "resolution_strategy": "investigate_project",
-                })
-            continue
-        if not isinstance(raw, dict):
-            continue
-        strategy = str(raw.get("resolution_strategy") or "").strip()
-        if strategy not in {"investigate_project", "ask_user", "deferred"}:
-            continue
-        item = {
-            "id": str(raw.get("id") or "").strip(),
-            "question": str(raw.get("question") or "").strip(),
-            "blocking": bool(raw.get("blocking")),
-            "resolution_strategy": strategy,
-            "type": str(raw.get("type") or "code_fact").strip() or "code_fact",
-        }
-        if item["id"] and item["question"]:
-            items.append(item)
-    return items
+    try:
+        return _contract_unknowns(value)
+    except ValueError:
+        return []
 
 
 def _summary(final: dict) -> str:

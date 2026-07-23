@@ -68,6 +68,15 @@ def _task_item(item_id: str, kind: str, text: str, status: str, *, parent_id: st
     }
 
 
+def _unknown_task_status(item: dict) -> str:
+    strategy = item.get("resolution_strategy")
+    if strategy == "ask_user":
+        return "blocked"
+    if strategy == "deferred" or not item.get("blocking"):
+        return "deferred"
+    return "unknown"
+
+
 def _normalize_task_updates(analysis_id: str, updates: list[dict], existing: list[dict] | None = None) -> list[dict]:
     result = []
     prior = [_normalize_existing_task(analysis_id, item) for item in existing or [] if isinstance(item, dict)]
@@ -87,7 +96,7 @@ def _normalize_task_updates(analysis_id: str, updates: list[dict], existing: lis
         item.setdefault("reason", "")
         item["trace"] = [str(entry) for entry in item.get("trace", [])] if isinstance(item.get("trace"), list) else []
         item["answers"] = _answers(item.get("answers"))
-        matched = next((row for row in prior + result if _same_task(row, item)), None)
+        matched = next((row for row in prior + result if _same_task(row, item, analysis_id)), None)
         if matched:
             if matched.get("kind") == "goal":
                 item = dict(matched)
@@ -96,11 +105,15 @@ def _normalize_task_updates(analysis_id: str, updates: list[dict], existing: lis
                 result.append(item)
                 continue
             item["id"] = matched.get("id") or item["id"]
+            if _status_rank(item.get("status")) < _status_rank(matched.get("status")):
+                item["status"] = matched.get("status")
             item["answers"] = _merge_answers(matched.get("answers"), item.get("answers"))
-        index = next((i for i, row in enumerate(result) if _same_task(row, item)), None)
+        index = next((i for i, row in enumerate(result) if _same_task(row, item, analysis_id)), None)
         if index is None:
             result.append(item)
         elif result[index].get("kind") != "goal":
+            if _status_rank(item.get("status")) < _status_rank(result[index].get("status")):
+                item["status"] = result[index].get("status")
             result[index] = {
                 **result[index],
                 **item,
@@ -108,6 +121,43 @@ def _normalize_task_updates(analysis_id: str, updates: list[dict], existing: lis
                 "answers": _merge_answers(result[index].get("answers"), item.get("answers")),
             }
     return result
+
+
+def _apply_task_updates(
+    analysis_id: str,
+    current: list[dict],
+    updates: list[dict],
+    existing: list[dict] | None = None,
+) -> dict:
+    before = [dict(item) for item in current or [] if isinstance(item, dict)]
+    items = _normalize_task_updates(analysis_id, before + list(updates or []), existing or [])
+    return {
+        "items": items,
+        "changes": _task_update_changes(before, items, analysis_id),
+    }
+
+
+def _merge_task_items(old: list[dict], new: list[dict], analysis_id: str = "") -> list[dict]:
+    merged = [dict(item) for item in old or [] if isinstance(item, dict)]
+    for raw in new or []:
+        if not isinstance(raw, dict) or not raw.get("text"):
+            continue
+        item = dict(raw)
+        index = next((i for i, row in enumerate(merged) if _same_task(row, item, analysis_id)), None)
+        if index is None:
+            merged.append(item)
+            continue
+        if merged[index].get("kind") == "goal":
+            continue
+        if _status_rank(item.get("status")) < _status_rank(merged[index].get("status")):
+            item["status"] = merged[index].get("status")
+        merged[index] = {
+            **merged[index],
+            **item,
+            "id": merged[index].get("id") or item.get("id"),
+            "answers": _merge_answers(merged[index].get("answers"), item.get("answers")),
+        }
+    return merged
 
 
 def _finalize_task_statuses(items: list[dict], investigation: dict) -> list[dict]:
@@ -162,13 +212,49 @@ def _prior_goal_by_id(prior: list[dict], item_id: str) -> dict | None:
     return next((dict(item) for item in prior if item.get("kind") == "goal" and item.get("id") == item_id), None)
 
 
-def _same_task(left: dict, right: dict) -> bool:
-    analysis_id = _task_id_scope(right.get("id")) or _task_id_scope(left.get("id"))
+def _same_task(left: dict, right: dict, analysis_id: str = "") -> bool:
+    analysis_id = analysis_id or _task_id_scope(right.get("id")) or _task_id_scope(left.get("id"))
     if _same_task_id(left.get("id"), right.get("id"), analysis_id):
         return True
     if _same_task_id(left.get("id"), right.get("target_id"), analysis_id) or _same_task_id(right.get("id"), left.get("target_id"), analysis_id):
         return True
+    left_trace = left.get("trace") if isinstance(left.get("trace"), list) else []
+    right_trace = right.get("trace") if isinstance(right.get("trace"), list) else []
+    left_ids = [left.get("id"), *left_trace]
+    right_ids = [right.get("id"), *right_trace]
+    if any(_same_task_id(left_id, right_id, analysis_id) for left_id in left_ids for right_id in right_ids):
+        return True
     return False
+
+
+def _task_update_changes(before: list[dict], after: list[dict], analysis_id: str) -> list[dict]:
+    changes = []
+    for item in after:
+        matched = next((row for row in before if _same_task(row, item, analysis_id)), None)
+        if not matched:
+            changes.append({"action": "add", "before": None, "item": item})
+            continue
+        if matched.get("status") != item.get("status"):
+            changes.append({"action": "status", "before": matched, "item": item})
+        elif _task_payload(matched) != _task_payload(item):
+            changes.append({"action": "update", "before": matched, "item": item})
+    return changes
+
+
+def _task_payload(item: dict) -> dict:
+    return {
+        "id": item.get("id"),
+        "target_id": item.get("target_id"),
+        "kind": item.get("kind"),
+        "text": item.get("text"),
+        "reason": item.get("reason"),
+        "trace": [str(entry) for entry in item.get("trace", [])] if isinstance(item.get("trace"), list) else [],
+        "answers": _answers(item.get("answers")),
+    }
+
+
+def _status_rank(status: str | None) -> int:
+    return {"unknown": 0, "pending": 0, "added": 1, "updated": 1, "deferred": 2, "blocked": 2, "active": 2, "known": 3}.get(status or "", 0)
 
 
 def _task_id_scope(value: str | None) -> str:

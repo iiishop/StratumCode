@@ -14,7 +14,7 @@ function toggleReason(key) {
 }
 
 const changes = computed(() => {
-  if (Array.isArray(props.event.changes) && props.event.changes.length) return props.event.changes
+  if (Array.isArray(props.event.changes)) return props.event.changes
   return (props.event.items || []).map(item => ({ action: 'update', item }))
 })
 
@@ -29,7 +29,7 @@ const detail = computed(() => {
     counts.value.status && `${counts.value.status} transition`,
     counts.value.update && `${counts.value.update} updated`,
   ].filter(Boolean)
-  return parts.join(' · ') || `${props.event.items?.length || 0} task items`
+  return parts.join(' · ') || `${changes.value.length} task items`
 })
 
 function actionLabel(change) {

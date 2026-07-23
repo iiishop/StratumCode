@@ -61,6 +61,13 @@ ROUND_LIMITS = {
         "description": "Model/tool rounds used by the MCP installer subagent.",
     },
 }
+TASK_LIMITS = {
+    "task_unknowns": {
+        "label": "Task unknowns",
+        "description": "Maximum unknowns allowed in task analysis. Set to 0 for unlimited.",
+        "default": 5,
+    },
+}
 TEXT = {
     "en": {
         "answer_context": "User answered a pending agent question.",
@@ -234,6 +241,27 @@ def save_round_limit(key: str, value) -> int:
     return limit
 
 
+def get_task_limit(key: str) -> int:
+    if key not in TASK_LIMITS:
+        raise ValueError(f"unknown task limit setting: {key}")
+    default = str(TASK_LIMITS[key]["default"])
+    try:
+        return max(0, int(_get(key, default)))
+    except (TypeError, ValueError):
+        return int(default)
+
+
+def save_task_limit(key: str, value) -> int:
+    if key not in TASK_LIMITS:
+        raise ValueError(f"unknown task limit setting: {key}")
+    try:
+        limit = max(0, int(value))
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{key} must be a non-negative integer") from exc
+    _save(key, str(limit))
+    return limit
+
+
 def to_json() -> dict:
     language = get_output_language()
     return {
@@ -251,6 +279,15 @@ def to_json() -> dict:
                 "value": get_round_limit(key),
             }
             for key, meta in ROUND_LIMITS.items()
+        ],
+        "task_limits": [
+            {
+                "key": key,
+                "label": meta["label"],
+                "description": meta["description"],
+                "value": get_task_limit(key),
+            }
+            for key, meta in TASK_LIMITS.items()
         ],
     }
 

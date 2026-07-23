@@ -185,8 +185,8 @@ INVESTIGATION_FINALIZE = """\
 Use only the tool results already present in this conversation.
 
 First call record_investigation_findings with only a reason. The runtime will
-request beliefs, resolutions, answers, user_decisions_required, new_unknowns,
-and still-open unknowns one slot at a time. The runtime derives task_updates.
+request beliefs, resolutions, user_decisions_required, and new_unknowns one slot
+at a time. The runtime derives task_updates and carries unresolved contract unknowns.
 
 Then call finish_investigation with reason, summary, recommended_next_step, and
 patch_planning_facts when code work should continue.

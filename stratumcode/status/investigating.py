@@ -5,8 +5,9 @@ from uuid import uuid4
 from .. import investigator
 from ..agent_runtime import start_event
 from ..status.task_analysis import IMPLEMENTATION_INTENT_TYPES, _message_requests_implementation
-from .task_contract import _analysis_context, run_request
+from .task_contract import _ensure_task_contract, run_request
 from .task_updates import (
+    _apply_task_updates,
     _beliefs_as_knowledge,
     _finalize_task_statuses,
     _investigation_continuation_findings,
@@ -17,8 +18,55 @@ from .task_updates import (
 )
 from .session_memory import _session_context_lines
 from .session_memory import _attach_session_relationship, _select_session_memory
-from .task_contract import _ensure_task_contract
 from .task_updates import _seed_task_updates
+
+
+def _analysis_context(analysis: dict) -> list[str]:
+    """把规范化后的 task analysis 渲染成 investigation 使用的上下文行。"""
+    analysis = _ensure_task_contract(analysis)
+    lines = [f"Task intent ({analysis['intent']['type']}): {analysis['intent']['summary']}"]
+    lines.extend(
+        f"Acceptance criterion {item['id']}: {item['text']}"
+        for item in analysis.get("acceptance_criteria", [])
+    )
+    behavior = analysis.get("behavior_contract", {})
+    for key, label in (
+        ("inputs", "Behavior input"),
+        ("outputs", "Behavior output"),
+        ("success_behaviors", "Success behavior"),
+        ("failure_behaviors", "Failure behavior"),
+        ("boundaries", "Boundary"),
+    ):
+        lines.extend(f"{label}: {item}" for item in behavior.get(key, []))
+    lines.extend(f"Constraint: {item}" for item in analysis["constraints"])
+    scope = analysis.get("scope", {})
+    lines.extend(f"In scope: {item}" for item in scope.get("in", []))
+    lines.extend(f"Out of scope: {item}" for item in scope.get("out", []))
+    lines.extend(f"Undecided scope: {item}" for item in scope.get("undecided", []))
+    lines.extend(
+        f"Assumption to verify ({item['certainty']}): {item['text']}"
+        for item in analysis["hypotheses"]
+    )
+    for clue in analysis["clues"]:
+        parts = [clue["kind"], clue["value"]]
+        if clue.get("path"):
+            parts.append(f"path={clue['path']}")
+        if clue.get("line"):
+            parts.append(f"line={clue['line']}")
+        if clue.get("symbol"):
+            parts.append(f"symbol={clue['symbol']}")
+        lines.append("Clue to verify: " + " ".join(str(part) for part in parts if part))
+    lines.extend(
+        "Initial unknown {id} [{type}, {strategy}, blocking={blocking}]: {question}".format(
+            id=item.get("id", ""),
+            type=item.get("type", ""),
+            strategy=item.get("resolution_strategy", ""),
+            blocking=bool(item.get("blocking")),
+            question=item.get("question", ""),
+        )
+        for item in analysis["unknowns"]
+    )
+    return lines
 
 
 def prepare_investigation(run):
@@ -63,12 +111,15 @@ def handle(run):
         previous_knowledge=previous_knowledge,
     ):
         if event.get("event") == "task_update":
-            event["data"]["items"] = _normalize_task_updates(
+            applied = _apply_task_updates(
                 run.analysis["id"],
-                run.analysis.get("task_updates", []) + event["data"].get("items", []),
+                run.analysis.get("task_updates", []),
+                event["data"].get("items", []),
                 [],
             )
-            run.analysis["task_updates"] = event["data"]["items"]
+            event["data"]["items"] = applied["items"]
+            event["data"]["changes"] = applied["changes"]
+            run.analysis["task_updates"] = applied["items"]
         if event.get("op") == "start" and event.get("event") == "user_question" and event.get("data", {}).get("clearify_tool"):
             yield event
             continue
@@ -83,6 +134,13 @@ def handle(run):
                 run.session_context.get("tasks", []),
             )
             last_investigation["task_updates"] = _finalize_task_statuses(last_investigation["task_updates"], last_investigation)
+            applied = _apply_task_updates(
+                run.analysis["id"],
+                run.analysis.get("task_updates", []),
+                last_investigation["task_updates"],
+                run.session_context.get("tasks", []),
+            )
+            last_investigation["task_updates"] = applied["items"]
             last_investigation["observations"] = _scoped_items(run.analysis["id"], last_investigation.get("observations", []))
             new_observations = [{**item, "fresh": item.get("fresh", True)} for item in last_investigation["observations"]]
             last_investigation["observations"] = new_observations
@@ -95,6 +153,7 @@ def handle(run):
             yield start_event(f"{run.analysis['id']}-task-final", "task_update", {
                 "analysis_id": run.analysis["id"],
                 "items": run.analysis["task_updates"],
+                "changes": applied["changes"],
             })
             if pending_question:
                 run.last_investigation = last_investigation

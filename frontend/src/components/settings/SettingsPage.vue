@@ -103,6 +103,34 @@ function roundLabel(value) {
           </label>
         </div>
       </div>
+
+      <div class="settings-row settings-row--stack">
+        <div>
+          <strong>Task limits</strong>
+          <span>Set any value to 0 for unlimited task analysis items.</span>
+        </div>
+        <div class="round-grid">
+          <label
+            v-for="item in settings.task_limits || []"
+            :key="item.key"
+            class="round-limit"
+          >
+            <span>
+              <strong>{{ item.label }}</strong>
+              <em>{{ item.description }}</em>
+            </span>
+            <input
+              type="number"
+              min="0"
+              step="1"
+              :value="item.value || 0"
+              :disabled="saving"
+              @change="setRoundLimit(item.key, $event.target.value)"
+            />
+            <b>{{ roundLabel(item.value) }}</b>
+          </label>
+        </div>
+      </div>
     </section>
   </main>
 </template>

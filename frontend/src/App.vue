@@ -74,7 +74,7 @@ const cardRefs = reactive({})
 const dotRefs = reactive({})
 const listRefs = reactive({})
 const toastRefs = reactive({})
-const appSettings = ref({ output_language: 'zh', languages: [], font_scale: 1.0, round_limits: [] })
+const appSettings = ref({ output_language: 'zh', languages: [], font_scale: 1.0, round_limits: [], task_limits: [] })
 const settingsSaving = ref(false)
 const fontScale = computed(() => appSettings.value.font_scale || 1)
 

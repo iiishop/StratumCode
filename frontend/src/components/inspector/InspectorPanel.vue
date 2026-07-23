@@ -51,17 +51,13 @@ const analysisRows = computed(() => {
   const analysis = props.taskAnalysis
   if (!analysis) return []
   const updates = Array.isArray(analysis.task_updates) ? analysis.task_updates : []
-  const updateFor = (row) => bestTaskUpdate(updates.filter(item => sameTaskItem(item, row, analysis.id)))
-  const withUpdate = (row) => {
-    const update = updateFor(row)
-    return update ? { ...row, ...update, kind: update.kind || row.kind } : row
-  }
+  if (updates.length) return updates.filter(item => item?.text)
   const rows = [
-    withUpdate({ kind: 'goal', text: analysis.intent?.summary, status: 'goal' }),
-    ...(analysis.acceptance_criteria || []).map(item => withUpdate({ id: item.id, kind: 'acceptance', text: item.text, status: 'pending' })),
-    ...behaviorTaskRows(analysis).map(row => withUpdate(row)),
-    ...(analysis.constraints || []).map(text => withUpdate({ kind: 'constraint', text, status: 'constraint' })),
-    ...(analysis.unknowns || []).map(item => withUpdate({
+    { kind: 'goal', text: analysis.intent?.summary, status: 'goal' },
+    ...(analysis.acceptance_criteria || []).map(item => ({ id: item.id, kind: 'acceptance', text: item.text, status: 'pending' })),
+    ...behaviorTaskRows(analysis),
+    ...(analysis.constraints || []).map(text => ({ kind: 'constraint', text, status: 'constraint' })),
+    ...(analysis.unknowns || []).map(item => ({
       id: item.id,
       kind: 'unknown',
       text: typeof item === 'string' ? item : item.question || item.text,
@@ -69,7 +65,7 @@ const analysisRows = computed(() => {
       answers: item.answers,
     })),
   ].filter(item => item.text)
-  return dedupeTaskRows(rows)
+  return rows
 })
 const remainingTaskCount = computed(() => analysisRows.value.filter(item =>
   ['unknown', 'blocked', 'added', 'updated'].includes(item.status || '')
@@ -109,10 +105,6 @@ function taskStatusIcon(status) {
   return 'pending'
 }
 
-function bestTaskUpdate(items) {
-  return items.reduce((best, item) => preferredTaskRow(best, item), null)
-}
-
 function behaviorTaskRows(analysis) {
   const behavior = analysis.behavior_contract || {}
   const groups = [
@@ -130,29 +122,6 @@ function behaviorTaskRows(analysis) {
   })))
 }
 
-function dedupeTaskRows(rows) {
-  const result = []
-  const seen = new Map()
-  for (const [rowIndex, row] of rows.entries()) {
-    const key = row.id || `row:${rowIndex}`
-    if (!seen.has(key)) {
-      seen.set(key, result.length)
-      result.push(row)
-      continue
-    }
-    const index = seen.get(key)
-    result[index] = preferredTaskRow(result[index], row)
-  }
-  return result
-}
-
-function preferredTaskRow(left, right) {
-  if (!left) return right
-  const rank = { known: 5, blocked: 4, deferred: 3, updated: 2, added: 2, pending: 1, unknown: 0 }
-  const merged = { ...left, ...right, id: left.id || right.id, answers: mergeTaskAnswers(left.answers, right.answers) }
-  return (rank[right.status] ?? 0) >= (rank[left.status] ?? 0) ? merged : { ...right, ...left, answers: merged.answers }
-}
-
 function taskAnswers(value) {
   if (!Array.isArray(value)) return []
   return value.map(answer => typeof answer === 'object' && answer !== null ? answer : { text: answer })
@@ -163,53 +132,6 @@ function taskAnswers(value) {
       trace: Array.isArray(answer.trace) ? answer.trace.map(String) : [],
     }))
     .filter(answer => answer.text)
-}
-
-function mergeTaskAnswers(oldAnswers, newAnswers) {
-  const merged = []
-  const seen = new Set()
-  for (const answer of [...taskAnswers(oldAnswers), ...taskAnswers(newAnswers)]) {
-    const key = `${answer.source}:${answer.text}`
-    if (seen.has(key)) continue
-    seen.add(key)
-    merged.push(answer)
-  }
-  return merged
-}
-
-
-function sameTaskItem(left, right, analysisId = '') {
-  if (!left || !right) return false
-  if (sameTaskId(left.id, right.id, analysisId)) return true
-  if (sameTaskId(left.id, right.target_id, analysisId) || sameTaskId(right.id, left.target_id, analysisId)) return true
-  const leftTrace = Array.isArray(left.trace) ? left.trace : []
-  const rightTrace = Array.isArray(right.trace) ? right.trace : []
-  if ([left.id, ...leftTrace].some(leftId => [right.id, ...rightTrace].some(rightId => sameTaskId(leftId, rightId, analysisId)))) return true
-  return false
-}
-
-function sameTaskId(left, right, analysisId = '') {
-  left = String(left || '')
-  right = String(right || '')
-  if (!left || !right) return false
-  if (left === right) return true
-  const leftScope = taskIdScope(left)
-  const rightScope = taskIdScope(right)
-  if (leftScope && rightScope) return false
-  if (leftScope && leftScope !== analysisId) return false
-  if (rightScope && rightScope !== analysisId) return false
-  return taskIdTail(left) === taskIdTail(right)
-}
-
-function taskIdScope(value) {
-  const text = String(value || '')
-  const prefix = text.includes(':') ? text.split(':')[0] : ''
-  return prefix.startsWith('task-') ? prefix : ''
-}
-
-function taskIdTail(value) {
-  const text = String(value || '')
-  return taskIdScope(text) ? text.split(':').slice(1).join(':') : text
 }
 
 onMounted(() => {
