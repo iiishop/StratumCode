@@ -282,12 +282,18 @@ function sessionExport() {
   return {
     exported_at: new Date().toISOString(),
     url: window.location.href,
-    session: props.session ? plain(props.session) : null,
+    session: sessionExportMetadata(),
     activeWorkspace: props.activeWorkspace ? plain(props.activeWorkspace) : null,
     draft: input.value,
     agentStatus: plain(agentStatus),
     state: snapshotState(),
   }
+}
+
+function sessionExportMetadata() {
+  if (!props.session) return null
+  const { state_json, usage_json, state, usage, ...session } = plain(props.session)
+  return session
 }
 
 async function writeClipboard(text) {
