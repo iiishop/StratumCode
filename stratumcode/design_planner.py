@@ -214,7 +214,12 @@ def validate_design_plan(plan: dict, analysis: dict, investigation: dict) -> lis
     for item in alignments:
         if item.get("status") == "matched" and not item.get("evidence"):
             issues.append(f"matched alignment {item.get('requirement_id') or '?'} has no evidence")
-        if item.get("status") == "ambiguous" and not item.get("project_fact") and not item.get("evidence") and _project_facts(investigation):
+        empty_ambiguous = (
+            item.get("status") == "ambiguous"
+            and not item.get("project_fact")
+            and not item.get("evidence")
+        )
+        if empty_ambiguous and _project_facts(investigation):
             issues.append(f"ambiguous alignment {item.get('requirement_id') or '?'} ignored investigation facts")
     for item in decisions:
         if not item.get("because"):
@@ -376,7 +381,21 @@ def _project_facts(investigation: dict) -> list[dict]:
 
 def _status_from_fact_text(text: str) -> str:
     lower = text.casefold()
-    missing_terms = ("missing", "absent", "does not", "doesn't", "without", "lacks", "not found", "缺少", "不存在", "没有", "未找到")
+    missing_terms = (
+        "missing",
+        "absent",
+        "does not",
+        "doesn't",
+        "without a",
+        "without an",
+        "without any",
+        "lacks",
+        "not found",
+        "\u7f3a\u5c11",
+        "\u4e0d\u5b58\u5728",
+        "\u6ca1\u6709",
+        "\u672a\u627e\u5230",
+    )
     return "missing" if any(term in lower for term in missing_terms) else "matched"
 
 
