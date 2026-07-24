@@ -20,7 +20,7 @@ async def _grep(params: dict, ctx: dict) -> ToolResult:
     d = Path(ctx.get("directory", ".")).resolve()
     target = _resolve(params.get("path") or ".", ctx)
     if _ignored(target, d):
-        return ToolResult.ok("grep", "(no matches)", count=0)
+        return ToolResult.ok("grep", _no_matches_message(pattern, "."), count=0)
     target_arg = "." if target == d else str(target.relative_to(d))
 
     cmd = ["rg", "--no-heading", "--line-number", "--color", "never"]
@@ -37,7 +37,7 @@ async def _grep(params: dict, ctx: dict) -> ToolResult:
         return ToolResult.err("grep", "rg not found; install ripgrep for grep support")
 
     if not lines:
-        return ToolResult.ok("grep", "(no matches)", count=0)
+        return ToolResult.ok("grep", _no_matches_message(pattern, target_arg), count=0)
 
     max_lines = 100
     trunc = len(lines) > max_lines
@@ -79,7 +79,7 @@ async def _grep_patterns(patterns: list[str], params: dict, ctx: dict) -> ToolRe
         }
     return ToolResult.ok(
         "grep patterns",
-        json.dumps(results, ensure_ascii=False, indent=2),
+        json.dumps(_with_no_match_hint(results, total, target_arg), ensure_ascii=False, indent=2),
         patterns=len(patterns),
         count=total,
     )
@@ -107,3 +107,24 @@ def _run_rg(cmd: list[str], cwd: Path) -> list[str]:
     out = subprocess.run(cmd, capture_output=True, timeout=15, cwd=str(cwd))
     stdout = out.stdout.decode("utf-8", errors="replace")
     return stdout.strip().splitlines()
+
+
+def _no_matches_message(pattern: str, target: str) -> str:
+    return (
+        "(no matches)\n"
+        f"Hint: pattern {pattern!r} produced no results under {target!r}. "
+        "If this was based on a guessed file or UI label, retry from the workspace root "
+        "and search related visible text, prop names, and camel/kebab/singular/plural variants."
+    )
+
+
+def _with_no_match_hint(results: dict, total: int, target: str) -> dict:
+    if total:
+        return results
+    return {
+        "_hint": (
+            f"No patterns matched under {target!r}. Retry from the workspace root if the path was guessed, "
+            "and include visible-label, prop-name, camel/kebab, and singular/plural variants."
+        ),
+        **results,
+    }
