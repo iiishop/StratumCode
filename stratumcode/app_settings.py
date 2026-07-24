@@ -48,6 +48,10 @@ ROUND_LIMITS = {
         "label": "Validation rounds",
         "description": "Model/tool rounds used by semantic validation.",
     },
+    "validation_mcp_rounds": {
+        "label": "Validation MCP rounds",
+        "description": "MCP tool calls allowed during validation. Set to 0 for unlimited.",
+    },
     "design_json_attempts": {
         "label": "Design JSON attempts",
         "description": "Retry count for design planner JSON output.",

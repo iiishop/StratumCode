@@ -8,7 +8,7 @@ from itertools import count
 from pathlib import Path
 from uuid import uuid4
 
-from . import app_settings, model_settings, prompt, providers
+from . import app_settings, mcp, model_settings, prompt, providers
 from .agent.tools import openai_tool_schema
 from .agent_runtime import (
     add_usage as _add_usage,
@@ -22,7 +22,6 @@ from .tools import registry
 
 IMPLEMENTATION_TOOLS = ("read", "apply_patch")
 VALIDATION_TOOLS = ("read", "code_nav")
-MAX_VALIDATION_ROUNDS = 3
 
 
 def implementation_stream(
@@ -386,7 +385,8 @@ def _assistant_replay(content: str, tool_calls: list[dict]) -> dict:
 
 
 def _validation_tools() -> list[dict]:
-    tools = _tools_for(VALIDATION_TOOLS)
+    mcp.load_enabled()
+    tools = _tools_for(_validation_tool_names())
     tools.append(openai_tool_schema("finish_validation", "Finish semantic validation with a structured verdict.", {
         "type": "object",
         "properties": {
@@ -425,6 +425,11 @@ def _validation_tools() -> list[dict]:
         "required": ["verdict", "summary", "issues"],
     }))
     return tools
+
+
+def _validation_tool_names() -> tuple[str, ...]:
+    mcp_tools = tuple(tool.name for tool in registry.list_all() if tool.name.startswith("mcp_"))
+    return VALIDATION_TOOLS + tuple(name for name in mcp_tools if name not in VALIDATION_TOOLS)
 
 
 def _tools_for(names: tuple[str, ...]) -> list[dict]:
@@ -509,7 +514,7 @@ def _prepare_tool_arguments(name: str, arguments: dict, patch_plan: dict) -> dic
 
 def _run_tool(name: str, call_id: str, arguments: dict, workspace_dir: str) -> Iterator[dict]:
     tool = registry.get(name)
-    if name not in (*IMPLEMENTATION_TOOLS, *VALIDATION_TOOLS) or tool is None:
+    if (name not in (*IMPLEMENTATION_TOOLS, *VALIDATION_TOOLS) and not _is_mcp_tool(name)) or tool is None:
         output = json.dumps({"error": f"tool not allowed in implementation: {name}"}, ensure_ascii=False)
         yield start_event(call_id, "tool", {
             "name": name or "invalid",
@@ -594,13 +599,24 @@ def _patch_already_applied(output: str) -> bool:
     return metadata.get("code") == "PATCH_ATTEMPT_ALREADY_APPLIED"
 
 
-def _code_nav_validated(output: str) -> bool:
+def _validation_tool_validated(name: str, output: str) -> bool:
     try:
         data = json.loads(output or "{}")
     except json.JSONDecodeError:
         return False
+    title = str(data.get("title") or "")
+    if title.startswith("[error]"):
+        return False
     metadata = data.get("metadata") if isinstance(data.get("metadata"), dict) else {}
-    return metadata.get("status") == "ok"
+    if name == "code_nav":
+        return metadata.get("status") == "ok"
+    if name == "read":
+        return metadata.get("diagnostics") == 0
+    return _is_mcp_tool(name)
+
+
+def _is_mcp_tool(name: str) -> bool:
+    return str(name or "").startswith("mcp_")
 
 
 def _patch_files_from_output(output: str) -> list[str]:
@@ -656,7 +672,9 @@ def _validation_stream(
     tools = _validation_tools()
     semantic_checked = False
     validation_result = None
-    for round_index in _round_indexes(app_settings.get_round_limit("validation_rounds") or MAX_VALIDATION_ROUNDS):
+    mcp_round_limit = app_settings.get_round_limit("validation_mcp_rounds")
+    mcp_rounds = 0
+    for round_index in _round_indexes(app_settings.get_round_limit("validation_rounds")):
         assistant = _call_model(provider, model, messages, tools=tools)
         if usage := _usage_delta(pricing_rules, assistant.pop("_usage", {})):
             _add_usage(usage_total, usage)
@@ -677,7 +695,7 @@ def _validation_stream(
                     validation_result = _finish_validation_arguments(arguments, changed_files)
                     if not semantic_checked and validation_result["verdict"] == "passed":
                         output = json.dumps({
-                            "error": "finish_validation verdict passed requires at least one successful code_nav call first.",
+                            "error": "finish_validation verdict passed requires at least one successful validation tool call first.",
                             "retryable": True,
                         }, ensure_ascii=False)
                         validation_result = None
@@ -692,8 +710,25 @@ def _validation_stream(
                         "output": output,
                     })
                 else:
+                    if _is_mcp_tool(name):
+                        if mcp_round_limit and mcp_rounds >= mcp_round_limit:
+                            output = json.dumps({
+                                "error": "validation MCP round limit reached",
+                                "retryable": False,
+                            }, ensure_ascii=False)
+                            yield start_event(call_id, "tool", {
+                                "name": name,
+                                "description": "Validation MCP tool",
+                                "status": "error",
+                                "open": False,
+                                "input": json.dumps(arguments, ensure_ascii=False, indent=2),
+                                "output": output,
+                            })
+                            messages.append({"role": "tool", "tool_call_id": call_id, "content": output})
+                            continue
+                        mcp_rounds += 1
                     output = yield from _run_tool(name, call_id, arguments, workspace_dir)
-                if name == "code_nav" and _code_nav_validated(output):
+                if _validation_tool_validated(name, output):
                     semantic_checked = True
             except Exception as exc:
                 output = json.dumps({"error": str(exc), "retryable": True}, ensure_ascii=False)
@@ -711,11 +746,11 @@ def _validation_stream(
         if validation_result is not None:
             break
     else:
-        yield start_event(f"{run_id}-checkpoint", "output", _checkpoint_output(
-            "Semantic validation reached its checkpoint before a clear pass/fail result."
-        ))
-        yield {"op": "update", "id": stage_id, "patch": {"state": "failed", "phase": "validation_checkpoint"}}
-        return None
+        validation_result = _validation_result(
+            "inconclusive",
+            "Semantic validation ended before a clear pass/fail result.",
+            changed_files,
+        )
     yield start_event(f"{run_id}-output", "output", {
         "content": validation_result["summary"],
         "streaming": False,
