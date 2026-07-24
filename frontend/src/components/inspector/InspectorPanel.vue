@@ -21,7 +21,6 @@ const props = defineProps({
 })
 const emit = defineEmits([
   'update:tab',
-  'toggle-todo',
   'add-workspace',
   'activate-workspace',
   'delete-workspace',
@@ -604,19 +603,6 @@ function onWsRowLeave(el) {
           </div>
         </template>
 
-        <!-- todos -->
-        <div v-if="todos.length" class="tk-todos">
-          <div class="tk-group-head">
-            <span class="tk-group-label">Personal todos</span>
-            <span class="tk-group-count">{{ todos.filter(t => !t.done).length }} left</span>
-          </div>
-          <button v-for="item in todos" :key="item.id" class="tk-todo" :class="{ done: item.done }" @click="emit('toggle-todo', item.id)">
-            <span class="tk-todo-check">
-              <svg v-if="item.done" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><path d="M5 13l4 4L19 7"/></svg>
-            </span>
-            <span class="tk-todo-text">{{ item.content }}</span>
-          </button>
-        </div>
       </template>
 
       <template v-else-if="tab === 'tools'">
@@ -949,57 +935,6 @@ function onWsRowLeave(el) {
 .tk-item--added .tk-item-badge,
 .tk-item--updated .tk-item-badge { color: #11866f; background: rgba(17,134,111,.1); }
 .tk-item--blocked .tk-item-badge { color: #8a5b00; background: rgba(196,139,0,.12); }
-
-/* ---- todos ---- */
-.tk-todos {
-  margin-top: 4px;
-  padding-top: 10px;
-  border-top: 1px solid #dbe4f0;
-}
-
-.tk-todo {
-  display: flex;
-  width: 100%;
-  align-items: center;
-  gap: 8px;
-  padding: 8px;
-  border: 1px solid transparent;
-  border-radius: 7px;
-  color: #37516f;
-  background: transparent;
-  text-align: left;
-  cursor: pointer;
-  transition: background .12s, border-color .12s;
-}
-.tk-todo:hover {
-  border-color: #d8e2ef;
-  background: #f5f8fd;
-}
-.tk-todo.done .tk-todo-text {
-  color: #94a8c2;
-  text-decoration: line-through;
-}
-
-.tk-todo-check {
-  display: grid;
-  width: 18px;
-  height: 18px;
-  place-items: center;
-  border: 1.5px solid #a9bad0;
-  border-radius: 5px;
-  flex-shrink: 0;
-  color: #11866f;
-}
-.tk-todo.done .tk-todo-check {
-  border-color: #a0d8b4;
-  background: rgba(17,134,111,.08);
-}
-
-.tk-todo-text {
-  font-size: 10.5px;
-  line-height: 1.4;
-  overflow-wrap: anywhere;
-}
 .inspector-tool { display: grid; grid-template-columns: 28px 1fr auto; align-items: center; gap: 9px; margin-bottom: 6px; padding: 9px; border: 1px solid #d7e2ef; border-radius: 9px; background: #fff; }.inspector-tool > b { display: grid; width: 27px; height: 27px; place-items: center; border-radius: 7px; color: #1756d1; background: #e8f0ff; font: 800 10px/1 var(--mono); }.inspector-tool div { display: grid; gap: 3px; }.inspector-tool strong { font: 700 10px/1 var(--mono); }.inspector-tool small { color: #778ba4; font-size: 9px; line-height: 1.35; }.inspector-tool > span { color: #8da0b6; font: 800 9px/1 var(--mono); }
 .mcp-row { margin-bottom: 7px; padding: 10px; border: 1px solid #d7e2ef; border-radius: 10px; background: #fff; }
 .subagent-row {
