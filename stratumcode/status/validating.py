@@ -46,6 +46,8 @@ def handle(run):
             run.transition(chat.ChatState.INVESTIGATING, "Validation queued a clearify decision.")
         elif next_state in {chat.ChatState.DESIGNING, chat.ChatState.INVESTIGATING}:
             _add_validation_context(run)
+            if next_state == chat.ChatState.DESIGNING:
+                run.design_revision_mode = "validation"
             run.transition(next_state, "Validation completed.")
         else:
             run.transition(next_state, "Validation completed.")

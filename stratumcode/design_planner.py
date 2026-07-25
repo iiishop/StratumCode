@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+from copy import deepcopy
 from collections.abc import Iterator
 from itertools import count
 from uuid import uuid4
@@ -15,6 +16,7 @@ from .agent_runtime import (
     start_event,
     usage_delta as _usage_delta,
 )
+from .planning_facts import normalize_project_facts as _project_facts
 
 DEFAULT_DESIGN_JSON_ATTEMPTS = 3
 
@@ -25,6 +27,9 @@ def design_planning_stream(
     analysis: dict,
     investigation: dict,
     workspace_dir: str,
+    previous_plan: dict | None = None,
+    revision_mode: str = "",
+    revision_context: list[str] | None = None,
 ) -> Iterator[dict]:
     setting = model_settings.resolve(model_settings.DEFAULT_STAGE)
     if setting is None:
@@ -48,6 +53,28 @@ def design_planning_stream(
         "inherited": setting["inherited"],
     })
 
+    if previous_plan and revision_mode == "grounding":
+        plan = normalize_design_plan(deepcopy(previous_plan), analysis, investigation)
+        plan["runtime_warnings"].append(
+            "Runtime reused the approved design because patch planning requested project grounding only."
+        )
+        issues = validate_design_plan(plan, analysis, investigation)
+        if issues:
+            yield start_event(f"{run_id}-output", "output", {
+                "content": "Reused design plan rejected by runtime validator:\n"
+                + "\n".join(f"- {item}" for item in issues),
+                "streaming": False,
+            })
+            yield {"op": "update", "id": stage_id, "patch": {
+                "state": "error",
+                "phase": "design_validation_failed",
+            }}
+            return
+        yield start_event(f"{run_id}-design", "design_plan", plan)
+        yield {"op": "update", "id": stage_id, "patch": {"state": "done", "phase": "design_reused"}}
+        yield {"op": "done", "design_plan": plan}
+        return
+
     system = {"role": "system", "content": prompt.build_design_planner_system(app_settings.get_output_language())}
     criteria = [item for item in analysis.get("acceptance_criteria", []) if isinstance(item, dict)]
     slots = []
@@ -65,6 +92,9 @@ def design_planning_stream(
                     workspace_dir,
                     slot_index=index,
                     criterion=criterion,
+                    previous_plan=previous_plan,
+                    revision_mode=revision_mode,
+                    revision_context=revision_context,
                 )},
             ],
             pricing_rules,
@@ -76,24 +106,55 @@ def design_planning_stream(
             runtime_warnings.append(f"Requirement slot {index} fell back to ambiguous after invalid model content.")
             slot = _default_requirement_slot(criterion)
         slots.append(slot)
-    decision_data = yield from _content_json_stream(
-        provider,
-        model,
-        [
-            system,
-            {"role": "user", "content": prompt.build_design_decision_slots_user(
-                message,
-                analysis,
-                investigation,
-                workspace_dir,
-                _runtime_requirement_slots(slots, criteria),
+    decision_messages = [
+        system,
+        {"role": "user", "content": prompt.build_design_decision_slots_user(
+            message,
+            analysis,
+            investigation,
+            workspace_dir,
+            _runtime_requirement_slots(slots, criteria),
+            previous_plan=previous_plan,
+            revision_mode=revision_mode,
+            revision_context=revision_context,
+        )},
+    ]
+    decision_data = None
+    plan = None
+    semantic_attempts = app_settings.get_round_limit("design_json_attempts") or DEFAULT_DESIGN_JSON_ATTEMPTS
+    for semantic_attempt in _attempt_indexes(semantic_attempts):
+        decision_data = yield from _content_json_stream(
+            provider,
+            model,
+            decision_messages,
+            pricing_rules,
+            usage_total,
+            run_id,
+            f"decision-{semantic_attempt}",
+        )
+        if decision_data is None:
+            break
+        plan = _design_from_slots(
+            slots,
+            decision_data,
+            criteria,
+            analysis.get("reference_baselines", []),
+            runtime_warnings,
+        )
+        plan = _merge_design_revision(plan, previous_plan, revision_mode)
+        plan = normalize_design_plan(plan, analysis, investigation)
+        semantic_issues = validate_design_plan(plan, analysis, investigation)
+        if not semantic_issues:
+            break
+        decision_messages.extend([
+            {"role": "assistant", "content": json.dumps(decision_data, ensure_ascii=False)[:6000]},
+            {"role": "user", "content": (
+                "The decision pass was valid JSON but failed runtime semantics:\n- "
+                + "\n- ".join(semantic_issues)
+                + "\nReturn a corrected decision_pass JSON object only. Preserve valid decisions, "
+                "cover every missing requirement and reference baseline, and complete any changed data boundary."
             )},
-        ],
-        pricing_rules,
-        usage_total,
-        run_id,
-        "decision",
-    )
+        ])
     if decision_data is None:
         yield start_event(f"{run_id}-output", "output", {
             "content": "Design planning failed to produce valid decision content after repeated invalid responses.",
@@ -101,8 +162,16 @@ def design_planning_stream(
         })
         yield {"op": "update", "id": stage_id, "patch": {"state": "error", "phase": "design_planning_failed"}}
         return
-    plan = _design_from_slots(slots, decision_data, criteria, runtime_warnings)
-    plan = normalize_design_plan(plan, analysis, investigation)
+    if plan is None:
+        plan = _design_from_slots(
+            slots,
+            decision_data,
+            criteria,
+            analysis.get("reference_baselines", []),
+            runtime_warnings,
+        )
+        plan = _merge_design_revision(plan, previous_plan, revision_mode)
+        plan = normalize_design_plan(plan, analysis, investigation)
     issues = validate_design_plan(plan, analysis, investigation)
     if issues:
         yield start_event(f"{run_id}-output", "output", {
@@ -124,11 +193,31 @@ def normalize_design_plan(plan: dict, analysis: dict, investigation: dict) -> di
     """Apply deterministic design-plan fixes that should not be delegated to the model."""
     plan = {
         **plan,
+        "requirement_model": [dict(item) for item in plan.get("requirement_model", []) if isinstance(item, dict)],
+        "project_alignment": [dict(item) for item in plan.get("project_alignment", []) if isinstance(item, dict)],
         "decision_gaps": [dict(item) for item in plan.get("decision_gaps", []) if isinstance(item, dict)],
         "design_decisions": [dict(item) for item in plan.get("design_decisions", []) if isinstance(item, dict)],
         "runtime_warnings": list(plan.get("runtime_warnings") or []),
     }
+    criteria_by_id = {
+        str(item.get("id") or f"AC{index}"): str(item.get("text") or "").strip()
+        for index, item in enumerate(analysis.get("acceptance_criteria", []), start=1)
+        if isinstance(item, dict) and str(item.get("text") or "").strip()
+    }
+    for requirement in plan["requirement_model"]:
+        canonical = criteria_by_id.get(str(requirement.get("source") or ""))
+        if canonical:
+            requirement["behavior"] = canonical
+    for decision in plan["design_decisions"]:
+        decision.pop("replaces_decision_ids", None)
+    scope = analysis.get("scope") if isinstance(analysis.get("scope"), dict) else {}
+    plan["out_of_scope"] = _statement_strings(scope.get("out"))
+    if not str(plan.get("summary") or "").strip():
+        intent = analysis.get("intent") if isinstance(analysis.get("intent"), dict) else {}
+        plan["summary"] = str(intent.get("summary") or next(iter(criteria_by_id.values()), "")).strip()
+        plan["runtime_warnings"].append("Runtime filled the empty design summary from the canonical task contract.")
     _fill_empty_project_alignments(plan, investigation)
+    _correct_contradictory_alignments(plan, investigation)
     if not _analysis_authorizes_behavior_preserving_refactor(analysis):
         return plan
     allowed_refactor_symbols = set(_structured_refactor_symbols(investigation))
@@ -201,6 +290,11 @@ def validate_design_plan(plan: dict, analysis: dict, investigation: dict) -> lis
     decisions = plan.get("design_decisions") or []
     blocking_gaps = [item for item in plan.get("decision_gaps", []) if item.get("blocks_implementation")]
     requirement_ids = {item.get("id") for item in requirements if item.get("id")}
+    reference_baselines = [
+        item for item in analysis.get("reference_baselines", [])
+        if isinstance(item, dict) and item.get("id")
+    ]
+    reference_ids = {str(item["id"]) for item in reference_baselines}
     aligned_ids = {item.get("requirement_id") for item in alignments if item.get("requirement_id")}
     if criteria and len(requirements) < len(criteria):
         issues.append("not every acceptance criterion is represented in requirement_model")
@@ -223,6 +317,68 @@ def validate_design_plan(plan: dict, analysis: dict, investigation: dict) -> lis
     for item in decisions:
         if not item.get("because"):
             issues.append(f"design decision {item.get('id') or item.get('decision') or '?'} has no because")
+        invalid_requirements = sorted(
+            item_id
+            for item_id in _strings(item.get("requirement_ids"))
+            if item_id not in requirement_ids
+        )
+        if invalid_requirements:
+            issues.append(
+                f"design decision {item.get('id') or '?'} references unknown requirements: "
+                + ", ".join(invalid_requirements)
+            )
+        invalid_references = sorted(
+            item_id
+            for item_id in _strings(item.get("reference_ids"))
+            if item_id not in reference_ids
+        )
+        if invalid_references:
+            issues.append(
+                f"design decision {item.get('id') or '?'} references unknown baselines: "
+                + ", ".join(invalid_references)
+            )
+        boundary = item.get("data_boundary") if isinstance(item.get("data_boundary"), dict) else {}
+        if boundary.get("changes"):
+            missing_boundary = [
+                key
+                for key in ("owner", "producers", "consumers", "contract")
+                if not boundary.get(key)
+            ]
+            if missing_boundary:
+                issues.append(
+                    f"design decision {item.get('id') or '?'} has incomplete data boundary: "
+                    + ", ".join(missing_boundary)
+                )
+    covered_requirements = {
+        requirement_id
+        for item in decisions
+        for requirement_id in _strings(item.get("requirement_ids"))
+    }
+    for item in alignments:
+        requirement_id = str(item.get("requirement_id") or "")
+        if item.get("status") == "missing" and requirement_id not in covered_requirements:
+            issues.append(f"missing requirement {requirement_id or '?'} has no design decision")
+    covered_references = {
+        reference_id
+        for item in decisions
+        for reference_id in _strings(item.get("reference_ids"))
+    }
+    fact_text = " ".join(item["text"] for item in _project_facts(investigation)).casefold()
+    for baseline in reference_baselines:
+        reference_id = str(baseline["id"])
+        if reference_id not in covered_references:
+            issues.append(f"reference baseline {reference_id} has no design decision")
+        target = str(baseline.get("target") or "").strip()
+        if target and target.casefold() not in fact_text:
+            issues.append(f"reference baseline {reference_id} has no grounded project fact")
+    seen_decisions: dict[str, str] = {}
+    for item in decisions:
+        decision_id = str(item.get("id") or "?")
+        key = " ".join(str(item.get("decision") or "").casefold().split())
+        if key and key in seen_decisions:
+            issues.append(f"duplicate design decision: {decision_id} duplicates {seen_decisions[key]}")
+        elif key:
+            seen_decisions[key] = decision_id
     for symbol in _structured_skip_symbols(investigation):
         for item in decisions:
             text = " ".join([str(item.get("decision") or ""), " ".join(item.get("because") or [])])
@@ -363,19 +519,24 @@ def _fill_empty_project_alignments(plan: dict, investigation: dict) -> None:
         )
 
 
-def _project_facts(investigation: dict) -> list[dict]:
-    raw_facts = investigation.get("patch_planning_facts") or investigation.get("patch_planning_context") or []
-    facts = []
-    for index, raw in enumerate(raw_facts, start=1):
-        if isinstance(raw, dict):
-            text = str(raw.get("text") or raw.get("fact") or raw.get("statement") or "").strip()
-            fact_id = str(raw.get("id") or f"PF{index}").strip()
-        else:
-            text = str(raw or "").strip()
-            fact_id = f"PF{index}"
-        if text:
-            facts.append({"id": fact_id, "text": text})
-    return facts
+def _correct_contradictory_alignments(plan: dict, investigation: dict) -> None:
+    facts = {item["id"]: item["text"] for item in _project_facts(investigation)}
+    for item in plan.get("project_alignment") or []:
+        if not isinstance(item, dict) or item.get("status") != "matched":
+            continue
+        evidence_text = " ".join(
+            facts[evidence_id]
+            for evidence_id in _strings(item.get("evidence"))
+            if evidence_id in facts
+        )
+        text = " ".join([str(item.get("project_fact") or ""), evidence_text])
+        if _status_from_fact_text(text) != "missing":
+            continue
+        item["status"] = "missing"
+        plan.setdefault("runtime_warnings", []).append(
+            f"Runtime changed project_alignment {item.get('requirement_id') or '?'} "
+            "from matched to missing because its cited facts state the behavior is absent."
+        )
 
 
 def _status_from_fact_text(text: str) -> str:
@@ -385,6 +546,7 @@ def _status_from_fact_text(text: str) -> str:
         "absent",
         "does not",
         "doesn't",
+        "has no",
         "without a",
         "without an",
         "without any",
@@ -395,7 +557,7 @@ def _status_from_fact_text(text: str) -> str:
         "\u6ca1\u6709",
         "\u672a\u627e\u5230",
     )
-    return "missing" if any(term in lower for term in missing_terms) else "matched"
+    return "missing" if any(term in lower for term in missing_terms) else "ambiguous"
 
 
 def _analysis_text(analysis: dict) -> str:
@@ -599,7 +761,13 @@ def _runtime_requirement_slots(slots: list[dict], criteria: list[dict]) -> list[
     ]
 
 
-def _design_from_slots(slots: list[dict], data: dict, criteria: list[dict], runtime_warnings: list[str] | None = None) -> dict:
+def _design_from_slots(
+    slots: list[dict],
+    data: dict,
+    criteria: list[dict],
+    reference_baselines: list[dict],
+    runtime_warnings: list[str] | None = None,
+) -> dict:
     requirements = []
     alignments = []
     for index, criterion in enumerate(criteria, start=1):
@@ -623,6 +791,17 @@ def _design_from_slots(slots: list[dict], data: dict, criteria: list[dict], runt
             "decision": str(item.get("decision") or "").strip(),
             "because": _strings(item.get("because")),
             "variant_strategy": str(item.get("variant_strategy") or "").strip(),
+            "requirement_ids": [
+                f"RM{slot}"
+                for slot in _integer_slots(item.get("requirement_slots"), len(criteria))
+            ],
+            "reference_ids": [
+                str(reference_baselines[slot - 1].get("id") or f"REF{slot}")
+                for slot in _integer_slots(item.get("reference_slots"), len(reference_baselines))
+                if isinstance(reference_baselines[slot - 1], dict)
+            ],
+            "data_boundary": _data_boundary(item.get("data_boundary")),
+            "replaces_decision_ids": _strings(item.get("replaces_decision_ids")),
         }
         for index, item in enumerate(data.get("decision_content") or [], start=1)
         if isinstance(item, dict) and str(item.get("decision") or "").strip()
@@ -653,6 +832,85 @@ def _strings(value) -> list[str]:
     if not isinstance(value, list):
         return []
     return [item for raw in value if (item := str(raw).strip())]
+
+
+def _statement_strings(value) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [
+        text
+        for item in value
+        if (text := str((item.get("text") or "") if isinstance(item, dict) else item or "").strip())
+    ]
+
+
+def _integer_slots(value, maximum: int) -> list[int]:
+    if not isinstance(value, list):
+        return []
+    return sorted({
+        slot
+        for raw in value
+        if str(raw).isdigit() and 1 <= (slot := int(raw)) <= maximum
+    })
+
+
+def _data_boundary(value) -> dict:
+    value = value if isinstance(value, dict) else {}
+    return {
+        "changes": bool(value.get("changes")),
+        "owner": str(value.get("owner") or "").strip(),
+        "producers": _strings(value.get("producers")),
+        "consumers": _strings(value.get("consumers")),
+        "contract": str(value.get("contract") or "").strip(),
+    }
+
+
+def _merge_design_revision(plan: dict, previous_plan: dict | None, revision_mode: str) -> dict:
+    if not previous_plan or revision_mode != "validation":
+        return plan
+    previous = [
+        dict(item)
+        for item in previous_plan.get("design_decisions", [])
+        if isinstance(item, dict) and item.get("id")
+    ]
+    merged = {str(item["id"]): item for item in previous}
+    existing_text = {
+        " ".join(str(item.get("decision") or "").casefold().split())
+        for item in previous
+    }
+    next_index = len(previous) + 1
+    for candidate in plan.get("design_decisions", []):
+        candidate_text = " ".join(str(candidate.get("decision") or "").casefold().split())
+        if candidate_text in existing_text:
+            continue
+        replacements = [
+            item_id
+            for item_id in _strings(candidate.get("replaces_decision_ids"))
+            if item_id in merged
+        ]
+        if replacements:
+            for item_id in replacements:
+                merged.pop(item_id, None)
+            if len(replacements) == 1:
+                candidate["id"] = replacements[0]
+            else:
+                while f"DD{next_index}" in merged:
+                    next_index += 1
+                candidate["id"] = f"DD{next_index}"
+                next_index += 1
+        else:
+            while f"DD{next_index}" in merged:
+                next_index += 1
+            candidate["id"] = f"DD{next_index}"
+            next_index += 1
+        candidate.pop("replaces_decision_ids", None)
+        merged[str(candidate["id"])] = candidate
+        existing_text.add(candidate_text)
+    plan["design_decisions"] = list(merged.values())
+    plan.setdefault("runtime_warnings", []).append(
+        "Runtime preserved prior design decisions unless the validation revision explicitly replaced their ids."
+    )
+    return plan
 
 
 def _one_of(value, allowed: set[str], fallback: str) -> str:

@@ -6,6 +6,8 @@ import json
 import platform
 from datetime import date
 
+from .planning_facts import normalize_project_facts
+
 
 PERSONA = """\
 You are StratumCode, an evidence-driven software engineering agent.
@@ -254,7 +256,7 @@ For the decision pass:
 {{
   "summary": "one short sentence",
   "decision_content": [
-    {{"decision": "chosen design", "because": ["requirement reason", "project fact", "user answer"], "variant_strategy": "required only for action=review candidates: how existing behavioral differences stay preserved"}}
+    {{"decision": "chosen design", "because": ["requirement reason", "project fact", "user answer"], "requirement_slots": [1], "reference_slots": [1], "data_boundary": {{"changes": false, "owner": "", "producers": [], "consumers": [], "contract": ""}}, "replaces_decision_ids": ["DD1 only when validation evidence invalidates that prior decision"], "variant_strategy": "required only for action=review candidates: how existing behavioral differences stay preserved"}}
   ],
   "gap_content": [
     {{"question": "specific decision question", "recommended_answer": "safest default answer", "blocks_implementation": true, "why": "which implementation branch changes"}}
@@ -263,7 +265,8 @@ For the decision pass:
 }}
 
 Rules:
-- Do not write ids. Do not copy runtime_skeleton ids into your output.
+- Do not invent ids. Only copy a previous DD id into replaces_decision_ids
+  when validation evidence specifically invalidates that decision.
 - project alignment must say matched, missing, or ambiguous for each requirement slot.
 - Add a blocking decision_gap when implementation would branch and current facts do not decide it.
 - Before finalizing design_decisions, stress-test the design branch by branch.
@@ -282,6 +285,14 @@ Rules:
 - Each blocking decision_gap must include recommended_answer and why that answer
   is the safest default.
 - design_decisions must cite why the decision is valid. No "best practice" alone.
+- Every design_decision must list the requirement_slots it implements.
+- Every reference baseline must be covered by a design_decision using its
+  reference_slots entry. Never invent behavior that investigation did not observe.
+- Set data_boundary.changes=true when a decision changes ownership or a data
+  handoff, then name the owner, producers, consumers, and preserved contract.
+- During a validation revision, preserve every previous decision by default. Use
+  replaces_decision_ids only when validation evidence specifically invalidates it.
+- During a grounding revision, do not change design semantics.
 - Do not include implementation steps; that is the patch planner's job."""
 
 PATCH_PLANNER = """\
@@ -300,6 +311,7 @@ For patch_step_for_design_decision:
 {{
   "needed": true,
   "skip_reason": "why this design decision needs no code change when needed is false",
+  "skip_project_fact_slots": [1],
   "step_content": [
     {{
       "file": "workspace-relative path",
@@ -325,18 +337,60 @@ For patch_step_for_design_decision:
 For patch_verification:
 {{
   "tests_or_checks": ["runnable command or the smallest concrete manual check"],
+  "check_grounding": [
+    {{
+      "check_slot": 1,
+      "kind": "manual|command",
+      "project_fact_slots": [1],
+      "reason": "why the cited facts support every operation used by this check"
+    }}
+  ],
   "acceptance_verification": [
     {{"acceptance_slot": 1, "verification": "check proving this acceptance criterion"}}
   ],
   "step_acceptance_coverage": [
     {{"step_slot": 1, "acceptance_slots": [1, 2]}}
+  ],
+  "step_merge_groups": [
+    {{
+      "step_slots": [1, 2],
+      "reason": "why these steps are the same implementation responsibility",
+      "merged_content": {{
+        "purpose": "one consolidated behavior-level purpose",
+        "target": "one canonical target description",
+        "action": "one complete non-conflicting action",
+        "required_behavior_if_removed": "what breaks if the merged step is removed",
+        "completion_conditions": ["conditions covering every merged decision"],
+        "out_of_scope": ["only boundaries compatible with every merged decision"],
+        "minimality_check": "what the merged responsibility deliberately avoids"
+      }}
+    }}
+  ],
+  "step_revisions": [
+    {{
+      "step_slot": 1,
+      "reason": "why the candidate step weakens, contradicts, or exceeds its requirements",
+      "revised_content": {{
+        "purpose": "corrected behavior-level purpose",
+        "target": "corrected target",
+        "action": "corrected complete action",
+        "required_behavior_if_removed": "what breaks if removed",
+        "completion_conditions": ["grounded completion condition"],
+        "out_of_scope": ["compatible boundary only"],
+        "minimality_check": "what this responsibility avoids"
+      }}
+    }}
+  ],
+  "skip_reviews": [
+    {{"decision_slot": 1, "approved": true, "reason": "why cited facts prove this needs no code change"}}
   ]
 }}
 
 Rules:
 - Keep the plan minimal: the fewest steps that cover the approved design.
 - If the current runtime_slot needs no code change, return needed=false,
-  step_content=[], and a concrete skip_reason.
+  step_content=[], a concrete skip_reason, and skip_project_fact_slots proving
+  the current project already satisfies or preserves that decision.
 - Do not write implementation step ids or responsibility_chain objects.
 - Do not write AC/DD/PF ids. Use only 1-based acceptance_slots,
   and project_fact_slots from runtime_skeleton. The current design decision is
@@ -348,11 +402,78 @@ Rules:
   be planned only when the design chose a behavior-preserving variant strategy.
 - Make each purpose describe behavior, not just the file operation.
 - Include one runnable check or the smallest manual check when no test framework exists.
+- Never invent constructors, helper methods, classes, commands, or test files in
+  tests_or_checks. Use only identifiers grounded in project facts, the approved
+  design, or planned step targets. If invocation details are unknown, use a
+  structural manual check limited to the known target and completion conditions.
+- For patch_verification, act as a semantic auditor rather than copying the
+  decision-slot output. Cite project facts for every check in check_grounding.
+  A citation is valid only when it supports every invoked API, constructor,
+  command, or manual interaction. Rewrite unsupported checks as grounded manual
+  checks instead of guessing.
+- Mark each check_grounding item as kind=command or kind=manual. A command check
+  must be copied exactly from verification_commands on one of its cited project
+  facts. When no cited fact supplies that exact command, return a manual check;
+  manual checks must describe inspection or observation and must not embed a
+  shell command or executable setup.
+- The runtime replaces manual prose with a canonical check built from the final
+  audited steps' file, target, and completion conditions. For a no-patch plan,
+  it builds the check from cited project facts.
+- Compare all planned steps semantically. Put steps that modify the same code
+  responsibility for the same outcome into one step_merge_groups item even when
+  their target wording differs. Do not group steps merely because they share a
+  file. Leave distinct responsibilities ungrouped. For each group, write one
+  complete merged_content object. Resolve contradictions among the source
+  purpose, action, completion conditions, and out-of-scope claims; do not
+  concatenate their prose.
+- Review every runtime skip candidate against its cited facts. Set approved=true
+  only when the facts directly prove the design decision already needs no code
+  change. Set approved=false with a concrete reason otherwise; do not silently
+  turn a rejected skip into a code step.
+- When candidate_verification is present, treat it as untrusted. Check every
+  operation in every proposed check against the cited project facts. A fact
+  naming a type or method does not prove its constructor, test setup, mutable
+  representation, CLI, or surrounding API. Return a corrected complete
+  patch_verification object; use a structural manual check when facts do not
+  support an executable setup.
 - For patch_verification, cover every acceptance slot in both
   acceptance_verification and step_acceptance_coverage. Map an acceptance slot
   only to a planned step whose action and completion conditions actually
   implement it. Return at least one tests_or_checks item for a feature or bugfix.
+- Compare every planned step with its cited acceptance criteria and design
+  decision. Use step_revisions to replace the complete semantic content of a
+  step when it weakens, contradicts, or exceeds them. Do not substitute a
+  merely similar behavior. Leave step_revisions empty when no correction is
+  needed.
 The runtime validates coverage, responsibility chains, IDs, files, and required fields."""
+
+PATCH_VERIFICATION_AUDITOR = """\
+You are StratumCode's patch-verification auditor. Write content in {language}.
+Return one compact JSON object only. Do not use Markdown.
+
+The candidate verification is untrusted. Your only job is to falsify unsupported
+steps, merges, skips, and checks against the supplied project facts and approved
+design. Plausibility is not evidence. Do not optimize for runnable checks.
+Detect semantic weakening or substitution in every planned step and return a
+complete step_revisions entry when correction is needed.
+
+For every check, independently account for all required setup, calls, inputs,
+state mutations, commands, and expected outputs. A fact that merely names a
+target does not establish any surrounding API or setup. When the facts do not
+establish a complete executable setup, replace the candidate with a concrete
+manual inspection of the planned target and its completion conditions.
+
+Merge steps only when their file, affected responsibility, and behavioral
+outcome are semantically the same. Review every skip candidate; reject it unless
+the cited facts directly prove that no code change is required.
+Being unable to authorize, locate, or modify a target does not mean the design
+is already satisfied. A workspace boundary or missing implementation evidence
+must therefore be rejected as a skip, not converted into a successful no-patch
+plan.
+
+Return the complete patch_verification shape requested by output_shape. Preserve
+only claims that survive this audit. The runtime validates slot references and
+coverage after you respond."""
 
 IMPLEMENTATION_RUNNER = """\
 You are StratumCode's implementation runner. Write user-visible text in {language}.
@@ -646,6 +767,9 @@ def build_design_requirement_slot_user(
     *,
     slot_index: int,
     criterion: dict,
+    previous_plan: dict | None = None,
+    revision_mode: str = "",
+    revision_context: list[str] | None = None,
 ) -> str:
     return json.dumps({
         "platform": platform.system(),
@@ -672,10 +796,25 @@ def build_design_requirement_slot_user(
             "beliefs": investigation.get("beliefs", []),
             "resolutions": investigation.get("resolutions", []),
         },
+        "design_revision": {
+            "mode": revision_mode,
+            "context": revision_context or [],
+            "previous_plan": previous_plan or {},
+        },
     }, ensure_ascii=False, indent=2)
 
 
-def build_design_decision_slots_user(message: str, analysis: dict, investigation: dict, workspace_dir: str, slots: list[dict]) -> str:
+def build_design_decision_slots_user(
+    message: str,
+    analysis: dict,
+    investigation: dict,
+    workspace_dir: str,
+    slots: list[dict],
+    *,
+    previous_plan: dict | None = None,
+    revision_mode: str = "",
+    revision_context: list[str] | None = None,
+) -> str:
     return json.dumps({
         "platform": platform.system(),
         "workspace_root": workspace_dir,
@@ -683,6 +822,15 @@ def build_design_decision_slots_user(message: str, analysis: dict, investigation
         "output_contract": "decision_pass",
         "runtime_skeleton": {
             "requirement_slots": slots,
+            "reference_slots": [
+                {
+                    "index": index,
+                    "target": str(item.get("target") or ""),
+                    "policy": str(item.get("policy") or ""),
+                }
+                for index, item in enumerate(analysis.get("reference_baselines", []), start=1)
+                if isinstance(item, dict)
+            ],
             "decision_content": "Return only decisions that are actually needed.",
             "gap_content": "Return at most one blocking gap.",
         },
@@ -704,11 +852,20 @@ def build_design_decision_slots_user(message: str, analysis: dict, investigation
             "resolutions": investigation.get("resolutions", []),
             "user_decisions_required": investigation.get("user_decisions_required", []),
         },
+        "design_revision": {
+            "mode": revision_mode,
+            "context": revision_context or [],
+            "previous_plan": previous_plan or {},
+        },
     }, ensure_ascii=False, indent=2)
 
 
 def build_patch_planner_system(language: str) -> str:
     return PATCH_PLANNER.format(language=language) + "\n"
+
+
+def build_patch_verification_auditor_system(language: str) -> str:
+    return PATCH_VERIFICATION_AUDITOR.format(language=language) + "\n"
 
 
 def build_patch_step_slot_user(
@@ -740,7 +897,11 @@ def build_patch_step_slot_user(
                 if isinstance(item, dict)
             ],
             "project_fact_slots": [
-                {"index": index, "text": str(item.get("text") or "")}
+                {
+                    "index": index,
+                    "text": str(item.get("text") or ""),
+                    "verification_commands": item.get("verification_commands", []),
+                }
                 for index, item in enumerate(facts, start=1)
                 if isinstance(item, dict)
             ],
@@ -765,6 +926,7 @@ def build_patch_step_slot_user(
         "output_shape": {
             "needed": True,
             "skip_reason": "why no code change is needed when needed is false",
+            "skip_project_fact_slots": [1],
             "step_content": [{
                 "file": "workspace-relative path",
                 "mode": "modify|create",
@@ -792,6 +954,8 @@ def build_patch_verification_slot_user(
     design_plan: dict,
     workspace_dir: str,
     step_content: list[dict],
+    candidate_verification: dict | None = None,
+    skipped_decision_slots: list[dict] | None = None,
 ) -> str:
     criteria = [
         item for item in analysis.get("acceptance_criteria", [])
@@ -809,14 +973,33 @@ def build_patch_verification_slot_user(
             ],
             "planned_steps": [
                 {
+                    "index": index,
+                    "mode": str(item.get("mode") or "modify"),
                     "file": str(item.get("file") or ""),
+                    "purpose": str(item.get("purpose") or ""),
                     "target": str(item.get("target") or ""),
                     "action": str(item.get("action") or ""),
                     "acceptance_slots": item.get("acceptance_slots", []),
+                    "decision_slots": item.get("decision_slots", []),
+                    "project_fact_slots": item.get("project_fact_slots", []),
+                    "required_behavior_if_removed": str(item.get("required_behavior_if_removed") or ""),
+                    "completion_conditions": item.get("completion_conditions", []),
+                    "out_of_scope": item.get("out_of_scope", []),
+                    "minimality_check": str(item.get("minimality_check") or ""),
                 }
-                for item in step_content
+                for index, item in enumerate(step_content, start=1)
                 if isinstance(item, dict)
             ],
+            "project_fact_slots": [
+                {
+                    "index": index,
+                    "text": str(item.get("text") or ""),
+                    "verification_commands": item.get("verification_commands", []),
+                }
+                for index, item in enumerate(_numbered_project_facts(investigation), start=1)
+                if isinstance(item, dict)
+            ],
+            "runtime_skip_candidates": skipped_decision_slots or [],
         },
         "task": {
             "intent": analysis.get("intent", {}),
@@ -831,8 +1014,15 @@ def build_patch_verification_slot_user(
         "design_plan": {
             "design_decisions": design_plan.get("design_decisions", []),
         },
+        "candidate_verification": candidate_verification,
         "output_shape": {
             "tests_or_checks": ["runnable command or concrete manual check"],
+            "check_grounding": [{
+                "check_slot": 1,
+                "kind": "manual",
+                "project_fact_slots": [1],
+                "reason": "why facts support every operation in this check",
+            }],
             "acceptance_verification": [{
                 "acceptance_slot": 1,
                 "verification": "check proving this acceptance criterion",
@@ -841,6 +1031,41 @@ def build_patch_verification_slot_user(
                 "step_slot": 1,
                 "acceptance_slots": [1],
             }],
+            "step_merge_groups": [{
+                "step_slots": [1, 2],
+                "reason": "why these are the same implementation responsibility",
+                "merged_content": {
+                    "purpose": "consolidated behavior-level purpose",
+                    "target": "canonical target",
+                    "action": "complete non-conflicting action",
+                    "required_behavior_if_removed": "what breaks if removed",
+                    "completion_conditions": ["condition covering the merged decisions"],
+                    "out_of_scope": ["compatible boundary only"],
+                    "minimality_check": "what the merged responsibility avoids",
+                },
+            }],
+            "step_revisions": [{
+                "step_slot": 1,
+                "reason": "why the candidate step needs semantic correction",
+                "revised_content": {
+                    "purpose": "corrected behavior-level purpose",
+                    "target": "corrected target",
+                    "action": "corrected complete action",
+                    "required_behavior_if_removed": "what breaks if removed",
+                    "completion_conditions": ["grounded completion condition"],
+                    "out_of_scope": ["compatible boundary only"],
+                    "minimality_check": "what this responsibility avoids",
+                },
+            }],
+            "skip_reviews": [
+                {
+                    "decision_slot": int(item["decision_slot"]),
+                    "approved": True,
+                    "reason": "why the cited facts prove no code change is needed",
+                }
+                for item in skipped_decision_slots or []
+                if item.get("decision_slot")
+            ],
         },
     }, ensure_ascii=False, indent=2)
 
@@ -878,18 +1103,8 @@ def _round_limit_text(max_rounds: int) -> str:
     )
 
 
-def _prompt_strings(value) -> list[str]:
-    if not isinstance(value, list):
-        return []
-    return [item for raw in value if (item := str(raw).strip())]
-
-
 def _numbered_project_facts(investigation: dict) -> list[dict]:
-    facts = investigation.get("patch_planning_facts") or investigation.get("patch_planning_context") or []
-    return [
-        {"id": f"PF{index}", "text": text}
-        for index, text in enumerate(_prompt_strings(facts), start=1)
-    ]
+    return normalize_project_facts(investigation)
 
 
 def _format_scope(scope: dict) -> str:

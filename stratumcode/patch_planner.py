@@ -8,6 +8,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from . import app_settings, model_settings, patch_authorization, prompt, providers
+from .planning_facts import normalize_project_facts as _project_facts
 from .agent_runtime import (
     add_usage as _add_usage,
     call_model as _call_model,
@@ -67,6 +68,8 @@ def patch_planning_stream(
     out_of_scope = _strings(design_plan.get("out_of_scope"))
     acceptance_verification = {}
     skipped_decision_slots = []
+    facts = _project_facts(investigation)
+    acceptance_count = len(analysis.get("acceptance_criteria", []))
     decisions = [
         item for item in design_plan.get("design_decisions", [])
         if isinstance(item, dict)
@@ -96,8 +99,13 @@ def patch_planning_stream(
                 run_id,
                 f"decision-{index}-{semantic_attempt}",
             )
-            slot_issues = _slot_step_issues(slot, workspace_dir)
-            if not slot or slot.get("needed") is False or not slot_issues:
+            slot_issues = _slot_step_issues(
+                slot,
+                workspace_dir,
+                acceptance_count=acceptance_count,
+                fact_count=len(facts),
+            )
+            if not slot or not slot_issues:
                 break
             messages.extend([
                 {"role": "assistant", "content": json.dumps(slot, ensure_ascii=False)[:4000]},
@@ -109,13 +117,19 @@ def patch_planning_stream(
                     "needs no code change, set needed=false and include skip_reason."
                 )},
             ])
-        if slot and slot.get("needed") is not False and slot_issues:
+        if slot and slot_issues:
             reason = "Patch step remains ungrounded after semantic repair: " + "; ".join(slot_issues)
             yield start_event(f"{run_id}-ungrounded", "output", {
                 "content": reason,
                 "streaming": False,
             })
-            yield {"op": "done", "next_state": "investigating", "reason": reason}
+            if _slot_issues_need_investigation(slot_issues):
+                yield {"op": "done", "next_state": "investigating", "reason": reason}
+            else:
+                yield {"op": "update", "id": stage_id, "patch": {
+                    "state": "error",
+                    "phase": "patch_planning_failed",
+                }}
             return
         if not slot:
             continue
@@ -126,13 +140,17 @@ def patch_planning_stream(
             skipped_decision_slots.append({
                 "decision_slot": index,
                 "reason": str(slot.get("skip_reason") or "Model marked this design decision as requiring no code change.").strip(),
+                "project_fact_slots": _numbered_slots(
+                    slot.get("skip_project_fact_slots"),
+                    len(facts),
+                ),
             })
             continue
-        for step in slot.get("step_content") or []:
-            if isinstance(step, dict):
-                patched = dict(step)
-                patched["decision_slots"] = [index]
-                step_content.append(patched)
+        _append_slot_steps(
+            step_content,
+            slot.get("step_content"),
+            decision_slot=index,
+        )
     verification = {
         "tests_or_checks": tests_or_checks,
         "acceptance_verification": [
@@ -140,8 +158,12 @@ def patch_planning_stream(
             for key, value in sorted(acceptance_verification.items())
         ],
     }
-    verification_issues = _verification_slot_issues(verification, analysis, step_content)
-    if step_content and verification_issues:
+    required_skip_slots = {
+        int(item["decision_slot"])
+        for item in skipped_decision_slots
+    }
+    verification_issues = ["semantic patch verification has not run"]
+    if step_content or skipped_decision_slots:
         messages = [
             system,
             {"role": "user", "content": prompt.build_patch_verification_slot_user(
@@ -151,6 +173,7 @@ def patch_planning_stream(
                 design_plan,
                 workspace_dir,
                 step_content,
+                skipped_decision_slots=skipped_decision_slots,
             )},
         ]
         attempts = app_settings.get_round_limit("patch_json_attempts") or DEFAULT_PATCH_JSON_ATTEMPTS
@@ -168,6 +191,8 @@ def patch_planning_stream(
                 verification,
                 analysis,
                 step_content,
+                facts,
+                required_skip_slots,
             )
             if not verification_issues:
                 break
@@ -179,8 +204,90 @@ def patch_planning_stream(
                     + "\nReturn only corrected patch_verification JSON."
                 )},
             ])
+        if verification_issues:
+            reason = "Patch verification remains invalid after semantic repair: " + "; ".join(verification_issues)
+            yield start_event(f"{run_id}-verification-failed", "output", {
+                "content": reason,
+                "streaming": False,
+            })
+            yield {"op": "update", "id": stage_id, "patch": {
+                "state": "error",
+                "phase": "patch_planning_failed",
+            }}
+            return
+        audit_messages = [
+            {
+                "role": "system",
+                "content": prompt.build_patch_verification_auditor_system(
+                    app_settings.get_output_language()
+                ),
+            },
+            {"role": "user", "content": prompt.build_patch_verification_slot_user(
+                message,
+                analysis,
+                investigation,
+                design_plan,
+                workspace_dir,
+                step_content,
+                candidate_verification=verification,
+                skipped_decision_slots=skipped_decision_slots,
+            )},
+        ]
+        for semantic_attempt in _attempt_indexes(attempts):
+            audited = yield from _content_json_stream(
+                provider,
+                model,
+                audit_messages,
+                pricing_rules,
+                usage_total,
+                run_id,
+                f"verification-audit-{semantic_attempt}",
+            )
+            audit_issues = _verification_slot_issues(
+                audited,
+                analysis,
+                step_content,
+                facts,
+                required_skip_slots,
+            )
+            if not audit_issues:
+                verification = audited
+                break
+            audit_messages.extend([
+                {"role": "assistant", "content": json.dumps(audited or {}, ensure_ascii=False)[:4000]},
+                {"role": "user", "content": (
+                    "The semantic audit output is incomplete:\n- "
+                    + "\n- ".join(audit_issues)
+                    + "\nReturn only corrected patch_verification JSON."
+                )},
+            ])
+        else:
+            reason = "Patch verification audit remains invalid after repair: " + "; ".join(audit_issues)
+            yield start_event(f"{run_id}-verification-audit-failed", "output", {
+                "content": reason,
+                "streaming": False,
+            })
+            yield {"op": "update", "id": stage_id, "patch": {
+                "state": "error",
+                "phase": "patch_planning_failed",
+            }}
+            return
+        rejected_skips = _rejected_skip_reviews(verification.get("skip_reviews"))
+        if rejected_skips:
+            reason = "Patch verification rejected runtime skip candidates: " + "; ".join(
+                str(item.get("reason") or item.get("decision_slot"))
+                for item in rejected_skips
+            )
+            yield start_event(f"{run_id}-skip-rejected", "output", {
+                "content": reason,
+                "streaming": False,
+            })
+            yield {"op": "update", "id": stage_id, "patch": {
+                "state": "error",
+                "phase": "patch_planning_failed",
+            }}
+            return
         if isinstance(verification, dict):
-            tests_or_checks = _strings(verification.get("tests_or_checks"))
             _merge_acceptance_verification(
                 acceptance_verification,
                 verification.get("acceptance_verification"),
@@ -190,11 +297,24 @@ def patch_planning_stream(
                 verification.get("step_acceptance_coverage"),
                 len(analysis.get("acceptance_criteria", [])),
             )
+            _apply_verified_step_revisions(
+                step_content,
+                verification.get("step_revisions"),
+            )
+            _merge_verified_step_groups(
+                step_content,
+                verification.get("step_merge_groups"),
+            )
+            tests_or_checks = _canonical_verification_checks(
+                verification,
+                step_content,
+                facts,
+            )
     plan_content = {
         "summary": _patch_summary(step_content),
         "step_content": step_content,
-        "tests_or_checks": tests_or_checks,
-        "risks": risks,
+        "tests_or_checks": _unique_strings(tests_or_checks),
+        "risks": _unique_strings(risks),
         "out_of_scope": out_of_scope,
         "acceptance_verification": [
             {"acceptance_slot": key, "verification": value}
@@ -274,6 +394,21 @@ def validate_patch_plan(plan: dict, analysis: dict, design_plan: dict, workspace
         for item in plan.get("project_facts", [])
         if isinstance(item, dict) and str(item.get("id") or "").strip()
     }
+    for item in plan.get("runtime_skipped_decisions") or []:
+        if not isinstance(item, dict):
+            continue
+        decision_id = str(item.get("decision_id") or "?")
+        if not str(item.get("reason") or "").strip():
+            issues.append(f"runtime_skipped_decisions {decision_id} has no reason")
+        refs = set(item.get("project_fact_ids") or [])
+        if fact_ids and not refs:
+            issues.append(f"runtime_skipped_decisions {decision_id} has no project_fact_ids")
+        unknown_refs = sorted(refs - fact_ids)
+        if unknown_refs:
+            issues.append(
+                f"runtime_skipped_decisions {decision_id} references unknown project facts: "
+                + ", ".join(unknown_refs)
+            )
     steps = plan.get("implementation_steps") or []
     no_patch_plan = not steps and bool(skipped_decision_ids)
     seen_step_ids = set()
@@ -285,6 +420,25 @@ def validate_patch_plan(plan: dict, analysis: dict, design_plan: dict, workspace
         seen_step_ids.add(step_id)
     if duplicate_step_ids:
         issues.append("duplicate implementation step ids: " + ", ".join(sorted(duplicate_step_ids)))
+    seen_responsibilities: dict[tuple[str, str, str], str] = {}
+    steps_by_file: dict[str, list[dict]] = {}
+    for item in steps:
+        key = _step_responsibility_key(item)
+        if key in seen_responsibilities:
+            issues.append(
+                f"duplicate implementation responsibility: {item.get('id') or '?'} "
+                f"duplicates {seen_responsibilities[key]}"
+            )
+        else:
+            seen_responsibilities[key] = str(item.get("id") or "?")
+        if item.get("file"):
+            steps_by_file.setdefault(str(item["file"]), []).append(item)
+    for file, file_steps in steps_by_file.items():
+        modes = {str(item.get("mode") or "modify") for item in file_steps}
+        if len(modes) > 1:
+            issues.append(f"file has conflicting create/modify steps: {file}")
+        if "create" in modes and len(file_steps) > 1:
+            issues.append(f"created file must have exactly one implementation step: {file}")
     step_ids = {item.get("id") for item in steps if item.get("id")}
     step_files = {item.get("file") for item in steps if item.get("file")}
     files = set(plan.get("files_to_change") or [])
@@ -521,8 +675,9 @@ def _acceptance_verification_map(value) -> dict[int, str]:
     return result
 
 
-def _skipped_decisions(value, design_plan: dict) -> list[dict]:
+def _skipped_decisions(value, design_plan: dict, facts: list[dict]) -> list[dict]:
     decision_ids = _known_ids(design_plan.get("design_decisions"))
+    fact_ids = _known_ids(facts)
     result = []
     if not isinstance(value, list):
         return result
@@ -537,6 +692,7 @@ def _skipped_decisions(value, design_plan: dict) -> list[dict]:
             result.append({
                 "decision_id": decision_ids[index - 1],
                 "reason": str(item.get("reason") or "").strip(),
+                "project_fact_ids": _slot_ids(item.get("project_fact_slots"), fact_ids),
             })
     return result
 
@@ -544,7 +700,7 @@ def _skipped_decisions(value, design_plan: dict) -> list[dict]:
 def _plan_from_content(data: dict, analysis: dict, design_plan: dict, investigation: dict) -> dict:
     facts = _project_facts(investigation)
     steps = _runtime_steps(data.get("step_content"), analysis, design_plan, facts)
-    skipped_decisions = _skipped_decisions(data.get("skipped_decision_slots"), design_plan)
+    skipped_decisions = _skipped_decisions(data.get("skipped_decision_slots"), design_plan, facts)
     if not steps and not skipped_decisions:
         raise ValueError("step_content must contain at least one implementation step")
     step_ids = [step["id"] for step in steps]
@@ -576,8 +732,8 @@ def _plan_from_content(data: dict, analysis: dict, design_plan: dict, investigat
             }
             for index, item in enumerate(criteria)
         ],
-        "tests_or_checks": _strings(data.get("tests_or_checks")),
-        "risks": _strings(data.get("risks")),
+        "tests_or_checks": _unique_strings(data.get("tests_or_checks")),
+        "risks": _unique_strings(data.get("risks")),
         "out_of_scope": _strings(data.get("out_of_scope")),
         "runtime_skipped_decisions": skipped_decisions,
     }
@@ -595,6 +751,9 @@ def _runtime_steps(value, analysis: dict, design_plan: dict, facts: list[dict]) 
             continue
         acceptance_ids = _slot_ids(item.get("acceptance_slots"), criteria_ids)
         decision_refs = _slot_ids(item.get("decision_slots"), decision_ids)
+        acceptance_ids = _unique_strings(
+            acceptance_ids + _decision_acceptance_ids(decision_refs, design_plan)
+        )
         fact_refs = _slot_ids(item.get("project_fact_slots"), fact_ids)
         steps.append({
             "id": f"IS{index}",
@@ -618,9 +777,22 @@ def _has_usable_steps(value) -> bool:
     return isinstance(value, list) and any(isinstance(item, dict) and str(item.get("file") or "").strip() for item in value)
 
 
-def _slot_step_issues(slot: dict | None, workspace_dir: str) -> list[str]:
-    if not slot or slot.get("needed") is False:
+def _slot_step_issues(
+    slot: dict | None,
+    workspace_dir: str,
+    *,
+    acceptance_count: int,
+    fact_count: int,
+) -> list[str]:
+    if not slot:
         return []
+    if slot.get("needed") is False:
+        issues = []
+        if not str(slot.get("skip_reason") or "").strip():
+            issues.append("needed=false requires a concrete skip_reason")
+        if fact_count and not _numbered_slots(slot.get("skip_project_fact_slots"), fact_count):
+            issues.append("needed=false requires at least one skip_project_fact_slots item")
+        return issues
     steps = slot.get("step_content")
     if not _has_usable_steps(steps):
         return ["needed=true requires at least one step_content item with a workspace-relative file"]
@@ -633,15 +805,44 @@ def _slot_step_issues(slot: dict | None, workspace_dir: str) -> list[str]:
         if mode not in {"modify", "create"}:
             issues.append(f"step_content item {index} has invalid mode: {mode}")
             continue
+        try:
+            item["file"] = _canonical_workspace_file(str(item["file"]), workspace)
+        except ValueError as exc:
+            issues.append(f"step_content item {index} {exc}")
+            continue
         if issue := _planned_file_issue(str(item["file"]), mode, workspace):
             issues.append(f"step_content item {index} {issue}")
+        for field in ("purpose", "target", "action", "required_behavior_if_removed", "minimality_check"):
+            if not str(item.get(field) or "").strip():
+                issues.append(f"step_content item {index} has no {field}")
+        if not _strings(item.get("completion_conditions")):
+            issues.append(f"step_content item {index} has no completion_conditions")
+        if acceptance_count and not _numbered_slots(item.get("acceptance_slots"), acceptance_count):
+            issues.append(f"step_content item {index} has no valid acceptance_slots")
+        if fact_count and not _numbered_slots(item.get("project_fact_slots"), fact_count):
+            issues.append(f"step_content item {index} has no valid project_fact_slots")
     return issues
+
+
+def _slot_issues_need_investigation(issues: list[str]) -> bool:
+    return any(
+        marker in issue
+        for issue in issues
+        for marker in (
+            "outside workspace",
+            "modify target does not exist",
+            "create target already exists",
+            "file path is invalid",
+        )
+    )
 
 
 def _verification_slot_issues(
     slot: dict | None,
     analysis: dict,
     steps: list[dict],
+    facts: list[dict],
+    required_skip_slots: set[int] | None = None,
 ) -> list[str]:
     if not isinstance(slot, dict):
         return ["patch_verification must be a JSON object"]
@@ -685,9 +886,266 @@ def _verification_slot_issues(
         for index in range(1, len(criteria) + 1)
         if index not in step_coverage
     ]
-    if missing_coverage:
+    if missing_coverage and steps:
         issues.append("implementation step coverage missing acceptance slots: " + ", ".join(missing_coverage))
+    issues.extend(_skip_review_issues(slot.get("skip_reviews"), required_skip_slots or set()))
+    issues.extend(
+        _check_grounding_issues(
+            slot.get("check_grounding"),
+            _strings(slot.get("tests_or_checks")),
+            facts,
+        )
+    )
+    _, merge_issues = _step_merge_groups(slot.get("step_merge_groups"), len(steps))
+    issues.extend(merge_issues)
+    _, revision_issues = _step_revision_updates(slot.get("step_revisions"), len(steps))
+    issues.extend(revision_issues)
     return issues
+
+
+def _skip_review_issues(value, required_slots: set[int]) -> list[str]:
+    if not required_slots:
+        return [] if value in (None, []) else ["skip_reviews must be empty without runtime skip candidates"]
+    if not isinstance(value, list):
+        return ["skip_reviews must be an array"]
+    reviewed = set()
+    issues = []
+    for item in value:
+        if not isinstance(item, dict):
+            issues.append("skip_reviews contains a non-object item")
+            continue
+        try:
+            slot = int(item.get("decision_slot"))
+        except (TypeError, ValueError):
+            issues.append("skip_reviews has an invalid decision_slot")
+            continue
+        if slot not in required_slots:
+            issues.append(f"skip_reviews references unknown skip slot: {slot}")
+            continue
+        if slot in reviewed:
+            issues.append(f"skip_reviews repeats decision slot: {slot}")
+        reviewed.add(slot)
+        if not isinstance(item.get("approved"), bool):
+            issues.append(f"skip_reviews decision {slot} has no boolean approved value")
+        if not str(item.get("reason") or "").strip():
+            issues.append(f"skip_reviews decision {slot} has no reason")
+    missing = sorted(required_slots - reviewed)
+    if missing:
+        issues.append("skip_reviews missing decision slots: " + ", ".join(map(str, missing)))
+    return issues
+
+
+def _rejected_skip_reviews(value) -> list[dict]:
+    return [
+        item
+        for item in value or []
+        if isinstance(item, dict) and item.get("approved") is False
+    ]
+
+
+def _check_grounding_issues(
+    value,
+    checks: list[str],
+    facts: list[dict],
+) -> list[str]:
+    check_count = len(checks)
+    if check_count == 0:
+        return []
+    if not isinstance(value, list):
+        return ["check_grounding must be an array"]
+    covered = set()
+    issues = []
+    for item in value:
+        if not isinstance(item, dict):
+            issues.append("check_grounding contains a non-object item")
+            continue
+        try:
+            check_slot = int(item.get("check_slot"))
+        except (TypeError, ValueError):
+            issues.append("check_grounding has an invalid check_slot")
+            continue
+        if not 1 <= check_slot <= check_count:
+            issues.append(f"check_grounding references unknown check slot: {check_slot}")
+            continue
+        if check_slot in covered:
+            issues.append(f"check_grounding repeats check slot: {check_slot}")
+        covered.add(check_slot)
+        fact_slots = _numbered_slots(item.get("project_fact_slots"), len(facts))
+        if facts and not fact_slots:
+            issues.append(f"check_grounding check {check_slot} has no valid project fact slots")
+        kind = str(item.get("kind") or "").strip()
+        if kind not in {"manual", "command"}:
+            issues.append(f"check_grounding check {check_slot} has invalid kind")
+        if kind == "command":
+            allowed_commands = {
+                command
+                for fact_slot in fact_slots
+                for command in _strings(facts[fact_slot - 1].get("verification_commands"))
+            }
+            if checks[check_slot - 1] not in allowed_commands:
+                issues.append(f"check_grounding check {check_slot} command is not authorized by project facts")
+        if not str(item.get("reason") or "").strip():
+            issues.append(f"check_grounding check {check_slot} has no reason")
+    missing = sorted(set(range(1, check_count + 1)) - covered)
+    if missing:
+        issues.append("check_grounding missing check slots: " + ", ".join(map(str, missing)))
+    return issues
+
+
+def _canonical_verification_checks(slot: dict, steps: list[dict], facts: list[dict]) -> list[str]:
+    checks = _strings(slot.get("tests_or_checks"))
+    grounding = {
+        int(item["check_slot"]): item
+        for item in slot.get("check_grounding", [])
+        if isinstance(item, dict) and str(item.get("check_slot") or "").isdigit()
+    }
+    result = []
+    for check_slot, check in enumerate(checks, start=1):
+        item = grounding.get(check_slot, {})
+        if item.get("kind") == "command":
+            result.append(check)
+            continue
+        if steps:
+            targets = [
+                f"{step.get('file')}::{step.get('target')}"
+                for step in steps
+            ]
+            conditions = _unique_strings([
+                condition
+                for step in steps
+                for condition in _strings(step.get("completion_conditions"))
+            ])
+            result.append(
+                "Inspect "
+                + ", ".join(targets)
+                + " and confirm: "
+                + "; ".join(conditions)
+            )
+            continue
+        fact_slots = _numbered_slots(item.get("project_fact_slots"), len(facts))
+        result.append(
+            "Confirm the observed project facts remain true: "
+            + "; ".join(facts[index - 1]["text"] for index in fact_slots)
+        )
+    return _unique_strings(result)
+
+
+def _step_merge_groups(value, step_count: int) -> tuple[list[dict], list[str]]:
+    if value is None:
+        return [], []
+    if not isinstance(value, list):
+        return [], ["step_merge_groups must be an array"]
+    groups = []
+    used = set()
+    issues = []
+    for item in value:
+        if not isinstance(item, dict):
+            issues.append("step_merge_groups contains a non-object item")
+            continue
+        slots = _numbered_slots(item.get("step_slots"), step_count)
+        if len(slots) < 2:
+            issues.append("step_merge_groups item requires at least two valid step slots")
+            continue
+        overlap = used & set(slots)
+        if overlap:
+            issues.append("step_merge_groups repeats step slots: " + ", ".join(map(str, sorted(overlap))))
+            continue
+        if not str(item.get("reason") or "").strip():
+            issues.append("step_merge_groups item has no reason")
+            continue
+        issue_count = len(issues)
+        merged = item.get("merged_content")
+        if not isinstance(merged, dict):
+            issues.append("step_merge_groups item has no merged_content")
+            continue
+        for field in ("purpose", "target", "action", "required_behavior_if_removed", "minimality_check"):
+            if not str(merged.get(field) or "").strip():
+                issues.append(f"step_merge_groups merged_content has no {field}")
+        if not _strings(merged.get("completion_conditions")):
+            issues.append("step_merge_groups merged_content has no completion_conditions")
+        if len(issues) > issue_count:
+            continue
+        used.update(slots)
+        groups.append({"slots": slots, "content": merged})
+    return groups, issues
+
+
+def _step_revision_updates(value, step_count: int) -> tuple[dict[int, dict], list[str]]:
+    if value is None:
+        return {}, []
+    if not isinstance(value, list):
+        return {}, ["step_revisions must be an array"]
+    updates = {}
+    issues = []
+    for item in value:
+        if not isinstance(item, dict):
+            issues.append("step_revisions contains a non-object item")
+            continue
+        try:
+            slot = int(item.get("step_slot"))
+        except (TypeError, ValueError):
+            issues.append("step_revisions has an invalid step_slot")
+            continue
+        if not 1 <= slot <= step_count:
+            issues.append(f"step_revisions references unknown step slot: {slot}")
+            continue
+        if slot in updates:
+            issues.append(f"step_revisions repeats step slot: {slot}")
+            continue
+        if not str(item.get("reason") or "").strip():
+            issues.append(f"step_revisions step {slot} has no reason")
+        revised = item.get("revised_content")
+        if not isinstance(revised, dict):
+            issues.append(f"step_revisions step {slot} has no revised_content")
+            continue
+        for field in ("purpose", "target", "action", "required_behavior_if_removed", "minimality_check"):
+            if not str(revised.get(field) or "").strip():
+                issues.append(f"step_revisions step {slot} revised_content has no {field}")
+        if not _strings(revised.get("completion_conditions")):
+            issues.append(f"step_revisions step {slot} revised_content has no completion_conditions")
+        updates[slot] = revised
+    return updates, issues
+
+
+def _apply_verified_step_revisions(steps: list[dict], value) -> None:
+    updates, _ = _step_revision_updates(value, len(steps))
+    for slot, revised in updates.items():
+        step = steps[slot - 1]
+        for field in (
+            "purpose",
+            "target",
+            "action",
+            "required_behavior_if_removed",
+            "minimality_check",
+        ):
+            step[field] = str(revised.get(field) or "").strip()
+        step["completion_conditions"] = _strings(revised.get("completion_conditions"))
+        step["out_of_scope"] = _strings(revised.get("out_of_scope"))
+
+
+def _merge_verified_step_groups(steps: list[dict], value) -> None:
+    groups, _ = _step_merge_groups(value, len(steps))
+    remove = set()
+    for group in groups:
+        slots = group["slots"]
+        destination = steps[slots[0] - 1]
+        for slot in slots[1:]:
+            source = steps[slot - 1]
+            for field in ("decision_slots", "acceptance_slots", "project_fact_slots"):
+                destination[field] = sorted(set(destination.get(field) or []) | set(source.get(field) or []))
+            remove.add(slot - 1)
+        merged = group["content"]
+        for field in (
+            "purpose",
+            "target",
+            "action",
+            "required_behavior_if_removed",
+            "minimality_check",
+        ):
+            destination[field] = str(merged.get(field) or "").strip()
+        destination["completion_conditions"] = _strings(merged.get("completion_conditions"))
+        destination["out_of_scope"] = _strings(merged.get("out_of_scope"))
+    steps[:] = [step for index, step in enumerate(steps) if index not in remove]
 
 
 def _merge_step_acceptance_coverage(
@@ -747,7 +1205,77 @@ def _numbered_slots(value, limit: int) -> list[int]:
     return result
 
 
+def _append_slot_steps(target: list[dict], value, *, decision_slot: int) -> None:
+    if not isinstance(value, list):
+        return
+    for raw in value:
+        if not isinstance(raw, dict):
+            continue
+        candidate = dict(raw)
+        candidate["decision_slots"] = [decision_slot]
+        target.append(candidate)
+
+
+def _step_responsibility_key(step: dict) -> tuple[str, str, str]:
+    return (
+        str(step.get("mode") or "modify").strip().casefold(),
+        str(step.get("file") or "").strip().replace("\\", "/").casefold(),
+        _normalized_target(step.get("target")),
+    )
+
+
+def _normalized_target(value) -> str:
+    return " ".join(str(value or "").replace("`", " ").casefold().split())
+
+
+def _unique_strings(value) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    result = []
+    seen = set()
+    for raw in value:
+        text = str(raw or "").strip()
+        key = text.casefold()
+        if text and key not in seen:
+            result.append(text)
+            seen.add(key)
+    return result
+
+
+def _decision_acceptance_ids(decision_ids: list[str], design_plan: dict) -> list[str]:
+    requirement_sources = {
+        str(item.get("id") or ""): str(item.get("source") or "")
+        for item in design_plan.get("requirement_model", [])
+        if isinstance(item, dict) and item.get("id") and item.get("source")
+    }
+    return _unique_strings([
+        requirement_sources[requirement_id]
+        for item in design_plan.get("design_decisions", [])
+        if isinstance(item, dict) and item.get("id") in decision_ids
+        for requirement_id in item.get("requirement_ids", [])
+        if requirement_id in requirement_sources
+    ])
+
+
+def _canonical_workspace_file(file: str, workspace: Path) -> str:
+    workspace = workspace.resolve()
+    raw = str(file or "").strip()
+    if not raw:
+        raise ValueError("file path is invalid")
+    path = Path(raw)
+    target = path.resolve() if path.is_absolute() else (workspace / path).resolve()
+    try:
+        relative = target.relative_to(workspace)
+    except ValueError as exc:
+        raise ValueError("file is outside workspace") from exc
+    if relative == Path("."):
+        raise ValueError("file path is invalid")
+    return relative.as_posix()
+
+
 def _planned_file_issue(file: str, mode: str, workspace: Path) -> str:
+    if Path(file).is_absolute():
+        return "file must be workspace-relative"
     try:
         target = (workspace / file).resolve()
     except OSError:
@@ -789,11 +1317,3 @@ def _strings(value) -> list[str]:
     if not isinstance(value, list):
         return []
     return [item for raw in value if (item := str(raw).strip())]
-
-
-def _project_facts(investigation: dict) -> list[dict]:
-    facts = investigation.get("patch_planning_facts") or investigation.get("patch_planning_context") or []
-    return [
-        {"id": f"PF{index}", "text": text}
-        for index, text in enumerate(_strings(facts), start=1)
-    ]

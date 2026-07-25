@@ -8,6 +8,7 @@ from .task_contract import run_request
 def handle(run):
     from .. import chat
 
+    previous_plan = run.design_plan
     run.design_plan = None
     run.patch_plan = None
     request = run_request(run)
@@ -16,10 +17,14 @@ def handle(run):
         analysis=run.analysis,
         investigation=run.last_investigation or {},
         workspace_dir=run.workspace_dir,
+        previous_plan=previous_plan,
+        revision_mode=run.design_revision_mode,
+        revision_context=run.continuation_context,
     ):
         if event.get("op") == "done" and isinstance(event.get("design_plan"), dict):
             run.design_plan = event["design_plan"]
         yield event
+    run.design_revision_mode = ""
     if not run.design_plan:
         run.transition(chat._chat_finish_state(run), "Design planning finished without a plan.")
         return

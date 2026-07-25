@@ -31,6 +31,9 @@ def handle(run):
     elif next_state == "analyzing":
         run.transition(chat.ChatState.ANALYZING, next_reason or "Patch planning requires task re-analysis.")
     elif next_state == "investigating":
+        run.design_revision_mode = "grounding"
+        if next_reason and next_reason not in run.continuation_context:
+            run.continuation_context.append(f"Patch planning feedback: {next_reason}")
         run.transition(chat.ChatState.INVESTIGATING, next_reason or "Patch planning requires more project evidence.")
     elif failed:
         run.transition(chat.ChatState.FAILED, "Patch planning failed before producing a patch plan.")

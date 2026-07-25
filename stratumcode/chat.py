@@ -60,6 +60,7 @@ class ChatRun:
     investigation_knowledge: list[dict] = field(default_factory=list)
     last_investigation: dict | None = None
     design_plan: dict | None = None
+    design_revision_mode: str = ""
     patch_plan: dict | None = None
     implementation_result: dict | None = None
     changed_files: list[str] = field(default_factory=list)
