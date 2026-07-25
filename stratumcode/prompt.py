@@ -76,10 +76,16 @@ For intent_scope:
 {{
   "intent_type": "feature|bugfix|refactor|question|investigation|other",
   "summary": "one sentence describing the result the user wants",
-  "constraints": ["explicit hard requirement"],
-  "clues": [
-    {{"kind": "file|line|symbol|route|other", "value": "literal clue", "path": "", "line": 0, "symbol": "", "note": ""}}
+  "constraints": [
+    {{"text": "explicit hard requirement", "authority": "user_explicit", "source_ref": "SRC1", "source_excerpt": "verbatim supporting excerpt"}}
   ],
+  "clues": [
+    {{"kind": "file|line|symbol|route|other", "value": "literal sourced clue", "path": "", "line": 0, "symbol": "", "source_ref": "SRC1", "note": ""}}
+  ],
+  "reference_baselines": [
+    {{"target": "referenced existing behavior", "policy": "inherit_unspecified_behavior", "source_ref": "SRC1", "source_excerpt": "verbatim supporting excerpt"}}
+  ],
+  "investigation_targets": ["neutral fact to locate or verify without a guessed path"],
   "hypotheses": [
     {{"text": "claim explicitly implied by the user", "certainty": "certain|uncertain|guess"}}
   ]
@@ -87,18 +93,20 @@ For intent_scope:
 
 For acceptance_contract:
 {{
-  "acceptance_criteria": ["observable behavior that must be true when done"],
+  "acceptance_criteria": [
+    {{"text": "observable behavior that must be true when done", "authority": "derived", "derived_from": ["REQ1"]}}
+  ],
   "behavior_contract": {{
-    "inputs": ["user/system inputs involved in the behavior"],
-    "outputs": ["observable outputs or state changes"],
-    "success_behaviors": ["what happens on the successful path"],
-    "failure_behaviors": ["what happens on expected failure paths"],
-    "boundaries": ["explicit non-goals, edge cases, and scope limits"]
+    "inputs": [{{"text": "user/system input", "authority": "derived", "derived_from": ["REQ1"]}}],
+    "outputs": [{{"text": "observable output", "authority": "derived", "derived_from": ["REQ1"]}}],
+    "success_behaviors": [{{"text": "successful behavior", "authority": "derived", "derived_from": ["REQ1"]}}],
+    "failure_behaviors": [],
+    "boundaries": [{{"text": "explicit boundary", "authority": "user_explicit", "source_ref": "SRC1", "source_excerpt": "verbatim supporting excerpt"}}]
   }},
   "scope": {{
-    "in": ["work explicitly required now"],
-    "out": ["work explicitly not required"],
-    "undecided": ["product or user decisions not yet settled"]
+    "in": [{{"text": "derived work required now", "authority": "derived", "derived_from": ["REQ1"]}}],
+    "out": [{{"text": "explicitly excluded work", "authority": "user_explicit", "source_ref": "SRC1", "source_excerpt": "verbatim supporting excerpt"}}],
+    "undecided": [{{"text": "unresolved product decision", "authority": "derived", "derived_from": ["REQ1"]}}]
   }}
 }}
 
@@ -111,6 +119,7 @@ For unknowns:
       "type": "code_fact|doc_fact|runtime_fact|product_decision|engineering_decision|risk|deferred",
       "why": "why this question matters",
       "resolution_strategy": "investigate_project|clearify|deferred",
+      "reference_id": "REF1 when this question may be answered by a reference baseline",
       "acceptance_slots": [1]
     }}
   ]
@@ -118,12 +127,24 @@ For unknowns:
 
 Rules:
 - Do not write AC/U ids; use 1-based acceptance_slots when needed.
-- Preserve explicit constraints exactly enough that later code work cannot violate them.
-- Clues are pointers to verify, not requirements and not evidence.
+- Use only ids from source_catalog in source_ref and runtime_skeleton in derived_from.
+- constraints, scope.out, and boundaries require a supporting source_ref and source_excerpt.
+- Derived fields must name the requirement or reference they derive from and must
+  not introduce a new product decision.
+- file, line, symbol, and route clues require a user or verified source. When no
+  source supports a location, omit the clue and emit a path-free investigation_target.
+- A reference baseline records only its target and inheritance policy. Do not
+  infer its animation, state storage, component, interaction, or transition.
+- failure_behaviors stays empty unless an authoritative source explicitly requires one.
 - If the user states no hypothesis, keep hypotheses empty; do not invent one.
 - Unknowns should be concrete facts, decisions, or delivery uncertainties relevant
   to implementation, validation, scope, or later follow-up.
-- Prefer one acceptance criterion and one to three concrete unknowns.
+- Write one acceptance criterion per independent observable final state or state
+  transition, usually 1-4 criteria. Never split by file or implementation step.
+- Explicit user behavior overrides a reference baseline; the baseline supplies
+  only behavior the user left unspecified.
+- Questions about a reference baseline's interaction, state, animation, or
+  transition must use its reference_id and investigate_project, never clearify.
 - Use clearify only for user-visible product decisions; runtime normalizes
   deferred, engineering, and invalid strategy combinations."""
 
@@ -170,11 +191,17 @@ Constraints:
 Scope:
 {scope}
 
+Canonical statements and authority:
+{canonical_statements}
+
 Initial hypotheses from user:
 {hypotheses}
 
 Clues to verify first when useful:
 {clues}
+
+Reference baselines to investigate:
+{reference_baselines}
 
 Initial unknowns:
 {unknowns}
@@ -244,6 +271,9 @@ Rules:
   it as a design_decision instead of asking the user.
 - When the user asks to match an existing project behavior, preserve the observed
   state model, interaction, and transition behavior unless explicitly excluded.
+- Resolve conflicts in this order: user_explicit, user_reference, verified_fact,
+  then derived. Explicit user behavior overrides the reference baseline; inherit
+  only dimensions the user left unspecified.
 - When investigation.structured_findings exists, treat it as runtime-classified
   facts: action=extract candidates may be extracted directly; action=review
   candidates need an explicit behavior-preserving design; action=skip candidates
@@ -266,7 +296,7 @@ The runtime owns the final patch-plan JSON, all ids, responsibility-chain
 slots, acceptance mapping slots, project facts, and schema normalization.
 You only fill content for the current runtime_slot.
 
-Output shape:
+For patch_step_for_design_decision:
 {{
   "needed": true,
   "skip_reason": "why this design decision needs no code change when needed is false",
@@ -292,6 +322,17 @@ Output shape:
   "risks": ["small risk or empty"]
 }}
 
+For patch_verification:
+{{
+  "tests_or_checks": ["runnable command or the smallest concrete manual check"],
+  "acceptance_verification": [
+    {{"acceptance_slot": 1, "verification": "check proving this acceptance criterion"}}
+  ],
+  "step_acceptance_coverage": [
+    {{"step_slot": 1, "acceptance_slots": [1, 2]}}
+  ]
+}}
+
 Rules:
 - Keep the plan minimal: the fewest steps that cover the approved design.
 - If the current runtime_slot needs no code change, return needed=false,
@@ -307,6 +348,10 @@ Rules:
   be planned only when the design chose a behavior-preserving variant strategy.
 - Make each purpose describe behavior, not just the file operation.
 - Include one runnable check or the smallest manual check when no test framework exists.
+- For patch_verification, cover every acceptance slot in both
+  acceptance_verification and step_acceptance_coverage. Map an acceptance slot
+  only to a planned step whose action and completion conditions actually
+  implement it. Return at least one tests_or_checks item for a feature or bugfix.
 The runtime validates coverage, responsibility chains, IDs, files, and required fields."""
 
 IMPLEMENTATION_RUNNER = """\
@@ -315,6 +360,11 @@ You are StratumCode's implementation runner. Write user-visible text in {languag
 Apply the authorized patch plan. Do not redesign it.
 Read files before modifying them, keep each patch focused on the current plan,
 and explain any plan/file conflict instead of inventing new behavior.
+
+Set step_complete=false when one authorized step must be split across multiple
+apply_patch calls. Set it to true only on the final call after all completion
+conditions for that step are satisfied. Use a fresh attempt_id for each distinct
+patch payload; reuse an attempt_id only to retry the identical payload.
 
 The runtime enforces apply_patch authorization, step ids, injected metadata,
 required tool fields, missing patch steps, and stale snapshot errors."""
@@ -420,12 +470,14 @@ def build_task_intent_slot_user(
     message: str,
     directory: str,
     context: list[str] | None = None,
+    source_catalog: list[dict] | None = None,
     error: str = "",
 ) -> str:
     return _task_analyzer_slot_user(
         message=message,
         directory=directory,
         context=context,
+        source_catalog=source_catalog,
         output_contract="intent_scope",
         runtime_skeleton={},
         error=error,
@@ -438,12 +490,14 @@ def build_task_acceptance_slot_user(
     directory: str,
     context: list[str] | None = None,
     intent_slot: dict | None = None,
+    source_catalog: list[dict] | None = None,
     error: str = "",
 ) -> str:
     return _task_analyzer_slot_user(
         message=message,
         directory=directory,
         context=context,
+        source_catalog=source_catalog,
         output_contract="acceptance_contract",
         runtime_skeleton={"intent": intent_slot or {}},
         error=error,
@@ -457,12 +511,14 @@ def build_task_unknowns_slot_user(
     context: list[str] | None = None,
     intent_slot: dict | None = None,
     acceptance_slots: list[dict] | None = None,
+    source_catalog: list[dict] | None = None,
     error: str = "",
 ) -> str:
     return _task_analyzer_slot_user(
         message=message,
         directory=directory,
         context=context,
+        source_catalog=source_catalog,
         output_contract="unknowns",
         runtime_skeleton={
             "intent": intent_slot or {},
@@ -477,6 +533,7 @@ def _task_analyzer_slot_user(
     message: str,
     directory: str,
     context: list[str] | None,
+    source_catalog: list[dict] | None,
     output_contract: str,
     runtime_skeleton: dict,
     error: str = "",
@@ -484,6 +541,7 @@ def _task_analyzer_slot_user(
     payload = {
         "workspace_root": directory,
         "user_selected_context": context or [],
+        "source_catalog": source_catalog or [],
         "user_request": message,
         "output_contract": output_contract,
         "runtime_skeleton": runtime_skeleton,
@@ -553,6 +611,10 @@ def build_investigation_context(
             behavior_contract=_format_behavior_contract(analysis.get("behavior_contract", {})),
             constraints="\n".join(f"- {item}" for item in analysis.get("constraints", [])) or "- (none)",
             scope=_format_scope(analysis.get("scope", {})),
+            canonical_statements="\n".join(
+                f"- [{item.get('authority', '')}] {item.get('text', '')}"
+                for item in analysis.get("statements", [])
+            ) or "- (none)",
             hypotheses="\n".join(
                 f"- ({item.get('certainty', 'uncertain')}) {item.get('text', '')}"
                 for item in analysis.get("hypotheses", [])
@@ -560,6 +622,10 @@ def build_investigation_context(
             clues="\n".join(
                 f"- {item.get('kind', 'other')}: {item.get('value', '')}"
                 for item in analysis.get("clues", [])
+            ) or "- (none)",
+            reference_baselines="\n".join(
+                f"- {item.get('id', '')}: inherit unspecified behavior from {item.get('target', '')}"
+                for item in analysis.get("reference_baselines", [])
             ) or "- (none)",
             unknowns="\n".join(_format_unknown(item) for item in analysis.get("unknowns", [])) or "- (none)",
             message=message,
@@ -596,6 +662,8 @@ def build_design_requirement_slot_user(
             "behavior_contract": analysis.get("behavior_contract", {}),
             "constraints": analysis.get("constraints", []),
             "scope": analysis.get("scope", {}),
+            "reference_baselines": analysis.get("reference_baselines", []),
+            "canonical_statements": analysis.get("statements", []),
         },
         "investigation": {
             "summary": investigation.get("summary", ""),
@@ -625,6 +693,8 @@ def build_design_decision_slots_user(message: str, analysis: dict, investigation
             "constraints": analysis.get("constraints", []),
             "scope": analysis.get("scope", {}),
             "unknowns": analysis.get("unknowns", []),
+            "reference_baselines": analysis.get("reference_baselines", []),
+            "canonical_statements": analysis.get("statements", []),
         },
         "investigation": {
             "summary": investigation.get("summary", ""),
@@ -681,6 +751,8 @@ def build_patch_step_slot_user(
             "behavior_contract": analysis.get("behavior_contract", {}),
             "constraints": analysis.get("constraints", []),
             "scope": analysis.get("scope", {}),
+            "reference_baselines": analysis.get("reference_baselines", []),
+            "canonical_statements": analysis.get("statements", []),
         },
         "investigation": {
             "summary": investigation.get("summary", ""),
@@ -709,6 +781,66 @@ def build_patch_step_slot_user(
             "tests_or_checks": ["command or manual check"],
             "risks": ["small risk or empty"],
             "acceptance_verification": [{"acceptance_slot": 1, "verification": "check"}],
+        },
+    }, ensure_ascii=False, indent=2)
+
+
+def build_patch_verification_slot_user(
+    message: str,
+    analysis: dict,
+    investigation: dict,
+    design_plan: dict,
+    workspace_dir: str,
+    step_content: list[dict],
+) -> str:
+    criteria = [
+        item for item in analysis.get("acceptance_criteria", [])
+        if isinstance(item, dict)
+    ]
+    return json.dumps({
+        "platform": platform.system(),
+        "workspace_root": workspace_dir,
+        "user_request": message,
+        "output_contract": "patch_verification",
+        "runtime_skeleton": {
+            "acceptance_slots": [
+                {"index": index, "text": str(item.get("text") or "")}
+                for index, item in enumerate(criteria, start=1)
+            ],
+            "planned_steps": [
+                {
+                    "file": str(item.get("file") or ""),
+                    "target": str(item.get("target") or ""),
+                    "action": str(item.get("action") or ""),
+                    "acceptance_slots": item.get("acceptance_slots", []),
+                }
+                for item in step_content
+                if isinstance(item, dict)
+            ],
+        },
+        "task": {
+            "intent": analysis.get("intent", {}),
+            "acceptance_criteria": criteria,
+            "canonical_statements": analysis.get("statements", []),
+        },
+        "investigation": {
+            "patch_planning_facts": investigation.get("patch_planning_facts")
+            or investigation.get("patch_planning_context")
+            or [],
+        },
+        "design_plan": {
+            "design_decisions": design_plan.get("design_decisions", []),
+        },
+        "output_shape": {
+            "tests_or_checks": ["runnable command or concrete manual check"],
+            "acceptance_verification": [{
+                "acceptance_slot": 1,
+                "verification": "check proving this acceptance criterion",
+            }],
+            "step_acceptance_coverage": [{
+                "step_slot": 1,
+                "acceptance_slots": [1],
+            }],
         },
     }, ensure_ascii=False, indent=2)
 

@@ -14,6 +14,7 @@ _MAX_BODY_SIZE = 1_000_000
 _FILE_PREVIEW_LINES = 120
 _FILE_PREVIEW_BYTES = 64_000
 _IGNORED_DIRS = {".git", ".venv", "venv", "node_modules", "dist", "__pycache__", ".pytest_cache"}
+_CLIENT_DISCONNECT_ERRORS = (BrokenPipeError, ConnectionResetError, ConnectionAbortedError)
 
 
 # -- 路由系统 ---------------------------------------------------------------
@@ -181,6 +182,8 @@ class _Handler(SimpleHTTPRequestHandler):
                     self._handle_lsp_get()
                 else:
                     super().do_GET()
+        except _CLIENT_DISCONNECT_ERRORS:
+            return
         except Exception:
             _logger.exception("GET request failed: %s", self.path)
             try:
@@ -201,6 +204,8 @@ class _Handler(SimpleHTTPRequestHandler):
                     self._handle_lsp_post(body)
                 else:
                     self._json({"error": "not found"}, 404)
+        except _CLIENT_DISCONNECT_ERRORS:
+            return
         except (KeyError, TypeError, ValueError) as exc:
             try:
                 self._json({"error": str(exc)}, 400)
@@ -241,6 +246,8 @@ class _Handler(SimpleHTTPRequestHandler):
         try:
             result = asyncio.run(tool.execute(params, ctx))
             self._json({"title": result.title, "output": result.output, "metadata": result.metadata})
+        except _CLIENT_DISCONNECT_ERRORS:
+            return
         except Exception:
             _logger.exception("tool execution failed: %s", tool_name)
             self._json({"title": f"error: {tool_name}", "output": "tool execution failed", "metadata": {}}, 500)
@@ -261,7 +268,7 @@ class _Handler(SimpleHTTPRequestHandler):
             for event in events:
                 self.wfile.write(json.dumps(event, ensure_ascii=False).encode() + b"\n")
                 self.wfile.flush()
-        except (BrokenPipeError, ConnectionResetError):
+        except _CLIENT_DISCONNECT_ERRORS:
             return
         except Exception as exc:
             _logger.exception("chat stream failed")
@@ -269,7 +276,7 @@ class _Handler(SimpleHTTPRequestHandler):
             try:
                 self.wfile.write(json.dumps(error, ensure_ascii=False).encode() + b"\n")
                 self.wfile.flush()
-            except (BrokenPipeError, ConnectionResetError):
+            except _CLIENT_DISCONNECT_ERRORS:
                 pass
 
     def _handle_chat_answer(self, body: dict):
@@ -293,12 +300,14 @@ class _Handler(SimpleHTTPRequestHandler):
             for event in subagents.mcp_install_stream(hint, self._workspace_path()):
                 self.wfile.write(json.dumps(event, ensure_ascii=False).encode() + b"\n")
                 self.wfile.flush()
+        except _CLIENT_DISCONNECT_ERRORS:
+            return
         except Exception as exc:
             _logger.exception("mcp installer stream failed")
             try:
                 self.wfile.write(json.dumps({"op": "error", "message": str(exc)}, ensure_ascii=False).encode() + b"\n")
                 self.wfile.flush()
-            except (BrokenPipeError, ConnectionResetError):
+            except _CLIENT_DISCONNECT_ERRORS:
                 pass
 
     def _handle_lsp_get(self):
@@ -359,12 +368,14 @@ class _Handler(SimpleHTTPRequestHandler):
             for event in lsp.bootstrap_mason_events():
                 self.wfile.write(json.dumps(event, ensure_ascii=False).encode() + b"\n")
                 self.wfile.flush()
+        except _CLIENT_DISCONNECT_ERRORS:
+            return
         except Exception as exc:
             _logger.exception("lsp bootstrap failed")
             try:
                 self.wfile.write(json.dumps({"op": "error", "message": str(exc)}, ensure_ascii=False).encode() + b"\n")
                 self.wfile.flush()
-            except (BrokenPipeError, ConnectionResetError):
+            except _CLIENT_DISCONNECT_ERRORS:
                 pass
 
     def _handle_file_list(self):

@@ -9,6 +9,8 @@ def handle(run):
 
     run.patch_plan = None
     failed = False
+    next_state = ""
+    next_reason = ""
     for event in patch_planner.patch_planning_stream(
         message=run_request(run),
         analysis=run.analysis,
@@ -18,11 +20,18 @@ def handle(run):
     ):
         if event.get("op") == "done" and isinstance(event.get("patch_plan"), dict):
             run.patch_plan = event["patch_plan"]
+        if event.get("op") == "done" and event.get("next_state"):
+            next_state = str(event.get("next_state") or "")
+            next_reason = str(event.get("reason") or "")
         if event.get("op") == "update" and event.get("patch", {}).get("state") == "error":
             failed = True
         yield event
     if run.patch_plan:
         run.transition(chat.ChatState.IMPLEMENTING, "Patch plan is ready.")
+    elif next_state == "analyzing":
+        run.transition(chat.ChatState.ANALYZING, next_reason or "Patch planning requires task re-analysis.")
+    elif next_state == "investigating":
+        run.transition(chat.ChatState.INVESTIGATING, next_reason or "Patch planning requires more project evidence.")
     elif failed:
         run.transition(chat.ChatState.FAILED, "Patch planning failed before producing a patch plan.")
     else:

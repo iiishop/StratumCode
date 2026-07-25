@@ -44,6 +44,10 @@ ROUND_LIMITS = {
         "label": "Implementation error rounds",
         "description": "Consecutive implementation rounds with only tool errors before asking.",
     },
+    "implementation_patch_calls": {
+        "label": "Implementation patch calls",
+        "description": "Maximum apply_patch calls per implementation. Set to 0 for unlimited.",
+    },
     "validation_rounds": {
         "label": "Validation rounds",
         "description": "Model/tool rounds used by semantic validation.",

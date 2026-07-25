@@ -73,12 +73,15 @@ def snapshot_file(path: Path, root: Path) -> FileSnapshot:
 
 
 def apply_patch_request(request: dict, root: Path) -> dict:
+    root = root.resolve()
     with _workspace_lock(root):
         files = request.get("files")
         if not isinstance(files, list) or not files:
             raise PatchError("INVALID_REQUEST", "files must be a non-empty array")
         if len(files) > MAX_FILES:
             raise PatchError("PATCH_TOO_LARGE", f"at most {MAX_FILES} files per patch")
+        request = _canonicalize_request_paths(request, root)
+        files = request["files"]
         _validate_authorization(request, root, changed_bytes=0)
 
         prepared = []
@@ -110,6 +113,7 @@ def apply_patch_request(request: dict, root: Path) -> dict:
                 str(request.get("authorization_id") or ""),
                 str(request.get("step_id") or ""),
                 str(request.get("attempt_id") or request.get("patch_id") or ""),
+                complete=bool(request.get("step_complete", True)),
             )
         except Exception as exc:
             _abort_transaction(tx, committed, exc)
@@ -120,6 +124,7 @@ def apply_patch_request(request: dict, root: Path) -> dict:
         "attempt_id": str(request.get("attempt_id") or ""),
         "authorization_id": str(request.get("authorization_id") or ""),
         "step_id": str(request.get("step_id") or ""),
+        "step_complete": bool(request.get("step_complete", True)),
         "purpose": str(request.get("purpose") or ""),
         "operation_summary": str(request.get("operation_summary") or ""),
         "acceptance_ids": request.get("acceptance_ids") or [],
@@ -222,6 +227,19 @@ def _validate_authorization(request: dict, root: Path, *, changed_bytes: int) ->
         patch_authorization.validate_request(request, root, changed_bytes=changed_bytes)
     except patch_authorization.AuthorizationError as exc:
         raise PatchError(exc.code, exc.message) from exc
+
+
+def _canonicalize_request_paths(request: dict, root: Path) -> dict:
+    files = []
+    for file_patch in request["files"]:
+        if not isinstance(file_patch, dict):
+            raise PatchError("INVALID_REQUEST", "file patch must be an object")
+        rel = str(file_patch.get("path") or "").strip()
+        if not rel:
+            raise PatchError("INVALID_REQUEST", "file path is required")
+        path = _safe_path(root, rel)
+        files.append({**file_patch, "path": path.relative_to(root).as_posix()})
+    return {**request, "files": files}
 
 
 @contextmanager

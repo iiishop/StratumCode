@@ -8,14 +8,10 @@ from itertools import count
 from .. import app_settings, model_settings, prompt
 from ..agent_runtime import call_model as _runtime_call_model, content_text as _runtime_content_text
 from .task_contract import (
-    _acceptance_criteria,
-    _behavior_contract,
     _ensure_task_contract,
     _limited_unknowns,
-    _scope,
-    _string_list,
 )
-from .session_memory import _session_context_lines
+from .session_memory import _session_sources
 
 LOGGER = logging.getLogger(__name__)
 
@@ -47,7 +43,9 @@ def analyze_task(message: str, context: list[str], workspace_dir: str, session_c
     provider = setting["provider"]
     model = setting["model_id"]
     analyzer_errors = []
-    slot_context = context + _session_context_lines(session_context)
+    selected_context = [item for item in context if not _workspace_snapshot_line(str(item))]
+    source_catalog = _session_sources(message, selected_context, session_context)
+    slot_context = selected_context
     system = {"role": "system", "content": prompt.build_task_analyzer(app_settings.get_output_language())}
     intent_slot, errors = _task_slot_json(
         provider,
@@ -60,11 +58,16 @@ def analyze_task(message: str, context: list[str], workspace_dir: str, session_c
                 message=message,
                 directory=workspace_dir,
                 context=slot_context,
+                source_catalog=source_catalog,
             )},
         ],
         "intent_scope",
+        required=_intent_summary_present,
     )
     analyzer_errors.extend(errors)
+    canonical_intent = _canonical_analysis(
+        message, selected_context, source_catalog, intent_slot or {}, {}, {}
+    )
     acceptance_slot, errors = _task_slot_json(
         provider,
         model,
@@ -76,13 +79,23 @@ def analyze_task(message: str, context: list[str], workspace_dir: str, session_c
                 message=message,
                 directory=workspace_dir,
                 context=slot_context,
-                intent_slot=intent_slot,
+                intent_slot=_intent_slot_payload(canonical_intent),
+                source_catalog=source_catalog,
             )},
         ],
         "acceptance_contract",
+        required=lambda data: _canonical_acceptance_present(
+            data,
+            message,
+            source_catalog,
+            canonical_intent,
+        ),
     )
     analyzer_errors.extend(errors)
-    acceptance_slots = _runtime_acceptance_slots(acceptance_slot, message, context)
+    canonical_acceptance = _canonical_analysis(
+        message, selected_context, source_catalog, intent_slot or {}, acceptance_slot or {}, {}
+    )
+    acceptance_slots = canonical_acceptance["acceptance_criteria"]
     unknowns_slot, errors = _task_slot_json(
         provider,
         model,
@@ -94,21 +107,23 @@ def analyze_task(message: str, context: list[str], workspace_dir: str, session_c
                 message=message,
                 directory=workspace_dir,
                 context=slot_context,
-                intent_slot=intent_slot,
+                intent_slot=_contract_slot_payload(canonical_acceptance),
                 acceptance_slots=acceptance_slots,
+                source_catalog=source_catalog,
             )},
         ],
         "unknowns",
     )
     analyzer_errors.extend(errors)
     try:
-        analysis = _validate_task_analysis(_analysis_from_slots(
+        analysis = _canonical_analysis(
             message,
-            context,
+            selected_context,
+            source_catalog,
             intent_slot or {},
             acceptance_slot or {},
             unknowns_slot or {},
-        ))
+        )
     except ValueError as exc:
         analyzer_errors.append(str(exc))
         analysis = _minimal_task_analysis(message, context)
@@ -123,7 +138,16 @@ def analyze_task(message: str, context: list[str], workspace_dir: str, session_c
     return analysis
 
 
-def _task_slot_json(provider: dict, model: str, call_model, content_text, messages: list[dict], label: str) -> tuple[dict | None, list[str]]:
+def _task_slot_json(
+    provider: dict,
+    model: str,
+    call_model,
+    content_text,
+    messages: list[dict],
+    label: str,
+    *,
+    required=None,
+) -> tuple[dict | None, list[str]]:
     errors = []
     last_invalid_key = ""
     repeated_invalid = 0
@@ -134,7 +158,10 @@ def _task_slot_json(provider: dict, model: str, call_model, content_text, messag
         try:
             if assistant.get("tool_calls"):
                 raise ValueError("tool calls are not allowed")
-            return _json_object(raw), errors
+            data = _json_object(raw)
+            if required and not required(data):
+                raise ValueError("required slot fields are missing")
+            return data, errors
         except ValueError as exc:
             error = f"{label}: {exc}"
             errors.append(error)
@@ -164,11 +191,49 @@ def _task_slot_json(provider: dict, model: str, call_model, content_text, messag
     return None, errors
 
 
+def _canonical_analysis(
+    message: str,
+    context: list[str],
+    source_catalog: list[dict],
+    intent_slot: dict,
+    acceptance_slot: dict,
+    unknowns_slot: dict,
+) -> dict:
+    data = _analysis_from_slots(message, context, intent_slot, acceptance_slot, unknowns_slot)
+    data["origin_message"] = message
+    data["source_catalog"] = source_catalog
+    return _validate_task_analysis(data)
+
+
+def _intent_summary_present(data: dict) -> bool:
+    intent = data.get("intent") if isinstance(data.get("intent"), dict) else data
+    return bool(str(intent.get("summary") or "").strip())
+
+
+def _intent_slot_payload(analysis: dict) -> dict:
+    return {
+        "intent": analysis.get("intent", {}),
+        "constraints": analysis.get("constraint_statements", []),
+        "clues": analysis.get("clues", []),
+        "reference_baselines": analysis.get("reference_baselines", []),
+        "investigation_targets": analysis.get("investigation_targets", []),
+    }
+
+
+def _contract_slot_payload(analysis: dict) -> dict:
+    return {
+        **_intent_slot_payload(analysis),
+        "acceptance_criteria": analysis.get("acceptance_criteria", []),
+        "behavior_contract": analysis.get("behavior_contract", {}),
+        "scope": analysis.get("scope", {}),
+    }
+
+
 def _analysis_from_slots(message: str, context: list[str], intent_slot: dict, acceptance_slot: dict, unknowns_slot: dict) -> dict:
     fallback = _fallback_task_analysis(message, context)
     intent_data = intent_slot.get("intent") if isinstance(intent_slot.get("intent"), dict) else intent_slot
-    acceptance_data = acceptance_slot or intent_slot
-    unknown_data = unknowns_slot or intent_slot
+    acceptance_data = acceptance_slot or {}
+    unknown_data = unknowns_slot or {}
     intent_type = str(intent_data.get("intent_type") or intent_data.get("type") or fallback["intent"]["type"]).strip().casefold()
     if intent_type not in TASK_INTENT_TYPES:
         intent_type = fallback["intent"]["type"]
@@ -182,12 +247,20 @@ def _analysis_from_slots(message: str, context: list[str], intent_slot: dict, ac
         "scope": _slot_scope(acceptance_data, fallback),
         "hypotheses": _slot_hypotheses(intent_data.get("hypotheses")),
         "clues": _unique_clues(_slot_clues(intent_data.get("clues")) + fallback["clues"]),
+        "reference_baselines": intent_data.get("reference_baselines", []),
+        "investigation_targets": intent_data.get("investigation_targets", []),
         "unknowns": _runtime_unknowns(unknown_data, acceptance, fallback),
     }
     return data
 
 
-def _runtime_acceptance_slots(data: dict | None, message: str, context: list[str]) -> list[dict]:
+def _runtime_acceptance_slots(
+    data: dict | None,
+    message: str,
+    context: list[str],
+    *,
+    use_fallback: bool = True,
+) -> list[dict]:
     fallback = _fallback_task_analysis(message, context)["acceptance_criteria"]
     value = (data or {}).get("acceptance_criteria")
     if value is None:
@@ -198,8 +271,35 @@ def _runtime_acceptance_slots(data: dict | None, message: str, context: list[str
             text = str(raw.get("text") or raw.get("description") or "") if isinstance(raw, dict) else str(raw)
             text = text.strip()
             if text:
-                items.append({"id": f"AC{len(items) + 1}", "text": text})
-    return items or fallback
+                item = {"id": f"AC{len(items) + 1}", "text": text}
+                if isinstance(raw, dict):
+                    for field in ("authority", "source_ref", "source_refs", "source_excerpt", "derived_from"):
+                        if field in raw:
+                            item[field] = raw[field]
+                items.append(item)
+    return items or (fallback if use_fallback else [])
+
+
+def _canonical_acceptance_present(
+    data: dict,
+    message: str,
+    source_catalog: list[dict],
+    canonical_intent: dict,
+) -> bool:
+    acceptance = _runtime_acceptance_slots(data, message, [], use_fallback=False)
+    if not acceptance:
+        return False
+    probe = {
+        "origin_message": message,
+        "source_catalog": source_catalog,
+        "intent": canonical_intent.get("intent", {}),
+        "reference_baselines": canonical_intent.get("reference_baselines", []),
+        "acceptance_criteria": acceptance,
+        "behavior_contract": data.get("behavior_contract", {}),
+        "scope": data.get("scope", {}),
+        "unknowns": [],
+    }
+    return bool(_ensure_task_contract(probe).get("acceptance_criteria"))
 
 
 def _runtime_unknowns(data: dict, acceptance: list[dict], fallback: dict) -> list[dict]:
@@ -251,26 +351,17 @@ def _slot_ids(value, ids: list[str]) -> list[str]:
 def _slot_behavior_contract(data: dict, fallback: dict) -> dict:
     if "behavior_contract" not in data:
         return fallback["behavior_contract"]
-    try:
-        parsed = _behavior_contract(data.get("behavior_contract"))
-    except ValueError:
-        return _behavior_contract({})
-    return parsed or fallback["behavior_contract"]
+    value = data.get("behavior_contract")
+    return value if isinstance(value, dict) else {}
 
 
 def _slot_scope(data: dict, fallback: dict) -> dict:
-    try:
-        parsed = _scope(data.get("scope"))
-    except ValueError:
-        return fallback["scope"]
-    return parsed or fallback["scope"]
+    value = data.get("scope")
+    return value if isinstance(value, dict) else fallback["scope"]
 
 
 def _slot_string_list(value, fallback: list[str]) -> list[str]:
-    try:
-        return _string_list(value, "slot")
-    except ValueError:
-        return fallback
+    return value if isinstance(value, list) else fallback
 
 
 def _slot_hypotheses(value) -> list[dict]:
@@ -387,14 +478,14 @@ def _fallback_task_analysis(message: str, context: list[str]) -> dict:
             {"id": "AC1", "text": text[:220] or "The requested behavior is completed."},
         ],
         "behavior_contract": {
-            "inputs": ["User request"],
-            "outputs": ["Updated behavior or answer matching the request"],
-            "success_behaviors": [text[:220] or "The request is satisfied."],
+            "inputs": [],
+            "outputs": [],
+            "success_behaviors": [],
             "failure_behaviors": [],
-            "boundaries": ["Do not add unrelated behavior."],
+            "boundaries": [],
         },
         "constraints": [],
-        "scope": {"in": [text[:220] or "Requested work"], "out": ["Unrelated changes"], "undecided": []},
+        "scope": {"in": [text[:220] or "Requested work"], "out": [], "undecided": []},
         "hypotheses": [],
         "clues": clues,
         "unknowns": [
@@ -442,17 +533,10 @@ def _validate_task_analysis(data: dict) -> dict:
     if not summary:
         raise ValueError("intent.summary is required")
 
-    acceptance = _optional_field(lambda: _acceptance_criteria(data.get("acceptance_criteria")), [])
-    result = {
-        "intent": {"type": intent_type, "summary": summary},
-        "acceptance_criteria": acceptance,
-        "behavior_contract": _optional_field(lambda: _behavior_contract(data.get("behavior_contract")), {}),
-        "constraints": _optional_field(lambda: _string_list(data.get("constraints"), "constraints"), []),
-        "scope": _optional_field(lambda: _scope(data.get("scope")), {}),
-        "hypotheses": _optional_field(lambda: _hypotheses(data.get("hypotheses")), []),
-        "clues": _optional_field(lambda: _clues(data.get("clues")), []),
-        "unknowns": _limited_unknowns(data.get("unknowns"), acceptance),
-    }
+    result = dict(data)
+    result["intent"] = {"type": intent_type, "summary": summary}
+    result["hypotheses"] = _optional_field(lambda: _hypotheses(data.get("hypotheses")), [])
+    result["clues"] = _optional_field(lambda: _clues(data.get("clues")), [])
     return _ensure_task_contract(result)
 
 
@@ -509,6 +593,11 @@ def _clues(value) -> list[dict]:
             "line": line if line and line > 0 else None,
             "symbol": str(raw.get("symbol") or "").strip(),
             "note": str(raw.get("note") or "").strip(),
+            **({
+                field: raw[field]
+                for field in ("source_ref", "source_refs", "source_excerpt")
+                if field in raw
+            }),
         })
     return items
 

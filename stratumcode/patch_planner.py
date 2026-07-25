@@ -28,6 +28,16 @@ def patch_planning_stream(
     design_plan: dict,
     workspace_dir: str,
 ) -> Iterator[dict]:
+    prerequisite = _patch_planning_prerequisite(analysis, investigation)
+    if prerequisite:
+        next_state, reason = prerequisite
+        yield start_event(f"patch-prerequisite-{uuid4().hex[:8]}", "output", {
+            "content": reason,
+            "streaming": False,
+        })
+        yield {"op": "done", "next_state": next_state, "reason": reason}
+        return
+
     setting = model_settings.resolve(model_settings.DEFAULT_STAGE)
     if setting is None:
         raise ValueError("No model configured for patch planning. Configure a default model in Providers.")
@@ -99,6 +109,14 @@ def patch_planning_stream(
                     "needs no code change, set needed=false and include skip_reason."
                 )},
             ])
+        if slot and slot.get("needed") is not False and slot_issues:
+            reason = "Patch step remains ungrounded after semantic repair: " + "; ".join(slot_issues)
+            yield start_event(f"{run_id}-ungrounded", "output", {
+                "content": reason,
+                "streaming": False,
+            })
+            yield {"op": "done", "next_state": "investigating", "reason": reason}
+            return
         if not slot:
             continue
         tests_or_checks.extend(_strings(slot.get("tests_or_checks")))
@@ -115,6 +133,63 @@ def patch_planning_stream(
                 patched = dict(step)
                 patched["decision_slots"] = [index]
                 step_content.append(patched)
+    verification = {
+        "tests_or_checks": tests_or_checks,
+        "acceptance_verification": [
+            {"acceptance_slot": key, "verification": value}
+            for key, value in sorted(acceptance_verification.items())
+        ],
+    }
+    verification_issues = _verification_slot_issues(verification, analysis, step_content)
+    if step_content and verification_issues:
+        messages = [
+            system,
+            {"role": "user", "content": prompt.build_patch_verification_slot_user(
+                message,
+                analysis,
+                investigation,
+                design_plan,
+                workspace_dir,
+                step_content,
+            )},
+        ]
+        attempts = app_settings.get_round_limit("patch_json_attempts") or DEFAULT_PATCH_JSON_ATTEMPTS
+        for semantic_attempt in _attempt_indexes(attempts):
+            verification = yield from _content_json_stream(
+                provider,
+                model,
+                messages,
+                pricing_rules,
+                usage_total,
+                run_id,
+                f"verification-{semantic_attempt}",
+            )
+            verification_issues = _verification_slot_issues(
+                verification,
+                analysis,
+                step_content,
+            )
+            if not verification_issues:
+                break
+            messages.extend([
+                {"role": "assistant", "content": json.dumps(verification or {}, ensure_ascii=False)[:4000]},
+                {"role": "user", "content": (
+                    "The patch verification slot is incomplete:\n- "
+                    + "\n- ".join(verification_issues)
+                    + "\nReturn only corrected patch_verification JSON."
+                )},
+            ])
+        if isinstance(verification, dict):
+            tests_or_checks = _strings(verification.get("tests_or_checks"))
+            _merge_acceptance_verification(
+                acceptance_verification,
+                verification.get("acceptance_verification"),
+            )
+            _merge_step_acceptance_coverage(
+                step_content,
+                verification.get("step_acceptance_coverage"),
+                len(analysis.get("acceptance_criteria", [])),
+            )
     plan_content = {
         "summary": _patch_summary(step_content),
         "step_content": step_content,
@@ -148,6 +223,19 @@ def patch_planning_stream(
     yield start_event(f"{run_id}-plan", "patch_plan", plan)
     yield {"op": "update", "id": stage_id, "patch": {"state": "done", "phase": "patch_planned"}}
     yield {"op": "done", "patch_plan": plan}
+
+
+def _patch_planning_prerequisite(
+    analysis: dict, investigation: dict
+) -> tuple[str, str] | None:
+    implementation = analysis.get("intent", {}).get("type") in {"feature", "bugfix", "refactor"}
+    if implementation and not analysis.get("acceptance_criteria"):
+        return "analyzing", "Patch planning requires a non-empty canonical acceptance contract."
+    if investigation.get("runtime_recovered"):
+        return "investigating", "Patch planning requires grounded investigation facts, not runtime recovery output."
+    if implementation and not _project_facts(investigation):
+        return "investigating", "Patch planning requires at least one grounded project fact."
+    return None
 
 
 def _attempt_indexes(limit: int, start: int = 1):
@@ -548,6 +636,115 @@ def _slot_step_issues(slot: dict | None, workspace_dir: str) -> list[str]:
         if issue := _planned_file_issue(str(item["file"]), mode, workspace):
             issues.append(f"step_content item {index} {issue}")
     return issues
+
+
+def _verification_slot_issues(
+    slot: dict | None,
+    analysis: dict,
+    steps: list[dict],
+) -> list[str]:
+    if not isinstance(slot, dict):
+        return ["patch_verification must be a JSON object"]
+    issues = []
+    if (
+        analysis.get("intent", {}).get("type") in {"feature", "bugfix"}
+        and not _strings(slot.get("tests_or_checks"))
+    ):
+        issues.append("feature/bugfix requires at least one test or check")
+    criteria = [
+        item for item in analysis.get("acceptance_criteria", [])
+        if isinstance(item, dict)
+    ]
+    covered = set()
+    for item in slot.get("acceptance_verification") or []:
+        if not isinstance(item, dict) or not str(item.get("verification") or "").strip():
+            continue
+        try:
+            covered.add(int(item.get("acceptance_slot")))
+        except (TypeError, ValueError):
+            continue
+    missing = [str(index) for index in range(1, len(criteria) + 1) if index not in covered]
+    if missing:
+        issues.append("acceptance verification missing slots: " + ", ".join(missing))
+    step_coverage = {
+        slot_number
+        for step in steps
+        if isinstance(step, dict)
+        for slot_number in _numbered_slots(step.get("acceptance_slots"), len(criteria))
+    }
+    coverage_updates, coverage_issues = _step_coverage_updates(
+        slot.get("step_acceptance_coverage"),
+        len(steps),
+        len(criteria),
+    )
+    issues.extend(coverage_issues)
+    for acceptance_slots in coverage_updates.values():
+        step_coverage.update(acceptance_slots)
+    missing_coverage = [
+        str(index)
+        for index in range(1, len(criteria) + 1)
+        if index not in step_coverage
+    ]
+    if missing_coverage:
+        issues.append("implementation step coverage missing acceptance slots: " + ", ".join(missing_coverage))
+    return issues
+
+
+def _merge_step_acceptance_coverage(
+    steps: list[dict],
+    value,
+    acceptance_count: int,
+) -> None:
+    updates, _ = _step_coverage_updates(value, len(steps), acceptance_count)
+    for step_slot, acceptance_slots in updates.items():
+        step = steps[step_slot - 1]
+        existing = _numbered_slots(step.get("acceptance_slots"), acceptance_count)
+        step["acceptance_slots"] = sorted(set(existing) | acceptance_slots)
+
+
+def _step_coverage_updates(
+    value,
+    step_count: int,
+    acceptance_count: int,
+) -> tuple[dict[int, set[int]], list[str]]:
+    if value is None:
+        return {}, []
+    if not isinstance(value, list):
+        return {}, ["step_acceptance_coverage must be an array"]
+    updates: dict[int, set[int]] = {}
+    issues = []
+    for item in value:
+        if not isinstance(item, dict):
+            issues.append("step_acceptance_coverage contains a non-object item")
+            continue
+        try:
+            step_slot = int(item.get("step_slot"))
+        except (TypeError, ValueError):
+            issues.append("step_acceptance_coverage has an invalid step_slot")
+            continue
+        if not 1 <= step_slot <= step_count:
+            issues.append(f"step_acceptance_coverage references unknown step slot: {step_slot}")
+            continue
+        slots = set(_numbered_slots(item.get("acceptance_slots"), acceptance_count))
+        if not slots:
+            issues.append(f"step_acceptance_coverage step {step_slot} has no valid acceptance slots")
+            continue
+        updates.setdefault(step_slot, set()).update(slots)
+    return updates, issues
+
+
+def _numbered_slots(value, limit: int) -> list[int]:
+    if not isinstance(value, list):
+        return []
+    result = []
+    for raw in value:
+        try:
+            slot = int(raw)
+        except (TypeError, ValueError):
+            continue
+        if 1 <= slot <= limit and slot not in result:
+            result.append(slot)
+    return result
 
 
 def _planned_file_issue(file: str, mode: str, workspace: Path) -> str:

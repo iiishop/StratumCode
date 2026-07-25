@@ -43,10 +43,6 @@ def _seed_task_updates(analysis: dict, existing: list[dict] | None = None) -> li
         _task_item(f"{task_id}:{prefix}{index}", kind, text, "pending", parent_id=root_goal)
         for index, (prefix, kind, text) in enumerate(behavior_rows, start=1)
     )
-    items.extend(
-        _task_item(f"{task_id}:H{index}", "hypothesis", item["text"], "pending", parent_id=root_goal)
-        for index, item in enumerate(analysis.get("hypotheses", []), start=1)
-    )
     parent = f"{task_id}:work" if analysis.get("root_goal_id") else root_goal
     items.extend(
         _task_item(f"{task_id}:{item.get('id') or f'U{index}'}", "unknown", item.get("question", ""), _unknown_task_status(item), parent_id=parent)

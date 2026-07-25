@@ -151,6 +151,72 @@ def _session_context_lines(session_context: dict | None) -> list[str]:
     return lines
 
 
+def _session_sources(message: str, context: list[str], session_context: dict | None) -> list[dict]:
+    """Build structured analyzer sources without trusting assistant summaries."""
+    sources = [{
+        "id": "SRC1",
+        "kind": "user_message",
+        "authority": "user_explicit",
+        "text": str(message or "").strip(),
+    }]
+    for path in context:
+        text = str(path or "").strip()
+        if text:
+            sources.append({
+                "id": f"SRC{len(sources) + 1}",
+                "kind": "user_file",
+                "authority": "user_explicit",
+                "text": text,
+                "path": text,
+            })
+    session_context = session_context or {}
+    for text in session_context.get("recent_user_messages", []):
+        text = str(text or "").strip()
+        if text and text != sources[0]["text"]:
+            sources.append({
+                "id": f"SRC{len(sources) + 1}",
+                "kind": "user_history",
+                "authority": "user_explicit",
+                "text": text,
+            })
+    for item in session_context.get("observations", []):
+        if not isinstance(item, dict) or not item.get("fresh"):
+            continue
+        text = " ".join(str(item.get(field) or "").strip() for field in ("path", "summary", "title", "tool"))
+        sources.append({
+            "id": f"SRC{len(sources) + 1}",
+            "external_id": str(item.get("id") or ""),
+            "kind": "observation",
+            "authority": "verified_fact",
+            "text": " ".join(text.split()),
+            "path": str(item.get("path") or "").strip(),
+        })
+    fresh_observation_ids = {
+        str(item.get("id") or "")
+        for item in session_context.get("observations", [])
+        if isinstance(item, dict) and item.get("fresh")
+    }
+    for item in session_context.get("knowledge", []):
+        observation_ids = item.get("observation_ids")
+        if (
+            not isinstance(item, dict)
+            or not item.get("fresh")
+            or not isinstance(observation_ids, list)
+            or not observation_ids
+            or any(str(value) not in fresh_observation_ids for value in observation_ids)
+        ):
+            continue
+        sources.append({
+            "id": f"SRC{len(sources) + 1}",
+            "external_id": str(item.get("id") or ""),
+            "kind": "verified_knowledge",
+            "authority": "verified_fact",
+            "text": str(item.get("statement") or "").strip(),
+            "observation_ids": [str(value) for value in observation_ids],
+        })
+    return sources
+
+
 def _recent_conversation_turns(messages: list[dict]) -> list[dict]:
     turns = []
     pending_user = ""
@@ -208,8 +274,9 @@ def _knowledge_freshness(state: dict) -> list[dict]:
     for raw in state.get("knowledge", []):
         item = dict(raw)
         ids = []
+        raw_ids = item.get("observation_ids", [])
         fresh = True
-        for obs_id in item.get("observation_ids", []):
+        for obs_id in raw_ids:
             observation = by_id.get(obs_id) or by_call.get(_call_key(obs_id))
             if observation:
                 ids.append(observation["id"])

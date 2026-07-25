@@ -8,7 +8,8 @@ from itertools import count
 from pathlib import Path
 from uuid import uuid4
 
-from . import app_settings, mcp, model_settings, prompt, providers
+from . import app_settings, mcp, model_settings, patch_authorization, prompt, providers
+from .patch_engine import PatchError, rollback_patch
 from .agent.tools import openai_tool_schema
 from .agent_runtime import (
     add_usage as _add_usage,
@@ -71,13 +72,15 @@ def implementation_stream(
     tools = _implementation_tools()
     final_text = ""
     consecutive_error_rounds = 0
-    no_patch_rounds = 0
+    no_progress_rounds = 0
+    inspected_ranges: set[tuple[str, str, str]] = set()
     applied_steps: set[str] = set()
     changed_files: list[str] = []
     required_steps = _required_step_ids(patch_plan)
     patch_required = bool(required_steps)
     patch_call_count = 0
-    patch_call_limit = max(len(required_steps) + 8, 12)
+    patch_call_limit = app_settings.get_round_limit("implementation_patch_calls")
+    rollback_ids: list[str] = []
     tool_error_limit = app_settings.get_round_limit("implementation_tool_error_rounds")
     for round_index in _round_indexes(app_settings.get_round_limit("implementation_rounds")):
         assistant = _call_model(provider, model, messages, tools=tools)
@@ -115,7 +118,7 @@ def implementation_stream(
             break
 
         round_had_success = False
-        round_applied_patch = False
+        round_made_progress = False
         for call in tool_calls:
             function = call.get("function") or {}
             name = function.get("name") or ""
@@ -125,22 +128,38 @@ def implementation_stream(
                 arguments = _prepare_tool_arguments(name, arguments, patch_plan)
                 if name == "apply_patch":
                     patch_call_count += 1
-                    if patch_call_count > patch_call_limit:
+                    if patch_call_limit and patch_call_count > patch_call_limit:
                         missing_steps = _missing_steps(required_steps, applied_steps)
                         reason = (
                             "Implementation exceeded the patch application budget without completing the authorized plan. "
                             f"Applied step ids: {', '.join(sorted(applied_steps))}. "
                             f"Missing step ids: {', '.join(missing_steps)}."
                         )
+                        reason = _rollback_checkpoint_reason(
+                            reason, rollback_ids, workspace_dir, _authorization_id(patch_plan)
+                        )
                         yield start_event(f"{run_id}-patch-budget-checkpoint", "output", _checkpoint_output(reason))
                         yield {"op": "update", "id": stage_id, "patch": {"state": "failed", "phase": "implementation_patch_budget_checkpoint"}}
                         return
                 output = yield from _run_tool(name, call_id, arguments, workspace_dir)
-                round_had_success = round_had_success or not _tool_failed(output)
-                if name == "apply_patch" and (not _tool_failed(output) or _patch_already_applied(output)):
-                    round_applied_patch = True
-                    applied_steps.add(str(arguments.get("step_id") or "").strip())
+                tool_failed = _tool_failed(output)
+                round_had_success = round_had_success or not tool_failed
+                if name == "read" and not tool_failed:
+                    signature = _read_signature(arguments, workspace_dir)
+                    if signature not in inspected_ranges:
+                        inspected_ranges.add(signature)
+                        round_made_progress = True
+                if name == "apply_patch" and not tool_failed:
+                    round_made_progress = True
+                    if rollback_id := _patch_rollback_id(output):
+                        rollback_ids.append(rollback_id)
                     changed_files.extend(_patch_files_from_output(output))
+                    if bool(arguments.get("step_complete", True)):
+                        applied_steps.add(str(arguments.get("step_id") or "").strip())
+                elif name == "apply_patch" and _patch_already_applied(output):
+                    step_id = str(arguments.get("step_id") or "").strip()
+                    if _authorized_step_complete(patch_plan, step_id):
+                        applied_steps.add(step_id)
             except Exception as exc:
                 output = json.dumps({
                     "error": str(exc),
@@ -162,18 +181,19 @@ def implementation_stream(
                 "and split any remaining patch across model rounds."
             )})
         consecutive_error_rounds = 0 if round_had_success else consecutive_error_rounds + 1
-        if patch_required and not round_applied_patch:
-            no_patch_rounds += 1
+        if patch_required and not round_made_progress:
+            no_progress_rounds += 1
             missing_steps = _missing_steps(required_steps, applied_steps)
-            if no_patch_rounds == 3:
+            if no_progress_rounds == 3:
                 messages.append({"role": "user", "content": (
-                    "Stop reading files unless a stale snapshot error requires it. "
+                    "No new file range or patch progress was made. "
+                    "Stop repeating reads unless a stale snapshot error requires it. "
                     "Apply the authorized patch now. Missing step ids: "
                     f"{', '.join(missing_steps)}."
                 )})
-            elif no_patch_rounds >= 6:
+            elif no_progress_rounds >= 6:
                 checkpoint_reason = (
-                    "Implementation repeatedly inspected files without applying any authorized patch step."
+                    "Implementation repeatedly called tools without new inspection or patch progress."
                     if not applied_steps
                     else "Implementation applied some patch steps but stopped making progress on the remaining authorized steps."
                 )
@@ -182,39 +202,59 @@ def implementation_stream(
                         f"Missing step ids: {', '.join(missing_steps)}."
                         if applied_steps else ""
                     )
+                reason = _rollback_checkpoint_reason(
+                    reason, rollback_ids, workspace_dir, _authorization_id(patch_plan)
+                )
                 yield start_event(f"{run_id}-no-patch-checkpoint", "output", _checkpoint_output(reason))
                 yield {"op": "update", "id": stage_id, "patch": {"state": "failed", "phase": "implementation_no_patch_checkpoint"}}
                 return
-        elif round_applied_patch:
-            no_patch_rounds = 0
+        elif round_made_progress:
+            no_progress_rounds = 0
         if tool_error_limit and consecutive_error_rounds >= tool_error_limit:
-            yield start_event(f"{run_id}-tool-error-checkpoint", "output", _checkpoint_output(
-                "Implementation hit repeated tool errors. The patch plan or file path likely needs correction."
-            ))
+            reason = _rollback_checkpoint_reason(
+                "Implementation hit repeated tool errors. The patch plan or file path likely needs correction.",
+                rollback_ids,
+                workspace_dir,
+                _authorization_id(patch_plan),
+            )
+            yield start_event(f"{run_id}-tool-error-checkpoint", "output", _checkpoint_output(reason))
             yield {"op": "update", "id": stage_id, "patch": {"state": "failed", "phase": "implementation_tool_error_checkpoint"}}
             return
     else:
         missing_steps = _missing_steps(required_steps, applied_steps)
         if missing_steps:
-            yield start_event(f"{run_id}-checkpoint", "output", _checkpoint_output(
-                "Implementation reached its checkpoint before applying every authorized patch step."
-            ))
+            reason = _rollback_checkpoint_reason(
+                "Implementation reached its checkpoint before applying every authorized patch step.",
+                rollback_ids,
+                workspace_dir,
+                _authorization_id(patch_plan),
+            )
+            yield start_event(f"{run_id}-checkpoint", "output", _checkpoint_output(reason))
             yield {"op": "update", "id": stage_id, "patch": {"state": "failed", "phase": "implementation_checkpoint"}}
             return
         final_text = "Implementation patching reached its checkpoint; continuing with validation."
 
     missing_steps = _missing_steps(required_steps, applied_steps)
     if missing_steps:
-        yield start_event(f"{run_id}-checkpoint", "output", _checkpoint_output(
-            "Implementation stopped before applying every authorized patch step."
-        ))
+        reason = _rollback_checkpoint_reason(
+            "Implementation stopped before applying every authorized patch step.",
+            rollback_ids,
+            workspace_dir,
+            _authorization_id(patch_plan),
+        )
+        yield start_event(f"{run_id}-checkpoint", "output", _checkpoint_output(reason))
         yield {"op": "update", "id": stage_id, "patch": {"state": "failed", "phase": "implementation_checkpoint"}}
         return
     condition_issues = _completion_condition_issues(patch_plan, workspace_dir, applied_steps)
     if condition_issues:
-        yield start_event(f"{run_id}-checkpoint", "output", _checkpoint_output(
-            "Implementation stopped with unmet completion conditions:\n" + "\n".join(f"- {item}" for item in condition_issues)
-        ))
+        reason = _rollback_checkpoint_reason(
+            "Implementation stopped with unmet completion conditions:\n"
+            + "\n".join(f"- {item}" for item in condition_issues),
+            rollback_ids,
+            workspace_dir,
+            _authorization_id(patch_plan),
+        )
+        yield start_event(f"{run_id}-checkpoint", "output", _checkpoint_output(reason))
         yield {"op": "update", "id": stage_id, "patch": {"state": "failed", "phase": "implementation_completion_checkpoint"}}
         return
 
@@ -286,6 +326,51 @@ def _required_step_ids(patch_plan: dict) -> set[str]:
 
 def _missing_steps(required: set[str], applied: set[str]) -> list[str]:
     return sorted(required - applied)
+
+
+def _authorization_id(patch_plan: dict) -> str:
+    auth = patch_plan.get("execution_authorization") or {}
+    return str(auth.get("authorization_id") or "")
+
+
+def _authorized_step_complete(patch_plan: dict, step_id: str) -> bool:
+    return patch_authorization.step_states(_authorization_id(patch_plan)).get(step_id) == "validation_required"
+
+
+def _read_signature(arguments: dict, workspace_dir: str) -> tuple[str, str, str]:
+    path = Path(str(arguments.get("path") or ""))
+    if not path.is_absolute():
+        path = Path(workspace_dir) / path
+    return (
+        str(path.resolve()),
+        str(arguments.get("start_line") or ""),
+        str(arguments.get("end_line") or ""),
+    )
+
+
+def _rollback_checkpoint_reason(
+    reason: str,
+    rollback_ids: list[str],
+    workspace_dir: str,
+    authorization_id: str,
+) -> str:
+    if not rollback_ids:
+        return reason
+    issues = _rollback_patch_ids(rollback_ids, workspace_dir, authorization_id)
+    if issues:
+        return reason + "\n\nRollback was incomplete:\n" + "\n".join(f"- {item}" for item in issues)
+    return reason + "\n\nApplied patches from this failed implementation were rolled back."
+
+
+def _rollback_patch_ids(rollback_ids: list[str], workspace_dir: str, authorization_id: str) -> list[str]:
+    issues = []
+    for rollback_id in reversed(rollback_ids):
+        try:
+            rollback_patch(rollback_id, root=Path(workspace_dir), authorization_id=authorization_id)
+        except PatchError as exc:
+            issues.append(f"{rollback_id}: {exc.code}: {exc.message}")
+            break
+    return issues
 
 
 def _completion_condition_issues(patch_plan: dict, workspace_dir: str, applied_steps: set[str]) -> list[str]:
@@ -464,6 +549,7 @@ def _apply_patch_parameters() -> dict:
             "patch_id": {"type": "string"},
             "step_id": {"type": "string"},
             "attempt_id": {"type": "string"},
+            "step_complete": {"type": "boolean"},
             "operation_summary": {"type": "string"},
             "files": {
                 "type": "array",
@@ -494,7 +580,7 @@ def _apply_patch_parameters() -> dict:
                 },
             },
         },
-        "required": ["step_id", "operation_summary", "files"],
+        "required": ["step_id", "step_complete", "operation_summary", "files"],
     }
 
 
@@ -520,6 +606,7 @@ def _prepare_tool_arguments(name: str, arguments: dict, patch_plan: dict) -> dic
     patched["completion_conditions"] = allowed.get("completion_conditions") or step.get("completion_conditions") or []
     patched["required_behavior_if_removed"] = allowed.get("required_behavior_if_removed") or step.get("required_behavior_if_removed") or ""
     patched["reason"] = patched["purpose"] or step.get("action") or str(arguments.get("operation_summary") or "")
+    patched["step_complete"] = bool(patched.get("step_complete", True))
     patched["attempt_id"] = patched.get("attempt_id") or f"{step_id}-A1"
     patched["patch_id"] = patched.get("patch_id") or patched["attempt_id"]
     return patched
@@ -609,7 +696,16 @@ def _patch_already_applied(output: str) -> bool:
     except json.JSONDecodeError:
         return False
     metadata = data.get("metadata") if isinstance(data.get("metadata"), dict) else {}
-    return metadata.get("code") == "PATCH_ATTEMPT_ALREADY_APPLIED"
+    return metadata.get("code") in {"PATCH_ATTEMPT_ALREADY_APPLIED", "STEP_ALREADY_APPLIED"}
+
+
+def _patch_rollback_id(output: str) -> str:
+    try:
+        data = json.loads(output or "{}")
+        payload = json.loads(data.get("output") or "{}")
+    except (TypeError, json.JSONDecodeError):
+        return ""
+    return str(payload.get("rollback_id") or "")
 
 
 def _validation_tool_validated(name: str, output: str) -> bool:
@@ -824,6 +920,6 @@ def _normalized_validation_verdict(value: str) -> str:
 
 def _checkpoint_output(reason: str) -> dict:
     return {
-        "content": f"{reason}\n\nThe run stopped safely before applying further changes.",
+        "content": f"{reason}\n\nThe run stopped before applying further changes.",
         "streaming": False,
     }

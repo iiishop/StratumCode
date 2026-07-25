@@ -213,7 +213,7 @@ const hasContext = computed(() =>
             </span>
           </button>
 
-          <div v-if="event.custom_allowed" class="uq__custom">
+          <div v-if="event.custom_allowed !== false" class="uq__custom">
             <textarea
               v-model="customText"
               rows="2"

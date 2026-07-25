@@ -27,6 +27,7 @@ async def _apply_patch(params: dict, ctx: dict) -> ToolResult:
             "acceptance_ids",
             "is_state",
             "rollback_id",
+            "step_complete",
         )},
     )
 
@@ -42,6 +43,7 @@ apply_patch_tool = ToolDef(
             "patch_id": {"type": "string"},
             "step_id": {"type": "string"},
             "attempt_id": {"type": "string"},
+            "step_complete": {"type": "boolean"},
             "operation_summary": {"type": "string"},
             "purpose": {"type": "string"},
             "reason": {"type": "string"},

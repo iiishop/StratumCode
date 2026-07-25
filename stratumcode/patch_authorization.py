@@ -81,6 +81,9 @@ def validate_request(request: dict, root: Path, changed_bytes: int = 0) -> None:
     step = steps.get(step_id)
     if not step:
         raise AuthorizationError("STEP_NOT_AUTHORIZED", step_id)
+    states = _loads(row.get("step_states_json"), {})
+    if states.get(step_id) == "validation_required":
+        raise AuthorizationError("STEP_ALREADY_APPLIED", step_id)
     attempts = _loads(row.get("applied_attempts_json"), {})
     attempt_id = str(request.get("attempt_id") or request.get("patch_id") or "").strip()
     if attempt_id and attempt_id in set(attempts.get(step_id) or []):
@@ -106,7 +109,7 @@ def validate_request(request: dict, root: Path, changed_bytes: int = 0) -> None:
         raise AuthorizationError("PATCH_TOO_LARGE", "changed bytes exceed step authorization")
 
 
-def mark_step_applied(auth_id: str, step_id: str, attempt_id: str = "") -> None:
+def mark_step_applied(auth_id: str, step_id: str, attempt_id: str = "", *, complete: bool = True) -> None:
     row = _get(auth_id)
     if not row:
         raise AuthorizationError("AUTHORIZATION_NOT_FOUND", auth_id)
@@ -115,8 +118,11 @@ def mark_step_applied(auth_id: str, step_id: str, attempt_id: str = "") -> None:
     attempts = _loads(row.get("applied_attempts_json"), {})
     step_id = str(step_id)
     attempt_id = str(attempt_id or "")
-    consumed.add(step_id)
-    states[step_id] = "validation_required"
+    if complete:
+        consumed.add(step_id)
+        states[step_id] = "validation_required"
+    else:
+        states[step_id] = "applying"
     if attempt_id:
         values = set(attempts.get(step_id) or [])
         values.add(attempt_id)

@@ -36,6 +36,7 @@ INVESTIGATION_TOOLS = ("glob", "grep", "read", "code_nav", "python_static_check"
 MAX_HYPOTHESIS_VERIFIER_CALLS = 2
 MAX_REPEATED_TOOL_ERRORS = 3
 DISCOVERY_BATCH_OBSERVATIONS = 3
+REQUIRED_FINDING_SLOT_ATTEMPTS = 2
 FINDING_FIELDS = (
     "beliefs",
     "resolutions",
@@ -261,6 +262,27 @@ def investigation_stream(
                 if name == "record_investigation_findings":
                     _require_control_reason(arguments, name)
                     if not _has_finding_fields(arguments):
+                        if not pending_observation_ids and not resolution_required_ids:
+                            output = json.dumps({
+                                "recorded": False,
+                                "code": "nothing_to_record",
+                                "next_action": "continue_discovery",
+                                "message": "No pending observations or unresolved evidence-backed resolutions are available to record.",
+                            }, ensure_ascii=False)
+                            yield start_event(call_id, "tool", {
+                                "name": name,
+                                "description": "Record investigation findings",
+                                "status": "done",
+                                "open": False,
+                                "input": json.dumps(arguments, ensure_ascii=False, indent=2),
+                                "output": output,
+                            })
+                            messages.append({
+                                "role": "tool",
+                                "tool_call_id": call_id,
+                                "content": output,
+                            })
+                            continue
                         arguments = yield from _record_findings_by_slots(
                             provider=provider,
                             model=model,
@@ -273,6 +295,7 @@ def investigation_stream(
                             observations=observations,
                             recorded_findings=recorded_findings,
                             pending_observation_ids=pending_observation_ids,
+                            required_resolution_ids=resolution_required_ids,
                         )
                     _require_finding_fields(arguments)
                     recorded_findings = _merge_recorded_findings(recorded_findings, arguments)
@@ -410,7 +433,14 @@ def investigation_stream(
                         ),
                     })
                     continue
-                output = yield from _run_tool_stream(name, call_id, arguments, workspace_dir, analysis)
+                live_analysis = {
+                    **analysis,
+                    "unknowns": _merge_unknowns(
+                        _initial_unknowns(analysis)
+                        + _unknowns(recorded_findings.get("new_unknowns"))
+                    ),
+                }
+                output = yield from _run_tool_stream(name, call_id, arguments, workspace_dir, live_analysis)
                 repeated_tool_error_name = ""
                 repeated_tool_error_count = 0
                 tool_cache[cache_key] = output
@@ -671,6 +701,16 @@ def _record_arguments(arguments: dict) -> dict:
         beliefs = _alias_beliefs(normalized.get("findings")) or _alias_beliefs(normalized.get("evidence_summaries"))
         if beliefs:
             normalized["beliefs"] = beliefs
+    if isinstance(normalized.get("new_unknowns"), list):
+        normalized["new_unknowns"] = [
+            {
+                **item,
+                "question": item.get("question") or item.get("summary"),
+                "resolution_strategy": item.get("resolution_strategy") or item.get("strategy"),
+            }
+            for item in normalized["new_unknowns"]
+            if isinstance(item, dict)
+        ]
     return normalized
 
 
@@ -785,7 +825,11 @@ def _supported_unknown_ids(recorded: dict, observations: list[dict]) -> set[str]
         evidence_refs = _reference_list(raw.get("evidence")) + _reference_list(raw.get("observation_ids"))
         evidence_ids = [item for item in evidence_refs if item in observations_by_id]
         for unknown_id, unknown_observations in by_unknown.items():
-            if any(evidence_id in observations_by_id for evidence_id in evidence_ids):
+            unknown_evidence_ids = {
+                str(item.get("id") or "").strip()
+                for item in unknown_observations
+            }
+            if any(evidence_id in unknown_evidence_ids for evidence_id in evidence_ids):
                 supported.add(unknown_id)
                 continue
             if any(_observation_mentioned(text, observation) for observation in unknown_observations):
@@ -931,7 +975,9 @@ def _record_findings_by_slots(
     observations: list[dict],
     recorded_findings: dict,
     pending_observation_ids: list[str],
+    required_resolution_ids: list[str] | None = None,
 ) -> Iterator[dict]:
+    required_resolution_ids = required_resolution_ids or []
     slot_messages = list(messages)
     slot_messages.append({"role": "user", "content": _record_slot_context(
         reason,
@@ -939,21 +985,46 @@ def _record_findings_by_slots(
         observations,
         recorded_findings,
         pending_observation_ids,
+        required_resolution_ids,
     )})
     usage_events: list[dict] = []
 
     def ask(path: str, prompt_text: str) -> JSONValue:
-        slot_messages.append({"role": "user", "content": _record_slot_prompt(path, prompt_text)})
-        assistant = _call_model(provider, model, slot_messages, tools=[])
-        if usage := _usage_delta(pricing_rules, assistant.pop("_usage", {})):
-            _add_usage(usage_total, usage)
-            usage_events.append(start_event(
-                f"{run_id}-usage-record-slot-{len(usage_events)}",
-                "usage",
-                {"delta": usage, "total": usage_total},
-            ))
-        raw = _content_text(assistant.get("content"))
-        slot_messages.append({"role": "assistant", "content": raw})
+        required = (
+            path == "beliefs" and bool(pending_observation_ids)
+        ) or (
+            path == "resolutions" and bool(required_resolution_ids)
+        )
+        slot_messages.append({"role": "user", "content": _record_slot_prompt(
+            path,
+            prompt_text,
+            required=required,
+        )})
+        raw = ""
+        attempts = REQUIRED_FINDING_SLOT_ATTEMPTS if required else 1
+        for attempt in range(attempts):
+            assistant = _call_model(provider, model, slot_messages, tools=[])
+            if usage := _usage_delta(pricing_rules, assistant.pop("_usage", {})):
+                _add_usage(usage_total, usage)
+                usage_events.append(start_event(
+                    f"{run_id}-usage-record-slot-{len(usage_events)}",
+                    "usage",
+                    {"delta": usage, "total": usage_total},
+                ))
+            raw = _content_text(assistant.get("content"))
+            slot_messages.append({"role": "assistant", "content": raw})
+            if not required or _valid_required_slot_array(
+                raw,
+                path,
+                pending_observation_ids,
+                required_resolution_ids,
+            ):
+                break
+            if attempt + 1 < attempts:
+                slot_messages.append({"role": "user", "content": (
+                    f"The {path} slot is empty or does not cover its required evidence targets. "
+                    "Use the exact observation and unknown ids and return the corrected JSON array only."
+                )})
         return raw
 
     filled = json2slots(_record_slot_template(), ask)
@@ -976,6 +1047,7 @@ def _record_slot_context(
     observations: list[dict],
     recorded_findings: dict,
     pending_observation_ids: list[str],
+    required_resolution_ids: list[str],
 ) -> str:
     payload = {
         "mode": "record_investigation_findings_slots",
@@ -987,12 +1059,16 @@ def _record_slot_context(
             "acceptance_criteria": analysis.get("acceptance_criteria", []),
         },
         "pending_observation_ids": list(pending_observation_ids),
+        "required_resolution_ids": list(required_resolution_ids),
         "observations": [
             {
                 "id": item.get("id", ""),
                 "tool": item.get("tool", ""),
                 "title": item.get("title", ""),
                 "summary": item.get("summary", ""),
+                "target_unknown_ids": item.get("target_unknown_ids", []),
+                "reason": item.get("reason", ""),
+                "path": item.get("path", ""),
             }
             for item in observations[-12:]
         ],
@@ -1004,14 +1080,49 @@ def _record_slot_context(
     return json.dumps(payload, ensure_ascii=False, sort_keys=True)
 
 
-def _record_slot_prompt(path: str, prompt_text: str) -> str:
+def _record_slot_prompt(path: str, prompt_text: str, *, required: bool = False) -> str:
     payload = {
         "slot": path,
         "instruction": prompt_text,
         "contract": _record_slot_contract(path),
-        "empty_value": [],
+        "required_non_empty": required,
     }
     return json.dumps(payload, ensure_ascii=False, sort_keys=True)
+
+
+def _valid_required_slot_array(
+    value: str,
+    path: str,
+    pending_observation_ids: list[str],
+    required_resolution_ids: list[str],
+) -> bool:
+    text = str(value or "").strip()
+    if text.startswith("```"):
+        text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text, flags=re.IGNORECASE).strip()
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError:
+        return False
+    if not isinstance(parsed, list) or not parsed:
+        return False
+    if path == "beliefs":
+        pending = set(pending_observation_ids)
+        return any(
+            isinstance(item, dict)
+            and pending.intersection(
+                _reference_list(item.get("evidence"))
+                + _reference_list(item.get("observation_ids"))
+            )
+            for item in parsed
+        )
+    if path == "resolutions":
+        covered = {
+            str(item.get("unknown_id") or "").strip()
+            for item in parsed
+            if isinstance(item, dict)
+        }
+        return set(required_resolution_ids).issubset(covered)
+    return True
 
 
 def _record_slot_contract(path: str) -> str:
@@ -1146,6 +1257,11 @@ def _finalize_investigation(
                         observations=observations or [],
                         recorded_findings=recorded_findings or _empty_recorded_findings(),
                         pending_observation_ids=[],
+                        required_resolution_ids=_unknowns_needing_resolution(
+                            recorded_findings or _empty_recorded_findings(),
+                            observations or [],
+                            analysis,
+                        ),
                     )
                 _require_finding_fields(record_arguments)
                 recorded_findings = _merge_recorded_findings(
@@ -1330,9 +1446,24 @@ def _runtime_recovered_investigation(
     )
     unknowns = _unresolved_from_resolutions(resolutions, known_unknowns)
     has_blocking_unknowns = any(item.get("blocking") for item in unknowns)
+    requires_project_evidence = any(
+        item.get("blocking") and item.get("resolution_strategy") == "investigate_project"
+        for item in initial_unknowns
+    )
+    has_project_evidence = bool(observations) or any(
+        isinstance(item, dict)
+        and _belief_text(item)
+        and (item.get("evidence") or item.get("observation_ids"))
+        for item in recorded_findings.get("beliefs", [])
+    )
     return {
         "summary": "Runtime recovered from repeated invalid investigation tool arguments.",
-        "ready_for_patch_planning": bool(wants_patch and facts and not has_blocking_unknowns),
+        "ready_for_patch_planning": bool(
+            wants_patch
+            and facts
+            and not has_blocking_unknowns
+            and (not requires_project_evidence or has_project_evidence)
+        ),
         "runtime_recovered": True,
         "recovery_reason": reason,
         "beliefs": recorded_findings.get("beliefs", []),
@@ -1388,6 +1519,7 @@ def _clearify_question(
         "unknown_id": target_ids[0] if target_ids else "",
         "question": question,
         "options": options[:3],
+        "custom_allowed": True,
         "origin_message": (analysis or {}).get("origin_message", ""),
         "clearify_tool": True,
         "tool_name": "clearify",
