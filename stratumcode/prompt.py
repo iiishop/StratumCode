@@ -146,6 +146,8 @@ Principles:
   camel/kebab/singular/plural variants before concluding absence.
 - Use hypothesis-verifier only for an atomic inference that matters to the
   planned patch and is not directly observed.
+- Discovery tool unknown_id values must come from the current task contract.
+  Register newly discovered unknowns through finding slots before targeting them.
 - Call record_investigation_findings with only a reason when observations should
   be recorded. The runtime will request finding slots. Then finish with
   patch_planning_facts when code work should continue.
@@ -240,6 +242,8 @@ Rules:
 - Before finalizing design_decisions, stress-test the design branch by branch.
 - If a question can be answered from investigation facts or project code, resolve
   it as a design_decision instead of asking the user.
+- When the user asks to match an existing project behavior, preserve the observed
+  state model, interaction, and transition behavior unless explicitly excluded.
 - When investigation.structured_findings exists, treat it as runtime-classified
   facts: action=extract candidates may be extracted directly; action=review
   candidates need an explicit behavior-preserving design; action=skip candidates
@@ -269,6 +273,7 @@ Output shape:
   "step_content": [
     {{
       "file": "workspace-relative path",
+      "mode": "modify|create",
       "purpose": "behavior-level reason this step must exist",
       "target": "function/class/component/route",
       "action": "specific code-level action",
@@ -284,8 +289,7 @@ Output shape:
     {{"acceptance_slot": 1, "verification": "check that proves the acceptance criterion"}}
   ],
   "tests_or_checks": ["command or manual check"],
-  "risks": ["small risk or empty"],
-  "out_of_scope": ["behavior intentionally not implemented"]
+  "risks": ["small risk or empty"]
 }}
 
 Rules:
@@ -296,6 +300,8 @@ Rules:
 - Do not write AC/DD/PF ids. Use only 1-based acceptance_slots,
   and project_fact_slots from runtime_skeleton. The current design decision is
   bound by runtime_slot; do not write decision_slots.
+- Copy existing file paths exactly from project facts and use mode=modify.
+  Use mode=create only when the approved design explicitly requires a new file.
 - Respect safe_action from investigation.structured_findings when present; do
   not plan extraction for action=skip candidates. action=review candidates may
   be planned only when the design chose a behavior-preserving variant strategy.
@@ -689,6 +695,7 @@ def build_patch_step_slot_user(
             "skip_reason": "why no code change is needed when needed is false",
             "step_content": [{
                 "file": "workspace-relative path",
+                "mode": "modify|create",
                 "purpose": "why this step exists",
                 "target": "function/class/component/route",
                 "action": "specific code-level action",
@@ -701,7 +708,6 @@ def build_patch_step_slot_user(
             }],
             "tests_or_checks": ["command or manual check"],
             "risks": ["small risk or empty"],
-            "out_of_scope": ["behavior intentionally not implemented"],
             "acceptance_verification": [{"acceptance_slot": 1, "verification": "check"}],
         },
     }, ensure_ascii=False, indent=2)

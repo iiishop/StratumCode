@@ -15,6 +15,7 @@ from .agent_runtime import (
     call_model as _call_model,
     content_text as _content_text,
     empty_usage as _empty_usage,
+    output_truncated as _output_truncated,
     start_event,
     usage_delta as _usage_delta,
 )
@@ -77,7 +78,6 @@ def implementation_stream(
     patch_required = bool(required_steps)
     patch_call_count = 0
     patch_call_limit = max(len(required_steps) + 8, 12)
-
     tool_error_limit = app_settings.get_round_limit("implementation_tool_error_rounds")
     for round_index in _round_indexes(app_settings.get_round_limit("implementation_rounds")):
         assistant = _call_model(provider, model, messages, tools=tools)
@@ -89,6 +89,13 @@ def implementation_stream(
         tool_calls = assistant.get("tool_calls") or []
         messages.append(_assistant_replay(text, tool_calls))
         if not tool_calls:
+            if _output_truncated(assistant):
+                messages.append({"role": "user", "content": (
+                    "The previous response was truncated by the output limit. "
+                    "Retry with one smaller apply_patch call for a single authorized step, "
+                    "and split large file changes across model rounds."
+                )})
+                continue
             final_text = text.strip()
             missing_steps = _missing_steps(required_steps, applied_steps)
             if missing_steps:
@@ -149,6 +156,11 @@ def implementation_stream(
                     "output": output,
                 })
             messages.append({"role": "tool", "tool_call_id": call_id, "content": output})
+        if _output_truncated(assistant):
+            messages.append({"role": "user", "content": (
+                "The previous response hit the output limit. Continue with a smaller tool call "
+                "and split any remaining patch across model rounds."
+            )})
         consecutive_error_rounds = 0 if round_had_success else consecutive_error_rounds + 1
         if patch_required and not round_applied_patch:
             no_patch_rounds += 1

@@ -13,7 +13,7 @@ function setScale(value) {
   emit('save', 'font_scale', value)
 }
 
-function setRoundLimit(key, value) {
+function setLimit(key, value) {
   const parsed = Number.parseInt(value, 10)
   emit('save', key, Number.isFinite(parsed) ? Math.max(0, parsed) : 0)
 }
@@ -97,7 +97,35 @@ function roundLabel(value) {
               step="1"
               :value="item.value || 0"
               :disabled="saving"
-              @change="setRoundLimit(item.key, $event.target.value)"
+              @change="setLimit(item.key, $event.target.value)"
+            />
+            <b>{{ roundLabel(item.value) }}</b>
+          </label>
+        </div>
+      </div>
+
+      <div class="settings-row settings-row--stack">
+        <div>
+          <strong>Output limits</strong>
+          <span>Set a value to 0 for no application cap. Provider limits still apply.</span>
+        </div>
+        <div class="round-grid">
+          <label
+            v-for="item in settings.output_limits || []"
+            :key="item.key"
+            class="round-limit"
+          >
+            <span>
+              <strong>{{ item.label }}</strong>
+              <em>{{ item.description }}</em>
+            </span>
+            <input
+              type="number"
+              min="0"
+              step="1"
+              :value="item.value || 0"
+              :disabled="saving"
+              @change="setLimit(item.key, $event.target.value)"
             />
             <b>{{ roundLabel(item.value) }}</b>
           </label>
@@ -125,7 +153,7 @@ function roundLabel(value) {
               step="1"
               :value="item.value || 0"
               :disabled="saving"
-              @change="setRoundLimit(item.key, $event.target.value)"
+              @change="setLimit(item.key, $event.target.value)"
             />
             <b>{{ roundLabel(item.value) }}</b>
           </label>

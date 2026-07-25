@@ -8,6 +8,7 @@ from .task_contract import run_request
 def handle(run):
     from .. import chat
 
+    failed = False
     for event in implementation_runner.implementation_stream(
         message=run_request(run),
         analysis=run.analysis,
@@ -27,8 +28,12 @@ def handle(run):
         if event.get("op") == "done" and isinstance(event.get("implementation"), dict):
             run.implementation_result = event["implementation"]
             run.changed_files = [str(path) for path in run.implementation_result.get("changed_files", [])]
+        if event.get("op") == "update" and event.get("patch", {}).get("state") in {"error", "failed"}:
+            failed = True
         yield event
-    if run.state == chat.ChatState.IMPLEMENTING and (run.implementation_result or {}).get("patch_applied"):
+    if run.state == chat.ChatState.IMPLEMENTING and failed:
+        run.transition(chat.ChatState.FAILED, "Implementation failed before completing the authorized patch plan.")
+    elif run.state == chat.ChatState.IMPLEMENTING and (run.implementation_result or {}).get("patch_applied"):
         run.transition(chat.ChatState.VALIDATING, "Implementation patching completed; starting validation.")
     elif run.state == chat.ChatState.IMPLEMENTING:
         run.transition(chat._chat_finish_state(run), "Implementation stream completed.")

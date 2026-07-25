@@ -190,10 +190,14 @@ def _allowed_steps(plan: dict, root: Path) -> dict:
         rels = [rel for rel in rels if rel]
         if not step_id or not rels:
             continue
-        capabilities = set()
-        for rel in rels:
-            target = (root / rel).resolve()
-            capabilities.add("modify_existing" if target.exists() else "create_file")
+        mode = str(item.get("mode") or "").strip()
+        if mode:
+            capabilities = {"create_file" if mode == "create" else "modify_existing"}
+        else:
+            capabilities = {
+                "modify_existing" if (root / rel).resolve().exists() else "create_file"
+                for rel in rels
+            }
         steps[step_id] = {
             "files": rels,
             "purpose": str(item.get("purpose") or "").strip(),

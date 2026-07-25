@@ -16,7 +16,6 @@ from .agent_runtime import (
     usage_delta as _usage_delta,
 )
 
-MAX_OUTPUT_TOKENS = 6144
 DEFAULT_DESIGN_JSON_ATTEMPTS = 3
 
 
@@ -552,7 +551,7 @@ def _content_json_stream(
     repeated_invalid = 0
     attempts = app_settings.get_round_limit("design_json_attempts") or DEFAULT_DESIGN_JSON_ATTEMPTS
     for attempt in _attempt_indexes(attempts):
-        assistant = _call_model(provider, model, messages, tools=[], max_tokens=MAX_OUTPUT_TOKENS)
+        assistant = _call_model(provider, model, messages, tools=[])
         if usage := _usage_delta(pricing_rules, assistant.pop("_usage", {})):
             _add_usage(usage_total, usage)
             yield start_event(f"{run_id}-usage-{label}-{attempt}", "usage", {"delta": usage, "total": usage_total})

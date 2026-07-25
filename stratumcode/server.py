@@ -52,6 +52,9 @@ def _post_app_settings_save(handler, body):
     for key in app_settings.TASK_LIMITS:
         if key in body:
             app_settings.save_task_limit(key, body.get(key))
+    for key in app_settings.OUTPUT_LIMITS:
+        if key in body:
+            app_settings.save_output_limit(key, body.get(key))
     handler._json(app_settings.to_json())
 
 

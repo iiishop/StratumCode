@@ -78,6 +78,13 @@ def resolve(stage: str) -> dict | None:
     provider = providers.get_saved(row["provider_id"])
     if provider is None:
         return None
+    output_limit = providers.model_output_limit(
+        provider["base_url"],
+        provider["api_key"],
+        row["model_id"],
+    )
+    if output_limit:
+        provider["model_output_tokens"] = output_limit
     return {
         "requested_stage": stage,
         "configured_stage": row["stage"],

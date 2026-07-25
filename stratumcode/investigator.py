@@ -32,8 +32,6 @@ from .status.task_contract import (
 from .status.task_updates import _unknown_task_status
 from .tools import registry
 
-FINALIZATION_OUTPUT_TOKENS = 4096
-RECORD_SLOT_OUTPUT_TOKENS = 1536
 INVESTIGATION_TOOLS = ("glob", "grep", "read", "code_nav", "python_static_check", "websearch", "webfetch", "subagent", "clearify")
 MAX_HYPOTHESIS_VERIFIER_CALLS = 2
 MAX_REPEATED_TOOL_ERRORS = 3
@@ -47,6 +45,7 @@ FINDING_FIELDS = (
     "task_updates",
 )
 PROJECT_EVIDENCE_TOOLS = {"read", "grep", "code_nav", "python_static_check"}
+CLEARIFY_RESOLUTION_REASON = "Answered by the user through clearify."
 
 
 def investigation_stream(
@@ -945,7 +944,7 @@ def _record_findings_by_slots(
 
     def ask(path: str, prompt_text: str) -> JSONValue:
         slot_messages.append({"role": "user", "content": _record_slot_prompt(path, prompt_text)})
-        assistant = _call_model(provider, model, slot_messages, tools=[], max_tokens=RECORD_SLOT_OUTPUT_TOKENS)
+        assistant = _call_model(provider, model, slot_messages, tools=[])
         if usage := _usage_delta(pricing_rules, assistant.pop("_usage", {})):
             _add_usage(usage_total, usage)
             usage_events.append(start_event(
@@ -1095,7 +1094,6 @@ def _finalize_investigation(
             model,
             messages,
             tools=[_record_findings_tool_schema(), _finish_tool_schema()],
-            max_tokens=FINALIZATION_OUTPUT_TOKENS,
             tool_choice="required",
         )
         if usage := _usage_delta(pricing_rules, assistant.pop("_usage", {})):
@@ -1445,7 +1443,7 @@ def _clearify_resolution(arguments: dict, answer: dict | None) -> dict:
         "answer": text,
         "evidence": [],
         "belief_ids": [],
-        "reason": "Answered by the user through clearify.",
+        "reason": CLEARIFY_RESOLUTION_REASON,
     }
 
 
@@ -2046,7 +2044,14 @@ def _merge_list_by_identity(left: list, right: list) -> list:
     for item in right:
         key = _identity_key(item)
         if key and key in positions:
-            result[positions[key]] = item
+            existing = result[positions[key]]
+            if isinstance(existing, dict) and isinstance(item, dict):
+                if existing.get("reason") == CLEARIFY_RESOLUTION_REASON:
+                    result[positions[key]] = {**item, **existing}
+                else:
+                    result[positions[key]] = {**existing, **item}
+            else:
+                result[positions[key]] = item
         else:
             if key:
                 positions[key] = len(result)

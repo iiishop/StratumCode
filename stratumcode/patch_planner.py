@@ -17,7 +17,6 @@ from .agent_runtime import (
     usage_delta as _usage_delta,
 )
 
-MAX_OUTPUT_TOKENS = 6144
 DEFAULT_PATCH_JSON_ATTEMPTS = 3
 
 
@@ -55,7 +54,7 @@ def patch_planning_stream(
     step_content = []
     tests_or_checks = []
     risks = []
-    out_of_scope = []
+    out_of_scope = _strings(design_plan.get("out_of_scope"))
     acceptance_verification = {}
     skipped_decision_slots = []
     decisions = [
@@ -87,13 +86,15 @@ def patch_planning_stream(
                 run_id,
                 f"decision-{index}-{semantic_attempt}",
             )
-            if not slot or slot.get("needed") is False or _has_usable_steps(slot.get("step_content")):
+            slot_issues = _slot_step_issues(slot, workspace_dir)
+            if not slot or slot.get("needed") is False or not slot_issues:
                 break
             messages.extend([
                 {"role": "assistant", "content": json.dumps(slot, ensure_ascii=False)[:4000]},
                 {"role": "user", "content": (
-                    "The previous slot content was semantically unusable: needed=true "
-                    "requires at least one step_content item with a workspace-relative file. "
+                    "The previous slot content was semantically unusable:\n- "
+                    + "\n- ".join(slot_issues)
+                    + "\nUse exact workspace-relative paths from project facts. "
                     "Return the corrected slot JSON only. If this design decision genuinely "
                     "needs no code change, set needed=false and include skip_reason."
                 )},
@@ -102,7 +103,6 @@ def patch_planning_stream(
             continue
         tests_or_checks.extend(_strings(slot.get("tests_or_checks")))
         risks.extend(_strings(slot.get("risks")))
-        out_of_scope.extend(_strings(slot.get("out_of_scope")))
         _merge_acceptance_verification(acceptance_verification, slot.get("acceptance_verification"))
         if slot.get("needed") is False:
             skipped_decision_slots.append({
@@ -229,14 +229,13 @@ def validate_patch_plan(plan: dict, analysis: dict, design_plan: dict, workspace
         if not step.get("file"):
             issues.append(f"step {step_id} has no file")
             continue
+        mode = str(step.get("mode") or "modify").strip()
+        if mode not in {"modify", "create"}:
+            issues.append(f"step {step_id} has invalid mode: {mode}")
         if not step.get("target"):
             issues.append(f"step {step_id} has no target")
-        try:
-            target = (workspace / step["file"]).resolve()
-            if workspace not in (target, *target.parents):
-                issues.append(f"step {step_id} file is outside workspace")
-        except OSError:
-            issues.append(f"step {step_id} file path is invalid")
+        if file_issue := _planned_file_issue(step["file"], mode, workspace):
+            issues.append(f"step {step_id} {file_issue}")
         if not step.get("action"):
             issues.append(f"step {step_id} has no action")
         if not step.get("required_behavior_if_removed"):
@@ -382,7 +381,7 @@ def _content_json_stream(
     repeated_invalid = 0
     attempts = app_settings.get_round_limit("patch_json_attempts") or DEFAULT_PATCH_JSON_ATTEMPTS
     for attempt in _attempt_indexes(attempts):
-        assistant = _call_model(provider, model, messages, tools=[], max_tokens=MAX_OUTPUT_TOKENS)
+        assistant = _call_model(provider, model, messages, tools=[])
         if usage := _usage_delta(pricing_rules, assistant.pop("_usage", {})):
             _add_usage(usage_total, usage)
             yield start_event(f"{run_id}-usage-{label}-{attempt}", "usage", {"delta": usage, "total": usage_total})
@@ -511,6 +510,7 @@ def _runtime_steps(value, analysis: dict, design_plan: dict, facts: list[dict]) 
         fact_refs = _slot_ids(item.get("project_fact_slots"), fact_ids)
         steps.append({
             "id": f"IS{index}",
+            "mode": str(item.get("mode") or "modify").strip(),
             "purpose": str(item.get("purpose") or "").strip(),
             "file": str(item.get("file") or "").strip(),
             "target": str(item.get("target") or "").strip(),
@@ -528,6 +528,40 @@ def _runtime_steps(value, analysis: dict, design_plan: dict, facts: list[dict]) 
 
 def _has_usable_steps(value) -> bool:
     return isinstance(value, list) and any(isinstance(item, dict) and str(item.get("file") or "").strip() for item in value)
+
+
+def _slot_step_issues(slot: dict | None, workspace_dir: str) -> list[str]:
+    if not slot or slot.get("needed") is False:
+        return []
+    steps = slot.get("step_content")
+    if not _has_usable_steps(steps):
+        return ["needed=true requires at least one step_content item with a workspace-relative file"]
+    workspace = Path(workspace_dir or ".").resolve()
+    issues = []
+    for index, item in enumerate(steps, start=1):
+        if not isinstance(item, dict) or not str(item.get("file") or "").strip():
+            continue
+        mode = str(item.get("mode") or "modify").strip()
+        if mode not in {"modify", "create"}:
+            issues.append(f"step_content item {index} has invalid mode: {mode}")
+            continue
+        if issue := _planned_file_issue(str(item["file"]), mode, workspace):
+            issues.append(f"step_content item {index} {issue}")
+    return issues
+
+
+def _planned_file_issue(file: str, mode: str, workspace: Path) -> str:
+    try:
+        target = (workspace / file).resolve()
+    except OSError:
+        return "file path is invalid"
+    if workspace not in (target, *target.parents):
+        return "file is outside workspace"
+    if mode == "modify" and not target.is_file():
+        return f"modify target does not exist: {file}"
+    if mode == "create" and target.exists():
+        return f"create target already exists: {file}"
+    return ""
 
 
 def _slot_ids(value, ids: list[str]) -> list[str]:

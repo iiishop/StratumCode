@@ -34,16 +34,42 @@ def model_context_length(base_url: str, api_key: str, model_id: str) -> int | No
     try:
         data = _models_payload(base_url, api_key)
     except Exception:
-        return None
-    model = next((item for item in data.get("data", []) if item.get("id") == model_id), {})
-    for key in ("context_length", "context_window", "max_context_length", "max_input_tokens"):
+        data = {}
+    model = _provider_model(data, model_id)
+    direct = _positive_int(
+        model,
+        ("context_length", "context_window", "max_context_length", "max_input_tokens"),
+    )
+    return direct or _models_dev_limit(model_id, "context") or _litellm_context_length(model_id)
+
+
+@lru_cache(maxsize=128)
+def model_output_limit(base_url: str, api_key: str, model_id: str) -> int | None:
+    data = {}
+    if not _is_codex_url(base_url):
         try:
-            value = int(model.get(key) or 0)
-        except (TypeError, ValueError):
-            value = 0
-        if value > 0:
-            return value
-    return _models_dev_context_length(model_id) or _litellm_context_length(model_id)
+            data = _models_payload(base_url, api_key)
+        except Exception:
+            data = {}
+    model = _provider_model(data, model_id)
+    direct = _positive_int(
+        model,
+        ("max_output_tokens", "output_token_limit", "max_completion_tokens"),
+    )
+    nested = _positive_int(model.get("limit", {}), ("output",)) if isinstance(model, dict) else None
+    return direct or nested or _models_dev_limit(model_id, "output") or _litellm_output_limit(model_id)
+
+
+def _provider_model(data: dict, model_id: str) -> dict:
+    items = data.get("data", []) if isinstance(data, dict) else []
+    return next(
+        (
+            item
+            for item in items
+            if isinstance(item, dict) and item.get("id") == model_id
+        ),
+        {},
+    )
 
 
 @lru_cache(maxsize=1)
@@ -57,25 +83,29 @@ def _models_dev_payload() -> dict:
     return data if isinstance(data, dict) else {}
 
 
-def _models_dev_context_length(model_id: str) -> int | None:
+def _models_dev_limit(model_id: str, key: str) -> int | None:
     try:
         providers_payload = _models_dev_payload()
     except Exception:
         return None
+    limits = []
     for provider in providers_payload.values():
         models = provider.get("models", {}) if isinstance(provider, dict) else {}
         model = models.get(model_id)
         if not model:
-            model = next((value for key, value in models.items() if key.endswith("/" + model_id)), None)
+            model = next(
+                (
+                    value
+                    for model_key, value in models.items()
+                    if model_key.endswith("/" + model_id)
+                ),
+                None,
+            )
         if isinstance(model, dict):
-            limit = model.get("limit", {})
-            try:
-                context = int(limit.get("context") or 0)
-            except (TypeError, ValueError):
-                context = 0
-            if context > 0:
-                return context
-    return None
+            value = _positive_int(model.get("limit", {}), (key,))
+            if value:
+                limits.append(value)
+    return min(limits) if limits else None
 
 
 @lru_cache(maxsize=1)
@@ -94,9 +124,23 @@ def _litellm_context_length(model_id: str) -> int | None:
         model = _litellm_payload().get(model_id) or {}
     except Exception:
         return None
-    for key in ("max_input_tokens", "max_tokens"):
+    return _positive_int(model, ("max_input_tokens", "max_tokens"))
+
+
+def _litellm_output_limit(model_id: str) -> int | None:
+    try:
+        model = _litellm_payload().get(model_id) or {}
+    except Exception:
+        return None
+    return _positive_int(model, ("max_output_tokens", "max_completion_tokens"))
+
+
+def _positive_int(data: dict, keys: tuple[str, ...]) -> int | None:
+    if not isinstance(data, dict):
+        return None
+    for key in keys:
         try:
-            value = int(model.get(key) or 0)
+            value = int(data.get(key) or 0)
         except (TypeError, ValueError):
             value = 0
         if value > 0:

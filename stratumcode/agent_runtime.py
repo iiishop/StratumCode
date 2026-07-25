@@ -12,11 +12,11 @@ from . import app_settings, providers
 from .agent.tools import agent_tools
 from .agent.policy import DISCOVERY_TOOLS
 
-MAX_MODEL_OUTPUT_TOKENS = 2048
 DEFAULT_MODEL_REQUEST_ATTEMPTS = 3
 MODEL_RETRY_STATUS_CODES = {429, 502, 503, 504}
 MODEL_RETRY_DELAYS = (0.5, 1.0)
 MODEL_STREAM_DEADLINE_SECONDS = 180
+OUTPUT_TRUNCATION_REASONS = {"length", "max_tokens", "max_output_tokens", "incomplete"}
 _NON_THINKING_TOOL_CHOICE_MODELS: set[str] = set()
 
 
@@ -30,11 +30,11 @@ def call_model(
     messages: list[dict],
     *,
     tools: list[dict] | None = None,
-    max_tokens: int = MAX_MODEL_OUTPUT_TOKENS,
     tool_choice=None,
 ) -> dict:
+    output_tokens = _effective_output_tokens(provider)
     if provider.get("auth_type") == "codex_oauth":
-        return _call_codex_responses(provider, model, messages, tools, max_tokens, tool_choice)
+        return _call_codex_responses(provider, model, messages, tools, tool_choice)
     url = f"{provider['base_url'].rstrip('/')}/v1/chat/completions"
     headers = {
         "Authorization": f"Bearer {provider['api_key']}",
@@ -43,7 +43,7 @@ def call_model(
     attempts = app_settings.get_round_limit("model_request_attempts") or DEFAULT_MODEL_REQUEST_ATTEMPTS
     data = None
     for attempt in _attempt_indexes(attempts, start=0):
-        payload = _payload(provider, model, messages, tools, max_tokens, tool_choice)
+        payload = _payload(provider, model, messages, tools, output_tokens, tool_choice)
         body = json.dumps(payload).encode()
         request = Request(url, data=body, headers=headers)
         try:
@@ -71,11 +71,27 @@ def call_model(
     if not choices or not isinstance(choices[0].get("message"), dict):
         raise ValueError("provider returned no assistant message")
     message = choices[0]["message"]
+    message["finish_reason"] = choices[0].get("finish_reason")
     message["_usage"] = data.get("usage") or {}
     return message
 
 
-def _call_codex_responses(provider: dict, model: str, messages: list[dict], tools, max_tokens: int, tool_choice) -> dict:
+def _effective_output_tokens(provider: dict) -> int:
+    configured = app_settings.get_output_limit("llm_output_tokens")
+    limits = [
+        int(value)
+        for value in (configured, provider.get("model_output_tokens"))
+        if value is not None and int(value) > 0
+    ]
+    return min(limits) if limits else 0
+
+
+def output_truncated(message: dict) -> bool:
+    reason = str(message.get("finish_reason") or "").strip().casefold()
+    return reason in OUTPUT_TRUNCATION_REASONS
+
+
+def _call_codex_responses(provider: dict, model: str, messages: list[dict], tools, tool_choice) -> dict:
     access, account_id = providers.codex_access_token(provider)
     headers = {
         "Authorization": f"Bearer {access}",
@@ -228,7 +244,12 @@ def _responses_message(data: dict) -> dict:
                     "arguments": item.get("arguments") or "{}",
                 },
             })
-    return {"content": "\n".join(content).strip(), "tool_calls": tool_calls}
+    incomplete = data.get("incomplete_details") if isinstance(data.get("incomplete_details"), dict) else {}
+    return {
+        "content": "\n".join(content).strip(),
+        "tool_calls": tool_calls,
+        "finish_reason": incomplete.get("reason") or data.get("status"),
+    }
 
 
 def _responses_usage(usage: dict) -> dict:
@@ -302,8 +323,9 @@ def _payload(provider: dict, model: str, messages: list[dict], tools, max_tokens
         "messages": messages,
         "tools": agent_tools(DISCOVERY_TOOLS) if tools is None else tools,
         "temperature": 0.1,
-        "max_tokens": max_tokens,
     }
+    if max_tokens > 0:
+        payload["max_tokens"] = max_tokens
     if tool_choice is not None:
         payload["tool_choice"] = tool_choice
         if _model_key(provider, model) in _NON_THINKING_TOOL_CHOICE_MODELS:

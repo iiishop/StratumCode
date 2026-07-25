@@ -73,6 +73,14 @@ TASK_LIMITS = {
         "default": 5,
     },
 }
+DEFAULT_LLM_OUTPUT_TOKENS = 32000
+OUTPUT_LIMITS = {
+    "llm_output_tokens": {
+        "label": "LLM output tokens",
+        "description": "Maximum output tokens per model response. Set to 0 for no application cap.",
+        "default": DEFAULT_LLM_OUTPUT_TOKENS,
+    },
+}
 TEXT = {
     "en": {
         "answer_context": "User answered a pending agent question.",
@@ -268,6 +276,27 @@ def save_task_limit(key: str, value) -> int:
     return limit
 
 
+def get_output_limit(key: str) -> int:
+    if key not in OUTPUT_LIMITS:
+        raise ValueError(f"unknown output limit setting: {key}")
+    default = str(OUTPUT_LIMITS[key]["default"])
+    try:
+        return max(0, int(_get(key, default)))
+    except (TypeError, ValueError):
+        return int(default)
+
+
+def save_output_limit(key: str, value) -> int:
+    if key not in OUTPUT_LIMITS:
+        raise ValueError(f"unknown output limit setting: {key}")
+    try:
+        limit = max(0, int(value))
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{key} must be a non-negative integer") from exc
+    _save(key, str(limit))
+    return limit
+
+
 def to_json() -> dict:
     language = get_output_language()
     return {
@@ -294,6 +323,15 @@ def to_json() -> dict:
                 "value": get_task_limit(key),
             }
             for key, meta in TASK_LIMITS.items()
+        ],
+        "output_limits": [
+            {
+                "key": key,
+                "label": meta["label"],
+                "description": meta["description"],
+                "value": get_output_limit(key),
+            }
+            for key, meta in OUTPUT_LIMITS.items()
         ],
     }
 
