@@ -9,8 +9,8 @@ import threading
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass
+from difflib import SequenceMatcher, unified_diff
 from pathlib import Path
-from difflib import unified_diff
 
 from . import patch_authorization, snapshot_store
 
@@ -94,7 +94,8 @@ def apply_patch_request(request: dict, root: Path) -> dict:
             prepared.append(result)
         _validate_authorization(request, root, changed_bytes=touched_bytes)
 
-        tx = _prepare_transaction(request, root, prepared)
+        change_record = _change_record(request, prepared, root)
+        tx = _prepare_transaction(request, root, prepared, change_record)
         committed: list[dict] = []
         try:
             _set_transaction_state(tx, "committing")
@@ -125,11 +126,11 @@ def apply_patch_request(request: dict, root: Path) -> dict:
         "authorization_id": str(request.get("authorization_id") or ""),
         "step_id": str(request.get("step_id") or ""),
         "step_complete": bool(request.get("step_complete", True)),
-        "purpose": str(request.get("purpose") or ""),
+        "purpose": change_record["intent"]["purpose"],
         "operation_summary": str(request.get("operation_summary") or ""),
-        "acceptance_ids": request.get("acceptance_ids") or [],
-        "decision_ids": request.get("decision_ids") or [],
-        "project_fact_ids": request.get("project_fact_ids") or [],
+        "acceptance_ids": change_record["intent"]["acceptance_ids"],
+        "decision_ids": change_record["intent"]["decision_ids"],
+        "project_fact_ids": change_record["intent"]["project_fact_ids"],
         "is_state": patch_authorization.step_states(str(request.get("authorization_id") or "")).get(str(request.get("step_id") or ""), ""),
         "files": [
             {
@@ -145,6 +146,7 @@ def apply_patch_request(request: dict, root: Path) -> dict:
             for item in prepared
         ],
         "diff": "\n".join(item["diff"] for item in prepared if item["diff"]),
+        "change_record": change_record,
         "next_state": "validation_required",
         "rollback_id": tx["id"],
     }
@@ -479,6 +481,69 @@ def _diff(path: str, before: bytes, after: bytes, encoding: str) -> str:
     return "".join(unified_diff(old, new, fromfile=f"a/{path}", tofile=f"b/{path}"))
 
 
+def _change_record(request: dict, prepared: list[dict], root: Path) -> dict:
+    step_id = str(request.get("step_id") or "")
+    contract = patch_authorization.step_contract(
+        str(request.get("authorization_id") or ""),
+        step_id,
+    )
+    changed_files = [item["path"].relative_to(root).as_posix() for item in prepared]
+    planned_files = [str(path).replace("\\", "/") for path in contract.get("files") or []]
+    return {
+        "patch_id": str(request.get("patch_id") or ""),
+        "attempt_id": str(request.get("attempt_id") or ""),
+        "authorization_id": str(request.get("authorization_id") or ""),
+        "step_id": step_id,
+        "intent": {
+            "purpose": str(contract.get("purpose") or ""),
+            "target": str(contract.get("target") or ""),
+            "action": str(contract.get("action") or ""),
+            "significance": str(contract.get("required_behavior_if_removed") or ""),
+            "completion_conditions": contract.get("completion_conditions") or [],
+            "out_of_scope": contract.get("out_of_scope") or [],
+            "acceptance_ids": contract.get("acceptance_ids") or [],
+            "decision_ids": contract.get("decision_ids") or [],
+            "project_fact_ids": contract.get("project_fact_ids") or [],
+        },
+        "actual": {
+            "executor_summary": str(request.get("operation_summary") or ""),
+            "step_complete": bool(request.get("step_complete", True)),
+            "changed_files": changed_files,
+            "unmodified_authorized_files": sorted(set(planned_files) - set(changed_files)),
+            "files": [_file_change(item, root) for item in prepared],
+        },
+    }
+
+
+def _file_change(item: dict, root: Path) -> dict:
+    encoding = str(item["encoding"])
+    before = item["before"].decode(encoding).splitlines()
+    after = item["after"].decode(encoding).splitlines()
+    chunks = []
+    for tag, old_start, old_end, new_start, new_end in SequenceMatcher(
+        None,
+        before,
+        after,
+        autojunk=False,
+    ).get_opcodes():
+        if tag == "equal":
+            continue
+        chunks.append({
+            "kind": tag,
+            "old_start_line": old_start + 1,
+            "new_start_line": new_start + 1,
+            "removed_code": before[old_start:old_end],
+            "added_code": after[new_start:new_end],
+        })
+    return {
+        "path": item["path"].relative_to(root).as_posix(),
+        "mode": item["mode"],
+        "removed_bytes": item["removed_bytes"],
+        "added_bytes": item["added_bytes"],
+        "chunks": chunks,
+    }
+
+
 def _lsp_diagnostics(path: Path, root: Path) -> dict:
     try:
         from . import lsp
@@ -503,7 +568,7 @@ def _lsp_diagnostics(path: Path, root: Path) -> dict:
         }
 
 
-def _prepare_transaction(request: dict, root: Path, prepared: list[dict]) -> dict:
+def _prepare_transaction(request: dict, root: Path, prepared: list[dict], change_record: dict) -> dict:
     tx_id = f"RB-{int(time.time() * 1000)}-{hashlib.sha256(os.urandom(16)).hexdigest()[:8]}"
     directory = _transaction_dir(tx_id)
     backups = directory / "backups"
@@ -521,6 +586,7 @@ def _prepare_transaction(request: dict, root: Path, prepared: list[dict]) -> dic
         "purpose": request.get("purpose", ""),
         "operation_summary": request.get("operation_summary", ""),
         "acceptance_ids": request.get("acceptance_ids", []),
+        "change_record": change_record,
         "workspace_root": str(root),
         "request": request,
         "created_at": now,

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-import asyncio
 import ast
+import asyncio
 import json
 from collections.abc import Iterator
 from itertools import count
@@ -76,6 +76,7 @@ def implementation_stream(
     inspected_ranges: set[tuple[str, str, str]] = set()
     applied_steps: set[str] = set()
     changed_files: list[str] = []
+    patch_records: list[dict] = []
     required_steps = _required_step_ids(patch_plan)
     patch_required = bool(required_steps)
     patch_call_count = 0
@@ -154,6 +155,8 @@ def implementation_stream(
                     if rollback_id := _patch_rollback_id(output):
                         rollback_ids.append(rollback_id)
                     changed_files.extend(_patch_files_from_output(output))
+                    if patch_record := _patch_record_from_output(output):
+                        patch_records.append(patch_record)
                     if bool(arguments.get("step_complete", True)):
                         applied_steps.add(str(arguments.get("step_id") or "").strip())
                 elif name == "apply_patch" and _patch_already_applied(output):
@@ -220,6 +223,9 @@ def implementation_stream(
             yield start_event(f"{run_id}-tool-error-checkpoint", "output", _checkpoint_output(reason))
             yield {"op": "update", "id": stage_id, "patch": {"state": "failed", "phase": "implementation_tool_error_checkpoint"}}
             return
+        if applied_steps and not _missing_steps(required_steps, applied_steps):
+            final_text = "Authorized patch plan applied; continuing with validation."
+            break
     else:
         missing_steps = _missing_steps(required_steps, applied_steps)
         if missing_steps:
@@ -270,6 +276,7 @@ def implementation_stream(
         "applied_steps": sorted(applied_steps),
         "missing_steps": missing_steps,
         "changed_files": sorted(set(changed_files)),
+        "patch_records": patch_records,
         "semantic_checked": False,
     }}
 
@@ -281,6 +288,7 @@ def validation_stream(
     patch_plan: dict,
     workspace_dir: str,
     changed_files: list[str],
+    patch_records: list[dict] | None = None,
 ) -> Iterator[dict]:
     result = yield from _validation_stream(
         message=message,
@@ -288,6 +296,7 @@ def validation_stream(
         patch_plan=patch_plan,
         workspace_dir=workspace_dir,
         changed_files=changed_files,
+        patch_records=patch_records or [],
     )
     if result:
         yield {"op": "done", "validation_result": result}
@@ -300,6 +309,7 @@ def resume_validation_stream(
     patch_plan: dict,
     workspace_dir: str,
     changed_files: list[str],
+    patch_records: list[dict] | None = None,
 ) -> Iterator[dict]:
     result = yield from _validation_stream(
         message=message,
@@ -307,6 +317,7 @@ def resume_validation_stream(
         patch_plan=patch_plan,
         workspace_dir=workspace_dir,
         changed_files=changed_files,
+        patch_records=patch_records or [],
     )
     if result:
         yield {"op": "done", "validation_result": result}
@@ -476,7 +487,7 @@ def _round_indexes(limit: int, start: int = 1):
 
 
 def _assistant_replay(content: str, tool_calls: list[dict]) -> dict:
-    message = {"role": "assistant", "content": content or ""}
+    message: dict = {"role": "assistant", "content": content or ""}
     if tool_calls:
         message["tool_calls"] = tool_calls
     return message
@@ -503,6 +514,23 @@ def _validation_tools() -> list[dict]:
                         "summary": {"type": "string"},
                         "file": {"type": "string"},
                         "line": {"type": "integer"},
+                        "category": {
+                            "type": "string",
+                            "enum": [
+                                "behavior_mismatch",
+                                "scope_expansion",
+                                "incomplete_implementation",
+                                "unrelated_change",
+                                "code_defect",
+                            ],
+                        },
+                        "direction": {
+                            "type": "string",
+                            "enum": ["diverges", "exceeds", "falls_short"],
+                        },
+                        "step_id": {"type": "string"},
+                        "patch_id": {"type": "string"},
+                        "evidence": {"type": "array", "items": {"type": "string"}},
                     },
                 },
             },
@@ -741,6 +769,16 @@ def _patch_files_from_output(output: str) -> list[str]:
     ]
 
 
+def _patch_record_from_output(output: str) -> dict:
+    try:
+        data = json.loads(output or "{}")
+        payload = json.loads(data.get("output") or "{}")
+    except (TypeError, json.JSONDecodeError):
+        return {}
+    record = payload.get("change_record")
+    return record if isinstance(record, dict) else {}
+
+
 def _validation_stream(
     *,
     message: str,
@@ -748,6 +786,7 @@ def _validation_stream(
     patch_plan: dict,
     workspace_dir: str,
     changed_files: list[str],
+    patch_records: list[dict],
 ) -> Iterator[dict]:
     setting = model_settings.resolve(model_settings.DEFAULT_STAGE)
     if setting is None:
@@ -775,6 +814,7 @@ def _validation_stream(
             "acceptance_criteria": analysis.get("acceptance_criteria", []),
             "patch_plan": patch_plan,
             "changed_files": sorted(set(changed_files)),
+            "patch_records": patch_records,
             "workspace_dir": workspace_dir,
         }, ensure_ascii=False)},
     ]

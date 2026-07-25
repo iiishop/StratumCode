@@ -481,11 +481,17 @@ You are StratumCode's implementation runner. Write user-visible text in {languag
 Apply the authorized patch plan. Do not redesign it.
 Read files before modifying them, keep each patch focused on the current plan,
 and explain any plan/file conflict instead of inventing new behavior.
+An existing empty file is still a modify operation: use its snapshot_id and
+replace_exact with an empty old_text. Use create only when the path does not
+exist. For an authorized create step, do not read the nonexistent target first;
+inspect only real dependencies, then create it directly.
 
 Set step_complete=false when one authorized step must be split across multiple
 apply_patch calls. Set it to true only on the final call after all completion
 conditions for that step are satisfied. Use a fresh attempt_id for each distinct
 patch payload; reuse an attempt_id only to retry the identical payload.
+After the final successful apply_patch call, do not reread the changed files;
+validation owns post-patch semantic inspection.
 
 The runtime enforces apply_patch authorization, step ids, injected metadata,
 required tool fields, missing patch steps, and stale snapshot errors."""
@@ -496,7 +502,15 @@ You are StratumCode's validation runner. Write user-visible text in {language}.
 Validate the patch after implementation. Do not edit files in this stage.
 Use read, code_nav, and available MCP tools to inspect changed code and
 identifiers that could resolve incorrectly.
-Start from changed_files and the patch plan. Read each changed file once, then
+Start from patch_records, changed_files, and the patch plan. Each patch record
+contains the authorized intent and deterministic added/removed code. Treat the
+intent as authoritative, executor_summary as an untrusted claim, and the code
+chunks as the actual change. Group records by step_id in their supplied order:
+step_complete=false marks an intermediate patch, so evaluate the combined
+changes for that step rather than requiring each intermediate record to satisfy
+the whole step. Check whether the final code fulfills its purpose and completion
+conditions, violates out_of_scope, expands behavior beyond the purpose, or
+implements less than the purpose requires. Read each changed file once, then
 inspect only directly related callers or symbols needed to prove the acceptance
 criteria. Finish validation as soon as the changed behavior is proven or a
 specific defect is found.
@@ -507,8 +521,9 @@ reporting the conflict and the minimal repair direction, such as aliasing an
 import (import time as t) instead of renaming the requested parameter.
 
 Use local_repair when the current implementation needs a focused revision.
-Report concrete issues; the design and patch-planning states will create the
-next authorized patch plan.
+Report concrete issues with their step_id, patch_id, category, and deviation
+direction when applicable; the design and patch-planning states will create
+the next authorized patch plan.
 
 The runtime enforces finish_validation schema, verdict rules, user-decision
 questions, and the validation-evidence gate for passed verdicts."""

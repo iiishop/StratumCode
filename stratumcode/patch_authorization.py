@@ -171,6 +171,16 @@ def step_states(auth_id: str) -> dict:
     return _loads(row.get("step_states_json"), {}) if row else {}
 
 
+def step_contract(auth_id: str, step_id: str) -> dict:
+    """Return the immutable contract saved for an authorized step."""
+    row = _get(auth_id)
+    if not row:
+        return {}
+    steps = _loads(row.get("allowed_steps_json"), {})
+    step = steps.get(str(step_id))
+    return dict(step) if isinstance(step, dict) else {}
+
+
 def hash_plan(plan: dict) -> str:
     payload = json.dumps(plan, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return "sha256:" + hashlib.sha256(payload.encode("utf-8")).hexdigest()

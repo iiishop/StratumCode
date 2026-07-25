@@ -12,6 +12,7 @@ def handle(run):
         changed_files = [str(path) for path in run.changed_files]
     else:
         changed_files = []
+    patch_records = (run.implementation_result or {}).get("patch_records") or []
     run.validation_result = None
     for event in implementation_runner.validation_stream(
         message=run_request(run),
@@ -19,6 +20,7 @@ def handle(run):
         patch_plan=run.patch_plan or {},
         workspace_dir=run.workspace_dir,
         changed_files=changed_files,
+        patch_records=patch_records,
     ):
         if event.get("op") == "start" and event.get("event") == "user_question":
             data = event.get("data") or {}
