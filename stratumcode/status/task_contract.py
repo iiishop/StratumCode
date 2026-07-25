@@ -14,7 +14,9 @@ TASK_UNKNOWN_TYPE_ALIASES = {
     "codebase_fact": "code_fact",
     "user_decision": "product_decision",
 }
-TASK_UNKNOWN_STRATEGIES = {"investigate_project", "ask_user", "deferred"}
+TASK_UNKNOWN_STRATEGIES = {"investigate_project", "clearify", "deferred"}
+LEGACY_ASK_USER_STRATEGY = "ask_user"
+LEGACY_NEEDS_USER_STATUS = "needs_user"
 
 
 def request_from_analysis(analysis: dict | None, fallback: str = "") -> str:
@@ -193,9 +195,11 @@ def _unknowns(value, criteria=None) -> list[dict]:
             question = str(raw.get("question") or raw.get("text") or raw.get("description") or "").strip()
             item_id = str(raw.get("id") or f"U{index}").strip()
             strategy = str(raw.get("resolution_strategy") or "investigate_project").strip().casefold()
+            if strategy == LEGACY_ASK_USER_STRATEGY:
+                strategy = "clearify"
             unknown_type = str(raw.get("type") or "").strip().casefold()
             if not unknown_type:
-                unknown_type = "product_decision" if strategy == "ask_user" else "code_fact"
+                unknown_type = "product_decision" if strategy == "clearify" else "code_fact"
             accepted_ids = raw.get("acceptance_criteria_ids")
             if not isinstance(accepted_ids, list):
                 accepted_ids = []
@@ -247,7 +251,7 @@ def _normalize_unknown_policy(unknown_type: str, strategy: str, blocking: bool) 
     """
     if strategy == "deferred" or not blocking:
         return unknown_type, "deferred", False
-    if strategy == "ask_user":
+    if strategy == "clearify":
         if unknown_type != "product_decision":
             return unknown_type, "investigate_project", True
         return unknown_type, strategy, True

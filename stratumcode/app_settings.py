@@ -47,6 +47,7 @@ ROUND_LIMITS = {
     "validation_rounds": {
         "label": "Validation rounds",
         "description": "Model/tool rounds used by semantic validation.",
+        "default": 3,
     },
     "validation_mcp_rounds": {
         "label": "Validation MCP rounds",
@@ -228,10 +229,11 @@ def save_font_scale(value) -> float:
 def get_round_limit(key: str) -> int:
     if key not in ROUND_LIMITS:
         raise ValueError(f"unknown round limit setting: {key}")
+    default = str(ROUND_LIMITS[key].get("default", 0))
     try:
-        return max(0, int(_get(key, "0")))
+        return max(0, int(_get(key, default)))
     except (TypeError, ValueError):
-        return 0
+        return int(default)
 
 
 def save_round_limit(key: str, value) -> int:

@@ -8,7 +8,7 @@ const rootRef = ref(null)
 const stepLabel = computed(() => ({
   write_code: 'Ready for design',
   continue_investigation: 'More investigation needed',
-  ask_user: 'Needs your input',
+  clearify: 'Needs your input',
   done: 'Investigation complete',
   failed: 'Investigation stalled',
 })[props.event.next_step] || props.event.next_step)
@@ -16,7 +16,7 @@ const stepLabel = computed(() => ({
 const stepColor = computed(() => ({
   write_code: 'var(--ok, #11866f)',
   continue_investigation: 'var(--warn, #c48b00)',
-  ask_user: 'var(--accent, #1756d1)',
+  clearify: 'var(--accent, #1756d1)',
   done: 'var(--ok, #11866f)',
   failed: 'var(--err, #c44747)',
 })[props.event.next_step] || 'var(--text-muted)')
@@ -82,7 +82,7 @@ onMounted(() => {
         <template v-else-if="event.next_step === 'continue_investigation'">
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
         </template>
-        <template v-else-if="event.next_step === 'ask_user'">
+        <template v-else-if="event.next_step === 'clearify'">
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 22c5.523 0 10-4.477 10-10S17.523 2 12 2 2 6.477 2 12s4.477 10 10 10z"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
         </template>
         <template v-else>
@@ -130,7 +130,7 @@ onMounted(() => {
       <h4>Blockers</h4>
       <div class="sr__blockers">
         <div v-for="u in unknowns.slice(0, 4)" :key="u.id" class="sr__blocker">
-          <span>{{ u.resolution_strategy === 'ask_user' ? '?' : '→' }}</span>
+          <span>{{ u.resolution_strategy === 'clearify' ? '?' : '→' }}</span>
           {{ u.question }}
         </div>
       </div>

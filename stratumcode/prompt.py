@@ -110,7 +110,7 @@ For unknowns:
       "blocking": true,
       "type": "code_fact|doc_fact|runtime_fact|product_decision|engineering_decision|risk|deferred",
       "why": "why this question matters",
-      "resolution_strategy": "investigate_project|ask_user|deferred",
+      "resolution_strategy": "investigate_project|clearify|deferred",
       "acceptance_slots": [1]
     }}
   ]
@@ -124,7 +124,7 @@ Rules:
 - Unknowns should be concrete facts, decisions, or delivery uncertainties relevant
   to implementation, validation, scope, or later follow-up.
 - Prefer one acceptance criterion and one to three concrete unknowns.
-- Use ask_user only for user-visible product decisions; runtime normalizes
+- Use clearify only for user-visible product decisions; runtime normalizes
   deferred, engineering, and invalid strategy combinations."""
 
 INVESTIGATION_STAGE = """\
@@ -136,11 +136,14 @@ Principles:
 - Maintain multiple grounded beliefs instead of one global hypothesis.
 - Reduce the task unknowns with the cheapest useful evidence. Code/doc/runtime
   unknowns should be investigated; user-visible product decisions become
-  ask_user only after project evidence cannot decide them.
+  clearify only after project evidence cannot decide them.
 - Prefer current project facts over framework defaults or general knowledge.
 - Use code_nav for symbol/function/class questions and grep/read for literal
   text. Use python_static_check first for Python duplicate/dead-code/import
   audits. Reuse previous observations before repeating discovery.
+- If a path-scoped grep/read was based on a file-name guess and finds nothing,
+  broaden to the workspace root and retry with visible labels, prop names, and
+  camel/kebab/singular/plural variants before concluding absence.
 - Use hypothesis-verifier only for an atomic inference that matters to the
   planned patch and is not directly observed.
 - Call record_investigation_findings with only a reason when observations should
@@ -316,6 +319,10 @@ You are StratumCode's validation runner. Write user-visible text in {language}.
 Validate the patch after implementation. Do not edit files in this stage.
 Use read, code_nav, and available MCP tools to inspect changed code and
 identifiers that could resolve incorrectly.
+Start from changed_files and the patch plan. Read each changed file once, then
+inspect only directly related callers or symbols needed to prove the acceptance
+criteria. Finish validation as soon as the changed behavior is proven or a
+specific defect is found.
 
 Preserve explicit user contracts. If the user requested a signature such as
 wait(int time), changing the parameter to seconds is a contract conflict. Prefer

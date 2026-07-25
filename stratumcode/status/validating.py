@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from .. import implementation_runner
-from ..agent_runtime import start_event
+from .clearifying import queue_clearify
 from .task_contract import run_request
 
 
@@ -21,12 +21,14 @@ def handle(run):
         changed_files=changed_files,
     ):
         if event.get("op") == "start" and event.get("event") == "user_question":
-            question = (event.get("data") or {}).get("question") or "Validation requested a legacy checkpoint."
-            yield start_event(f"{event.get('id', 'validation-question')}-unsupported", "output", {
-                "content": f"Legacy checkpoint is disabled: {question}",
-                "streaming": False,
-            })
-            run.transition(chat.ChatState.FAILED, "Validation emitted a legacy user question.")
+            data = event.get("data") or {}
+            queue_clearify(
+                run,
+                data.get("question") or "Which validated behavior should be accepted?",
+                reason=data.get("reason") or "Validation requires a product decision.",
+                unknown_id=str(data.get("unknown_id") or ""),
+            )
+            run.transition(chat.ChatState.INVESTIGATING, "Validation queued a clearify decision.")
             return
         if event.get("op") == "done" and isinstance(event.get("validation_result"), dict):
             run.validation_result = event["validation_result"]
@@ -34,11 +36,14 @@ def handle(run):
     if run.state == chat.ChatState.VALIDATING:
         next_state = _state_after_validation(run)
         if next_state == "clearify":
-            yield start_event(f"{run.analysis['id']}-validation-question-unsupported", "output", {
-                "content": "Validation requested a user decision but legacy checkpoint is disabled.",
-                "streaming": False,
-            })
-            run.transition(chat.ChatState.FAILED, "Validation requested legacy checkpoint.")
+            _add_validation_context(run)
+            result = run.validation_result or {}
+            queue_clearify(
+                run,
+                result.get("question") or result.get("summary") or "Which validated behavior should be accepted?",
+                reason=result.get("summary") or "Validation requires a product decision.",
+            )
+            run.transition(chat.ChatState.INVESTIGATING, "Validation queued a clearify decision.")
         elif next_state in {chat.ChatState.DESIGNING, chat.ChatState.INVESTIGATING}:
             _add_validation_context(run)
             run.transition(next_state, "Validation completed.")
@@ -56,7 +61,7 @@ def _state_after_validation(run):
         return chat.ChatState.DESIGNING
     if verdict == "missing_evidence":
         return chat.ChatState.INVESTIGATING
-    if verdict == "user_decision":
+    if verdict == "clearify":
         return "clearify"
     return chat.ChatState.FAILED
 

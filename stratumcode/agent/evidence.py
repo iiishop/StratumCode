@@ -168,8 +168,8 @@ class EvidenceRun:
         resolved_by_evidence_ids: list[str] | None = None,
         resolved_by_belief_ids: list[str] | None = None,
     ) -> Unknown:
-        if resolution_strategy not in {"investigate_project", "ask_user", "deferred"}:
-            raise ValueError("resolution_strategy must be investigate_project, ask_user, or deferred")
+        if resolution_strategy not in {"investigate_project", "clearify", "deferred"}:
+            raise ValueError("resolution_strategy must be investigate_project, clearify, or deferred")
         item = Unknown(
             id=unknown_id,
             question=question.strip(),
@@ -223,13 +223,13 @@ class EvidenceRun:
         continue_reason: str,
         target_unknown_ids: list[str] | None = None,
     ) -> StepResult:
-        if next_step not in {"continue_investigation", "ask_user", "write_code", "done", "failed"}:
-            raise ValueError("next_step must be continue_investigation, ask_user, write_code, done, or failed")
+        if next_step not in {"continue_investigation", "clearify", "write_code", "done", "failed"}:
+            raise ValueError("next_step must be continue_investigation, clearify, write_code, done, or failed")
         targets = list(target_unknown_ids or [])
-        if next_step == "continue_investigation" and not targets:
-            raise ValueError("continue_investigation requires target_unknown_ids")
-        if next_step != "continue_investigation" and targets:
-            raise ValueError("target_unknown_ids are only allowed when continuing investigation")
+        if next_step in {"continue_investigation", "clearify"} and not targets:
+            raise ValueError(f"{next_step} requires target_unknown_ids")
+        if next_step not in {"continue_investigation", "clearify"} and targets:
+            raise ValueError("target_unknown_ids are only allowed when continuing investigation or clarifying")
         blockers = [
             item.id for item in self.unknowns.values()
             if item.blocking

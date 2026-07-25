@@ -22,6 +22,7 @@ from .tools import registry
 
 IMPLEMENTATION_TOOLS = ("read", "apply_patch")
 VALIDATION_TOOLS = ("read", "code_nav")
+LEGACY_USER_DECISION_VERDICT = "user_decision"
 
 
 def implementation_stream(
@@ -392,7 +393,7 @@ def _validation_tools() -> list[dict]:
         "properties": {
             "verdict": {
                 "type": "string",
-                "enum": ["passed", "local_repair", "redesign", "missing_evidence", "user_decision", "inconclusive", "failed"],
+                "enum": ["passed", "local_repair", "redesign", "missing_evidence", "clearify", "inconclusive", "failed"],
             },
             "summary": {"type": "string"},
             "issues": {
@@ -789,19 +790,21 @@ def _finish_validation_arguments(arguments: dict, changed_files: list[str]) -> d
     options = arguments.get("options") if isinstance(arguments.get("options"), list) else []
     if verdict == "passed" and issues:
         raise ValueError("passed verdict cannot include issues")
-    if verdict == "user_decision" and not question:
-        raise ValueError("user_decision verdict requires question")
+    if verdict == "clearify" and not question:
+        raise ValueError("clearify verdict requires question")
     return _validation_result(verdict, summary, changed_files, {}, issues, question, options)
 
 
 def _normalized_validation_verdict(value: str) -> str:
     value = value.strip().casefold()
+    if value == LEGACY_USER_DECISION_VERDICT:
+        return "clearify"
     return value if value in {
         "passed",
         "local_repair",
         "redesign",
         "missing_evidence",
-        "user_decision",
+        "clearify",
         "inconclusive",
         "failed",
     } else "inconclusive"
@@ -809,6 +812,6 @@ def _normalized_validation_verdict(value: str) -> str:
 
 def _checkpoint_output(reason: str) -> dict:
     return {
-        "content": f"{reason}\n\nlegacy checkpoint is disabled; rerun with clearer instructions if needed.",
+        "content": f"{reason}\n\nThe run stopped safely before applying further changes.",
         "streaming": False,
     }

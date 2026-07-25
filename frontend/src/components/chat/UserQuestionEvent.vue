@@ -183,7 +183,7 @@ const hasContext = computed(() =>
   <div ref="rootRef" class="uq-root">
     <EventFrame
       kind="user-question"
-      state="ask_user"
+      state="clearify"
       symbol="?"
       :label="submitted && selectedLabel ? 'Answered' : 'Needs your input'"
       :detail="submitted && selectedLabel ? selectedLabel : event.question"

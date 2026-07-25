@@ -27,7 +27,7 @@ PARAMETERS = {
                     "blocking": {"type": "boolean"},
                     "resolution_strategy": {
                         "type": "string",
-                        "enum": ["investigate_project", "ask_user", "deferred"],
+                        "enum": ["investigate_project", "clearify", "deferred"],
                     },
                     "resolved_by_evidence_ids": {
                         "type": "array",

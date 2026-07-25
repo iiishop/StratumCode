@@ -2,6 +2,9 @@ from __future__ import annotations
 
 from .task_contract import _ensure_task_contract
 
+INVESTIGATION_FALLBACK_REASON = "Investigation completed without a more specific task update."
+
+
 def _seed_task_updates(analysis: dict, existing: list[dict] | None = None) -> list[dict]:
     analysis = _ensure_task_contract(analysis)
     task_id = analysis["id"]
@@ -66,7 +69,7 @@ def _task_item(item_id: str, kind: str, text: str, status: str, *, parent_id: st
 
 def _unknown_task_status(item: dict) -> str:
     strategy = item.get("resolution_strategy")
-    if strategy == "ask_user":
+    if strategy == "clearify":
         return "blocked"
     if strategy == "deferred" or not item.get("blocking"):
         return "deferred"
@@ -103,19 +106,14 @@ def _normalize_task_updates(analysis_id: str, updates: list[dict], existing: lis
             item["id"] = matched.get("id") or item["id"]
             if _status_rank(item.get("status")) < _status_rank(matched.get("status")):
                 item["status"] = matched.get("status")
-            item["answers"] = _merge_answers(matched.get("answers"), item.get("answers"))
+            item = _merge_task_payload(matched, item, analysis_id)
         index = next((i for i, row in enumerate(result) if _same_task(row, item, analysis_id)), None)
         if index is None:
             result.append(item)
         elif result[index].get("kind") != "goal":
             if _status_rank(item.get("status")) < _status_rank(result[index].get("status")):
                 item["status"] = result[index].get("status")
-            result[index] = {
-                **result[index],
-                **item,
-                "id": result[index].get("id") or item["id"],
-                "answers": _merge_answers(result[index].get("answers"), item.get("answers")),
-            }
+            result[index] = _merge_task_payload(result[index], item, analysis_id)
     return result
 
 
@@ -147,48 +145,91 @@ def _merge_task_items(old: list[dict], new: list[dict], analysis_id: str = "") -
             continue
         if _status_rank(item.get("status")) < _status_rank(merged[index].get("status")):
             item["status"] = merged[index].get("status")
-        merged[index] = {
-            **merged[index],
-            **item,
-            "id": merged[index].get("id") or item.get("id"),
-            "answers": _merge_answers(merged[index].get("answers"), item.get("answers")),
-        }
+        merged[index] = _merge_task_payload(merged[index], item, analysis_id)
     return merged
 
 
 def _finalize_task_statuses(items: list[dict], investigation: dict) -> list[dict]:
     next_step = ((investigation.get("step_result") or {}).get("next_step") or "").strip()
-    if next_step == "ask_user" or (next_step != "done" and not investigation.get("ready_for_patch_planning")):
+    if next_step != "done" and not investigation.get("ready_for_patch_planning"):
         return items
-    resolved_ids = _resolved_unknown_ids(investigation)
+    resolved_unknowns = _resolved_unknowns(investigation)
     done_status = "known"
     final = []
     for item in items:
         status = item.get("status") or "unknown"
-        resolved = _task_id_tail(item.get("id")) in resolved_ids
+        resolution = resolved_unknowns.get(_task_id_tail(item.get("id")))
+        resolved = bool(resolution)
         clear_unknown = status == "unknown" and resolved
         clear_blocked = status == "blocked" and resolved
+        clear_deferred = status == "deferred" and resolved
+        enrich_known = (
+            item.get("kind") == "unknown"
+            and status == "known"
+            and resolved
+            and (not item.get("answers") or item.get("reason") == INVESTIGATION_FALLBACK_REASON)
+        )
         if (
-            item.get("kind") in {"unknown", "hypothesis", "clue", "work"}
-            and (status in {"pending", "added", "updated", "active"} or clear_unknown or clear_blocked)
+            item.get("kind") in {"unknown", "clue", "work"}
+            and (status in {"pending", "added", "updated", "active"} or clear_unknown or clear_blocked or clear_deferred or enrich_known)
         ):
-            item = {
-                **item,
-                "status": done_status,
-                "reason": item.get("reason") or "Investigation completed without a more specific task update.",
-            }
+            resolution_update = _resolution_task_update(item, resolution) if item.get("kind") == "unknown" else None
+            if resolution_update:
+                item = _merge_task_payload(item, resolution_update)
+            else:
+                item = {
+                    **item,
+                    "status": done_status,
+                    "reason": item.get("reason") or INVESTIGATION_FALLBACK_REASON,
+                }
         final.append(item)
     return final
 
 
 def _resolved_unknown_ids(investigation: dict) -> set[str]:
+    return set(_resolved_unknowns(investigation))
+
+
+def _resolved_unknowns(investigation: dict) -> dict[str, dict]:
+    resolved = {}
+    for item in investigation.get("resolutions", []):
+        if not isinstance(item, dict) or str(item.get("status") or "") != "resolved":
+            continue
+        unknown_id = str(item.get("unknown_id") or "").strip()
+        if unknown_id:
+            resolved[unknown_id] = item
+    return resolved
+
+
+def _resolution_task_update(item: dict, resolution: dict | None) -> dict | None:
+    if not resolution:
+        return None
+    trace = _resolution_trace(resolution)
+    answer = str(resolution.get("answer") or "").strip()
+    reason = str(resolution.get("reason") or "").strip()
+    if not (answer or reason or trace):
+        return None
     return {
-        str(item.get("unknown_id") or "").strip()
-        for item in investigation.get("resolutions", [])
-        if isinstance(item, dict)
-        and str(item.get("status") or "") == "resolved"
-        and str(item.get("unknown_id") or "").strip()
+        "id": item.get("id", ""),
+        "target_id": item.get("id", ""),
+        "kind": "unknown",
+        "text": answer or item.get("text", ""),
+        "status": "known",
+        "reason": reason if item.get("reason") == INVESTIGATION_FALLBACK_REASON else item.get("reason") or reason,
+        "trace": trace,
+        "answers": [{
+            "source": "investigation",
+            "text": answer,
+            "reason": reason,
+            "trace": trace,
+        }] if answer else [],
     }
+
+
+def _resolution_trace(resolution: dict) -> list[str]:
+    evidence = resolution.get("evidence") if isinstance(resolution.get("evidence"), list) else []
+    belief_ids = resolution.get("belief_ids") if isinstance(resolution.get("belief_ids"), list) else []
+    return [str(item).strip() for item in (evidence or belief_ids) if str(item).strip()][:6]
 
 
 def _normalize_existing_task(analysis_id: str, item: dict) -> dict | None:
@@ -213,12 +254,6 @@ def _same_task(left: dict, right: dict, analysis_id: str = "") -> bool:
     if _same_task_id(left.get("id"), right.get("id"), analysis_id):
         return True
     if _same_task_id(left.get("id"), right.get("target_id"), analysis_id) or _same_task_id(right.get("id"), left.get("target_id"), analysis_id):
-        return True
-    left_trace = left.get("trace") if isinstance(left.get("trace"), list) else []
-    right_trace = right.get("trace") if isinstance(right.get("trace"), list) else []
-    left_ids = [left.get("id"), *left_trace]
-    right_ids = [right.get("id"), *right_trace]
-    if any(_same_task_id(left_id, right_id, analysis_id) for left_id in left_ids for right_id in right_ids):
         return True
     return False
 
@@ -339,12 +374,56 @@ def _merge_items_by_id(old: list[dict], new: list[dict]) -> list[dict]:
         item = dict(item)
         item_id = item.get("id")
         if item_id and item_id in by_id:
-            merged[by_id[item_id]] = {**merged[by_id[item_id]], **item}
+            merged[by_id[item_id]] = _merge_task_payload(merged[by_id[item_id]], item)
         else:
             if item_id:
                 by_id[item_id] = len(merged)
             merged.append(item)
     return merged
+
+
+def _merge_task_payload(existing: dict, incoming: dict, analysis_id: str = "") -> dict:
+    merged = {
+        **existing,
+        **incoming,
+        "id": existing.get("id") or incoming.get("id"),
+        "answers": _merge_answers(existing.get("answers"), incoming.get("answers")),
+    }
+    if existing.get("kind") == "unknown" and incoming.get("kind") == "unknown":
+        question = str(existing.get("text") or "").strip()
+        replacement = str(incoming.get("text") or "").strip()
+        if question and replacement and replacement != question:
+            merged["text"] = question
+            if _looks_like_question(replacement) and not _answers(incoming.get("answers")):
+                merged["status"] = existing.get("status") or merged.get("status")
+                merged["reason"] = existing.get("reason") or ""
+            merged["answers"] = _merge_answers(
+                merged.get("answers"),
+                _replacement_answer(incoming, replacement, analysis_id),
+            )
+        elif question:
+            merged["text"] = question
+    return merged
+
+
+def _replacement_answer(item: dict, text: str, analysis_id: str = "") -> list[dict]:
+    if (
+        not text
+        or _looks_like_question(text)
+        or _same_task_id(text, item.get("id"), analysis_id)
+        or _same_task_id(text, item.get("target_id"), analysis_id)
+    ):
+        return []
+    return [{
+        "source": str(item.get("answer_source") or "investigation").strip(),
+        "text": text,
+        "reason": str(item.get("reason") or "").strip(),
+        "trace": [str(entry) for entry in item.get("trace", [])] if isinstance(item.get("trace"), list) else [],
+    }]
+
+
+def _looks_like_question(text: str) -> bool:
+    return "?" in text or "？" in text
 
 
 def _merge_findings(old: list[str], new: list[str]) -> list[str]:

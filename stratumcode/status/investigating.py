@@ -5,6 +5,7 @@ from uuid import uuid4
 from .. import investigator
 from ..agent_runtime import start_event
 from ..status.task_analysis import IMPLEMENTATION_INTENT_TYPES, _message_requests_implementation
+from .clearifying import queue_clearify
 from .task_contract import _ensure_task_contract, run_request
 from .task_updates import (
     _apply_task_updates,
@@ -100,10 +101,14 @@ def handle(run):
         run.investigation_knowledge,
     )
     request = run_request(run)
+    investigation_analysis = run.analysis
+    unresolved = (run.last_investigation or {}).get("unknowns")
+    if isinstance(unresolved, list) and unresolved:
+        investigation_analysis = {**run.analysis, "unknowns": unresolved}
     for event in investigator.investigation_stream(
         message=request,
-        analysis=run.analysis,
-        context=run.context + session_lines + _analysis_context(run.analysis) + run.continuation_context,
+        analysis=investigation_analysis,
+        context=run.context + session_lines + _analysis_context(investigation_analysis) + run.continuation_context,
         workspace_dir=run.workspace_dir,
         max_rounds=run.max_rounds,
         findings=run.findings,
@@ -158,30 +163,36 @@ def handle(run):
             if pending_question:
                 run.last_investigation = last_investigation
                 yield event
-                yield _unsupported_user_question(pending_question)
-                run.transition(chat.ChatState.FAILED, "Investigation emitted a legacy user question.")
+                data = pending_question.get("data") or {}
+                queue_clearify(
+                    run,
+                    data.get("question") or "Which behavior should be used?",
+                    reason=data.get("reason") or "Investigation requires a product decision.",
+                    unknown_id=str(data.get("unknown_id") or ""),
+                )
+                run.transition(chat.ChatState.INVESTIGATING, "Investigation queued a clearify decision.")
                 pending_question = None
                 return
         yield event
     run.last_investigation = last_investigation
     if pending_question:
-        yield _unsupported_user_question(pending_question)
-        run.transition(chat.ChatState.FAILED, "Investigation emitted a legacy user question.")
+        data = pending_question.get("data") or {}
+        queue_clearify(
+            run,
+            data.get("question") or "Which behavior should be used?",
+            reason=data.get("reason") or "Investigation requires a product decision.",
+            unknown_id=str(data.get("unknown_id") or ""),
+        )
+        run.transition(chat.ChatState.INVESTIGATING, "Investigation queued a clearify decision.")
         return
     next_step = ((run.last_investigation or {}).get("step_result") or {}).get("next_step")
     has_blocked_task = _has_task_status(run.last_investigation, "blocked")
     has_unknown_task = _has_task_status(run.last_investigation, "unknown")
     if next_step == "done":
         run.transition(chat._chat_finish_state(run), "Investigation ended without an implementation path.")
-    elif next_step == "ask_user" or has_blocked_task:
-        yield start_event(f"{run.analysis['id']}-unsupported-question", "output", {
-            "content": "Investigation requested legacy checkpoint. Use the clearify tool instead.",
-            "streaming": False,
-        })
-        run.transition(chat.ChatState.FAILED, "Legacy checkpoint is disabled.")
     elif run.last_investigation and _investigation_allows_patch(run.last_investigation) and _wants_implementation(run.analysis, request):
         run.transition(chat.ChatState.DESIGNING, "Investigation is ready for implementation planning.")
-    elif next_step == "continue_investigation" or has_unknown_task:
+    elif next_step == "continue_investigation" or has_unknown_task or has_blocked_task:
         run.findings = _merge_findings(run.findings, _investigation_continuation_findings(run.last_investigation))
         run.transition(chat.ChatState.INVESTIGATING, "Investigation requested another pass.")
     elif next_step == "failed":
@@ -200,11 +211,7 @@ def _wants_implementation(analysis: dict, message: str = "") -> bool:
 def _investigation_allows_patch(investigation: dict) -> bool:
     if _has_task_status(investigation, "blocked"):
         return False
-    if _has_task_status(investigation, "unknown") and not (
-        investigation.get("runtime_recovered") and (
-            investigation.get("patch_planning_facts") or investigation.get("patch_planning_context")
-        )
-    ):
+    if _has_task_status(investigation, "unknown"):
         return False
     step = investigation.get("step_result") if isinstance(investigation.get("step_result"), dict) else {}
     return bool(investigation.get("ready_for_patch_planning") or step.get("next_step") == "write_code")
@@ -225,15 +232,6 @@ def _has_task_status(investigation: dict | None, status: str) -> bool:
         if item.get("status") == status:
             return True
     return False
-
-
-def _unsupported_user_question(event: dict) -> dict:
-    data = event.get("data") if isinstance(event.get("data"), dict) else {}
-    question = str(data.get("question") or "A legacy user question was requested.").strip()
-    return start_event(f"{event.get('id', 'legacy-question')}-unsupported", "output", {
-        "content": f"Legacy checkpoint is disabled: {question}",
-        "streaming": False,
-    })
 
 
 def _fallback_question(run, request: str) -> dict:

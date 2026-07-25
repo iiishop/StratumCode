@@ -63,26 +63,41 @@ def patch_planning_stream(
         if isinstance(item, dict)
     ]
     for index, decision in enumerate(decisions, start=1):
-        slot = yield from _content_json_stream(
-            provider,
-            model,
-            [
-                system,
-                {"role": "user", "content": prompt.build_patch_step_slot_user(
-                    message,
-                    analysis,
-                    investigation,
-                    design_plan,
-                    workspace_dir,
-                    slot_index=index,
-                    decision=decision,
+        messages = [
+            system,
+            {"role": "user", "content": prompt.build_patch_step_slot_user(
+                message,
+                analysis,
+                investigation,
+                design_plan,
+                workspace_dir,
+                slot_index=index,
+                decision=decision,
+            )},
+        ]
+        slot = None
+        attempts = app_settings.get_round_limit("patch_json_attempts") or DEFAULT_PATCH_JSON_ATTEMPTS
+        for semantic_attempt in _attempt_indexes(attempts):
+            slot = yield from _content_json_stream(
+                provider,
+                model,
+                messages,
+                pricing_rules,
+                usage_total,
+                run_id,
+                f"decision-{index}-{semantic_attempt}",
+            )
+            if not slot or slot.get("needed") is False or _has_usable_steps(slot.get("step_content")):
+                break
+            messages.extend([
+                {"role": "assistant", "content": json.dumps(slot, ensure_ascii=False)[:4000]},
+                {"role": "user", "content": (
+                    "The previous slot content was semantically unusable: needed=true "
+                    "requires at least one step_content item with a workspace-relative file. "
+                    "Return the corrected slot JSON only. If this design decision genuinely "
+                    "needs no code change, set needed=false and include skip_reason."
                 )},
-            ],
-            pricing_rules,
-            usage_total,
-            run_id,
-            f"decision-{index}",
-        )
+            ])
         if not slot:
             continue
         tests_or_checks.extend(_strings(slot.get("tests_or_checks")))
@@ -509,6 +524,10 @@ def _runtime_steps(value, analysis: dict, design_plan: dict, facts: list[dict]) 
             "minimality_check": str(item.get("minimality_check") or "").strip(),
         })
     return steps
+
+
+def _has_usable_steps(value) -> bool:
+    return isinstance(value, list) and any(isinstance(item, dict) and str(item.get("file") or "").strip() for item in value)
 
 
 def _slot_ids(value, ids: list[str]) -> list[str]:
