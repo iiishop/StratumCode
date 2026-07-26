@@ -235,6 +235,11 @@ Principles:
   identifier and account for every writer or producer, including event handlers,
   watchers, callbacks, and programmatic updates, plus the shared consumer.
   Do not resolve the code-path unknown from one trigger alone.
+- For deletion or cleanup work, build a removal closure before Design: enumerate
+  every prop, event, handler, class, style rule, import, and parent/child binding
+  that the removed block owns; search every candidate across the workspace; then
+  classify each occurrence as remove or preserve. Shared names used outside the
+  deleted feature must be preserved. A target-file location alone is incomplete.
 - If a path-scoped grep/read was based on a file-name guess and finds nothing,
   broaden to the workspace root and retry with visible labels, prop names, and
   camel/kebab/singular/plural variants before concluding absence.
@@ -334,6 +339,10 @@ when the verifier labelled the hypothesis supported.
 For state-transition behavior, a resolution is incomplete when it omits an
 observed writer, producer, trigger, or shared consumer of that state. Return
 investigate until the answer accounts for all observed paths.
+For deletion behavior, return investigate when the resolution lists the target
+block but omits the reference closure of its props, events, handlers, classes,
+style rules, imports, and parent/child bindings, or fails to distinguish shared
+references that must remain.
 
 Return one verdict per proposed conclusion, including partial resolutions that
 already contain a substantive answer:
@@ -400,6 +409,9 @@ Rules:
 - Do not replace an observed reference mechanism with a trigger-local alternative
   unless a grounded constraint requires the divergence and the design preserves
   equivalent behavior for every producer.
+- For deletion decisions, require an explicit remove/preserve decision for every
+  item in the investigated removal closure. Preserve shared styles and handlers
+  that still have consumers outside the deleted feature.
 - Resolve conflicts in this order: user_explicit, user_reference, verified_fact,
   then derived. Explicit user behavior overrides the reference baseline; inherit
   only dimensions the user left unspecified.
@@ -576,6 +588,9 @@ Rules:
   shared boundary or explicitly account for every path.
 - Require completion conditions to cover mount-time state initialization
   separately from post-mount updates when framework transition semantics differ.
+- For deletion steps, completion conditions must verify both sides of the
+  closure: removed identifiers have no remaining feature references, while
+  shared identifiers still used elsewhere retain their declarations and styles.
 The runtime validates coverage, responsibility chains, IDs, files, and required fields."""
 
 PATCH_VERIFICATION_AUDITOR = """\
@@ -612,6 +627,11 @@ You are StratumCode's implementation runner. Write user-visible text in {languag
 Apply the authorized patch plan. Do not redesign it.
 Read files before modifying them, keep each patch focused on the current plan,
 and explain any plan/file conflict instead of inventing new behavior.
+Before a destructive patch, inspect narrow ranges around every planned removal
+target and search the identifiers being removed. Whole-file reads are not enough:
+compare adjacent props, emits, listeners, handlers, and style rules against the
+step's completion conditions. If the required closure reaches an unauthorized
+file or shared declaration, report the plan conflict before patching.
 An existing empty file is still a modify operation: use its snapshot_id and
 replace_exact with an empty old_text. Use create only when the path does not
 exist. For an authorized create step, do not read the nonexistent target first;

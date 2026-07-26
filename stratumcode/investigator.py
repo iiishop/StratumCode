@@ -34,6 +34,7 @@ from .tools import registry
 INVESTIGATION_CAPABILITY = "investigation"
 PROJECT_EVIDENCE_CAPABILITY = "investigation.project_evidence"
 MAX_REPEATED_TOOL_ERRORS = 3
+MAX_REPEATED_RECORD_NO_PROGRESS = 3
 DISCOVERY_BATCH_OBSERVATIONS = 3
 REQUIRED_FINDING_SLOT_ATTEMPTS = 2
 REQUIRED_AUDIT_ATTEMPTS = 2
@@ -133,6 +134,8 @@ def investigation_stream(
     clearify_questions: dict[str, str] = {}
     semantic_repair_required_ids = _semantic_repair_resolution_ids(recorded_findings)
     last_quality_audit: dict = {}
+    last_record_signature = _recorded_findings_signature(recorded_findings)
+    repeated_record_no_progress = 0
 
     for round_index in _round_indexes(max_rounds, start=0):
         thinking_id = f"{run_id}-thinking-{round_index}"
@@ -452,10 +455,23 @@ def investigation_stream(
                             if (item.get("unknown_id"), item.get("hypothesis")) not in known_requests
                         )
                         clearify_questions.update(questions)
+                    record_signature = _recorded_findings_signature(recorded_findings)
+                    if record_signature == last_record_signature:
+                        repeated_record_no_progress += 1
+                    else:
+                        repeated_record_no_progress = 0
+                    last_record_signature = record_signature
+                    if repeated_record_no_progress >= MAX_REPEATED_RECORD_NO_PROGRESS:
+                        finalization_reason = (
+                            "Runtime stopped after repeated record_investigation_findings "
+                            "calls produced no semantic progress."
+                        )
+                        stop_investigation = True
                     task_updates = _record_task_updates(recorded_findings)
                     output = json.dumps({
                         "recorded": True,
                         "counts": {field: len(recorded_findings.get(field, [])) for field in FINDING_FIELDS},
+                        **({"stalled": True} if stop_investigation else {}),
                     }, ensure_ascii=False)
                     yield start_event(call_id, "tool", {
                         "name": name,
@@ -475,6 +491,13 @@ def investigation_stream(
                         "tool_call_id": call_id,
                         "content": output,
                     })
+                    if stop_investigation:
+                        yield start_event(f"{run_id}-safety-record-no-progress", "safety_stop", {
+                            "reason": "record_no_progress",
+                            "message": finalization_reason,
+                            "tool": name,
+                        })
+                        break
                     continue
                 if name == "finish_investigation":
                     _require_control_reason(arguments, name)
@@ -3151,14 +3174,7 @@ def _missing_grounding_state_writes(
     observations: list[dict],
 ) -> list[str]:
     answer = str(resolution.get("answer") or "")
-    state_ids = [
-        literal
-        for literal in _grounding_code_literals(answer)
-        if re.fullmatch(
-            r"[a-z_$][A-Za-z0-9_$]*(?:\.[A-Za-z_$][A-Za-z0-9_$]*)+",
-            literal,
-        )
-    ]
+    state_ids = _assigned_state_ids(answer)
     if not state_ids:
         return []
     evidence_ids = set(_reference_list(resolution.get("evidence")))
@@ -3185,6 +3201,30 @@ def _missing_grounding_state_writes(
         for write in writes
         if re.sub(r"\s+", "", write) not in normalized_answer
     ])
+
+
+def _assigned_state_ids(value: str) -> list[str]:
+    return _dedupe_strings([
+        match.group(1)
+        for match in re.finditer(
+            r"(?<![@:A-Za-z0-9_$-])"
+            r"([a-z_$][A-Za-z0-9_$]*(?:\.[A-Za-z_$][A-Za-z0-9_$]*)+)"
+            r"\s*(?=\?\?=|&&=|\|\|=|\+=|-=|\*=|/=|%=|=(?!=)|\+\+|--)",
+            value,
+        )
+    ])
+
+
+def _recorded_findings_signature(recorded: dict) -> str:
+    return json.dumps(
+        {
+            field: recorded.get(field, [])
+            for field in FINDING_FIELDS
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
 
 
 def _final_observations(
