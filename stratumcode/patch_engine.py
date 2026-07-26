@@ -343,30 +343,58 @@ def _prepare_create(file_patch: dict, path: Path, root: Path) -> dict:
 
 def _compile_operations(text: str, operations: list[dict], encoding: str) -> list[CompiledEdit]:
     edits: list[CompiledEdit] = []
-    newline = "\r\n" if "\r\n" in text else "\n"
     for operation in operations:
         op = operation.get("op")
         expected = int(operation.get("expected_count") or 1)
         if expected != 1:
             raise PatchError("EXPECTED_COUNT_MISMATCH", "expected_count must be 1 in this version")
         if op == "replace_exact":
-            old = _normalize_operation_newlines(str(operation.get("old_text") or ""), newline)
-            new = _normalize_operation_newlines(str(operation.get("new_text") or ""), newline)
-            start, end = (0, 0) if old == "" and text == "" else _unique_span(text, old)
+            old = str(operation.get("old_text") or "")
+            start, end = (0, 0) if old == "" and text == "" else _newline_agnostic_span(text, old)
+            new = _normalize_operation_newlines(
+                str(operation.get("new_text") or ""), _local_newline(text, start, end)
+            )
             edits.append(_edit(text, start, end, new, encoding))
         elif op == "delete_exact":
-            old = _normalize_operation_newlines(str(operation.get("old_text") or ""), newline)
-            start, end = _unique_span(text, old)
+            old = str(operation.get("old_text") or "")
+            start, end = _newline_agnostic_span(text, old)
             edits.append(_edit(text, start, end, "", encoding))
         elif op in {"insert_before", "insert_after"}:
-            anchor = _normalize_operation_newlines(str(operation.get("anchor") or ""), newline)
-            start, end = _unique_span(text, anchor)
+            anchor = str(operation.get("anchor") or "")
+            start, end = _newline_agnostic_span(text, anchor)
             offset = start if op == "insert_before" else end
-            insert = _normalize_operation_newlines(str(operation.get("text") or ""), newline)
+            insert = _normalize_operation_newlines(
+                str(operation.get("text") or ""), _local_newline(text, start, end)
+            )
             edits.append(_edit(text, offset, offset, insert, encoding))
         else:
             raise PatchError("INVALID_OPERATION", f"unsupported operation: {op}")
     return _check_overlaps(edits)
+
+
+def _newline_agnostic_span(text: str, needle: str) -> tuple[int, int]:
+    normalized_text = _normalize_operation_newlines(text, "\n")
+    normalized_needle = _normalize_operation_newlines(needle, "\n")
+    start, end = _unique_span(normalized_text, normalized_needle)
+    return _source_index(text, start), _source_index(text, end)
+
+
+def _source_index(text: str, normalized_index: int) -> int:
+    source_index = 0
+    for _ in range(normalized_index):
+        source_index += 2 if text.startswith("\r\n", source_index) else 1
+    return source_index
+
+
+def _local_newline(text: str, start: int, end: int) -> str:
+    for segment in (text[start:end], text[end:]):
+        index = segment.find("\n")
+        if index >= 0:
+            return "\r\n" if index > 0 and segment[index - 1] == "\r" else "\n"
+    index = text.rfind("\n", 0, start)
+    if index >= 0:
+        return "\r\n" if index > 0 and text[index - 1] == "\r" else "\n"
+    return "\n"
 
 
 def _normalize_operation_newlines(value: str, newline: str) -> str:

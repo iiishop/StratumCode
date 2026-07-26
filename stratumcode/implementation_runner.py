@@ -72,6 +72,7 @@ def implementation_stream(
     tools = _implementation_tools()
     final_text = ""
     consecutive_error_rounds = 0
+    consecutive_patch_error_rounds = 0
     no_progress_rounds = 0
     inspected_ranges: set[tuple[str, str, str]] = set()
     applied_steps: set[str] = set()
@@ -120,6 +121,8 @@ def implementation_stream(
 
         round_had_success = False
         round_made_progress = False
+        round_had_patch_success = False
+        round_had_patch_failure = False
         for call in tool_calls:
             function = call.get("function") or {}
             name = function.get("name") or ""
@@ -145,6 +148,9 @@ def implementation_stream(
                 output = yield from _run_tool(name, call_id, arguments, workspace_dir)
                 tool_failed = _tool_failed(output)
                 round_had_success = round_had_success or not tool_failed
+                if name == "apply_patch":
+                    round_had_patch_failure = round_had_patch_failure or tool_failed
+                    round_had_patch_success = round_had_patch_success or not tool_failed
                 if name == "read" and not tool_failed:
                     signature = _read_signature(arguments, workspace_dir)
                     if signature not in inspected_ranges:
@@ -164,6 +170,8 @@ def implementation_stream(
                     if _authorized_step_complete(patch_plan, step_id):
                         applied_steps.add(step_id)
             except Exception as exc:
+                if name == "apply_patch":
+                    round_had_patch_failure = True
                 output = json.dumps({
                     "error": str(exc),
                     "retryable": True,
@@ -184,6 +192,10 @@ def implementation_stream(
                 "and split any remaining patch across model rounds."
             )})
         consecutive_error_rounds = 0 if round_had_success else consecutive_error_rounds + 1
+        if round_had_patch_success:
+            consecutive_patch_error_rounds = 0
+        elif round_had_patch_failure:
+            consecutive_patch_error_rounds += 1
         if patch_required and not round_made_progress:
             no_progress_rounds += 1
             missing_steps = _missing_steps(required_steps, applied_steps)
@@ -213,7 +225,7 @@ def implementation_stream(
                 return
         elif round_made_progress:
             no_progress_rounds = 0
-        if tool_error_limit and consecutive_error_rounds >= tool_error_limit:
+        if tool_error_limit and max(consecutive_error_rounds, consecutive_patch_error_rounds) >= tool_error_limit:
             reason = _rollback_checkpoint_reason(
                 "Implementation hit repeated tool errors. The patch plan or file path likely needs correction.",
                 rollback_ids,

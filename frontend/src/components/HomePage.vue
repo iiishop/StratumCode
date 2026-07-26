@@ -565,6 +565,7 @@ function onAgentPacket(packet, type, data) {
   } else if (packet.op === 'start' && type === 'task_analysis') {
     data.id ||= packet.id
     data.origin_message ||= messages[messages.length - 2]?.content || ''
+    data.open = true
     taskAnalyses.push(data)
     inspectorTab.value = 'tasks'
   } else if (packet.op === 'start' && type === 'task_update') {
@@ -793,7 +794,7 @@ watch(() => props.activeWorkspace?.id, () => {
           :tab="inspectorTab"
           :run="evidenceRun"
           :runs="evidenceRuns"
-          :task-analysis="activeTaskAnalysis"
+          :task-analyses="taskAnalyses"
           :usage="sessionUsage"
           :todos="todos"
           :tools="toolCatalog"

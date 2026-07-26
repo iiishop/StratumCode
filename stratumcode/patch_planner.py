@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 from collections.abc import Iterator
 from itertools import count
@@ -9,6 +10,7 @@ from uuid import uuid4
 
 from . import app_settings, model_settings, patch_authorization, prompt, providers
 from .planning_facts import normalize_project_facts as _project_facts
+from .tools.builtin.common import IGNORED_DIRS
 from .agent_runtime import (
     add_usage as _add_usage,
     call_model as _call_model,
@@ -19,6 +21,24 @@ from .agent_runtime import (
 )
 
 DEFAULT_PATCH_JSON_ATTEMPTS = 3
+NO_CHANGE_ACTION_MARKERS = (
+    "manual review",
+    "manual inspection",
+    "verification only",
+    "no code change",
+    "no additional code",
+    "already implemented",
+    "already satisfied",
+    "手动检查",
+    "人工检查",
+    "仅检查",
+    "无需代码",
+    "无需额外代码",
+    "不需要代码修改",
+    "已经实现",
+    "已实现",
+    "已满足",
+)
 
 
 def patch_planning_stream(
@@ -74,7 +94,19 @@ def patch_planning_stream(
         item for item in design_plan.get("design_decisions", [])
         if isinstance(item, dict)
     ]
+    revision_ids = (
+        set(_strings(design_plan.get("runtime_revision_decision_ids")))
+        if "runtime_revision_decision_ids" in design_plan
+        else None
+    )
     for index, decision in enumerate(decisions, start=1):
+        if revision_ids is not None and str(decision.get("id") or "") not in revision_ids:
+            skipped_decision_slots.append({
+                "decision_slot": index,
+                "reason": "Runtime preserved this already implemented decision during validation revision.",
+                "project_fact_slots": _validation_fact_slots(facts) or list(range(1, len(facts) + 1)),
+            })
+            continue
         messages = [
             system,
             {"role": "user", "content": prompt.build_patch_step_slot_user(
@@ -99,6 +131,7 @@ def patch_planning_stream(
                 run_id,
                 f"decision-{index}-{semantic_attempt}",
             )
+            _normalize_no_change_slot(slot)
             slot_issues = _slot_step_issues(
                 slot,
                 workspace_dir,
@@ -697,6 +730,19 @@ def _skipped_decisions(value, design_plan: dict, facts: list[dict]) -> list[dict
     return result
 
 
+def _validation_fact_slots(facts: list[dict]) -> list[int]:
+    slots = []
+    for index, fact in enumerate(facts, start=1):
+        fact_id = str(fact.get("id") or "").upper()
+        text = str(fact.get("text") or "").lstrip().upper()
+        evidence = [str(item).casefold() for item in fact.get("evidence_ids") or []]
+        if fact_id.startswith(("VAL", "PF-VAL")) or text.startswith("VAL") or any(
+            item.startswith("validation:") for item in evidence
+        ):
+            slots.append(index)
+    return slots
+
+
 def _plan_from_content(data: dict, analysis: dict, design_plan: dict, investigation: dict) -> dict:
     facts = _project_facts(investigation)
     steps = _runtime_steps(data.get("step_content"), analysis, design_plan, facts)
@@ -811,6 +857,34 @@ def _has_usable_steps(value) -> bool:
     return isinstance(value, list) and any(isinstance(item, dict) and str(item.get("file") or "").strip() for item in value)
 
 
+def _normalize_no_change_slot(slot: dict | None) -> None:
+    if not isinstance(slot, dict) or slot.get("needed") is False:
+        return
+    steps = [item for item in slot.get("step_content") or [] if isinstance(item, dict)]
+    if not steps or not all(_is_no_change_action(item) for item in steps):
+        return
+    fact_slots = sorted({
+        fact_slot
+        for item in steps
+        for fact_slot in _numbered_slots(item.get("project_fact_slots"), 10_000)
+    })
+    slot.update({
+        "needed": False,
+        "skip_reason": "Runtime normalized verification-only steps that explicitly require no code change.",
+        "skip_project_fact_slots": fact_slots,
+        "step_content": [],
+    })
+
+
+def _is_no_change_action(step: dict) -> bool:
+    text = " ".join([
+        str(step.get("purpose") or ""),
+        str(step.get("action") or ""),
+        str(step.get("minimality_check") or ""),
+    ]).casefold()
+    return any(marker in text for marker in NO_CHANGE_ACTION_MARKERS)
+
+
 def _slot_step_issues(
     slot: dict | None,
     workspace_dir: str,
@@ -844,6 +918,8 @@ def _slot_step_issues(
         except ValueError as exc:
             issues.append(f"step_content item {index} {exc}")
             continue
+        if mode == "modify":
+            item["file"] = _repair_unique_modify_target(str(item["file"]), workspace)
         if issue := _planned_file_issue(str(item["file"]), mode, workspace):
             issues.append(f"step_content item {index} {issue}")
         for field in ("purpose", "target", "action", "required_behavior_if_removed", "minimality_check"):
@@ -1305,6 +1381,22 @@ def _canonical_workspace_file(file: str, workspace: Path) -> str:
     if relative == Path("."):
         raise ValueError("file path is invalid")
     return relative.as_posix()
+
+
+def _repair_unique_modify_target(file: str, workspace: Path) -> str:
+    if (workspace / file).is_file():
+        return file
+    basename = Path(file).name.casefold()
+    matches = []
+    for root, dirs, files in os.walk(workspace, onerror=lambda _error: None):
+        dirs[:] = [name for name in dirs if name not in IGNORED_DIRS]
+        for name in files:
+            if name.casefold() != basename:
+                continue
+            matches.append((Path(root) / name).relative_to(workspace).as_posix())
+            if len(matches) > 1:
+                return file
+    return matches[0] if len(matches) == 1 else file
 
 
 def _planned_file_issue(file: str, mode: str, workspace: Path) -> str:

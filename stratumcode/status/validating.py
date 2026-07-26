@@ -106,20 +106,38 @@ def _add_validation_context(run) -> None:
     )
 
 
-def _validation_repair_facts(result: dict) -> list[str]:
+def _validation_repair_facts(result: dict) -> list[dict]:
+    changed_files = [
+        str(item)
+        for item in result.get("changed_files", [])
+        if str(item).strip()
+    ]
     facts = []
+    summary = str(result.get("summary") or "").strip()
+    if summary:
+        facts.append({
+            "id": "VAL0",
+            "text": f"Post-patch validation summary: {summary}",
+            "authority": "runtime_validation",
+            "evidence_ids": ["validation:summary"],
+            "supersedes_files": changed_files,
+        })
     for index, issue in enumerate(result.get("issues", []) if isinstance(result.get("issues"), list) else [], start=1):
         if not isinstance(issue, dict):
             continue
         loc = f"{issue.get('file')}:{issue.get('line')}" if issue.get("file") else ""
-        facts.append(
-            " ".join(part for part in [
+        facts.append({
+            "id": f"VAL{index}",
+            "text": " ".join(part for part in [
                 f"VAL{index}",
                 str(issue.get("severity") or "issue"),
                 loc,
                 str(issue.get("summary") or ""),
-            ] if part)
-        )
+            ] if part),
+            "authority": "runtime_validation",
+            "evidence_ids": [f"validation:{issue.get('id') or index}"],
+            "supersedes_files": [str(issue.get("file"))] if issue.get("file") else [],
+        })
     return facts
 
 

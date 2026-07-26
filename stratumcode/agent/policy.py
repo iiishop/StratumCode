@@ -77,8 +77,16 @@ class EvidencePolicy:
     def prepare_discovery(self, name: str, arguments: dict) -> dict:
         prepared = dict(arguments)
         if name == "read":
-            start = max(1, int(prepared.get("start_line", 1)))
-            requested_end = int(prepared.get("end_line") or (start + self.max_read_lines - 1))
+            offset = prepared.pop("offset", None)
+            limit = prepared.pop("limit", None)
+            start = max(
+                1,
+                int(prepared.get("start_line") or (int(offset) + 1 if offset is not None else 1)),
+            )
+            requested_end = int(
+                prepared.get("end_line")
+                or (start + int(limit) - 1 if limit is not None else start + self.max_read_lines - 1)
+            )
             prepared["start_line"] = start
             prepared["end_line"] = max(start, requested_end)
         elif name == "grep":

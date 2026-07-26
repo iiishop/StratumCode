@@ -7,7 +7,7 @@ const props = defineProps({
   tab: { type: String, default: 'evidence' },
   run: { type: Object, required: true },
   runs: { type: Array, default: () => [] },
-  taskAnalysis: { type: Object, default: null },
+  taskAnalyses: { type: Array, default: () => [] },
   usage: { type: Object, default: () => ({}) },
   todos: { type: Array, required: true },
   tools: { type: Array, required: true },
@@ -59,8 +59,12 @@ const taskKindLabels = {
   hypothesis: 'Hypotheses',
   unknown: 'Unknowns',
 }
-const analysisRows = computed(() => {
-  const analysis = props.taskAnalysis
+const activeTaskAnalysis = computed(() => {
+  const arr = props.taskAnalyses || []
+  return arr.length ? arr[arr.length - 1] : null
+})
+
+function analysisRowsFor(analysis) {
   if (!analysis) return []
   const updates = Array.isArray(analysis.task_updates) ? analysis.task_updates : []
   if (updates.length) return dedupeTaskRows([
@@ -81,32 +85,33 @@ const analysisRows = computed(() => {
     })),
   ].filter(item => item.text)
   return dedupeTaskRows(rows)
-})
-const remainingTaskCount = computed(() => analysisRows.value.filter(item =>
-  ['unknown', 'blocked', 'added', 'updated'].includes(item.status || '')
-).length)
+}
+function remainingTaskCountFor(analysis) {
+  const rows = analysisRowsFor(analysis)
+  return rows.filter(item =>
+    ['unknown', 'blocked', 'added', 'updated'].includes(item.status || '')
+  ).length
+}
 
-const investigationProgressRows = computed(() => analysisRows.value.filter(item => item.kind === 'unknown'))
+function taskProgressFor(analysis) {
+  const rows = analysisRowsFor(analysis)
+  const investigationRows = rows.filter(item => item.kind === 'unknown')
+  const completed = investigationRows.filter(item => ['known', 'deferred'].includes(item.status || '')).length
+  const total = investigationRows.length
+  const percent = total ? Math.round((completed / total) * 100) : 0
+  return { completed, total, percent }
+}
 
-const taskCompletedCount = computed(() => investigationProgressRows.value.filter(item =>
-  ['known', 'deferred'].includes(item.status || '')
-).length)
-
-const taskProgressTotal = computed(() => investigationProgressRows.value.length)
-
-const taskProgressPercent = computed(() =>
-  taskProgressTotal.value ? Math.round((taskCompletedCount.value / taskProgressTotal.value) * 100) : 0
-)
-
-const groupedTasks = computed(() => {
+function groupedTasksFor(analysis) {
+  const rows = analysisRowsFor(analysis)
   const groups = Object.fromEntries(taskGroupKinds.map(kind => [kind, []]))
-  for (const row of analysisRows.value) {
+  for (const row of rows) {
     const kind = row.kind || 'unknown'
     if (groups[kind]) groups[kind].push(row)
     else groups.unknown.push(row)
   }
   return groups
-})
+}
 
 function taskKindLabel(kind) {
   return taskKindLabels[kind] || kind
@@ -136,12 +141,12 @@ function missingUnknownRows(analysis, rows) {
     .filter(item => item.text)
 }
 
-function taskCopyPayload() {
-  const { task_updates, clues, ...task } = props.taskAnalysis || {}
+function taskCopyPayload(analysis) {
+  const { task_updates, clues, ...task } = analysis || {}
   return {
     copied_at: new Date().toISOString(),
     task,
-    rows: analysisRows.value,
+    rows: analysisRowsFor(analysis),
     clue_count: Array.isArray(clues) ? clues.length : 0,
   }
 }
@@ -167,10 +172,11 @@ async function writeClipboard(text) {
 }
 
 async function copyCurrentTask() {
-  if (!props.taskAnalysis) return
+  const analysis = activeTaskAnalysis.value
+  if (!analysis) return
   clearTimeout(copyTaskTimer)
   try {
-    await writeClipboard(JSON.stringify(taskCopyPayload(), null, 2))
+    await writeClipboard(JSON.stringify(taskCopyPayload(analysis), null, 2))
     copyTaskStatus.value = 'Copied'
   } catch {
     copyTaskStatus.value = 'Copy failed'
@@ -253,6 +259,15 @@ watch(() => props.runs.length, (newLen, oldLen) => {
 function toggleHypothesis(itemRun) {
   itemRun.open = !itemRun.open
 }
+
+function toggleTask(task) {
+  task.open = !task.open
+}
+
+watch(() => props.taskAnalyses.length, (newLen, oldLen) => {
+  if (newLen <= oldLen || !props.taskAnalyses.length) return
+  props.taskAnalyses.forEach((task, i) => { task.open = i === props.taskAnalyses.length - 1 })
+})
 
 function hypothesisEnter(el, done) {
   el.style.overflow = 'hidden'
@@ -518,90 +533,85 @@ function onWsRowLeave(el) {
         <div class="inspector__section-head">
           <strong>Tasks</strong>
           <div class="inspector__section-actions">
-            <span>{{ remainingTaskCount }} remaining</span>
-            <button type="button" class="section-action" :disabled="!taskAnalysis" @click="copyCurrentTask">
+            <span>{{ taskAnalyses.length }} task(s)</span>
+            <button type="button" class="section-action" :disabled="!activeTaskAnalysis" @click="copyCurrentTask">
               {{ copyTaskStatus || 'Copy task' }}
             </button>
           </div>
         </div>
 
-        <!-- progress bar -->
-        <div v-if="taskProgressTotal" class="tk-progress">
-          <div class="tk-progress-bar"><i :style="{ width: taskProgressPercent + '%' }"></i></div>
-          <span>{{ taskCompletedCount }}/{{ taskProgressTotal }} unknowns resolved</span>
-        </div>
+        <div v-for="(task, taskIdx) in taskAnalyses" :key="task.id || taskIdx" class="task-block">
+          <button class="task-block__summary" @click="toggleTask(task)">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="6"/><circle cx="12" cy="12" r="2"/></svg>
+            <span>{{ task.intent?.summary || 'Task ' + (taskIdx + 1) }}</span>
+            <span class="task-block__meta">
+              <small>{{ task.intent?.type || 'other' }} / {{ task.provider || 'model' }} / {{ task.model || 'unknown' }}</small>
+              <i class="task-block__chevron"></i>
+            </span>
+          </button>
 
-        <!-- goal -->
-        <section v-if="taskAnalysis" class="tk-goal">
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="6"/><circle cx="12" cy="12" r="2"/></svg>
-          <div>
-            <strong>{{ taskAnalysis.intent?.summary }}</strong>
-            <small>{{ taskAnalysis.intent?.type || 'other' }} / {{ taskAnalysis.provider || 'model' }} / {{ taskAnalysis.model || 'unknown' }}</small>
-          </div>
-        </section>
+          <div v-show="task.open" class="task-block__body">
+            <div v-if="taskProgressFor(task).total" class="tk-progress">
+              <div class="tk-progress-bar"><i :style="{ width: taskProgressFor(task).percent + '%' }"></i></div>
+              <span>{{ taskProgressFor(task).completed }}/{{ taskProgressFor(task).total }} unknowns resolved</span>
+            </div>
 
-        <!-- grouped task rows -->
-        <template v-if="analysisRows.length">
-          <div v-for="(items, kind) in groupedTasks" :key="kind">
-            <div v-if="items.length" class="tk-group">
-              <div class="tk-group-head">
-                <span class="tk-group-icon" :class="`tk-group-icon--${kind}`">
-                  <!-- goal -->
-                  <svg v-if="kind === 'goal'" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="3"/></svg>
-                  <!-- acceptance -->
-                  <svg v-else-if="kind === 'acceptance'" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M9 12l2 2 4-4"/><rect x="3" y="3" width="18" height="18" rx="3"/></svg>
-                  <!-- behavior -->
-                  <svg v-else-if="kind === 'behavior'" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="3"/><path d="M12 2v4M12 18v4M2 12h4M18 12h4"/></svg>
-                  <!-- boundary -->
-                  <svg v-else-if="kind === 'boundary'" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
-                  <!-- constraint -->
-                  <svg v-else-if="kind === 'constraint'" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="3" y="3" width="18" height="18" rx="3"/><circle cx="12" cy="12" r="3"/></svg>
-                  <!-- unknown -->
-                  <svg v-else width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3M12 17h.01"/></svg>
-                </span>
-                <span class="tk-group-label">{{ taskKindLabel(kind) }}</span>
-                <span class="tk-group-count">{{ items.length }}</span>
-              </div>
-
-              <div class="tk-items">
-                <div
-                  v-for="item in items"
-                  :key="item.id || `${item.kind}:${item.text}`"
-                  class="tk-item"
-                  :class="`tk-item--${kind} tk-item--${item.status || 'pending'}`"
-                >
-                  <!-- status icon -->
-                  <span class="tk-item-status" :class="`tk-item-status--${taskStatusIcon(item.status)}`">
-                    <svg v-if="taskStatusIcon(item.status) === 'check'" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><path d="M5 13l4 4L19 7"/></svg>
-                    <svg v-else-if="taskStatusIcon(item.status) === 'blocked'" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
-                    <svg v-else-if="taskStatusIcon(item.status) === 'deferred'" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
-                    <svg v-else-if="taskStatusIcon(item.status) === 'unknown'" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 015.83 1c0 2-3 3-3 3M12 17h.01"/></svg>
-                    <svg v-else width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="10"/></svg>
-                  </span>
-
-                  <div class="tk-item-body">
-                    <p class="tk-item-text">{{ item.text }}</p>
-                    <small v-if="item.reason" class="tk-item-reason">{{ item.reason }}</small>
-                    <ul v-if="taskAnswers(item.answers).length" class="tk-item-answers">
-                      <li v-for="(answer, i) in taskAnswers(item.answers)" :key="`${answer.source}:${i}`">
-                        <b>{{ answer.source }}</b>
-                        <span>{{ answer.text }}</span>
-                      </li>
-                    </ul>
-                    <div v-if="item.trace?.length" class="tk-item-trace">
-                      <span v-for="(t, i) in item.trace" :key="i" class="tk-trace-step">
-                        {{ t }}
-                        <span v-if="i < item.trace.length - 1" class="tk-trace-arrow">&#8594;</span>
-                      </span>
-                    </div>
+            <template v-if="analysisRowsFor(task).length">
+              <div v-for="(items, kind) in groupedTasksFor(task)" :key="kind">
+                <div v-if="items.length" class="tk-group">
+                  <div class="tk-group-head">
+                    <span class="tk-group-icon" :class="`tk-group-icon--${kind}`">
+                      <svg v-if="kind === 'goal'" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="3"/></svg>
+                      <svg v-else-if="kind === 'acceptance'" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M9 12l2 2 4-4"/><rect x="3" y="3" width="18" height="18" rx="3"/></svg>
+                      <svg v-else-if="kind === 'behavior'" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="3"/><path d="M12 2v4M12 18v4M2 12h4M18 12h4"/></svg>
+                      <svg v-else-if="kind === 'boundary'" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+                      <svg v-else-if="kind === 'constraint'" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="3" y="3" width="18" height="18" rx="3"/><circle cx="12" cy="12" r="3"/></svg>
+                      <svg v-else width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3M12 17h.01"/></svg>
+                    </span>
+                    <span class="tk-group-label">{{ taskKindLabel(kind) }}</span>
+                    <span class="tk-group-count">{{ items.length }}</span>
                   </div>
 
-                  <span class="tk-item-badge">{{ item.status }}</span>
+                  <div class="tk-items">
+                    <div
+                      v-for="item in items"
+                      :key="item.id || `${item.kind}:${item.text}`"
+                      class="tk-item"
+                      :class="`tk-item--${kind} tk-item--${item.status || 'pending'}`"
+                    >
+                      <span class="tk-item-status" :class="`tk-item-status--${taskStatusIcon(item.status)}`">
+                        <svg v-if="taskStatusIcon(item.status) === 'check'" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><path d="M5 13l4 4L19 7"/></svg>
+                        <svg v-else-if="taskStatusIcon(item.status) === 'blocked'" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+                        <svg v-else-if="taskStatusIcon(item.status) === 'deferred'" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+                        <svg v-else-if="taskStatusIcon(item.status) === 'unknown'" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 015.83 1c0 2-3 3-3 3M12 17h.01"/></svg>
+                        <svg v-else width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="10"/></svg>
+                      </span>
+
+                      <div class="tk-item-body">
+                        <p class="tk-item-text">{{ item.text }}</p>
+                        <small v-if="item.reason" class="tk-item-reason">{{ item.reason }}</small>
+                        <ul v-if="taskAnswers(item.answers).length" class="tk-item-answers">
+                          <li v-for="(answer, i) in taskAnswers(item.answers)" :key="`${answer.source}:${i}`">
+                            <b>{{ answer.source }}</b>
+                            <span>{{ answer.text }}</span>
+                          </li>
+                        </ul>
+                        <div v-if="item.trace?.length" class="tk-item-trace">
+                          <span v-for="(t, i) in item.trace" :key="i" class="tk-trace-step">
+                            {{ t }}
+                            <span v-if="i < item.trace.length - 1" class="tk-trace-arrow">&#8594;</span>
+                          </span>
+                        </div>
+                      </div>
+
+                      <span class="tk-item-badge">{{ item.status }}</span>
+                    </div>
+                  </div>
                 </div>
               </div>
-            </div>
+            </template>
           </div>
-        </template>
+        </div>
 
       </template>
 
@@ -764,6 +774,63 @@ function onWsRowLeave(el) {
   margin-top: 4px;
   color: #7188a3;
   font: 8.5px/1.35 var(--mono);
+}
+
+/* ---- task block (multi-task folding) ---- */
+.task-block {
+  margin-bottom: 10px;
+  border: 1px solid #d8e2ef;
+  border-radius: 10px;
+  background: #fff;
+  overflow: hidden;
+}
+.task-block__summary {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  gap: 8px;
+  padding: 11px;
+  border: 0;
+  color: #294564;
+  background: transparent;
+  font-size: 10.5px;
+  font-weight: 700;
+  cursor: pointer;
+  text-align: left;
+  transition: background .15s ease;
+}
+.task-block__summary:hover { background: #f5f8fd; }
+.task-block__summary svg {
+  flex-shrink: 0;
+  color: #6658c7;
+}
+.task-block__summary span:first-of-type {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+}
+.task-block__meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+.task-block__meta small {
+  color: #7188a3;
+  font: 8.5px/1.35 var(--mono);
+}
+.task-block__chevron {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  border-right: 1.5px solid #94a8c2;
+  border-bottom: 1.5px solid #94a8c2;
+  transform: rotate(45deg);
+  transition: transform .28s cubic-bezier(.22, 1, .36, 1);
+}
+.task-block__body {
+  padding: 0 11px 11px;
 }
 
 /* ---- group ---- */

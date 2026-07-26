@@ -27,6 +27,7 @@ from .status.user_context import _workspace_snapshot
 from .tools import registry
 
 DEFAULT_EMPTY_TOOL_ROUNDS = 2
+MAX_REPEATED_TOOL_ERRORS = 3
 
 
 def _round_indexes(limit: int, start: int = 0):
@@ -103,6 +104,9 @@ def evidence_stream(
     ]
     observed_calls: dict[str, dict] = {}
     empty_tool_rounds = 0
+    repeated_tool_error_name = ""
+    repeated_tool_error_count = 0
+    stop_evidence = False
     usage_total = _empty_usage(pricing_rules)
 
     empty_tool_limit = (
@@ -200,6 +204,8 @@ def evidence_stream(
                         yield next(gen)
                 except StopIteration as e:
                     output, concluded, maybe_step = e.value
+                repeated_tool_error_name = ""
+                repeated_tool_error_count = 0
                 if maybe_step is not None:
                     step_result = maybe_step
                 if name == "record_evidence":
@@ -212,8 +218,15 @@ def evidence_stream(
                     phase_before = policy.phase
             except Exception as exc:
                 output = tool_error_json(exc, name)
-                if name == "record_evidence":
+                if name == "record_evidence" or policy.checkpoint_due:
                     policy.note_checkpoint_failure()
+                error_name = name or "invalid"
+                if error_name == repeated_tool_error_name:
+                    repeated_tool_error_count += 1
+                else:
+                    repeated_tool_error_name = error_name
+                    repeated_tool_error_count = 1
+                stop_evidence = repeated_tool_error_count >= MAX_REPEATED_TOOL_ERRORS
                 yield start_event(call_id, _tool_event_type(name), {
                     "name": name or "invalid",
                     "description": (
@@ -234,6 +247,15 @@ def evidence_stream(
             if concluded:
                 break
         messages.extend(compaction_messages)
+        if stop_evidence:
+            yield start_event(f"{run_id}-safety-repeated-tool-error", "safety_stop", {
+                "reason": "repeated_tool_error",
+                "message": (
+                    "Safety net triggered: the evidence agent repeated the same invalid tool call."
+                ),
+                "tool": repeated_tool_error_name,
+            })
+            break
         if concluded:
             break
         if step_result is not None:

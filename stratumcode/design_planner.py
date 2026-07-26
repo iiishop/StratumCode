@@ -879,6 +879,7 @@ def _merge_design_revision(plan: dict, previous_plan: dict | None, revision_mode
         for item in previous
     }
     next_index = len(previous) + 1
+    revision_ids = []
     for candidate in plan.get("design_decisions", []):
         candidate_text = " ".join(str(candidate.get("decision") or "").casefold().split())
         if candidate_text in existing_text:
@@ -905,8 +906,10 @@ def _merge_design_revision(plan: dict, previous_plan: dict | None, revision_mode
             next_index += 1
         candidate.pop("replaces_decision_ids", None)
         merged[str(candidate["id"])] = candidate
+        revision_ids.append(str(candidate["id"]))
         existing_text.add(candidate_text)
     plan["design_decisions"] = list(merged.values())
+    plan["runtime_revision_decision_ids"] = revision_ids
     plan.setdefault("runtime_warnings", []).append(
         "Runtime preserved prior design decisions unless the validation revision explicitly replaced their ids."
     )
