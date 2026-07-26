@@ -93,8 +93,11 @@ def handle(run):
     last_investigation = None
     pending_question = None
     previous_observations = _merge_items_by_id(
-        run.selected_session_context.get("observations", []),
-        run.investigation_observations,
+        _merge_items_by_id(
+            run.selected_session_context.get("observations", []),
+            run.investigation_observations,
+        ),
+        run.investigation_grounding_observations,
     )
     previous_knowledge = _merge_items_by_id(
         run.selected_session_context.get("knowledge", []),
@@ -115,6 +118,7 @@ def handle(run):
         previous_observations=previous_observations,
         previous_knowledge=previous_knowledge,
         previous_findings=run.last_investigation,
+        preserve_grounding_evidence=True,
     ):
         if event.get("event") == "task_update":
             applied = _apply_task_updates(
@@ -147,8 +151,29 @@ def handle(run):
                 run.session_context.get("tasks", []),
             )
             last_investigation["task_updates"] = applied["items"]
-            last_investigation["observations"] = _scoped_items(run.analysis["id"], last_investigation.get("observations", []))
-            new_observations = [{**item, "fresh": item.get("fresh", True)} for item in last_investigation["observations"]]
+            scoped_observations = _scoped_items(
+                run.analysis["id"],
+                last_investigation.get("observations", []),
+            )
+            grounding_observations = [
+                {**item, "fresh": item.get("fresh", True)}
+                for item in scoped_observations
+            ]
+            run.investigation_grounding_observations = _merge_items_by_id(
+                run.investigation_grounding_observations,
+                grounding_observations,
+            )
+            new_observations = [
+                {
+                    **{
+                        key: value
+                        for key, value in item.items()
+                        if key != "_grounding_evidence"
+                    },
+                    "fresh": item.get("fresh", True),
+                }
+                for item in scoped_observations
+            ]
             last_investigation["observations"] = new_observations
             run.investigation_observations = _merge_items_by_id(run.investigation_observations, new_observations)
             run.investigation_knowledge = _merge_items_by_id(

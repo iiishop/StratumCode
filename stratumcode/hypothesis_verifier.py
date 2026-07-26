@@ -328,7 +328,8 @@ def _build_findings(run: EvidenceRun) -> list[dict]:
 
 def _discovery_tools(hypothesis: str = "", context: list[str] | None = None) -> tuple[str, ...]:
     mcp_tools = tuple(tool.name for tool in registry.list_all() if tool.name.startswith("mcp_"))
-    return DISCOVERY_TOOLS + tuple(name for name in mcp_tools if name not in DISCOVERY_TOOLS)
+    local_tools = tuple(name for name in DISCOVERY_TOOLS if name != "subagent")
+    return local_tools + tuple(name for name in mcp_tools if name not in local_tools)
 
 
 def _compact_tool_message(evidence_args: dict) -> dict | None:

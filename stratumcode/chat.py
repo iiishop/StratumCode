@@ -57,6 +57,7 @@ class ChatRun:
     findings: list[str] = field(default_factory=list)
     continuation_context: list[str] = field(default_factory=list)
     investigation_observations: list[dict] = field(default_factory=list)
+    investigation_grounding_observations: list[dict] = field(default_factory=list)
     investigation_knowledge: list[dict] = field(default_factory=list)
     last_investigation: dict | None = None
     design_plan: dict | None = None

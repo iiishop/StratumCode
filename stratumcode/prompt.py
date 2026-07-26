@@ -231,6 +231,10 @@ Principles:
 - Use code_nav for symbol/function/class questions and grep/read for literal
   text. Use python_static_check first for Python duplicate/dead-code/import
   audits. Reuse previous observations before repeating discovery.
+- When requested behavior is attached to a state transition, search the state
+  identifier and account for every writer or producer, including event handlers,
+  watchers, callbacks, and programmatic updates, plus the shared consumer.
+  Do not resolve the code-path unknown from one trigger alone.
 - If a path-scoped grep/read was based on a file-name guess and finds nothing,
   broaden to the workspace root and retry with visible labels, prop names, and
   camel/kebab/singular/plural variants before concluding absence.
@@ -238,6 +242,9 @@ Principles:
   planned patch and is not directly observed.
 - Discovery tool unknown_id values must come from the current task contract.
   Register newly discovered unknowns through finding slots before targeting them.
+- New investigation unknowns are only for material unresolved facts. Do not turn
+  implementation mechanisms or design choices into blocking investigation unknowns;
+  Design owns those choices once the current behavior and constraints are grounded.
 - Call record_investigation_findings with only a reason when observations should
   be recorded. The runtime will request finding slots. Then finish with
   patch_planning_facts when code work should continue.
@@ -324,6 +331,9 @@ An independent verifier verdict is reviewable evidence, not authority. Inspect
 its recorded findings and require them to entail every material part of the
 hypothesis. If the findings omit a material behavior, return investigate even
 when the verifier labelled the hypothesis supported.
+For state-transition behavior, a resolution is incomplete when it omits an
+observed writer, producer, trigger, or shared consumer of that state. Return
+investigate until the answer accounts for all observed paths.
 
 Return one verdict per proposed conclusion, including partial resolutions that
 already contain a substantive answer:
@@ -380,6 +390,16 @@ Rules:
   it as a design_decision instead of asking the user.
 - When the user asks to match an existing project behavior, preserve the observed
   state model, interaction, and transition behavior unless explicitly excluded.
+- For behavior attached to a state transition, account for every observed
+  producer and trigger of that state. Prefer the shared transition boundary; a
+  trigger-local handler is incomplete when another producer can bypass it.
+- Account for producer timing relative to consumer mount. If a producer sets the
+  visible state before a transition consumer mounts, the design must use the
+  framework's initial/appear mechanism or another shared mechanism that covers
+  that path; ordinary enter hooks may only cover post-mount changes.
+- Do not replace an observed reference mechanism with a trigger-local alternative
+  unless a grounded constraint requires the divergence and the design preserves
+  equivalent behavior for every producer.
 - Resolve conflicts in this order: user_explicit, user_reference, verified_fact,
   then derived. Explicit user behavior overrides the reference baseline; inherit
   only dimensions the user left unspecified.
@@ -551,6 +571,11 @@ Rules:
   step when it weakens, contradicts, or exceeds them. Do not substitute a
   merely similar behavior. Leave step_revisions empty when no correction is
   needed.
+- When project facts show multiple producers or triggers for the affected state,
+  require the action and completion conditions to cover each path through their
+  shared boundary or explicitly account for every path.
+- Require completion conditions to cover mount-time state initialization
+  separately from post-mount updates when framework transition semantics differ.
 The runtime validates coverage, responsibility chains, IDs, files, and required fields."""
 
 PATCH_VERIFICATION_AUDITOR = """\
@@ -620,6 +645,14 @@ implements less than the purpose requires. Read each changed file once, then
 inspect only directly related callers or symbols needed to prove the acceptance
 criteria. Finish validation as soon as the changed behavior is proven or a
 specific defect is found.
+
+For behavior attached to a state transition, inspect every observed producer or
+trigger of that state. A patch that works only through one event handler fails
+when a programmatic update, watcher, callback, or sibling path can bypass it.
+Prefer proof at the shared state-consumption boundary over one happy-path action.
+Also inspect producer timing: an enter hook does not prove a mount-time initially
+visible path unless the framework's initial/appear behavior is explicitly enabled
+or equivalent behavior is demonstrated.
 
 Preserve explicit user contracts. If the user requested a signature such as
 wait(int time), changing the parameter to seconds is a contract conflict. Prefer

@@ -49,6 +49,8 @@ FINDING_FIELDS = (
 # Compatibility hook for integrations that patched this set before tool capabilities existed.
 PROJECT_EVIDENCE_TOOLS: set[str] = set()
 CLEARIFY_RESOLUTION_REASON = "Answered by the user through clearify."
+GROUNDING_LITERAL_REASON_PREFIX = "Cited observations do not contain the claimed code literal(s):"
+STATE_WRITE_REASON_PREFIX = "Cited observations contain state writes omitted from the resolution:"
 
 
 def investigation_stream(
@@ -62,6 +64,7 @@ def investigation_stream(
     previous_observations: list[dict] | None = None,
     previous_knowledge: list[dict] | None = None,
     previous_findings: dict | None = None,
+    preserve_grounding_evidence: bool = False,
 ) -> Iterator[dict]:
     setting = (
         model_settings.resolve(model_settings.DEFAULT_STAGE)
@@ -767,10 +770,13 @@ def investigation_stream(
         )
     if last_quality_audit:
         final["quality_audit"] = last_quality_audit
-    final["observations"] = observations + [
-        item for item in final.get("observations", [])
-        if isinstance(item, dict)
-    ]
+    final["observations"] = _final_observations(
+        observations + [
+            item for item in final.get("observations", [])
+            if isinstance(item, dict)
+        ],
+        preserve_grounding_evidence=preserve_grounding_evidence,
+    )
 
     implementation_intent = _wants_implementation(analysis, message)
     yield {"op": "update", "id": stage_id, "patch": {
@@ -1012,12 +1018,21 @@ def _recorded_resolves_initial_unknowns(recorded: dict, analysis: dict | None) -
     initial = [item for item in (analysis or {}).get("unknowns", []) if isinstance(item, dict) and item.get("id")]
     if not initial:
         return False
+    required_ids = {str(item["id"]) for item in initial}
+    required_ids.update(
+        str(item["id"])
+        for item in (
+            _unknowns(recorded.get("unknowns"))
+            + _unknowns(recorded.get("new_unknowns"))
+        )
+        if item.get("blocking")
+    )
     resolved = {
         str(item.get("unknown_id") or "").strip()
         for item in recorded.get("resolutions", [])
         if isinstance(item, dict) and str(item.get("status") or "") in {"resolved", "deferred"}
     }
-    return all(str(item["id"]) in resolved for item in initial)
+    return required_ids <= resolved
 
 
 def _pending_clearify_unknown(
@@ -1305,6 +1320,12 @@ def _record_findings_by_slots(
             path,
             prompt_text,
             required=required,
+            required_answer_literals=_required_state_write_literals(
+                path,
+                resolution_slot_ids,
+                recorded_findings,
+                observations,
+            ),
         )})
         raw = ""
         attempts = (
@@ -1610,12 +1631,19 @@ def _record_slot_context(
     return json.dumps(payload, ensure_ascii=False, sort_keys=True)
 
 
-def _record_slot_prompt(path: str, prompt_text: str, *, required: bool = False) -> str:
+def _record_slot_prompt(
+    path: str,
+    prompt_text: str,
+    *,
+    required: bool = False,
+    required_answer_literals: list[str] | None = None,
+) -> str:
     payload = {
         "slot": path,
         "instruction": prompt_text,
         "contract": _record_slot_contract(path),
         "required_non_empty": required,
+        "required_exact_answer_literals": required_answer_literals or [],
     }
     return json.dumps(payload, ensure_ascii=False, sort_keys=True)
 
@@ -1644,7 +1672,8 @@ def _record_slot_contract(path: str) -> str:
         ),
         "new_unknowns": (
             "Return a JSON array of new unknown objects with id, question, blocking, resolution_strategy. "
-            "resolution_strategy is investigate_project, clearify, or deferred."
+            "resolution_strategy is investigate_project, clearify, or deferred. Add only material facts "
+            "that must be resolved before design; do not add implementation-mechanism or design-choice questions."
         ),
         "user_decisions_required": "Return a JSON array of user decision question strings.",
     }
@@ -1695,6 +1724,35 @@ def _required_resolution_slot(
     return (
         index < len(resolution_slot_ids)
         and resolution_slot_ids[index] in set(required_resolution_ids)
+    )
+
+
+def _required_state_write_literals(
+    path: str,
+    resolution_slot_ids: list[str],
+    recorded_findings: dict,
+    observations: list[dict],
+) -> list[str]:
+    match = re.fullmatch(r"resolutions\[(\d+)\]", path)
+    if not match:
+        return []
+    index = int(match.group(1))
+    if index >= len(resolution_slot_ids):
+        return []
+    unknown_id = resolution_slot_ids[index]
+    resolution = next((
+        item
+        for item in recorded_findings.get("resolutions", [])
+        if isinstance(item, dict)
+        and str(item.get("unknown_id") or "").strip() == unknown_id
+        and str(item.get("reason") or "").startswith(STATE_WRITE_REASON_PREFIX)
+    ), None)
+    if resolution is None:
+        return []
+    return _missing_grounding_state_writes(
+        resolution,
+        recorded_findings,
+        observations,
     )
 
 
@@ -2457,12 +2515,14 @@ def _tool_observation(name: str, call_id: str, output: str) -> dict:
         data = {}
     raw_metadata = data.get("metadata")
     metadata: dict = raw_metadata if isinstance(raw_metadata, dict) else {}
+    evidence = str(data.get("output") or output)
     return {
         "id": call_id,
         "tool": name,
         "title": str(data.get("title") or name),
-        "summary": _short_observation(data.get("output") or output),
-        "evidence_excerpt": _observation_evidence_excerpt(data.get("output") or output),
+        "summary": _short_observation(evidence),
+        "evidence_excerpt": _observation_evidence_excerpt(evidence),
+        "_grounding_evidence": evidence,
         "verification": data.get("run") if isinstance(data.get("run"), dict) else {},
         "target_unknown_ids": data.get("target_unknown_ids") or metadata.get("target_unknown_ids") or [],
         "reason": data.get("reason") or metadata.get("reason") or "",
@@ -2495,7 +2555,7 @@ def _tool_event_type(name: str) -> str:
 
 def _reject_batched_hypothesis(task: str) -> None:
     text = " ".join((task or "").split())
-    numbered = sum(1 for marker in ("1.", "2.", "3.", "4.", "5.", "6.", "7.") if marker in text)
+    numbered = len(re.findall(r"(?:^|\s)[1-7]\.\s", text))
     if numbered >= 2:
         raise ValueError(
             "hypothesis-verifier accepts exactly one atomic belief; split this numbered list into separate calls"
@@ -2914,16 +2974,21 @@ def _apply_investigation_audit(
                     result,
                     observations or [],
                 )
-            if not unsupported:
+            missing_state_writes = _missing_grounding_state_writes(
+                resolution,
+                result,
+                observations or [],
+            )
+            if not unsupported and not missing_state_writes:
                 resolution["status"] = "resolved"
                 if reason:
                     resolution["reason"] = reason
                 continue
             status = "investigate"
-            reason = (
-                "Cited observations do not contain the claimed code literal(s): "
-                + ", ".join(unsupported)
-            )
+            if unsupported:
+                reason = GROUNDING_LITERAL_REASON_PREFIX + " " + ", ".join(unsupported)
+            else:
+                reason = STATE_WRITE_REASON_PREFIX + " " + ", ".join(missing_state_writes)
         if status == "verify":
             hypothesis = str(verdict.get("hypothesis") or "").strip()
             if hypothesis:
@@ -2957,18 +3022,16 @@ def _unsupported_grounding_literals(
 ) -> list[str]:
     evidence_ids = set(_reference_list(resolution.get("evidence")))
     belief_ids = set(_reference_list(resolution.get("belief_ids")))
-    claims = [str(resolution.get("answer") or "")]
     for belief in recorded.get("beliefs", []):
         if isinstance(belief, dict) and str(belief.get("id") or "") in belief_ids:
             evidence_ids.update(_reference_list(belief.get("evidence")))
-            claims.append(str(belief.get("statement") or ""))
     evidence = "\n".join(
-        str(item.get("evidence_excerpt") or item.get("summary") or "")
+        _grounding_observation_text(item)
         for item in observations
         if isinstance(item, dict) and str(item.get("id") or "") in evidence_ids
     )
     normalized_evidence = re.sub(r"\s+", "", evidence)
-    literals = _grounding_code_literals("\n".join(claims))
+    literals = _grounding_code_literals(str(resolution.get("answer") or ""))
     return _dedupe_strings([
         literal
         for literal in literals
@@ -2983,6 +3046,10 @@ def _semantic_repair_resolution_ids(recorded: dict) -> set[str]:
         for item in recorded.get("resolutions", [])
         if isinstance(item, dict)
         and item.get("status") == "partially_resolved"
+        and str(item.get("reason") or "").startswith((
+            GROUNDING_LITERAL_REASON_PREFIX,
+            STATE_WRITE_REASON_PREFIX,
+        ))
         and str(item.get("unknown_id") or "")
     }
 
@@ -3005,10 +3072,11 @@ def _grounding_code_literals(value: str) -> list[str]:
                 value,
             ),
             *re.findall(
-                r"\b[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*\([^()\r\n]*\)",
+                r"(?<![-A-Za-z0-9_$])[a-z_$][A-Za-z0-9_$]*"
+                r"(?:\.[A-Za-z_$][A-Za-z0-9_$]*)+"
+                r"(?![-A-Za-z0-9_$])",
                 value,
             ),
-            *re.findall(r"\b[a-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)+\b", value),
         ])
         if not _code_literal_is_negated(value, literal)
     ]
@@ -3059,16 +3127,77 @@ def _supporting_observation_ids(
             and normalized in re.sub(
                 r"\s+",
                 "",
-                "\n".join((
-                    str(item.get("evidence_excerpt") or ""),
-                    str(item.get("summary") or ""),
-                )),
+                _grounding_observation_text(item),
             )
         ]
         if not matches:
             return []
         result.extend(matches)
     return _dedupe_strings(result)
+
+
+def _grounding_observation_text(observation: dict) -> str:
+    return str(
+        observation.get("_grounding_evidence")
+        or observation.get("evidence_excerpt")
+        or observation.get("summary")
+        or ""
+    )
+
+
+def _missing_grounding_state_writes(
+    resolution: dict,
+    recorded: dict,
+    observations: list[dict],
+) -> list[str]:
+    answer = str(resolution.get("answer") or "")
+    state_ids = [
+        literal
+        for literal in _grounding_code_literals(answer)
+        if re.fullmatch(
+            r"[a-z_$][A-Za-z0-9_$]*(?:\.[A-Za-z_$][A-Za-z0-9_$]*)+",
+            literal,
+        )
+    ]
+    if not state_ids:
+        return []
+    evidence_ids = set(_reference_list(resolution.get("evidence")))
+    belief_ids = set(_reference_list(resolution.get("belief_ids")))
+    for belief in recorded.get("beliefs", []):
+        if isinstance(belief, dict) and str(belief.get("id") or "") in belief_ids:
+            evidence_ids.update(_reference_list(belief.get("evidence")))
+    evidence = "\n".join(
+        _grounding_observation_text(item)
+        for item in observations
+        if isinstance(item, dict) and str(item.get("id") or "") in evidence_ids
+    )
+    normalized_answer = re.sub(r"\s+", "", answer)
+    writes = []
+    for state_id in state_ids:
+        writes.extend(re.findall(
+            re.escape(state_id)
+            + r"\s*(?:(?:\?\?=|&&=|\|\|=|\+=|-=|\*=|/=|%=|=)"
+            + r"\s*[^;\r\n}]+|\+\+|--)",
+            evidence,
+        ))
+    return _dedupe_strings([
+        write.strip()
+        for write in writes
+        if re.sub(r"\s+", "", write) not in normalized_answer
+    ])
+
+
+def _final_observations(
+    observations: list[dict],
+    *,
+    preserve_grounding_evidence: bool,
+) -> list[dict]:
+    if preserve_grounding_evidence:
+        return [dict(item) for item in observations]
+    return [
+        {key: value for key, value in item.items() if key != "_grounding_evidence"}
+        for item in observations
+    ]
 
 
 def _is_grounding_code_literal(value: str) -> bool:
@@ -3078,7 +3207,10 @@ def _is_grounding_code_literal(value: str) -> bool:
         marker in value
         for marker in ("=", "<", ">", "(", ")", "{", "}", "[", "]", "/", "\\")
     ) or bool(
-        re.fullmatch(r"[a-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)+", value)
+        re.fullmatch(
+            r"[a-z_$][A-Za-z0-9_$]*(?:\.[A-Za-z_$][A-Za-z0-9_$]*)+",
+            value,
+        )
     )
 
 
@@ -3416,7 +3548,7 @@ def _runtime_readiness(
             reasons.append(f"{item['id']}:missing_evidence")
     if isinstance(analysis, dict) and analysis.get("acceptance_criteria") and not patch_context:
         reasons.append("missing_patch_planning_facts")
-    ready = bool(model_ready and not reasons)
+    ready = not reasons
     return {
         "ready": ready,
         "model_ready": model_ready,
@@ -3434,6 +3566,19 @@ def _initial_unknowns(analysis: dict | None) -> list[dict]:
 
 
 def _complete_resolutions(resolutions: list[dict], initial_unknowns: list[dict], unknowns: list[dict]) -> list[dict]:
+    initial_by_id = {item["id"]: item for item in initial_unknowns}
+    for resolution in resolutions:
+        source = initial_by_id.get(resolution["unknown_id"])
+        if (
+            resolution.get("status") == "deferred"
+            and source
+            and source.get("blocking")
+            and source.get("resolution_strategy") != "deferred"
+        ):
+            resolution["status"] = "partially_resolved"
+            resolution["reason"] = (
+                "A blocking task-contract unknown cannot be deferred without resolving it."
+            )
     by_id = {item["unknown_id"]: item for item in resolutions}
     unresolved_ids = {item["id"] for item in unknowns}
     for item in initial_unknowns:

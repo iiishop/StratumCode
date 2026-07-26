@@ -269,6 +269,39 @@ watch(() => props.taskAnalyses.length, (newLen, oldLen) => {
   props.taskAnalyses.forEach((task, i) => { task.open = i === props.taskAnalyses.length - 1 })
 })
 
+function taskEnter(el, done) {
+  el.style.overflow = 'hidden'
+  if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+    done()
+    return
+  }
+  gsap.fromTo(el, { height: 0, autoAlpha: 0 }, {
+    height: el.scrollHeight,
+    autoAlpha: 1,
+    duration: 0.38,
+    ease: 'power3.out',
+    onComplete: () => {
+      gsap.set(el, { height: 'auto', clearProps: 'overflow' })
+      done()
+    },
+  })
+}
+
+function taskLeave(el, done) {
+  el.style.overflow = 'hidden'
+  if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+    done()
+    return
+  }
+  gsap.to(el, {
+    height: 0,
+    autoAlpha: 0,
+    duration: 0.28,
+    ease: 'power2.inOut',
+    onComplete: done,
+  })
+}
+
 function hypothesisEnter(el, done) {
   el.style.overflow = 'hidden'
   gsap.fromTo(el, { height: 0, autoAlpha: 0 }, {
@@ -550,7 +583,8 @@ function onWsRowLeave(el) {
             </span>
           </button>
 
-          <div v-show="task.open" class="task-block__body">
+          <Transition appear @enter="taskEnter" @leave="taskLeave">
+            <div v-show="task.open" class="task-block__body">
             <div v-if="taskProgressFor(task).total" class="tk-progress">
               <div class="tk-progress-bar"><i :style="{ width: taskProgressFor(task).percent + '%' }"></i></div>
               <span>{{ taskProgressFor(task).completed }}/{{ taskProgressFor(task).total }} unknowns resolved</span>
@@ -610,7 +644,8 @@ function onWsRowLeave(el) {
                 </div>
               </div>
             </template>
-          </div>
+            </div>
+          </Transition>
         </div>
 
       </template>
