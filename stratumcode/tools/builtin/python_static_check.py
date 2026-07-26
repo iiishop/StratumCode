@@ -121,6 +121,7 @@ python_static_check_tool = ToolDef(
         },
     },
     execute=_python_static_check,
+    capabilities=("investigation", "investigation.project_evidence"),
 )
 
 TOOL = python_static_check_tool

@@ -23,7 +23,11 @@ from .agent_runtime import (
     tool_error_json,
     usage_delta as _usage_delta,
 )
+from .status.user_context import _workspace_snapshot
 from .tools import registry
+
+DEFAULT_EMPTY_TOOL_ROUNDS = 2
+
 
 def _round_indexes(limit: int, start: int = 0):
     limit = int(limit or 0)
@@ -54,6 +58,7 @@ def evidence_stream(
     pricing_rules = providers.get_model_pricing(provider["id"], model)
     run = EvidenceRun(hypothesis)
     run.transition(RunState.GATHERING)
+    context = _workspace_snapshot(workspace_dir) + list(context or [])
     discovery_tools = _discovery_tools(hypothesis, context)
     policy = EvidencePolicy(
         discovery_tools=discovery_tools,
@@ -100,9 +105,12 @@ def evidence_stream(
     empty_tool_rounds = 0
     usage_total = _empty_usage(pricing_rules)
 
-    empty_tool_limit = app_settings.get_round_limit("evidence_empty_tool_rounds")
+    empty_tool_limit = (
+        app_settings.get_round_limit("evidence_empty_tool_rounds")
+        or DEFAULT_EMPTY_TOOL_ROUNDS
+    )
     for round_index in _round_indexes(policy.max_rounds, start=0):
-        allowed_tools, _, _ = policy.next_request(run)
+        allowed_tools, tool_choice, _ = policy.next_request(run)
         phase_before = policy.phase
         step_result = None
         thinking_id = f"{run_id}-thinking-{round_index}"
@@ -111,12 +119,17 @@ def evidence_stream(
             "done": False,
             "open": True,
         })
-        assistant = _call_model(
-            provider,
-            model,
-            messages,
-            tools=agent_tools(discovery_tools),
-        )
+        tool_schemas = agent_tools(discovery_tools, allowed_tools)
+        if tool_choice == "required":
+            assistant = _call_model(
+                provider,
+                model,
+                messages,
+                tools=tool_schemas,
+                tool_choice="required",
+            )
+        else:
+            assistant = _call_model(provider, model, messages, tools=tool_schemas)
         if usage := _usage_delta(pricing_rules, assistant.pop("_usage", {})):
             _add_usage(usage_total, usage)
             yield start_event(f"{run_id}-usage-{round_index}", "usage", {

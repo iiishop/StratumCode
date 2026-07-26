@@ -90,7 +90,7 @@ function onExpandLeave(el, done) {
       <div v-if="hasAnalyzerDiagnostics" class="ta__card ta__card--diagnostics">
         <div class="ta__card-head">
           <span class="ta__chip ta__chip--diagnostics">Analyzer diagnostics</span>
-          <span v-if="event.analyzer_attempts" class="ta__count">{{ event.analyzer_attempts }} attempts</span>
+          <span v-if="event.analyzer_attempts" class="ta__count">{{ event.analyzer_attempts }} model calls</span>
         </div>
         <p v-if="event.analyzer_error" class="ta__diagnostic">{{ event.analyzer_error }}</p>
         <ol v-if="analyzerErrors.length" class="ta__errors">

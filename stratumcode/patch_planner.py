@@ -770,7 +770,41 @@ def _runtime_steps(value, analysis: dict, design_plan: dict, facts: list[dict]) 
             "out_of_scope": _strings(item.get("out_of_scope")),
             "minimality_check": str(item.get("minimality_check") or "").strip(),
         })
-    return steps
+    return _merge_duplicate_responsibilities(steps)
+
+
+def _merge_duplicate_responsibilities(steps: list[dict]) -> list[dict]:
+    merged: dict[tuple[str, str, str], dict] = {}
+    for step in steps:
+        key = _step_responsibility_key(step)
+        if key not in merged:
+            merged[key] = step
+            continue
+        destination = merged[key]
+        for field in (
+            "acceptance_ids",
+            "decision_ids",
+            "project_fact_ids",
+            "completion_conditions",
+            "out_of_scope",
+        ):
+            destination[field] = _unique_strings(
+                list(destination.get(field) or []) + list(step.get(field) or [])
+            )
+        for field in (
+            "purpose",
+            "action",
+            "required_behavior_if_removed",
+            "minimality_check",
+        ):
+            destination[field] = " ".join(_unique_strings([
+                destination.get(field),
+                step.get(field),
+            ]))
+    result = list(merged.values())
+    for index, step in enumerate(result, start=1):
+        step["id"] = f"IS{index}"
+    return result
 
 
 def _has_usable_steps(value) -> bool:

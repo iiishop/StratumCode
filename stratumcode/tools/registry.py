@@ -26,6 +26,10 @@ def list_all() -> list[ToolDef]:
     return sorted(_registry.values(), key=lambda t: t.name)
 
 
+def list_for_capability(capability: str) -> list[ToolDef]:
+    return [tool for tool in list_all() if capability in tool.capabilities]
+
+
 def get(name: str) -> ToolDef | None:
     return _registry.get(name)
 

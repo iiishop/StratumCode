@@ -270,9 +270,19 @@ def _register_tools(server: dict, tools: list[dict]) -> None:
         schema = remote_tool.get("inputSchema") or {"type": "object", "properties": {}}
         description = remote_tool.get("description") or remote_tool.get("title") or remote_name
 
-        async def execute(params: dict, ctx: dict, sid=server["id"], tool_name=remote_name) -> ToolResult:
+        async def execute(
+            params: dict,
+            ctx: dict,
+            sid=server["id"],
+            tool_name=remote_name,
+            tool_schema=schema,
+        ) -> ToolResult:
             current = _raw_server(sid)
-            result = _client(current).call_tool(tool_name, params or {})
+            call_params = dict(params or {})
+            properties = tool_schema.get("properties") if isinstance(tool_schema, dict) else {}
+            if "projectPath" in (properties or {}) and not call_params.get("projectPath"):
+                call_params["projectPath"] = str(ctx.get("directory") or ".")
+            result = _client(current).call_tool(tool_name, call_params)
             output = _tool_result_text(result)
             title = f"{current['name']}:{tool_name}"
             if result.get("isError"):

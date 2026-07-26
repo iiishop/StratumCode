@@ -29,9 +29,8 @@ TOOL = ToolDef(
                     "properties": {
                         "id": {"type": "string"},
                         "label": {"type": "string"},
-                        "value": {"type": "string"},
                     },
-                    "required": ["label", "value"],
+                    "required": ["label"],
                 },
                 "description": "Exactly three candidate answers.",
             },
@@ -39,4 +38,5 @@ TOOL = ToolDef(
         "required": ["question", "options"],
     },
     execute=_clearify,
+    capabilities=("investigation",),
 )

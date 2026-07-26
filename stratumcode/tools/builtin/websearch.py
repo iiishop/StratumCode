@@ -164,6 +164,7 @@ websearch_tool = ToolDef(
         "required": ["query"],
     },
     execute=_websearch,
+    capabilities=("investigation",),
 )
 
 TOOL = websearch_tool

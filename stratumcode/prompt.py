@@ -78,6 +78,9 @@ For intent_scope:
 {{
   "intent_type": "feature|bugfix|refactor|question|investigation|other",
   "summary": "one sentence describing the result the user wants",
+  "requirements": [
+    {{"text": "minimal user requirement excerpt", "role": "directive|factual_claim", "authority": "user_explicit", "source_ref": "SRC1", "source_excerpt": "verbatim supporting excerpt"}}
+  ],
   "constraints": [
     {{"text": "explicit hard requirement", "authority": "user_explicit", "source_ref": "SRC1", "source_excerpt": "verbatim supporting excerpt"}}
   ],
@@ -89,7 +92,7 @@ For intent_scope:
   ],
   "investigation_targets": ["neutral fact to locate or verify without a guessed path"],
   "hypotheses": [
-    {{"text": "claim explicitly implied by the user", "certainty": "certain|uncertain|guess"}}
+    {{"text": "factual claim explicitly stated or implied by the user", "certainty": "uncertain|guess"}}
   ]
 }}
 
@@ -130,6 +133,16 @@ For unknowns:
 Rules:
 - Do not write AC/U ids; use 1-based acceptance_slots when needed.
 - Use only ids from source_catalog in source_ref and runtime_skeleton in derived_from.
+- Split requested behaviors into minimal requirements backed by exact source
+  excerpts. Preserve actor, trigger, timing, ordering, cardinality, negation,
+  and ambiguity; do not interpret a reference baseline.
+- A user source proves what the user said, not that a descriptive claim is true.
+  Mark desired outcomes, constraints, and product choices as role=directive.
+  Mark claims about current code, docs, runtime behavior, causes, versions, or
+  external reality as role=factual_claim and repeat them in hypotheses with
+  certainty=uncertain until Investigation verifies them.
+- Never derive acceptance criteria from a factual_claim. It is evidence to
+  investigate, not an authorized implementation outcome.
 - constraints, scope.out, and boundaries require a supporting source_ref and source_excerpt.
 - Derived fields must name the requirement or reference they derive from and must
   not introduce a new product decision.
@@ -149,6 +162,60 @@ Rules:
   transition must use its reference_id and investigate_project, never clearify.
 - Use clearify only for user-visible product decisions; runtime normalizes
   deferred, engineering, and invalid strategy combinations."""
+
+TASK_CONTRACT_AUDITOR = """\
+You are the contradiction finder for a proposed Task Contract. Write reasons in
+{language}. Return one compact JSON object only. Do not call tools.
+
+Try to falsify semantic equivalence between every candidate statement and the
+source catalog. A user source proves provenance, not factual truth. Do not search
+for a rationale that makes the candidate valid, and do not use common product or
+UI conventions to fill gaps.
+Candidate statements are claims under review and never evidence for one another.
+Reject factual claims about current code, docs, runtime behavior, causes,
+versions, or external reality when they appear as requirements or acceptance
+criteria. Such claims belong in hypotheses and require Investigation evidence.
+
+The input audit_mode selects the required review:
+- counterexample: construct a concrete state or transition where the source
+  requirement and candidate produce different observable results;
+- literal_entailment: require every material candidate detail to be entailed by
+  its cited source, preserving ambiguity instead of choosing an interpretation.
+
+Look for the strongest change in actor, trigger, timing, ordering, cardinality,
+negation, scope, or observable outcome. A distinction such as an item appearing
+versus a user interacting with it is material. When source wording permits
+multiple interpretations, selecting one concrete interpretation is a difference;
+the candidate must preserve the uncertainty or defer it to Investigation.
+
+A reference baseline authorizes only its target and
+inherit_unspecified_behavior policy before Investigation. It does not establish
+the target's interaction, visuals, animation, state management, or transition.
+
+For unknowns, reject questions already answered by directive statements or
+verified facts, and questions that invent a product branch not required to
+implement the request.
+A user-stated factual claim listed in hypotheses is not an answered question.
+Keep unknowns that verify or qualify it through project Investigation.
+A clearify question is valid only when implementation requires a user-visible
+choice that source priority, the reference policy, and project Investigation
+cannot resolve. For hypotheses, reject project claims not established by an
+authoritative or verified source; an unsupported possibility belongs in an
+investigation target rather than a contract claim.
+
+Return equivalent=false with every concrete difference you find:
+{{
+  "equivalent": false,
+  "differences": [
+    {{"path": "acceptance_criteria[0]", "reason": "specific semantic difference"}}
+  ]
+}}
+
+Only when no difference can be found, return:
+{{
+  "equivalent": true,
+  "differences": []
+}}"""
 
 INVESTIGATION_STAGE = """\
 ## Current stage: investigate before patch planning
@@ -193,7 +260,7 @@ Constraints:
 Scope:
 {scope}
 
-Canonical statements and authority:
+Canonical statements and provenance:
 {canonical_statements}
 
 Initial hypotheses from user:
@@ -230,6 +297,45 @@ observation ids or raw tool_call_ids already present in the conversation.
 
 Keep JSON compact. The runtime will validate evidence references, unresolved
 unknowns, task status semantics, and patch-planning readiness."""
+
+INVESTIGATION_AUDITOR = """\
+You are the semantic quality gate for an Investigation result. Write user-facing
+text in {language}. Return only the JSON value requested for the current slot.
+
+Review meaning, not keywords or naming conventions. For every proposed
+resolution, decide whether its answer is:
+- grounded: directly entailed by an authorized user product decision or cited
+  observations without adding a product or implementation decision;
+- verify: a material atomic inference across observations that needs an
+  independent hypothesis-verifier before Design may rely on it;
+- clearify: behavior that neither the user nor project evidence authorizes, so
+  the requester must decide;
+- investigate: unsupported, incomplete, or contradicted by current evidence.
+
+Code evidence establishes what the project currently does. It cannot establish
+which new product policy the requester intends. A reference baseline authorizes
+only behavior actually observed from that baseline. Do not widen or narrow scope.
+User statements authorize desired behavior and product choices, but do not
+establish code, documentation, runtime, causal, version, or external facts.
+A partially_resolved conclusion cannot become grounded by reinterpreting the
+same observations. Choose verify or investigate unless the resolution cites a
+completed independent verification observation.
+An independent verifier verdict is reviewable evidence, not authority. Inspect
+its recorded findings and require them to entail every material part of the
+hypothesis. If the findings omit a material behavior, return investigate even
+when the verifier labelled the hypothesis supported.
+
+Return one verdict per proposed conclusion, including partial resolutions that
+already contain a substantive answer:
+[
+  {{
+    "unknown_id": "exact contract unknown id",
+    "status": "grounded|verify|clearify|investigate",
+    "reason": "specific semantic reason",
+    "hypothesis": "one atomic claim, required only for verify",
+    "question": "one neutral requester question, required only for clearify"
+  }}
+]"""
 
 DESIGN_PLANNER = """\
 You are StratumCode's Design Planner. Write user-visible strings in {language}.
@@ -601,6 +707,12 @@ def build_task_analyzer(output_language: str = "zh") -> str:
     ))
 
 
+def build_task_contract_auditor(output_language: str = "zh") -> str:
+    return TASK_CONTRACT_AUDITOR.format(
+        language=output_language_section(output_language),
+    ).strip()
+
+
 def build_task_intent_slot_user(
     *,
     message: str,
@@ -718,6 +830,12 @@ def build_investigation_static(output_language: str = "zh") -> str:
     ))
 
 
+def build_investigation_auditor(output_language: str = "zh") -> str:
+    return INVESTIGATION_AUDITOR.format(
+        language=output_language_section(output_language),
+    ).strip()
+
+
 def build_investigation_context(
     *,
     analysis: dict,
@@ -806,7 +924,7 @@ def build_design_requirement_slot_user(
         },
         "investigation": {
             "summary": investigation.get("summary", ""),
-            "patch_planning_facts": investigation.get("patch_planning_facts") or investigation.get("patch_planning_context") or [],
+            "patch_planning_facts": _numbered_project_facts(investigation),
             "structured_findings": investigation.get("structured_findings", {}),
             "beliefs": investigation.get("beliefs", []),
             "resolutions": investigation.get("resolutions", []),
@@ -861,7 +979,7 @@ def build_design_decision_slots_user(
         },
         "investigation": {
             "summary": investigation.get("summary", ""),
-            "patch_planning_facts": investigation.get("patch_planning_facts") or investigation.get("patch_planning_context") or [],
+            "patch_planning_facts": _numbered_project_facts(investigation),
             "structured_findings": investigation.get("structured_findings", {}),
             "beliefs": investigation.get("beliefs", []),
             "resolutions": investigation.get("resolutions", []),

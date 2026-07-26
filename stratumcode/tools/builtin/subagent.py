@@ -60,6 +60,7 @@ subagent_tool = ToolDef(
         "required": ["agent", "task"],
     },
     execute=_subagent,
+    capabilities=("investigation",),
 )
 
 TOOL = subagent_tool

@@ -17,7 +17,7 @@ MODEL_RETRY_STATUS_CODES = {429, 502, 503, 504}
 MODEL_RETRY_DELAYS = (0.5, 1.0)
 MODEL_STREAM_DEADLINE_SECONDS = 180
 OUTPUT_TRUNCATION_REASONS = {"length", "max_tokens", "max_output_tokens", "incomplete"}
-_NON_THINKING_TOOL_CHOICE_MODELS: set[str] = set()
+_NON_THINKING_MODELS: set[str] = set()
 
 
 def start_event(event_id: str, event_type: str, data: dict) -> dict:
@@ -52,8 +52,12 @@ def call_model(
             break
         except HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace")[:1000]
-            if tool_choice is not None and _tool_choice_needs_disabled_thinking(exc.code, detail):
-                _NON_THINKING_TOOL_CHOICE_MODELS.add(_model_key(provider, model))
+            model_key = _model_key(provider, model)
+            if (
+                model_key not in _NON_THINKING_MODELS
+                and _thinking_needs_disabled(exc.code, detail)
+            ):
+                _NON_THINKING_MODELS.add(model_key)
                 continue
             if exc.code not in MODEL_RETRY_STATUS_CODES or _last_attempt(attempt, attempts):
                 raise ValueError(f"provider request failed ({exc.code}): {detail}") from exc
@@ -328,8 +332,8 @@ def _payload(provider: dict, model: str, messages: list[dict], tools, max_tokens
         payload["max_tokens"] = max_tokens
     if tool_choice is not None:
         payload["tool_choice"] = tool_choice
-        if _model_key(provider, model) in _NON_THINKING_TOOL_CHOICE_MODELS:
-            payload["thinking"] = {"type": "disabled"}
+    if _model_key(provider, model) in _NON_THINKING_MODELS:
+        payload["thinking"] = {"type": "disabled"}
     return payload
 
 
@@ -337,9 +341,12 @@ def _model_key(provider: dict, model: str) -> str:
     return f"{provider.get('base_url', '').rstrip('/')}|{model}"
 
 
-def _tool_choice_needs_disabled_thinking(status: int, detail: str) -> bool:
+def _thinking_needs_disabled(status: int, detail: str) -> bool:
     lowered = detail.casefold()
-    return status == 400 and "thinking" in lowered and "tool_choice" in lowered
+    return status == 400 and "thinking" in lowered and (
+        "tool_choice" in lowered
+        or ("reasoning_content" in lowered and "passed back" in lowered)
+    )
 
 
 def _attempt_indexes(limit: int, start: int = 0):
@@ -376,6 +383,8 @@ def assistant_message(message: dict) -> dict:
     for key in ("reasoning_content", "reasoning", "tool_calls"):
         if message.get(key):
             result[key] = message[key]
+    if "reasoning_content" not in result and isinstance(result.get("reasoning"), str):
+        result["reasoning_content"] = result["reasoning"]
     return result
 
 

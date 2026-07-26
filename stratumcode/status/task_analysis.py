@@ -19,7 +19,8 @@ TASK_INTENT_TYPES = {"feature", "bugfix", "refactor", "question", "investigation
 TASK_CERTAINTIES = {"certain", "uncertain", "guess"}
 TASK_CLUE_KINDS = {"file", "line", "symbol", "route", "other"}
 IMPLEMENTATION_INTENT_TYPES = {"feature", "bugfix", "refactor"}
-DEFAULT_TASK_SLOT_ATTEMPTS = 3
+DEFAULT_TASK_SLOT_ATTEMPTS = 2
+TASK_CONTRACT_AUDIT_MODES = ("counterexample", "literal_entailment")
 
 
 def _message_requests_implementation(message: str) -> bool:
@@ -42,6 +43,18 @@ def analyze_task(message: str, context: list[str], workspace_dir: str, session_c
 
     provider = setting["provider"]
     model = setting["model_id"]
+    analyzer_attempts = 0
+
+    def tracked_call_model(
+        provider_setting: dict,
+        model_id: str,
+        messages: list[dict],
+        **kwargs: object,
+    ) -> dict:
+        nonlocal analyzer_attempts
+        analyzer_attempts += 1
+        return call_model(provider_setting, model_id, messages, **kwargs)
+
     analyzer_errors = []
     selected_context = [item for item in context if not _workspace_snapshot_line(str(item))]
     source_catalog = _session_sources(message, selected_context, session_context)
@@ -50,7 +63,7 @@ def analyze_task(message: str, context: list[str], workspace_dir: str, session_c
     intent_slot, errors = _task_slot_json(
         provider,
         model,
-        call_model,
+        tracked_call_model,
         content_text,
         [
             system,
@@ -71,7 +84,7 @@ def analyze_task(message: str, context: list[str], workspace_dir: str, session_c
     acceptance_slot, errors = _task_slot_json(
         provider,
         model,
-        call_model,
+        tracked_call_model,
         content_text,
         [
             system,
@@ -84,14 +97,21 @@ def analyze_task(message: str, context: list[str], workspace_dir: str, session_c
             )},
         ],
         "acceptance_contract",
-        required=lambda data: _canonical_acceptance_present(
-            data,
-            message,
-            source_catalog,
-            canonical_intent,
+        required=lambda data: _acceptance_contract_validation(
+            provider=provider,
+            model=model,
+            call_model=tracked_call_model,
+            content_text=content_text,
+            data=data,
+            message=message,
+            source_catalog=source_catalog,
+            canonical_intent=canonical_intent,
         ),
     )
     analyzer_errors.extend(errors)
+    acceptance_recovered = acceptance_slot is None
+    if acceptance_recovered:
+        acceptance_slot = _requirement_acceptance_fallback(canonical_intent)
     canonical_acceptance = _canonical_analysis(
         message, selected_context, source_catalog, intent_slot or {}, acceptance_slot or {}, {}
     )
@@ -99,7 +119,7 @@ def analyze_task(message: str, context: list[str], workspace_dir: str, session_c
     unknowns_slot, errors = _task_slot_json(
         provider,
         model,
-        call_model,
+        tracked_call_model,
         content_text,
         [
             system,
@@ -115,6 +135,7 @@ def analyze_task(message: str, context: list[str], workspace_dir: str, session_c
         "unknowns",
     )
     analyzer_errors.extend(errors)
+    minimal_recovery_error = ""
     try:
         analysis = _canonical_analysis(
             message,
@@ -126,13 +147,29 @@ def analyze_task(message: str, context: list[str], workspace_dir: str, session_c
         )
     except ValueError as exc:
         analyzer_errors.append(str(exc))
+        minimal_recovery_error = str(exc)
         analysis = _minimal_task_analysis(message, context)
+    _sanitize_optional_contract(
+        provider=provider,
+        model=model,
+        call_model=tracked_call_model,
+        content_text=content_text,
+        source_catalog=source_catalog,
+        analysis=analysis,
+    )
     analysis["model"] = model
     analysis["provider"] = provider["name"]
-    analysis["analyzer_attempts"] = len([item for item in (intent_slot, acceptance_slot, unknowns_slot) if item])
+    analysis["analyzer_attempts"] = analyzer_attempts
+    partial_recovery = intent_slot is None or acceptance_recovered or unknowns_slot is None
     if analyzer_errors:
-        analysis["analyzer_errors"] = analyzer_errors
+        analysis["analyzer_warnings"] = (
+            list(analysis.get("analyzer_warnings", []))
+            + _summarize_analyzer_errors(analyzer_errors)
+        )
+    if partial_recovery:
         analysis["recovered_from_partial_analyzer_output"] = True
+    if minimal_recovery_error:
+        analysis["analyzer_errors"] = [minimal_recovery_error]
         analysis["analyzer_error"] = "minimal recovery: task analyzer slot recovery used runtime defaults for invalid or missing content"
     analysis["evidence_hypothesis"] = _analysis_hypothesis(message, analysis)
     return analysis
@@ -159,14 +196,19 @@ def _task_slot_json(
             if assistant.get("tool_calls"):
                 raise ValueError("tool calls are not allowed")
             data = _json_object(raw)
-            if required and not required(data):
-                raise ValueError("required slot fields are missing")
+            validation = required(data) if required else True
+            if validation is not True:
+                raise ValueError(
+                    validation
+                    if isinstance(validation, str) and validation
+                    else "required slot fields are missing"
+                )
             return data, errors
         except ValueError as exc:
             error = f"{label}: {exc}"
             errors.append(error)
-            LOGGER.warning(
-                "task analyzer slot failed",
+            LOGGER.info(
+                "task analyzer slot candidate rejected",
                 extra={
                     "slot": label,
                     "attempt": attempt,
@@ -191,6 +233,23 @@ def _task_slot_json(
     return None, errors
 
 
+def _summarize_analyzer_errors(errors: list[str]) -> list[str]:
+    grouped: dict[str, list[str]] = {}
+    for error in errors:
+        label, separator, detail = str(error).partition(": ")
+        grouped.setdefault(label if separator else "task_analyzer", []).append(
+            detail if separator else str(error)
+        )
+    return [
+        (
+            f"{label}: {items[0]}"
+            if len(items) == 1
+            else f"{label}: recovered after {len(items)} rejected attempts; last issue: {items[-1]}"
+        )
+        for label, items in grouped.items()
+    ]
+
+
 def _canonical_analysis(
     message: str,
     context: list[str],
@@ -206,13 +265,15 @@ def _canonical_analysis(
 
 
 def _intent_summary_present(data: dict) -> bool:
-    intent = data.get("intent") if isinstance(data.get("intent"), dict) else data
+    nested = data.get("intent")
+    intent: dict = nested if isinstance(nested, dict) else data
     return bool(str(intent.get("summary") or "").strip())
 
 
 def _intent_slot_payload(analysis: dict) -> dict:
     return {
         "intent": analysis.get("intent", {}),
+        "requirements": analysis.get("requirements", []),
         "constraints": analysis.get("constraint_statements", []),
         "clues": analysis.get("clues", []),
         "reference_baselines": analysis.get("reference_baselines", []),
@@ -229,9 +290,26 @@ def _contract_slot_payload(analysis: dict) -> dict:
     }
 
 
+def _requirement_acceptance_fallback(analysis: dict) -> dict:
+    criteria = [
+        {
+            "text": str(item.get("text") or "").strip(),
+            "authority": "derived",
+            "derived_from": [str(item.get("id") or "").strip()],
+        }
+        for item in analysis.get("requirements", [])
+        if isinstance(item, dict)
+        and str(item.get("text") or "").strip()
+        and str(item.get("id") or "").strip()
+    ]
+    return {"acceptance_criteria": criteria}
+
+
 def _analysis_from_slots(message: str, context: list[str], intent_slot: dict, acceptance_slot: dict, unknowns_slot: dict) -> dict:
     fallback = _fallback_task_analysis(message, context)
-    intent_data = intent_slot.get("intent") if isinstance(intent_slot.get("intent"), dict) else intent_slot
+    nested_intent = intent_slot.get("intent")
+    intent_data: dict = nested_intent if isinstance(nested_intent, dict) else intent_slot
+    intent_meta = intent_slot
     acceptance_data = acceptance_slot or {}
     unknown_data = unknowns_slot or {}
     intent_type = str(intent_data.get("intent_type") or intent_data.get("type") or fallback["intent"]["type"]).strip().casefold()
@@ -241,14 +319,15 @@ def _analysis_from_slots(message: str, context: list[str], intent_slot: dict, ac
     acceptance = _runtime_acceptance_slots(acceptance_data, message, context)
     data = {
         "intent": {"type": intent_type, "summary": summary},
+        "requirements": intent_meta.get("requirements", []),
         "acceptance_criteria": acceptance,
         "behavior_contract": _slot_behavior_contract(acceptance_data, fallback),
-        "constraints": _slot_string_list(intent_data.get("constraints"), fallback["constraints"]),
+        "constraints": _slot_string_list(intent_meta.get("constraints"), fallback["constraints"]),
         "scope": _slot_scope(acceptance_data, fallback),
-        "hypotheses": _slot_hypotheses(intent_data.get("hypotheses")),
-        "clues": _unique_clues(_slot_clues(intent_data.get("clues")) + fallback["clues"]),
-        "reference_baselines": intent_data.get("reference_baselines", []),
-        "investigation_targets": intent_data.get("investigation_targets", []),
+        "hypotheses": _slot_hypotheses(intent_meta.get("hypotheses")),
+        "clues": _unique_clues(_slot_clues(intent_meta.get("clues")) + fallback["clues"]),
+        "reference_baselines": intent_meta.get("reference_baselines", []),
+        "investigation_targets": intent_meta.get("investigation_targets", []),
         "unknowns": _runtime_unknowns(unknown_data, acceptance, fallback),
     }
     return data
@@ -300,6 +379,195 @@ def _canonical_acceptance_present(
         "unknowns": [],
     }
     return bool(_ensure_task_contract(probe).get("acceptance_criteria"))
+
+
+def _acceptance_contract_validation(
+    *,
+    provider: dict,
+    model: str,
+    call_model,
+    content_text,
+    data: dict,
+    message: str,
+    source_catalog: list[dict],
+    canonical_intent: dict,
+) -> bool | str:
+    if not _canonical_acceptance_present(
+        data,
+        message,
+        source_catalog,
+        canonical_intent,
+    ):
+        return "required acceptance contract fields are missing"
+    candidate = _canonical_analysis(
+        message,
+        [],
+        source_catalog,
+        _intent_slot_payload(canonical_intent),
+        data,
+        {},
+    )
+    return _semantic_contract_audit(
+        provider=provider,
+        model=model,
+        call_model=call_model,
+        content_text=content_text,
+        payload={
+            "source_catalog": source_catalog,
+            "requirements": canonical_intent.get("requirements", []),
+            "reference_baselines": canonical_intent.get("reference_baselines", []),
+            "candidate_contract": {
+                "acceptance_criteria": candidate.get("acceptance_criteria", []),
+                "behavior_contract": candidate.get("behavior_contract", {}),
+                "scope": candidate.get("scope", {}),
+            },
+        },
+    )
+
+
+def _semantic_contract_audit(
+    *,
+    provider: dict,
+    model: str,
+    call_model,
+    content_text,
+    payload: dict,
+) -> bool | str:
+    for audit_mode in TASK_CONTRACT_AUDIT_MODES:
+        equivalent, issues, error = _task_contract_audit(
+            provider=provider,
+            model=model,
+            call_model=call_model,
+            content_text=content_text,
+            payload=payload,
+            audit_mode=audit_mode,
+        )
+        if error:
+            return error
+        if equivalent and not issues:
+            continue
+        reasons = [
+            f"{item.get('path') or 'contract'}: {item.get('reason') or 'semantic drift'}"
+            for item in issues
+            if isinstance(item, dict)
+        ]
+        return "semantic contract drift: " + (
+            "; ".join(reasons) or "auditor rejected the derived contract"
+        )
+    return True
+
+
+def _sanitize_optional_contract(
+    *,
+    provider: dict,
+    model: str,
+    call_model,
+    content_text,
+    source_catalog: list[dict],
+    analysis: dict,
+) -> None:
+    unknowns = analysis.get("unknowns", [])
+    hypotheses = analysis.get("hypotheses", [])
+    warnings = analysis.setdefault("analyzer_warnings", [])
+    analysis["hypotheses"] = [
+        item for item in hypotheses
+        if item.get("certainty") != "guess"
+    ]
+    for index, item in enumerate(hypotheses):
+        if item.get("certainty") == "guess":
+            warnings.append(
+                f"hypotheses[{index}]: removed because no authoritative source supports it"
+            )
+    if not any(item.get("resolution_strategy") == "clearify" for item in unknowns):
+        return
+    payload = {
+        "source_catalog": source_catalog,
+        "requirements": analysis.get("requirements", []),
+        "hypotheses": analysis.get("hypotheses", []),
+        "reference_baselines": analysis.get("reference_baselines", []),
+        "candidate_contract": {
+            "acceptance_criteria": analysis.get("acceptance_criteria", []),
+            "unknowns": unknowns,
+        },
+    }
+    reviews = []
+    for audit_mode in TASK_CONTRACT_AUDIT_MODES:
+        _equivalent, issues, error = _task_contract_audit(
+            provider=provider,
+            model=model,
+            call_model=call_model,
+            content_text=content_text,
+            payload=payload,
+            audit_mode=audit_mode,
+        )
+        if error:
+            warnings.append(f"optional contract review skipped: {error}")
+            return
+        reviews.append({
+            match.group(0): str(item.get("reason") or "semantic drift")
+            for item in issues
+            if isinstance(item, dict)
+            and (match := re.match(
+                r"^unknowns\[\d+\]",
+                str(item.get("path") or ""),
+            ))
+        })
+    rejected = set.union(*(set(review) for review in reviews))
+    rejected_unknowns = {
+        int(match.group(1))
+        for path in rejected
+        if (match := re.fullmatch(r"unknowns\[(\d+)\]", path))
+    }
+    analysis["unknowns"] = [
+        {**item, "id": f"U{new_index}"}
+        for new_index, (old_index, item) in enumerate(
+            (
+                (index, item)
+                for index, item in enumerate(unknowns)
+                if index not in rejected_unknowns
+            ),
+            start=1,
+        )
+    ]
+    for path in sorted(rejected):
+        reason = next(review[path] for review in reviews if path in review)
+        warnings.append(f"{path}: removed after semantic review: {reason}")
+
+
+def _task_contract_audit(
+    *,
+    provider: dict,
+    model: str,
+    call_model,
+    content_text,
+    payload: dict,
+    audit_mode: str,
+) -> tuple[bool, list[dict], str]:
+    assistant = call_model(
+        provider,
+        model,
+        [
+            {
+                "role": "system",
+                "content": prompt.build_task_contract_auditor(
+                    app_settings.get_output_language()
+                ),
+            },
+            {"role": "user", "content": json.dumps({
+                "audit_mode": audit_mode,
+                **payload,
+            }, ensure_ascii=False)},
+        ],
+        tools=[],
+    )
+    try:
+        audit = _json_object(content_text(assistant.get("content")))
+    except ValueError as exc:
+        return False, [], f"semantic contract audit was invalid: {exc}"
+    issues = audit.get("differences", audit.get("issues"))
+    issues = issues if isinstance(issues, list) else []
+    equivalent = audit.get("equivalent", audit.get("valid"))
+    return equivalent is True, issues, ""
 
 
 def _runtime_unknowns(data: dict, acceptance: list[dict], fallback: dict) -> list[dict]:
@@ -621,8 +889,9 @@ def _unique_clues(items: list[dict]) -> list[dict]:
 
 
 def _analysis_hypothesis(message: str, analysis: dict) -> str:
-    if analysis["hypotheses"]:
-        return analysis["hypotheses"][0]["text"]
+    for hypothesis in analysis["hypotheses"]:
+        if hypothesis.get("certainty") != "guess":
+            return hypothesis["text"]
     return ""
 
 

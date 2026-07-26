@@ -114,6 +114,7 @@ def handle(run):
         findings=run.findings,
         previous_observations=previous_observations,
         previous_knowledge=previous_knowledge,
+        previous_findings=run.last_investigation,
     ):
         if event.get("event") == "task_update":
             applied = _apply_task_updates(
@@ -213,7 +214,8 @@ def _investigation_allows_patch(investigation: dict) -> bool:
         return False
     if _has_task_status(investigation, "unknown"):
         return False
-    step = investigation.get("step_result") if isinstance(investigation.get("step_result"), dict) else {}
+    raw_step = investigation.get("step_result")
+    step: dict = raw_step if isinstance(raw_step, dict) else {}
     return bool(investigation.get("ready_for_patch_planning") or step.get("next_step") == "write_code")
 
 

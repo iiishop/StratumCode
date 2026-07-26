@@ -190,7 +190,7 @@ const activeTaskAnalysis = computed(() => taskAnalyses[taskAnalyses.length - 1] 
 const visibleSubagents = computed(() => {
   const byName = new Map()
   for (const agent of availableSubagents) byName.set(agent.name, agent)
-  for (const agent of subagentRuns) if (!byName.has(agent.name)) byName.set(agent.name, agent)
+  for (const agent of subagentRuns) byName.set(agent.name, agent)
   return [...byName.values()]
 })
 const sessionName = computed(() => props.session?.name || 'New session')
@@ -537,8 +537,8 @@ function animSmoothScroll() {
 function scrollBottom() { if (msgList.value) msgList.value.scrollTop = msgList.value.scrollHeight }
 
 function upsertSubagent(data) {
-  const existing = [...availableSubagents, ...subagentRuns].find(agent =>
-    (data.id && agent.id === data.id) || (data.name && agent.name === data.name)
+  const existing = subagentRuns.find(agent =>
+    (data.id && agent.id === data.id) || (!data.id && data.name && agent.name === data.name)
   )
   if (existing) {
     Object.assign(existing, data)
@@ -595,9 +595,9 @@ function onAgentPacket(packet, type, data) {
     addUsage(data.delta)
     agentStatus.contextUsed = data.delta?.input_tokens || agentStatus.contextUsed
   } else if (packet.op === 'start' && type === 'subagent') {
-    upsertSubagent(data)
+    upsertSubagent({ id: packet.id, ...data })
   } else if (packet.op === 'update' && type === 'subagent') {
-    upsertSubagent(data)
+    upsertSubagent({ id: packet.id, ...data })
   } else if (packet.op === 'update' && type === 'stage' && data?.phase) {
     const run = currentEvidenceRun()
     if (run) run.phase = data.phase

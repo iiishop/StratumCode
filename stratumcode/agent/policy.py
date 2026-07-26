@@ -46,7 +46,7 @@ class EvidencePolicy:
 
         if self.checkpoint_due:
             return (
-                self._working_tools(available_discovery),
+                ("record_evidence",),
                 "required",
                 prompt.EVIDENCE_CHECKPOINT_INSTRUCTION,
             )

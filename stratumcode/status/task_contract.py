@@ -6,11 +6,6 @@ from .. import app_settings
 
 TASK_AUTHORITIES = {"user_explicit", "user_reference", "verified_fact", "derived"}
 AUTHORITATIVE_AUTHORITIES = {"user_explicit", "user_reference"}
-PRODUCT_DECISION_TERMS = {
-    "animation", "animate", "transition duration", "persist", "persistence", "localstorage",
-    "toast", "error message", "click title", "click button", "delete", "drag", "sort",
-    "动画", "持久化", "错误提示", "点击标题", "点击按钮", "删除", "拖拽", "排序",
-}
 TASK_UNKNOWN_TYPES = {
     "code_fact",
     "doc_fact",
@@ -318,29 +313,44 @@ def _canonicalize_task_contract(analysis: dict) -> None:
     }
     warnings = analysis.setdefault("analyzer_warnings", [])
     origin = str(analysis.get("origin_message") or sources.get("SRC1", {}).get("text") or "").strip()
-    requirements = [{
-        "id": "REQ1",
-        "text": origin,
-        "authority": "user_explicit",
-        "source_refs": ["SRC1"],
-        "derived_from": [],
-    }] if origin else []
+    raw_requirements, factual_claims = _partition_user_requirements(
+        analysis.get("requirements")
+    )
+    requirements = _canonical_statements(
+        raw_requirements,
+        "requirement",
+        sources,
+        warnings,
+        authoritative=True,
+    )
+    if not requirements and origin and not factual_claims:
+        requirements = [{
+            "text": origin,
+            "authority": "user_explicit",
+            "source_refs": ["SRC1"],
+            "derived_from": [],
+        }]
+    requirements = [
+        {"id": f"REQ{index}", **item}
+        for index, item in enumerate(requirements, start=1)
+    ]
     analysis["requirements"] = requirements
-    intent = analysis.get("intent") if isinstance(analysis.get("intent"), dict) else {}
+    requirement_id_list = [item["id"] for item in requirements]
+    requirement_ids = set(requirement_id_list)
     intent_statements = _canonical_statements(
-        [{"text": intent.get("summary", ""), "derived_from": ["REQ1"]}],
+        [{"text": origin, "derived_from": requirement_id_list}],
         "intent.summary",
         sources,
         warnings,
-        valid_derived_ids={"REQ1"},
+        valid_derived_ids=requirement_ids,
     )
     if not intent_statements and origin:
         intent_statements = _canonical_statements(
-            [{"text": origin[:160], "derived_from": ["REQ1"]}],
+            [{"text": origin[:160], "derived_from": requirement_id_list}],
             "intent.summary",
             sources,
             warnings,
-            valid_derived_ids={"REQ1"},
+            valid_derived_ids=requirement_ids,
         )
     analysis["intent_statement"] = intent_statements[0] if intent_statements else {}
     if intent_statements:
@@ -374,6 +384,17 @@ def _canonicalize_task_contract(analysis: dict) -> None:
             "source_excerpt": excerpt,
         })
     analysis["reference_baselines"] = references
+    hypotheses = analysis.setdefault("hypotheses", [])
+    known_hypotheses = {
+        _normalized(str(item.get("text") or ""))
+        for item in hypotheses
+        if isinstance(item, dict)
+    }
+    hypotheses.extend(
+        {"text": text, "certainty": "uncertain"}
+        for text in factual_claims
+        if _normalized(text) not in known_hypotheses
+    )
     for hypothesis in analysis.get("hypotheses", []):
         text = str(hypothesis.get("text") or "") if isinstance(hypothesis, dict) else ""
         if text and not _matching_source_refs(text, sources, user_only=True):
@@ -387,8 +408,8 @@ def _canonicalize_task_contract(analysis: dict) -> None:
 
     criteria = _canonical_statements(
         analysis.get("acceptance_criteria"), "acceptance_criteria", sources, warnings,
-        default_derived_from=["REQ1"],
-        valid_derived_ids={"REQ1", *(item["id"] for item in references)},
+        default_derived_from=requirement_id_list,
+        valid_derived_ids={*requirement_ids, *(item["id"] for item in references)},
     )
     analysis["acceptance_criteria"] = [
         {"id": f"AC{index}", **item}
@@ -401,8 +422,8 @@ def _canonicalize_task_contract(analysis: dict) -> None:
     for field in ("inputs", "outputs", "success_behaviors"):
         behavior_statements[field] = _canonical_statements(
             behavior.get(field), f"behavior_contract.{field}", sources, warnings,
-            default_derived_from=["REQ1"],
-            valid_derived_ids={"REQ1", *(item["id"] for item in references)},
+            default_derived_from=requirement_id_list,
+            valid_derived_ids={*requirement_ids, *(item["id"] for item in references)},
         )
     for field in ("failure_behaviors", "boundaries"):
         behavior_statements[field] = _canonical_statements(
@@ -419,14 +440,14 @@ def _canonicalize_task_contract(analysis: dict) -> None:
     scope_statements = {
         "in": _canonical_statements(
             raw_scope.get("in"), "scope.in", sources, warnings,
-            default_derived_from=["REQ1"], valid_derived_ids={"REQ1"},
+            default_derived_from=requirement_id_list, valid_derived_ids=requirement_ids,
         ),
         "out": _canonical_statements(
             raw_scope.get("out"), "scope.out", sources, warnings, authoritative=True
         ),
         "undecided": _canonical_statements(
             raw_scope.get("undecided"), "scope.undecided", sources, warnings,
-            default_derived_from=["REQ1"], valid_derived_ids={"REQ1"},
+            default_derived_from=requirement_id_list, valid_derived_ids=requirement_ids,
         ),
     }
     out_text = {_normalized(item["text"]) for item in scope_statements["out"]}
@@ -442,11 +463,15 @@ def _canonicalize_task_contract(analysis: dict) -> None:
 
     clues, rejected = _canonical_clues(analysis.get("clues"), sources, warnings)
     analysis["clues"] = clues
-    targets = [
+    raw_targets = [
         str(item.get("text") or "").strip() if isinstance(item, dict) else str(item).strip()
         for item in analysis.get("investigation_targets", [])
     ]
-    targets = [item for item in targets if item]
+    targets = (
+        ["Locate the existing code path responsible for the requested behavior."]
+        if any(raw_targets)
+        else []
+    )
     if rejected and not targets:
         targets = ["Locate the existing code path responsible for the requested behavior."]
     analysis["investigation_targets"] = targets
@@ -471,6 +496,21 @@ def _canonicalize_task_contract(analysis: dict) -> None:
     analysis["_canonicalized"] = True
 
 
+def _partition_user_requirements(value: object) -> tuple[object, list[str]]:
+    if not isinstance(value, list):
+        return value, []
+    directives = []
+    factual_claims = []
+    for item in value:
+        if isinstance(item, dict) and item.get("role") == "factual_claim":
+            text = str(item.get("text") or item.get("description") or "").strip()
+            if text:
+                factual_claims.append(text)
+            continue
+        directives.append(item)
+    return directives, factual_claims
+
+
 def _canonical_statements(
     value,
     field: str,
@@ -487,6 +527,7 @@ def _canonical_statements(
         warnings.append(f"{field}: removed invalid non-array value")
         return []
     items = []
+    seen = set()
     for raw in value:
         data = raw if isinstance(raw, dict) else {"text": raw}
         text = str(data.get("text") or data.get("description") or "").strip()
@@ -503,7 +544,8 @@ def _canonical_statements(
             if authority not in AUTHORITATIVE_AUTHORITIES or not _refs_support(source_refs, excerpt, sources):
                 warnings.append(f"{field}: removed unsupported statement {text}")
                 continue
-            text = excerpt
+            if not _refs_support(source_refs, text, sources):
+                text = excerpt
             derived_from = []
         else:
             authority = "derived"
@@ -521,10 +563,11 @@ def _canonical_statements(
             if not derived_from:
                 warnings.append(f"{field}: removed statement without valid derived_from {text}")
                 continue
-            if _introduces_product_decision(text, sources, derived_from):
-                warnings.append(f"{field}: removed ungrounded product decision {text}")
-                continue
             source_refs = []
+        key = _normalized(text)
+        if key in seen:
+            continue
+        seen.add(key)
         items.append({
             "text": text,
             "authority": authority,
@@ -653,15 +696,6 @@ def _source_contains(source: dict, text: str) -> bool:
     if not needle:
         return False
     return needle in haystack or needle.replace(" ", "") in haystack.replace(" ", "")
-
-
-def _introduces_product_decision(
-    text: str, sources: dict[str, dict], derived_from: list[str]
-) -> bool:
-    normalized = _normalized(text)
-    grounding = [sources["SRC1"]] if "REQ1" in derived_from and "SRC1" in sources else []
-    source_text = _normalized(" ".join(str(item.get("text") or "") for item in grounding))
-    return any(_normalized(term) in normalized and _normalized(term) not in source_text for term in PRODUCT_DECISION_TERMS)
 
 
 def _normalized(value: str) -> str:

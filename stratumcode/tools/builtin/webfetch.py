@@ -140,6 +140,7 @@ webfetch_tool = ToolDef(
         "required": ["url"],
     },
     execute=_webfetch,
+    capabilities=("investigation",),
 )
 
 TOOL = webfetch_tool

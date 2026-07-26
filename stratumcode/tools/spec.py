@@ -28,6 +28,7 @@ class ToolDef:
     description: str
     parameters: dict[str, Any]  # JSON Schema object
     execute: Callable[..., Any]  # async (params: dict, ctx: dict) -> ToolResult
+    capabilities: tuple[str, ...] = ()
 
     def to_json(self) -> dict:
         return {

@@ -86,7 +86,6 @@ def hypothesis_verify_stream(task: str, workspace_dir: str = ".") -> Iterator[di
             "status": "error",
             "result": str(exc),
         }}
-        yield {"op": "error", "message": str(exc)}
         yield {"op": "done", "error": str(exc)}
 
 

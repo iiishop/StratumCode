@@ -130,6 +130,7 @@ read_tool = ToolDef(
         "required": ["path"],
     },
     execute=_read,
+    capabilities=("investigation", "investigation.project_evidence"),
 )
 
 TOOL = read_tool

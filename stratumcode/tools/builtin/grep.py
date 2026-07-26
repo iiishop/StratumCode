@@ -98,6 +98,7 @@ grep_tool = ToolDef(
         },
     },
     execute=_grep,
+    capabilities=("investigation", "investigation.project_evidence"),
 )
 
 TOOL = grep_tool

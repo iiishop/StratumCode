@@ -403,6 +403,7 @@ code_nav_tool = ToolDef(
         "required": ["operation", "path"],
     },
     execute=_code_nav,
+    capabilities=("investigation", "investigation.project_evidence"),
 )
 
 TOOL = code_nav_tool

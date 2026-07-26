@@ -42,6 +42,7 @@ glob_tool = ToolDef(
         "required": ["pattern"],
     },
     execute=_glob,
+    capabilities=("investigation", "investigation.project_evidence"),
 )
 
 TOOL = glob_tool

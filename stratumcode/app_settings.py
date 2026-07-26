@@ -15,6 +15,7 @@ ROUND_LIMITS = {
     "task_analyzer_attempts": {
         "label": "Task analyzer attempts",
         "description": "Retry count for turning the user request into structured task JSON.",
+        "default": 2,
     },
     "model_request_attempts": {
         "label": "Model request attempts",
