@@ -128,6 +128,7 @@ def investigation_stream(
     verification_queue: list[dict] = []
     attempted_verifications: set[tuple[str, str]] = set()
     clearify_questions: dict[str, str] = {}
+    semantic_repair_required_ids = _semantic_repair_resolution_ids(recorded_findings)
     last_quality_audit: dict = {}
 
     for round_index in _round_indexes(max_rounds, start=0):
@@ -142,6 +143,10 @@ def investigation_stream(
         )
         verification_request = verification_queue[0] if verification_queue else None
         resolution_required_ids = _unknowns_needing_resolution(recorded_findings, observations, analysis)
+        resolution_required_ids = _dedupe_strings([
+            *resolution_required_ids,
+            *sorted(semantic_repair_required_ids),
+        ])
         if clearify_unknown:
             messages.append({"role": "user", "content": _clearify_required_prompt(clearify_unknown)})
             current_tools = [
@@ -161,6 +166,24 @@ def investigation_stream(
                 if ((tool.get("function") or {}).get("name") or "") == "subagent"
             ]
             current_tool_choice = {"type": "function", "function": {"name": "subagent"}}
+        elif semantic_repair_required_ids:
+            reasons = {
+                str(item.get("unknown_id") or ""): str(item.get("reason") or "")
+                for item in recorded_findings.get("resolutions", [])
+                if isinstance(item, dict)
+                and str(item.get("unknown_id") or "") in semantic_repair_required_ids
+            }
+            messages.append({"role": "user", "content": (
+                "The semantic quality gate rejected these recorded resolutions. "
+                "Call record_investigation_findings now to replace only these resolutions "
+                "with claims supported by the observations; finish_investigation is not "
+                f"allowed until they pass: {json.dumps(reasons, ensure_ascii=False)}"
+            )})
+            current_tools = [_record_findings_tool_schema()]
+            current_tool_choice = {
+                "type": "function",
+                "function": {"name": "record_investigation_findings"},
+            }
         elif _recorded_resolves_initial_unknowns(recorded_findings, analysis):
             current_tools = [_finish_tool_schema()]
             current_tool_choice = {"type": "function", "function": {"name": "finish_investigation"}}
@@ -249,6 +272,30 @@ def investigation_stream(
                         or "Independently verify the material investigation inference.",
                     }
                 if name not in allowed_tool_names:
+                    if _recorded_resolves_initial_unknowns(recorded_findings, analysis):
+                        output = json.dumps({
+                            "error": "investigation_already_resolved",
+                            "retryable": True,
+                            "required_tool": "finish_investigation",
+                            "message": (
+                                "All initial unknowns are resolved. Call finish_investigation now; "
+                                "do not repeat discovery or recording tools."
+                            ),
+                        }, ensure_ascii=False)
+                        yield start_event(call_id, _tool_event_type(name), {
+                            "name": name or "invalid",
+                            "description": "Investigation tool",
+                            "status": "error",
+                            "open": False,
+                            "input": json.dumps(arguments, ensure_ascii=False, indent=2),
+                            "output": output,
+                        })
+                        messages.append({
+                            "role": "tool",
+                            "tool_call_id": call_id,
+                            "content": output,
+                        })
+                        continue
                     if resolution_required_ids:
                         output = json.dumps({
                             "error": "resolution_required",
@@ -365,6 +412,10 @@ def investigation_stream(
                         continue
                     _require_finding_fields(arguments)
                     recorded_findings = _merge_recorded_findings(recorded_findings, arguments)
+                    recorded_findings = _bind_grounding_evidence(
+                        recorded_findings,
+                        observations,
+                    )
                     pending_observation_ids.clear()
                     if analysis.get("_canonicalized"):
                         last_quality_audit = yield from _audit_recorded_findings(
@@ -384,6 +435,10 @@ def investigation_stream(
                         recorded_findings, requests, questions = _apply_investigation_audit(
                             recorded_findings,
                             last_quality_audit,
+                            observations=observations,
+                        )
+                        semantic_repair_required_ids = _semantic_repair_resolution_ids(
+                            recorded_findings,
                         )
                         known_requests = {
                             (item.get("unknown_id"), item.get("hypothesis"))
@@ -445,6 +500,10 @@ def investigation_stream(
                         recorded_findings, requests, questions = _apply_investigation_audit(
                             recorded_findings,
                             last_quality_audit,
+                            observations=observations,
+                        )
+                        semantic_repair_required_ids = _semantic_repair_resolution_ids(
+                            recorded_findings,
                         )
                         attempted = attempted_verifications | {
                             (item.get("unknown_id"), item.get("hypothesis"))
@@ -1903,6 +1962,10 @@ def _finalize_investigation(
                     recorded_findings or _empty_recorded_findings(),
                     record_arguments,
                 )
+                recorded_findings = _bind_grounding_evidence(
+                    recorded_findings,
+                    observations or [],
+                )
                 if (analysis or {}).get("_canonicalized"):
                     quality_audit = yield from _audit_recorded_findings(
                         provider=provider,
@@ -1921,6 +1984,7 @@ def _finalize_investigation(
                     recorded_findings, _, _ = _apply_investigation_audit(
                         recorded_findings,
                         quality_audit,
+                        observations=observations or [],
                     )
                 messages.append({
                     "role": "tool",
@@ -2000,8 +2064,8 @@ def _finalize_investigation(
                         "role": "user",
                         "content": _resolution_repair_prompt(final["resolution_repair"]),
                     })
-                    continue
-                return final
+                else:
+                    return final
         elif content:
             last_error = "Investigation finalization must use record_investigation_findings and finish_investigation tool calls."
         else:
@@ -2139,10 +2203,24 @@ def _finalization_progress_score(
 def _runtime_patch_facts(observations: list[dict], recorded_findings: dict) -> list[str]:
     facts = []
     for belief in recorded_findings.get("beliefs", []):
-        if isinstance(belief, dict) and _belief_text(belief):
+        if (
+            isinstance(belief, dict)
+            and belief.get("status") in {"supported", "strongly_supported", "runtime_confirmed"}
+            and belief.get("evidence")
+            and _belief_text(belief)
+        ):
             facts.append(_belief_text(belief))
     for resolution in recorded_findings.get("resolutions", []):
-        if isinstance(resolution, dict) and resolution.get("answer"):
+        if (
+            isinstance(resolution, dict)
+            and resolution.get("status") == "resolved"
+            and resolution.get("answer")
+            and (
+                resolution.get("evidence")
+                or resolution.get("belief_ids")
+                or resolution.get("reason") == CLEARIFY_RESOLUTION_REASON
+            )
+        ):
             facts.append(str(resolution["answer"]))
     for item in observations:
         if isinstance(item, dict) and item.get("summary"):
@@ -2766,8 +2844,39 @@ def _continued_recorded_findings(previous: dict | None, observations: list[dict]
 def _apply_investigation_audit(
     recorded: dict,
     audit: dict,
+    *,
+    observations: list[dict] | None = None,
 ) -> tuple[dict, list[dict], dict[str, str]]:
     result = {field: list(recorded.get(field, [])) for field in FINDING_FIELDS}
+    beliefs = [dict(item) for item in result["beliefs"] if isinstance(item, dict)]
+    result["beliefs"] = beliefs
+    for belief in beliefs:
+        if belief.get("status") not in {"supported", "strongly_supported", "runtime_confirmed"}:
+            continue
+        unsupported = _unsupported_grounding_literals(
+            {
+                "answer": belief.get("statement", ""),
+                "evidence": belief.get("evidence", []),
+            },
+            _empty_recorded_findings(),
+            observations or [],
+        )
+        supporting_ids = _supporting_observation_ids(unsupported, observations or [])
+        if supporting_ids:
+            belief["evidence"] = _dedupe_strings([
+                *_reference_list(belief.get("evidence")),
+                *supporting_ids,
+            ])
+            unsupported = _unsupported_grounding_literals(
+                {
+                    "answer": belief.get("statement", ""),
+                    "evidence": belief.get("evidence", []),
+                },
+                _empty_recorded_findings(),
+                observations or [],
+            )
+        if unsupported:
+            belief["status"] = "unverified"
     resolutions = [dict(item) for item in result["resolutions"] if isinstance(item, dict)]
     by_id = {
         str(item.get("unknown_id") or "").strip(): item
@@ -2789,10 +2898,32 @@ def _apply_investigation_audit(
         status = str(verdict.get("status") or "").strip()
         reason = str(verdict.get("reason") or "").strip()
         if status == "grounded":
-            resolution["status"] = "resolved"
-            if reason:
-                resolution["reason"] = reason
-            continue
+            unsupported = _unsupported_grounding_literals(
+                resolution,
+                result,
+                observations or [],
+            )
+            supporting_ids = _supporting_observation_ids(unsupported, observations or [])
+            if supporting_ids:
+                resolution["evidence"] = _dedupe_strings([
+                    *_reference_list(resolution.get("evidence")),
+                    *supporting_ids,
+                ])
+                unsupported = _unsupported_grounding_literals(
+                    resolution,
+                    result,
+                    observations or [],
+                )
+            if not unsupported:
+                resolution["status"] = "resolved"
+                if reason:
+                    resolution["reason"] = reason
+                continue
+            status = "investigate"
+            reason = (
+                "Cited observations do not contain the claimed code literal(s): "
+                + ", ".join(unsupported)
+            )
         if status == "verify":
             hypothesis = str(verdict.get("hypothesis") or "").strip()
             if hypothesis:
@@ -2817,6 +2948,138 @@ def _apply_investigation_audit(
         resolution["reason"] = reason or "The semantic audit found insufficient evidence."
     result["resolutions"] = resolutions
     return result, verification_requests, clearify_questions
+
+
+def _unsupported_grounding_literals(
+    resolution: dict,
+    recorded: dict,
+    observations: list[dict],
+) -> list[str]:
+    evidence_ids = set(_reference_list(resolution.get("evidence")))
+    belief_ids = set(_reference_list(resolution.get("belief_ids")))
+    claims = [str(resolution.get("answer") or "")]
+    for belief in recorded.get("beliefs", []):
+        if isinstance(belief, dict) and str(belief.get("id") or "") in belief_ids:
+            evidence_ids.update(_reference_list(belief.get("evidence")))
+            claims.append(str(belief.get("statement") or ""))
+    evidence = "\n".join(
+        str(item.get("evidence_excerpt") or item.get("summary") or "")
+        for item in observations
+        if isinstance(item, dict) and str(item.get("id") or "") in evidence_ids
+    )
+    normalized_evidence = re.sub(r"\s+", "", evidence)
+    literals = _grounding_code_literals("\n".join(claims))
+    return _dedupe_strings([
+        literal
+        for literal in literals
+        if _is_grounding_code_literal(literal)
+        and re.sub(r"\s+", "", literal) not in normalized_evidence
+    ])
+
+
+def _semantic_repair_resolution_ids(recorded: dict) -> set[str]:
+    return {
+        str(item.get("unknown_id") or "")
+        for item in recorded.get("resolutions", [])
+        if isinstance(item, dict)
+        and item.get("status") == "partially_resolved"
+        and str(item.get("unknown_id") or "")
+    }
+
+
+def _grounding_code_literals(value: str) -> list[str]:
+    quoted = [
+        literal
+        for literal in re.findall(r"`([^`\r\n]+)`", value)
+        if len(literal) <= 80
+        and "..." not in literal
+        and not literal.lstrip().startswith("<")
+    ]
+    return [
+        literal
+        for literal in _dedupe_strings([
+            *quoted,
+            *re.findall(
+                r"""\bv-(?:if|show|for|else-if|else|bind|on|model|html|text|slot|pre|cloak|once|memo)"""
+                r"""(?:\s*=\s*(?:"[^"\r\n]*"|'[^'\r\n]*'))?""",
+                value,
+            ),
+            *re.findall(
+                r"\b[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*\([^()\r\n]*\)",
+                value,
+            ),
+            *re.findall(r"\b[a-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)+\b", value),
+        ])
+        if not _code_literal_is_negated(value, literal)
+    ]
+
+
+def _code_literal_is_negated(value: str, literal: str) -> bool:
+    positions = [match.start() for match in re.finditer(re.escape(literal), value)]
+    return bool(positions) and all(
+        re.search(
+            r"(?:非|无|没有|不存在|\bnot|\bno)\s*[\(（]?\s*$",
+            value[max(0, index - 12):index].casefold(),
+        )
+        for index in positions
+    )
+
+
+def _bind_grounding_evidence(recorded: dict, observations: list[dict]) -> dict:
+    for field, text_field in (("beliefs", "statement"), ("resolutions", "answer")):
+        for item in recorded.get(field, []):
+            if not isinstance(item, dict):
+                continue
+            supporting_ids = _supporting_observation_ids(
+                _grounding_code_literals(str(item.get(text_field) or "")),
+                observations,
+            )
+            if supporting_ids:
+                item["evidence"] = _dedupe_strings([
+                    *_reference_list(item.get("evidence")),
+                    *supporting_ids,
+                ])
+    return recorded
+
+
+def _supporting_observation_ids(
+    literals: list[str],
+    observations: list[dict],
+) -> list[str]:
+    if not literals:
+        return []
+    result = []
+    for literal in literals:
+        normalized = re.sub(r"\s+", "", literal)
+        matches = [
+            str(item.get("id") or "")
+            for item in observations
+            if isinstance(item, dict)
+            and str(item.get("id") or "")
+            and normalized in re.sub(
+                r"\s+",
+                "",
+                "\n".join((
+                    str(item.get("evidence_excerpt") or ""),
+                    str(item.get("summary") or ""),
+                )),
+            )
+        ]
+        if not matches:
+            return []
+        result.extend(matches)
+    return _dedupe_strings(result)
+
+
+def _is_grounding_code_literal(value: str) -> bool:
+    if value.casefold().endswith((".css", ".html", ".js", ".json", ".jsx", ".md", ".py", ".ts", ".tsx", ".vue")):
+        return False
+    return value.startswith(("v-if", "v-show", "@")) or any(
+        marker in value
+        for marker in ("=", "<", ">", "(", ")", "{", "}", "[", "]", "/", "\\")
+    ) or bool(
+        re.fullmatch(r"[a-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)+", value)
+    )
 
 
 def _audit_covers_resolutions(
@@ -2894,21 +3157,25 @@ def _record_task_updates(arguments: dict) -> list[dict]:
 
 
 def _finish_arguments(recorded: dict, finish: dict) -> dict:
+    facts = _runtime_patch_facts([], recorded)
+    summary = "\n\n".join(
+        str(item.get("answer") or "").strip()
+        for item in recorded.get("resolutions", [])
+        if isinstance(item, dict)
+        and item.get("status") == "resolved"
+        and str(item.get("answer") or "").strip()
+    )
     combined: dict = {
         field: list(recorded.get(field, []))
         for field in FINDING_FIELDS
     }
     combined.update({
-        "summary": str(finish.get("summary") or "").strip(),
+        "summary": summary or str(finish.get("summary") or "").strip(),
         "ready_for_patch_planning": _recommended_next_step(finish) == "patch_planning",
         "recommended_next_step": _recommended_next_step(finish),
+        "patch_planning_facts": facts,
+        "patch_planning_context": facts,
     })
-    facts = finish.get("patch_planning_facts")
-    context = finish.get("patch_planning_context")
-    if facts is not None:
-        combined["patch_planning_facts"] = facts
-    if context is not None:
-        combined["patch_planning_context"] = context
     return combined
 
 

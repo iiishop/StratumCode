@@ -993,6 +993,57 @@ def build_design_decision_slots_user(
     }, ensure_ascii=False, indent=2)
 
 
+def build_design_decision_repair_slot_user(
+    message: str,
+    analysis: dict,
+    investigation: dict,
+    workspace_dir: str,
+    *,
+    requirement_slots: list[int],
+    reference_slots: list[int],
+    semantic_issues: list[str],
+) -> str:
+    return json.dumps({
+        "platform": platform.system(),
+        "workspace_root": workspace_dir,
+        "user_request": message,
+        "output_contract": "one_design_decision_content_item",
+        "runtime_slot": {
+            "requirement_slots": requirement_slots,
+            "reference_slots": reference_slots,
+            "semantic_issues": semantic_issues,
+        },
+        "instruction": (
+            "Return one design decision covering every bound requirement and reference slot. "
+            "Runtime owns those slot bindings; do not return ids or slot arrays."
+        ),
+        "task": {
+            "intent": analysis.get("intent", {}),
+            "acceptance_criteria": analysis.get("acceptance_criteria", []),
+            "reference_baselines": analysis.get("reference_baselines", []),
+            "canonical_statements": analysis.get("statements", []),
+        },
+        "investigation": {
+            "summary": investigation.get("summary", ""),
+            "patch_planning_facts": _numbered_project_facts(investigation),
+            "beliefs": investigation.get("beliefs", []),
+            "resolutions": investigation.get("resolutions", []),
+        },
+        "output_shape": {
+            "decision": "chosen design",
+            "because": ["requirement reason", "grounded project fact"],
+            "data_boundary": {
+                "changes": False,
+                "owner": "",
+                "producers": [],
+                "consumers": [],
+                "contract": "",
+            },
+            "variant_strategy": "",
+        },
+    }, ensure_ascii=False, indent=2)
+
+
 def build_patch_planner_system(language: str) -> str:
     return PATCH_PLANNER.format(language=language) + "\n"
 

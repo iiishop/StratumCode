@@ -101,11 +101,6 @@ def patch_planning_stream(
     )
     for index, decision in enumerate(decisions, start=1):
         if revision_ids is not None and str(decision.get("id") or "") not in revision_ids:
-            skipped_decision_slots.append({
-                "decision_slot": index,
-                "reason": "Runtime preserved this already implemented decision during validation revision.",
-                "project_fact_slots": _validation_fact_slots(facts) or list(range(1, len(facts) + 1)),
-            })
             continue
         messages = [
             system,
@@ -416,7 +411,18 @@ def validate_patch_plan(plan: dict, analysis: dict, design_plan: dict, workspace
     unknown_skipped_decisions = sorted(skipped_decision_ids - decision_ids)
     if unknown_skipped_decisions:
         issues.append("runtime_skipped_decisions references unknown design decisions: " + ", ".join(unknown_skipped_decisions))
-    required_decision_ids = decision_ids - skipped_decision_ids
+    if "runtime_revision_decision_ids" in design_plan:
+        revision_decision_ids = set(_strings(design_plan.get("runtime_revision_decision_ids")))
+        unknown_revision_decisions = sorted(revision_decision_ids - decision_ids)
+        if unknown_revision_decisions:
+            issues.append(
+                "runtime_revision_decision_ids references unknown design decisions: "
+                + ", ".join(unknown_revision_decisions)
+            )
+        required_decision_ids = decision_ids & revision_decision_ids
+    else:
+        required_decision_ids = decision_ids
+    required_decision_ids -= skipped_decision_ids
     requirement_ids = {
         str(item.get("id") or "").strip()
         for item in design_plan.get("requirement_model", [])
@@ -728,19 +734,6 @@ def _skipped_decisions(value, design_plan: dict, facts: list[dict]) -> list[dict
                 "project_fact_ids": _slot_ids(item.get("project_fact_slots"), fact_ids),
             })
     return result
-
-
-def _validation_fact_slots(facts: list[dict]) -> list[int]:
-    slots = []
-    for index, fact in enumerate(facts, start=1):
-        fact_id = str(fact.get("id") or "").upper()
-        text = str(fact.get("text") or "").lstrip().upper()
-        evidence = [str(item).casefold() for item in fact.get("evidence_ids") or []]
-        if fact_id.startswith(("VAL", "PF-VAL")) or text.startswith("VAL") or any(
-            item.startswith("validation:") for item in evidence
-        ):
-            slots.append(index)
-    return slots
 
 
 def _plan_from_content(data: dict, analysis: dict, design_plan: dict, investigation: dict) -> dict:

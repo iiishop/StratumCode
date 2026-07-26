@@ -174,6 +174,52 @@ def design_planning_stream(
         plan = normalize_design_plan(plan, analysis, investigation)
     issues = validate_design_plan(plan, analysis, investigation)
     if issues:
+        requirement_slots, reference_slots = _missing_decision_slots(plan, analysis)
+        if requirement_slots or reference_slots:
+            repair_data = yield from _content_json_stream(
+                provider,
+                model,
+                [
+                    system,
+                    {"role": "user", "content": prompt.build_design_decision_repair_slot_user(
+                        message,
+                        analysis,
+                        investigation,
+                        workspace_dir,
+                        requirement_slots=requirement_slots,
+                        reference_slots=reference_slots,
+                        semantic_issues=issues,
+                    )},
+                ],
+                pricing_rules,
+                usage_total,
+                run_id,
+                "decision-coverage-repair",
+            )
+            repair_item = _decision_item(repair_data)
+            if repair_item:
+                decision_data = {
+                    **(decision_data or {}),
+                    "decision_content": [
+                        *_decision_items(decision_data),
+                        {
+                            **repair_item,
+                            "requirement_slots": requirement_slots,
+                            "reference_slots": reference_slots,
+                        },
+                    ],
+                }
+                plan = _design_from_slots(
+                    slots,
+                    decision_data,
+                    criteria,
+                    analysis.get("reference_baselines", []),
+                    runtime_warnings,
+                )
+                plan = _merge_design_revision(plan, previous_plan, revision_mode)
+                plan = normalize_design_plan(plan, analysis, investigation)
+                issues = validate_design_plan(plan, analysis, investigation)
+    if issues:
         yield start_event(f"{run_id}-output", "output", {
             "content": "Design plan rejected by runtime validator:\n" + "\n".join(f"- {item}" for item in issues),
             "streaming": False,
@@ -803,7 +849,7 @@ def _design_from_slots(
             "data_boundary": _data_boundary(item.get("data_boundary")),
             "replaces_decision_ids": _strings(item.get("replaces_decision_ids")),
         }
-        for index, item in enumerate(data.get("decision_content") or [], start=1)
+        for index, item in enumerate(_decision_items(data), start=1)
         if isinstance(item, dict) and str(item.get("decision") or "").strip()
     ]
     gaps = [
@@ -826,6 +872,60 @@ def _design_from_slots(
         "out_of_scope": _strings(data.get("out_of_scope")),
         "runtime_warnings": runtime_warnings or [],
     }
+
+
+def _decision_items(data: dict | None) -> list[dict]:
+    if not isinstance(data, dict):
+        return []
+    for key in ("decision_content", "design_decisions", "decisions"):
+        value = data.get(key)
+        if isinstance(value, list) and value:
+            return [item for item in value if isinstance(item, dict)]
+    return []
+
+
+def _decision_item(data: dict | None) -> dict | None:
+    if not isinstance(data, dict):
+        return None
+    if str(data.get("decision") or "").strip():
+        return data
+    return next(
+        (item for item in _decision_items(data) if str(item.get("decision") or "").strip()),
+        None,
+    )
+
+
+def _missing_decision_slots(plan: dict, analysis: dict) -> tuple[list[int], list[int]]:
+    decisions = [item for item in plan.get("design_decisions", []) if isinstance(item, dict)]
+    covered_requirements = {
+        item
+        for decision in decisions
+        for item in _strings(decision.get("requirement_ids"))
+    }
+    requirement_slots = [
+        index
+        for index, alignment in enumerate(plan.get("project_alignment", []), start=1)
+        if isinstance(alignment, dict)
+        and alignment.get("status") == "missing"
+        and str(alignment.get("requirement_id") or "") not in covered_requirements
+    ]
+    baselines = [
+        item for item in analysis.get("reference_baselines", [])
+        if isinstance(item, dict)
+    ]
+    covered_references = {
+        item
+        for decision in decisions
+        for item in _strings(decision.get("reference_ids"))
+    }
+    reference_slots = [
+        index
+        for index, baseline in enumerate(baselines, start=1)
+        if str(baseline.get("id") or f"REF{index}") not in covered_references
+    ]
+    if reference_slots and not requirement_slots:
+        requirement_slots = list(range(1, len(plan.get("requirement_model", [])) + 1))
+    return requirement_slots, reference_slots
 
 
 def _strings(value) -> list[str]:
