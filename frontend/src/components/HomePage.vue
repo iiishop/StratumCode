@@ -18,13 +18,6 @@ const props = defineProps({
 })
 const emit = defineEmits([
   'save-session-state',
-  'add-workspace',
-  'activate-workspace',
-  'delete-workspace',
-  'create-session',
-  'open-session',
-  'rename-session',
-  'delete-session',
 ])
 
 /* ── todos ── */
@@ -800,20 +793,8 @@ watch(() => props.activeWorkspace?.id, () => {
           :tools="toolCatalog"
           :mcp-servers="mcpServers"
           :subagents="visibleSubagents"
-          :workspaces="workspaces"
-          :active-workspace="activeWorkspace"
-          :workspace-error="workspaceError"
-          :sessions="sessions"
-          :active-session="session"
           @update:tab="inspectorTab = $event"
           @toggle-todo="toggleTodo"
-          @add-workspace="emit('add-workspace', $event)"
-          @activate-workspace="emit('activate-workspace', $event)"
-          @delete-workspace="emit('delete-workspace', $event)"
-          @create-session="emit('create-session')"
-          @open-session="emit('open-session', $event)"
-          @rename-session="emit('rename-session', $event)"
-          @delete-session="emit('delete-session', $event)"
           @close="inspectorTab = null"
         />
       </Transition>

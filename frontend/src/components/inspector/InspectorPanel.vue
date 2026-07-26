@@ -13,28 +13,14 @@ const props = defineProps({
   tools: { type: Array, required: true },
   mcpServers: { type: Array, default: () => [] },
   subagents: { type: Array, default: () => [] },
-  workspaces: { type: Array, default: () => [] },
-  activeWorkspace: { type: Object, default: null },
-  workspaceError: { type: String, default: '' },
-  sessions: { type: Array, default: () => [] },
-  activeSession: { type: Object, default: null },
 })
 const emit = defineEmits([
   'update:tab',
-  'add-workspace',
-  'activate-workspace',
-  'delete-workspace',
-  'create-session',
-  'open-session',
-  'rename-session',
-  'delete-session',
   'close',
 ])
 
 const root = ref(null)
 const confidenceBar = ref(null)
-const workspaceName = ref('')
-const workspacePath = ref('')
 const copyTaskStatus = ref('')
 let copyTaskTimer
 const percent = computed(() => Math.round((props.run.confidence ?? .5) * 100))
@@ -47,7 +33,7 @@ const phases = [
   ['audit', 'Audit'],
   ['evaluate', 'Evaluate'],
 ]
-const tabs = ['evidence', 'sessions', 'workspace', 'mcp', 'subagents', 'tasks', 'tools']
+const tabs = ['evidence', 'mcp', 'subagents', 'tasks', 'tools']
 const taskGroupKinds = ['goal', 'work', 'acceptance', 'behavior', 'boundary', 'constraint', 'hypothesis', 'unknown']
 const taskKindLabels = {
   goal: 'Goals',
@@ -363,14 +349,6 @@ function serverClass(status) {
   return 'idle'
 }
 
-function addWorkspace() {
-  const path = workspacePath.value.trim()
-  if (!path) return
-  emit('add-workspace', { name: workspaceName.value.trim(), path })
-  workspaceName.value = ''
-  workspacePath.value = ''
-}
-
 function onRowEnter(el) {
   if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) return
   gsap.to(el, { scale: 1.012, backgroundColor: '#f0f5ff', borderColor: '#a3c2ef', duration: 0.16, ease: 'power2.out', overwrite: 'auto' })
@@ -381,15 +359,6 @@ function onRowLeave(el) {
   gsap.to(el, { scale: 1, backgroundColor: '#ffffff', borderColor: '#d7e2ef', duration: 0.2, ease: 'power2.out', overwrite: 'auto' })
 }
 
-function onWsRowEnter(el) {
-  if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) return
-  gsap.to(el, { scale: 1.012, backgroundColor: '#f0f5ff', borderColor: '#a3c2ef', duration: 0.16, ease: 'power2.out', overwrite: 'auto' })
-}
-
-function onWsRowLeave(el) {
-  if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) return
-  gsap.to(el, { scale: 1, backgroundColor: '#ffffff', borderColor: '#d8e2ef', duration: 0.2, ease: 'power2.out', overwrite: 'auto' })
-}
 </script>
 
 <template>
@@ -508,27 +477,6 @@ function onWsRowLeave(el) {
           <strong>{{ run.verdict.verdict }}</strong>
           <p>{{ run.verdict.summary }}</p>
         </section>
-      </template>
-
-      <template v-else-if="tab === 'sessions'">
-        <div class="inspector__section-head">
-          <strong>Sessions</strong>
-          <button type="button" class="section-action" @click="emit('create-session')">New</button>
-        </div>
-        <article v-for="session in sessions" :key="session.id" class="session-row" :class="{ active: activeSession?.id === session.id }"
-          @pointerenter="onRowEnter($event.currentTarget)"
-          @pointerleave="onRowLeave($event.currentTarget)"
-        >
-          <button type="button" @click="emit('open-session', session.id)">
-            <strong>{{ session.name }}</strong>
-            <small>{{ session.usage?.total_tokens || 0 }} tokens · {{ session.updated_at || session.created_at }}</small>
-          </button>
-          <span>
-            <button type="button" title="Rename session" @click="emit('rename-session', session.id)">Rename</button>
-            <button type="button" title="Delete session" @click="emit('delete-session', session.id)">Delete</button>
-          </span>
-        </article>
-        <p v-if="!sessions.length" class="workspace-note">No sessions in this workspace yet.</p>
       </template>
 
       <template v-else-if="tab === 'mcp'">
@@ -659,27 +607,7 @@ function onWsRowLeave(el) {
         </article>
       </template>
 
-      <template v-else>
-        <div class="inspector__section-head"><strong>Workspaces</strong><span>Agent scope</span></div>
-        <p class="workspace-note">All local discovery and file previews are constrained to the active root.</p>
-        <p v-if="workspaceError" class="workspace-error">{{ workspaceError }}</p>
-        <article v-for="workspace in workspaces" :key="workspace.id" class="workspace-row" :class="{ active: activeWorkspace?.id === workspace.id }"
-          @pointerenter="onWsRowEnter($event.currentTarget)"
-          @pointerleave="onWsRowLeave($event.currentTarget)"
-        >
-          <button @click="emit('activate-workspace', workspace.id)">
-            <i></i>
-            <span><strong>{{ workspace.name }}</strong><small>{{ workspace.path }}</small></span>
-          </button>
-          <button v-if="workspace.is_active && workspaces.length > 1" class="workspace-row__delete" title="Delete workspace" @click="emit('delete-workspace', workspace.id)">D</button>
-          <button v-if="!workspace.is_active" class="workspace-row__delete" @click="emit('delete-workspace', workspace.id)">×</button>
-        </article>
-        <form class="workspace-form" @submit.prevent="addWorkspace">
-          <input v-model="workspaceName" placeholder="Workspace name (optional)" />
-          <input v-model="workspacePath" placeholder="Absolute directory path" />
-          <button>Add workspace</button>
-        </form>
-      </template>
+
     </div>
   </aside>
 </template>
@@ -1128,14 +1056,6 @@ function onWsRowLeave(el) {
 @media (prefers-reduced-motion: reduce) {
   .subagent-row.running .subagent-row__dot { animation: none; }
 }
-.session-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 8px; margin-bottom: 7px; padding: 8px; border: 1px solid #d7e2ef; border-radius: 10px; background: #fff; }
-.session-row.active { border-color: #83a9ec; box-shadow: 0 0 0 2px rgba(23, 86, 209, .08); }
-.session-row > button:first-child { display: grid; min-width: 0; gap: 3px; padding: 0; border: 0; color: inherit; background: transparent; text-align: left; cursor: pointer; }
-.session-row strong { overflow: hidden; color: #294564; font: 800 10.5px/1.25 var(--mono); text-overflow: ellipsis; white-space: nowrap; }
-.session-row small { overflow: hidden; color: #7188a3; font: 8.5px/1.3 var(--mono); text-overflow: ellipsis; white-space: nowrap; }
-.session-row > span { display: flex; gap: 2px; }
-.session-row > span button { display: grid; height: 21px; padding: 0 5px; place-items: center; border: 1px solid transparent; border-radius: 5px; color: #8194ad; background: transparent; font: 700 8px/1 var(--mono); cursor: pointer; }
-.session-row > span button:hover { border-color: #cbd9ec; color: #1756d1; background: #eef4ff; }
 .mcp-row__main { display: grid; grid-template-columns: 12px minmax(0, 1fr) auto; align-items: center; gap: 8px; }
 .mcp-row__main i { width: 9px; height: 9px; border-radius: 50%; background: #91a0b2; }
 .mcp-row.running .mcp-row__main i { background: #11866f; box-shadow: 0 0 0 3px #dff8f1; }
@@ -1146,10 +1066,7 @@ function onWsRowLeave(el) {
 .mcp-row__main b { color: #8799ad; font: 800 10px/1 var(--mono); }
 .mcp-row__tools { display: none; flex-wrap: wrap; gap: 5px; margin-top: 9px; }
 .mcp-row:hover .mcp-row__tools { display: flex; }
-.mcp-row__tools span { padding: 4px 5px; border: 1px solid #d8e2ef; border-radius: 6px; color: #1756d1; background: #eef4ff; font: 8.5px/1 var(--mono); }
-.workspace-note { margin: -2px 2px 10px; color: #71869f; font-size: 9.5px; line-height: 1.5; }.workspace-error { padding: 8px; border-radius: 7px; color: #a33; background: #fff0f0; font-size: 9px; }
-.workspace-row { display: flex; align-items: center; margin-bottom: 6px; border: 1px solid #d8e2ef; border-radius: 9px; background: #fff; }.workspace-row.active { border-color: #83a9ec; box-shadow: 0 0 0 2px rgba(23, 86, 209, .08); }.workspace-row > button:first-child { display: flex; min-width: 0; flex: 1; align-items: center; gap: 8px; padding: 9px; border: 0; background: transparent; text-align: left; cursor: pointer; }.workspace-row i { width: 8px; height: 8px; border: 2px solid #a5b7cd; border-radius: 50%; }.workspace-row.active i { border-color: #1756d1; background: #1756d1; box-shadow: 0 0 0 3px #dce8ff; }.workspace-row span { display: grid; min-width: 0; gap: 3px; }.workspace-row strong { font-size: 10px; }.workspace-row small { overflow: hidden; color: #7c8fa6; font: 8.5px/1.2 var(--mono); text-overflow: ellipsis; white-space: nowrap; }.workspace-row__delete { margin-right: 6px; border: 0; color: #98a8bb; background: transparent; cursor: pointer; }
-.workspace-form { display: grid; gap: 6px; margin-top: 12px; padding-top: 12px; border-top: 1px solid #dbe4f0; }.workspace-form input { height: 32px; padding: 0 9px; border: 1px solid #ccd9e9; border-radius: 7px; color: #29435f; background: #fff; font: 9px/1 var(--mono); outline: none; }.workspace-form input:focus { border-color: #1756d1; }.workspace-form button { height: 31px; border: 0; border-radius: 7px; color: #fff; background: #1756d1; font: 700 10px/1 var(--mono); cursor: pointer; }
+.workspace-note { margin: 12px 0 0; padding: 14px 12px; border: 1px dashed #cbd9ec; border-radius: 9px; color: #7188a3; background: #f8faff; font: 10px/1.45 var(--mono); text-align: center; }.mcp-row__tools span { padding: 4px 5px; border: 1px solid #d8e2ef; border-radius: 6px; color: #1756d1; background: #eef4ff; font: 8.5px/1 var(--mono); }
 .evidence-list-enter-active,.evidence-list-leave-active { transition: opacity .25s, transform .3s cubic-bezier(.22,1,.36,1); }.evidence-list-enter-from,.evidence-list-leave-to { opacity: 0; transform: translateY(10px) scale(.98); }
 @media (max-width: 980px) { .inspector { height: 100%; } }
 @media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }

@@ -754,11 +754,6 @@ watch(currentView, (v) => {
           :workspace-error="workspaceError"
           :sessions="sessionItems"
           @save-session-state="saveActiveSessionState"
-          @add-workspace="addWorkspaceFromPanel"
-          @activate-workspace="activateWorkspaceAndSession"
-          @delete-workspace="removeWorkspace"
-          @create-session="createSession"
-          @open-session="openSession"
           @rename-session="renameSession"
           @delete-session="removeSession"
         />
