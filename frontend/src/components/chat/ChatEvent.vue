@@ -17,7 +17,6 @@ import HypothesisEvent from './HypothesisEvent.vue'
 import EvidenceEvent from './EvidenceEvent.vue'
 import EvidenceRelationEvent from './EvidenceRelationEvent.vue'
 import VerdictEvent from './VerdictEvent.vue'
-import UsageEvent from './UsageEvent.vue'
 import StepResultEvent from './StepResultEvent.vue'
 import SafetyStopEvent from './SafetyStopEvent.vue'
 import UserQuestionEvent from './UserQuestionEvent.vue'
@@ -51,7 +50,6 @@ const eventComponents = {
   step_result: StepResultEvent,
   safety_stop: SafetyStopEvent,
   user_question: UserQuestionEvent,
-  usage: UsageEvent,
 }
 </script>
 
