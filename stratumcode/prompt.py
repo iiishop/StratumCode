@@ -77,6 +77,7 @@ output_contract.
 For intent_scope:
 {{
   "intent_type": "feature|bugfix|refactor|question|investigation|other",
+  "execution_mode": "implement|read_only",
   "summary": "one sentence describing the result the user wants",
   "requirements": [
     {{"text": "minimal user requirement excerpt", "role": "directive|factual_claim", "authority": "user_explicit", "source_ref": "SRC1", "source_excerpt": "verbatim supporting excerpt"}}
@@ -95,6 +96,12 @@ For intent_scope:
     {{"text": "factual claim explicitly stated or implied by the user", "certainty": "uncertain|guess"}}
   ]
 }}
+
+Set execution_mode to implement only when the user requests or authorizes
+workspace changes. Use read_only for questions, investigations, reviews,
+audits, explanations, and requests that forbid modification. A conditional
+request to fix a confirmed problem is implement when it authorizes that fix.
+User factual claims and project-path permissions do not authorize changes.
 
 For acceptance_contract:
 {{

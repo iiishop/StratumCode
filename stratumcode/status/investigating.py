@@ -4,7 +4,7 @@ from uuid import uuid4
 
 from .. import investigator
 from ..agent_runtime import start_event
-from ..status.task_analysis import IMPLEMENTATION_INTENT_TYPES, _message_requests_implementation
+from ..status.task_analysis import _analysis_requests_implementation
 from .clearifying import queue_clearify
 from .task_contract import _ensure_task_contract, run_request
 from .task_updates import (
@@ -218,20 +218,17 @@ def handle(run):
         run.transition(chat._chat_finish_state(run), "Investigation ended without an implementation path.")
     elif next_step == "failed":
         run.transition(chat.ChatState.FAILED, "Investigation failed.")
-    elif run.last_investigation and _investigation_allows_patch(run.last_investigation) and _wants_implementation(run.analysis, request):
+    elif (
+        run.last_investigation
+        and _investigation_allows_patch(run.last_investigation)
+        and _analysis_requests_implementation(run.analysis)
+    ):
         run.transition(chat.ChatState.DESIGNING, "Investigation is ready for implementation planning.")
     elif next_step == "continue_investigation" or has_unknown_task or has_blocked_task:
         run.findings = _merge_findings(run.findings, _investigation_continuation_findings(run.last_investigation))
         run.transition(chat.ChatState.INVESTIGATING, "Investigation requested another pass.")
     else:
         run.transition(chat._chat_finish_state(run), "Investigation ended without an implementation path.")
-
-
-def _wants_implementation(analysis: dict, message: str = "") -> bool:
-    return (
-        (analysis.get("intent") or {}).get("type") in IMPLEMENTATION_INTENT_TYPES
-        or _message_requests_implementation(message)
-    )
 
 
 def _investigation_allows_patch(investigation: dict) -> bool:

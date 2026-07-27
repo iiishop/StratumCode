@@ -154,6 +154,7 @@ def _finalize_task_statuses(items: list[dict], investigation: dict) -> list[dict
     final = []
     for item in items:
         status = item.get("status") or "unknown"
+        kind = item.get("kind")
         resolution = resolved_unknowns.get(_task_id_tail(item.get("id")))
         resolved = bool(resolution)
         clear_unknown = status == "unknown" and resolved
@@ -166,7 +167,7 @@ def _finalize_task_statuses(items: list[dict], investigation: dict) -> list[dict
             and (not item.get("answers") or item.get("reason") == INVESTIGATION_FALLBACK_REASON)
         )
         if (
-            item.get("kind") in {"unknown", "clue", "work"}
+            kind in {"unknown", "clue", "work"}
             and (status in {"pending", "added", "updated", "active"} or clear_unknown or clear_blocked or clear_deferred or enrich_known)
         ):
             resolution_update = _resolution_task_update(item, resolution) if item.get("kind") == "unknown" else None
@@ -178,6 +179,16 @@ def _finalize_task_statuses(items: list[dict], investigation: dict) -> list[dict
                     "status": done_status,
                     "reason": item.get("reason") or INVESTIGATION_FALLBACK_REASON,
                 }
+        elif (
+            next_step == "done"
+            and kind in {"acceptance", "behavior", "boundary"}
+            and status == "pending"
+        ):
+            item = {
+                **item,
+                "status": done_status,
+                "reason": item.get("reason") or INVESTIGATION_FALLBACK_REASON,
+            }
         final.append(item)
     return final
 

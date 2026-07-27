@@ -21,20 +21,16 @@ from .session_memory import _session_sources
 LOGGER = logging.getLogger(__name__)
 
 TASK_INTENT_TYPES = {"feature", "bugfix", "refactor", "question", "investigation", "other"}
+TASK_EXECUTION_MODES = {"implement", "read_only"}
 TASK_CERTAINTIES = {"certain", "uncertain", "guess"}
 TASK_CLUE_KINDS = {"file", "line", "symbol", "route", "other"}
-IMPLEMENTATION_INTENT_TYPES = {"feature", "bugfix", "refactor"}
 DEFAULT_TASK_SLOT_ATTEMPTS = 2
 TASK_CONTRACT_AUDIT_MODES = ("material_counterexample",)
 
 
-def _message_requests_implementation(message: str) -> bool:
-    lowered = " ".join(str(message or "").split()).casefold()
-    return any(word in lowered for word in (
-        "\u5b9e\u73b0", "\u6dfb\u52a0", "\u589e\u52a0", "\u4fee\u6539", "\u4fee\u590d", "\u652f\u6301", "\u8c03\u6574", "\u6539\u6210", "\u53d8\u6210", "\u52a0\u4e0a", "\u8ba9", "\u4e0d\u8981",
-        "\u5220\u9664", "\u79fb\u9664", "\u6e05\u7406", "\u66ff\u6362", "\u4f18\u5316", "\u8fdb\u884c\u4fee\u590d",
-        "create", "add", "implement", "change", "update", "adjust", "make", "set", "do not", "don't",
-    ))
+def _analysis_requests_implementation(analysis: dict | None) -> bool:
+    return str((analysis or {}).get("execution_mode") or "").strip().casefold() == "implement"
+
 
 def analyze_task_stream(
     message: str,
@@ -374,6 +370,7 @@ def _intent_summary_present(data: dict) -> bool:
 def _intent_slot_payload(analysis: dict) -> dict:
     return {
         "intent": analysis.get("intent", {}),
+        "execution_mode": analysis.get("execution_mode", "read_only"),
         "requirements": analysis.get("requirements", []),
         "constraints": analysis.get("constraint_statements", []),
         "hypotheses": [
@@ -461,10 +458,19 @@ def _analysis_from_slots(message: str, context: list[str], intent_slot: dict, ac
     intent_type = str(intent_data.get("intent_type") or intent_data.get("type") or fallback["intent"]["type"]).strip().casefold()
     if intent_type not in TASK_INTENT_TYPES:
         intent_type = fallback["intent"]["type"]
+    execution_mode = str(
+        intent_data.get("execution_mode")
+        or intent_meta.get("execution_mode")
+        or ""
+    ).strip().casefold()
+    execution_mode_recovered = execution_mode not in TASK_EXECUTION_MODES
+    if execution_mode_recovered:
+        execution_mode = "read_only"
     summary = str(intent_data.get("summary") or fallback["intent"]["summary"]).strip()
     acceptance = _runtime_acceptance_slots(acceptance_data, message, context)
     data = {
         "intent": {"type": intent_type, "summary": summary},
+        "execution_mode": execution_mode,
         "requirements": intent_meta.get("requirements", []),
         "acceptance_criteria": acceptance,
         "behavior_contract": _slot_behavior_contract(acceptance_data, fallback),
@@ -476,6 +482,10 @@ def _analysis_from_slots(message: str, context: list[str], intent_slot: dict, ac
         "investigation_targets": intent_meta.get("investigation_targets", []),
         "unknowns": _runtime_unknowns(unknown_data, acceptance, fallback),
     }
+    if execution_mode_recovered:
+        data["analyzer_warnings"] = [
+            "intent_scope: missing or invalid execution_mode; defaulted to read_only"
+        ]
     return data
 
 
@@ -792,7 +802,7 @@ def _runtime_unknowns(data: dict, acceptance: list[dict], fallback: dict) -> lis
             if question:
                 items.append(question)
     try:
-        return _limited_unknowns(items, acceptance) or fallback["unknowns"]
+        return _limited_unknowns(items, acceptance)
     except ValueError:
         return fallback["unknowns"]
 
@@ -895,10 +905,8 @@ def _minimal_task_analysis(message: str, context: list[str], raw: str = "") -> d
     request = " ".join(str(message or "").split()).strip()
     raw_text = " ".join(str(raw or "").split()).strip()
     summary = _sentence_from_raw(raw_text) or request[:160] or result["intent"]["summary"]
-    result["intent"] = {
-        "type": "feature" if _message_requests_implementation(request) else result["intent"]["type"],
-        "summary": summary,
-    }
+    result["intent"] = {"type": "other", "summary": summary}
+    result["execution_mode"] = "read_only"
     result["acceptance_criteria"] = [{"id": "AC1", "text": request[:220] or summary}]
     result["unknowns"] = [{
         "id": "U1",
@@ -928,15 +936,10 @@ def _implementation_unknown(request: str) -> str:
 
 def _fallback_task_analysis(message: str, context: list[str]) -> dict:
     text = " ".join(str(message or "").split()).strip()
-    lowered = text.casefold()
-    intent_type = "question"
-    if any(word in lowered for word in ("\u4fee\u590d", "fix", "bug", "\u62a5\u9519", "\u9519\u8bef")):
-        intent_type = "bugfix"
-    elif _message_requests_implementation(text):
-        intent_type = "feature"
     clues = _fallback_clues(context)
     return {
-        "intent": {"type": intent_type, "summary": text[:160] or "Handle the user request."},
+        "intent": {"type": "other", "summary": text[:160] or "Handle the user request."},
+        "execution_mode": "read_only",
         "acceptance_criteria": [
             {"id": "AC1", "text": text[:220] or "The requested behavior is completed."},
         ],
@@ -998,6 +1001,12 @@ def _validate_task_analysis(data: dict) -> dict:
 
     result = dict(data)
     result["intent"] = {"type": intent_type, "summary": summary}
+    execution_mode = str(data.get("execution_mode") or "").strip().casefold()
+    result["execution_mode"] = (
+        execution_mode
+        if execution_mode in TASK_EXECUTION_MODES
+        else "read_only"
+    )
     result["hypotheses"] = _optional_field(lambda: _hypotheses(data.get("hypotheses")), [])
     result["clues"] = _optional_field(lambda: _clues(data.get("clues")), [])
     return _ensure_task_contract(result)

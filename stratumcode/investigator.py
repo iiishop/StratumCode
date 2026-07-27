@@ -28,6 +28,7 @@ from .status.task_contract import (
     LEGACY_NEEDS_USER_STATUS,
     _unknowns as _contract_unknowns,
 )
+from .status.task_analysis import _analysis_requests_implementation
 from .status.task_updates import _unknown_task_status
 from .tools import registry
 
@@ -52,6 +53,7 @@ PROJECT_EVIDENCE_TOOLS: set[str] = set()
 CLEARIFY_RESOLUTION_REASON = "Answered by the user through clearify."
 GROUNDING_LITERAL_REASON_PREFIX = "Cited observations do not contain the claimed code literal(s):"
 STATE_WRITE_REASON_PREFIX = "Cited observations contain state writes omitted from the resolution:"
+RECORD_RECOVERY_REASON = "Record pending observations and required resolutions."
 
 
 def investigation_stream(
@@ -128,6 +130,7 @@ def investigation_stream(
     pending_observation_ids: list[str] = []
     repeated_tool_error_name = ""
     repeated_tool_error_count = 0
+    failed_tool_cache: dict[str, str] = {}
     stop_investigation = False
     verification_queue: list[dict] = []
     attempted_verifications: set[tuple[str, str]] = set()
@@ -259,8 +262,14 @@ def investigation_stream(
             call_id = raw_call.get("id") or f"call-{uuid4().hex[:8]}"
             function = raw_call.get("function") or {}
             name = function.get("name") or ""
+            arguments = {}
             try:
-                arguments = _tool_arguments(function.get("arguments"))
+                arguments = _investigation_tool_arguments(
+                    name,
+                    function.get("arguments"),
+                    pending_observation_ids=pending_observation_ids,
+                    resolution_required_ids=resolution_required_ids,
+                )
                 if name == "record_investigation_findings":
                     arguments = _record_arguments(arguments)
                 if verification_request and name == "subagent":
@@ -277,6 +286,43 @@ def investigation_stream(
                         "reason": verification_request.get("reason")
                         or "Independently verify the material investigation inference.",
                     }
+                failed_key = _tool_cache_key(name, arguments)
+                if failed_key in failed_tool_cache:
+                    repeated_tool_error_name = name or "invalid"
+                    repeated_tool_error_count += 1
+                    output = json.dumps({
+                        "error": {
+                            "code": "duplicate_failed_tool_call",
+                            "tool": name or "invalid",
+                            "retryable": False,
+                            "message": (
+                                "The same tool arguments already failed. "
+                                "Choose a different valid action; do not retry this call."
+                            ),
+                        },
+                    }, ensure_ascii=False)
+                    yield start_event(call_id, _tool_event_type(name), {
+                        "name": name or "invalid",
+                        "description": "Investigation tool",
+                        "status": "error",
+                        "open": False,
+                        "input": json.dumps(arguments, ensure_ascii=False, indent=2),
+                        "output": output,
+                        "deduplicated": True,
+                    })
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": call_id,
+                        "content": output,
+                    })
+                    if repeated_tool_error_count >= MAX_REPEATED_TOOL_ERRORS:
+                        finalization_reason = (
+                            "Runtime stopped an identical failed tool call loop: "
+                            f"{name or 'invalid'}."
+                        )
+                        stop_investigation = True
+                        break
+                    continue
                 if name not in allowed_tool_names:
                     if _recorded_resolves_initial_unknowns(recorded_findings, analysis):
                         output = json.dumps({
@@ -724,6 +770,10 @@ def investigation_stream(
                     last_quality_audit = {}
                 output = _tool_repair_error_json(exc, name, raw_arguments, partial_arguments)
                 error_name = name or "invalid"
+                failed_tool_cache[_tool_cache_key(
+                    error_name,
+                    arguments or partial_arguments,
+                )] = output
                 if error_name not in round_error_names:
                     if error_name == repeated_tool_error_name:
                         repeated_tool_error_count += 1
@@ -801,7 +851,7 @@ def investigation_stream(
         preserve_grounding_evidence=preserve_grounding_evidence,
     )
 
-    implementation_intent = _wants_implementation(analysis, message)
+    implementation_intent = _analysis_requests_implementation(analysis)
     yield {"op": "update", "id": stage_id, "patch": {
         "state": "done",
         "phase": "patch_planning_ready" if final.get("ready_for_patch_planning") and implementation_intent else "done",
@@ -2605,6 +2655,24 @@ def _tool_arguments(raw: str | None) -> dict:
     return arguments
 
 
+def _investigation_tool_arguments(
+    name: str,
+    raw: str | None,
+    *,
+    pending_observation_ids: list[str],
+    resolution_required_ids: list[str],
+) -> dict:
+    try:
+        return _tool_arguments(raw)
+    except ValueError:
+        if (
+            name == "record_investigation_findings"
+            and (pending_observation_ids or resolution_required_ids)
+        ):
+            return {"reason": RECORD_RECOVERY_REASON}
+        raise
+
+
 def _resolution_repair_request(
     arguments: dict,
     initial_unknowns: list[dict],
@@ -4053,17 +4121,6 @@ def _step_result(final: dict, *, implementation_intent: bool = True) -> dict:
         "unknowns": final.get("unknowns", []),
     }
 
-
-def _wants_implementation(analysis: dict, message: str = "") -> bool:
-    if (analysis.get("intent") or {}).get("type") in {"feature", "bugfix", "refactor"}:
-        return True
-    lowered = " ".join(str(message or "").split()).casefold()
-    keywords = (
-        "实现", "添加", "增加", "修改", "修复", "支持", "调整", "改成", "变成", "加上", "让", "不要",
-        "删除", "移除", "清理", "替换", "优化", "进行修复",
-        "create", "add", "implement", "change", "update", "adjust", "make", "set", "do not", "don't",
-    )
-    return any(word in lowered for word in keywords)
 
 def _unknowns(value) -> list[dict]:
     if not isinstance(value, list):
