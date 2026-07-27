@@ -4,7 +4,6 @@ import json
 import socket
 import time
 from datetime import datetime, timezone
-from itertools import count
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
@@ -13,7 +12,6 @@ from .agent.policy import DISCOVERY_TOOLS
 from .agent.tools import agent_tools
 
 DEFAULT_MODEL_REQUEST_ATTEMPTS = 3
-MAX_SKILL_LOAD_ROUNDS = 4
 MODEL_RETRY_STATUS_CODES = {429, 502, 503, 504}
 MODEL_RETRY_DELAYS = (0.5, 1.0)
 MODEL_STREAM_DEADLINE_SECONDS = 180
@@ -60,8 +58,7 @@ def call_model(
     tool_choice=None,
     use_skills: bool = True,
 ) -> dict:
-    catalog = skill_runtime.catalog_prompt()
-    if not use_skills or not catalog:
+    if not use_skills:
         return _call_model_once(
             provider,
             model,
@@ -69,66 +66,82 @@ def call_model(
             tools=tools,
             tool_choice=tool_choice,
         )
-
-    current_tools = list(agent_tools(DISCOVERY_TOOLS) if tools is None else tools)
-    current_tools.append(skill_runtime.tool_schema())
+    catalog = skill_runtime.tool_catalog_prompt()
+    loaded_messages = skill_runtime.loaded_messages()
+    current_tools = _with_skill_tool(tools)
     current_messages = [
         *messages,
-        {"role": "system", "content": catalog},
-        *skill_runtime.loaded_messages(),
+        *([{"role": "system", "content": catalog}] if catalog else []),
+        *loaded_messages,
     ]
-    total_usage: dict = {}
-    for _ in range(MAX_SKILL_LOAD_ROUNDS):
-        assistant = _call_model_once(
-            provider,
-            model,
-            current_messages,
-            tools=current_tools,
-            tool_choice=tool_choice,
-        )
-        _merge_model_usage(total_usage, assistant.get("_usage") or {})
-        calls = assistant.get("tool_calls") or []
-        skill_calls = [
-            call
-            for call in calls
-            if ((call.get("function") or {}).get("name") or "") == "load_skill"
-        ]
-        if not skill_calls:
-            skill_runtime.finish_selection([])
-            assistant["_usage"] = total_usage
-            return assistant
-
-        skill_runtime.finish_selection([
-            str(_tool_arguments((call.get("function") or {}).get("arguments")).get("name") or "")
-            for call in skill_calls
-        ])
-        current_messages.append(assistant_message(assistant))
-        for call in calls:
-            function = call.get("function") or {}
-            call_id = call.get("id") or f"skill-call-{next(_CALL_IDS)}"
-            if function.get("name") == "load_skill":
-                try:
-                    arguments = json.loads(function.get("arguments") or "{}")
-                    if not isinstance(arguments, dict):
-                        raise TypeError("load_skill arguments must be an object")
-                    output = skill_runtime.load_skill(str(arguments.get("name") or ""))
-                except (json.JSONDecodeError, OSError, TypeError, ValueError) as exc:
-                    output = tool_error_json(exc, "load_skill")
-            else:
-                output = tool_error_json(
-                    ValueError("retry this tool after skill loading completes"),
-                    str(function.get("name") or "invalid"),
-                )
-            current_messages.append({
-                "role": "tool",
-                "tool_call_id": call_id,
-                "content": output,
-            })
-        tool_choice = None
-    raise ValueError("model exceeded the skill loading round limit")
+    return _call_model_once(
+        provider,
+        model,
+        current_messages,
+        tools=current_tools,
+        tool_choice=tool_choice,
+    )
 
 
-_CALL_IDS = count()
+def select_initial_skills(
+    provider: dict,
+    model: str,
+    context: str,
+) -> dict:
+    prompt_text = skill_runtime.initial_selection_prompt(context)
+    return finish_initial_skill_selection(provider, model, prompt_text)
+
+
+def finish_initial_skill_selection(
+    provider: dict,
+    model: str,
+    prompt_text: str,
+) -> dict:
+    if not prompt_text:
+        return {}
+    assistant = _call_model_once(
+        provider,
+        model,
+        [{"role": "system", "content": prompt_text}],
+        tools=[skill_runtime.tool_schema()],
+    )
+    choices = []
+    for call in assistant.get("tool_calls") or []:
+        loaded, _, choice = execute_skill_tool_call(call)
+        if loaded and choice not in choices:
+            choices.append(choice)
+    skill_runtime.finish_selection(choices)
+    return assistant
+
+
+def execute_skill_tool_call(call: dict) -> tuple[bool, str, dict]:
+    function = call.get("function") or {}
+    if function.get("name") != "load_skill":
+        return False, "", {}
+    try:
+        arguments = json.loads(function.get("arguments") or "{}")
+        if not isinstance(arguments, dict):
+            raise TypeError("load_skill arguments must be an object")
+        choice = {
+            "name": str(arguments.get("name") or "").strip(),
+            "reason": str(arguments.get("reason") or "").strip(),
+        }
+        output = skill_runtime.load_skill(choice["name"], choice["reason"])
+        return True, output, choice
+    except (json.JSONDecodeError, OSError, TypeError, ValueError) as exc:
+        return True, tool_error_json(exc, "load_skill"), {}
+
+
+def _with_skill_tool(tools: list[dict] | None) -> list[dict] | None:
+    if not skill_runtime.tool_catalog_prompt():
+        return tools
+    if tools == []:
+        return tools
+    current = list(agent_tools(DISCOVERY_TOOLS) if tools is None else tools)
+    if any(((tool.get("function") or {}).get("name") or "") == "load_skill" for tool in current):
+        return current
+    current.append(skill_runtime.tool_schema())
+    return current
 
 
 def _call_model_once(

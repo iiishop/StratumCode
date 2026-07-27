@@ -16,6 +16,8 @@ from .agent_runtime import (
     assistant_visible_text as _assistant_visible_text,
     content_text as _content_text,
     empty_usage as _empty_usage,
+    execute_skill_tool_call,
+    finish_initial_skill_selection,
     start_event,
     tool_error_json,
     usage_delta as _usage_delta,
@@ -27,6 +29,8 @@ from .tools.spec import ToolResult
 def run_stream(agent: str, task: str, workspace_dir: str = ".") -> Iterator[dict]:
     name = normalize_agent_name(agent)
     with skill_runtime.target_scope(f"subagent:{name}"):
+        yield from _select_initial_subagent_skills(name, task)
+        yield from skill_runtime.pop_events()
         if name == "mcp-installer":
             yield from mcp_install_stream(task, workspace_dir)
             return
@@ -34,6 +38,22 @@ def run_stream(agent: str, task: str, workspace_dir: str = ".") -> Iterator[dict
             yield from hypothesis_verify_stream(task, workspace_dir)
             return
         raise ValueError(f"unknown subagent: {agent}")
+
+
+def _select_initial_subagent_skills(name: str, task: str) -> Iterator[dict]:
+    setting = (
+        model_settings.resolve(model_settings.DEFAULT_STAGE)
+        or model_settings.resolve(model_settings.EVIDENCE_STAGE)
+    )
+    if setting is None:
+        return
+    prompt_text = skill_runtime.initial_selection_prompt(f"subagent: {name}\ntask: {task}")
+    yield from skill_runtime.pop_events()
+    finish_initial_skill_selection(
+        setting["provider"],
+        setting["model_id"],
+        prompt_text,
+    )
 
 
 def hypothesis_verify_stream(task: str, workspace_dir: str = ".") -> Iterator[dict]:
@@ -214,6 +234,16 @@ def _react_install(
             call_id = raw_call.get("id") or f"call-{uuid4().hex[:8]}"
             function = raw_call.get("function") or {}
             name = function.get("name") or ""
+            if name == "load_skill":
+                _, output, _ = execute_skill_tool_call(raw_call)
+                yield from skill_runtime.pop_events()
+                observations.append(output)
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": call_id,
+                    "content": output,
+                })
+                continue
             try:
                 arguments = _tool_arguments(function.get("arguments"))
                 gen = _handle_installer_tool(

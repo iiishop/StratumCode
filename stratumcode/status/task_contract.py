@@ -19,6 +19,7 @@ TASK_UNKNOWN_TYPE_ALIASES = {
     "user_decision": "product_decision",
 }
 TASK_UNKNOWN_STRATEGIES = {"investigate_project", "clearify", "deferred"}
+DELIVERY_FACT_UNKNOWN_TYPES = {"code_fact", "doc_fact", "runtime_fact"}
 LEGACY_ASK_USER_STRATEGY = "ask_user"
 LEGACY_NEEDS_USER_STATUS = "needs_user"
 
@@ -301,6 +302,14 @@ def _ensure_task_contract(analysis: dict) -> dict:
     analysis["behavior_contract"] = _behavior_contract(analysis.get("behavior_contract"))
     analysis["scope"] = _scope(analysis.get("scope"))
     analysis["unknowns"] = _limited_unknowns(analysis.get("unknowns"), analysis.get("acceptance_criteria"))
+    if analysis.get("execution_mode") == "read_only":
+        for unknown in analysis["unknowns"]:
+            if (
+                unknown["type"] in DELIVERY_FACT_UNKNOWN_TYPES
+                and unknown["acceptance_criteria_ids"]
+            ):
+                unknown["blocking"] = True
+                unknown["resolution_strategy"] = "investigate_project"
     return analysis
 
 

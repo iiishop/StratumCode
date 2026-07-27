@@ -127,20 +127,7 @@ def target_scope(target_id: str):
         "loaded": {},
         "events": [],
         "selection_event_id": "",
-        "selection_resolved": False,
     }
-    if catalog:
-        event = _skill_event(
-            target_id,
-            "selecting",
-            "Selecting relevant skills",
-            available=[
-                {"name": item["name"], "description": item["description"]}
-                for item in catalog
-            ],
-        )
-        context["selection_event_id"] = event["id"]
-        context["events"].append(event)
     token = _CONTEXT.set(context)
     try:
         yield
@@ -153,16 +140,60 @@ def available_skills() -> list[dict]:
     return list(context.get("catalog", [])) if context else []
 
 
-def catalog_prompt() -> str:
+def initial_selection_prompt(stage_context: str) -> str:
     context = _CONTEXT.get()
-    if not context or not context["catalog"]:
+    remaining = _remaining_skills(context)
+    if not remaining:
+        return ""
+    _start_selection(context)
+    return "\n".join([
+        "Select the skills to preload for this agent target before the stage starts.",
+        "Choose zero, one, or multiple skills. Load only skills that materially improve this stage.",
+        "Use the current user request, stage goal, prior-stage results, and current artifacts.",
+        "Call load_skill for every selected skill. If no skill is relevant, return no tool calls.",
+        f'<target id="{escape(context["target_id"])}" />',
+        "<stage_context>",
+        escape(stage_context or ""),
+        "</stage_context>",
+        _available_skills_xml(remaining),
+    ])
+
+
+def tool_catalog_prompt() -> str:
+    context = _CONTEXT.get()
+    remaining = _remaining_skills(context)
+    if not remaining:
         return ""
     lines = [
-        "Skills are optional workflows. Load only skills clearly relevant to the current request.",
-        "Call load_skill before other tools when a listed skill is needed. Do not load skills speculatively.",
-        f'<available_skills target="{escape(context["target_id"])}">',
+        (
+            "Additional skills are available as a normal tool for this agent target."
+        ),
+        (
+            "Call load_skill only if a not-yet-loaded skill materially improves the current model step. "
+            "A skill may become relevant later as new facts are discovered."
+        ),
+        (
+            "Topic overlap alone is not relevance. Do not reinterpret a definition, explanation, or other "
+            "direct response as project work merely because a skill mentions the same subject. If the current "
+            "stage has no unresolved work that needs the workflow, load no skill."
+        ),
+        "After load_skill returns, continue on the next model round using the loaded instructions.",
+        _available_skills_xml(remaining),
     ]
-    for item in context["catalog"]:
+    loaded = [item["name"] for item in context["loaded"].values()]
+    if loaded:
+        lines.append(f"Already loaded in this target: {', '.join(loaded)}.")
+    return "\n".join(lines)
+
+
+def catalog_prompt() -> str:
+    return tool_catalog_prompt()
+
+
+def _available_skills_xml(items: list[dict]) -> str:
+    context = _CONTEXT.get() or {"target_id": ""}
+    lines = [f'<available_skills target="{escape(context["target_id"])}">']
+    for item in items:
         lines.append(
             f'<skill name="{escape(item["name"])}">'
             f"<description>{escape(item['description'])}</description></skill>"
@@ -170,9 +201,6 @@ def catalog_prompt() -> str:
         if sum(len(line) for line in lines) >= MAX_CATALOG_CHARS:
             break
     lines.append("</available_skills>")
-    loaded = [item["name"] for item in context["loaded"].values()]
-    if loaded:
-        lines.append(f"Already loaded in this target: {', '.join(loaded)}.")
     return "\n".join(lines)
 
 
@@ -186,7 +214,7 @@ def loaded_messages() -> list[dict]:
     ]
 
 
-def load_skill(name: str) -> str:
+def load_skill(name: str, reason: str) -> str:
     context = _CONTEXT.get()
     if not context:
         raise ValueError("skills are not enabled for the current agent target")
@@ -199,6 +227,9 @@ def load_skill(name: str) -> str:
         raise ValueError(f"skill is not enabled for this agent target: {name}")
     if item["id"] in context["loaded"]:
         return context["loaded"][item["id"]]["content"]
+    reason = str(reason or "").strip()
+    if not reason:
+        raise ValueError("load_skill reason is required")
 
     skill_file = Path(item["skill_file"])
     raw = skill_file.read_bytes()
@@ -223,6 +254,7 @@ def load_skill(name: str) -> str:
         "loaded",
         item["name"],
         description=item["description"],
+        reason=reason,
         path=str(skill_file),
         source=item["source"],
     ))
@@ -238,20 +270,21 @@ def pop_events() -> list[dict]:
     return events
 
 
-def finish_selection(selected: list[str]) -> None:
+def finish_selection(choices: list[dict]) -> None:
     context = _CONTEXT.get()
-    if not context or context["selection_resolved"]:
+    if not context or not context["selection_event_id"]:
         return
-    context["selection_resolved"] = True
     context["events"].append({
         "op": "update",
         "id": context["selection_event_id"],
         "patch": {
             "status": "done",
             "name": "Skill selection complete",
-            "selected": selected,
+            "selected": [item["name"] for item in choices],
+            "choices": choices,
         },
     })
+    context["selection_event_id"] = ""
 
 
 def tool_schema() -> dict:
@@ -267,11 +300,41 @@ def tool_schema() -> dict:
                         "type": "string",
                         "description": "Exact skill name from available_skills.",
                     },
+                    "reason": {
+                        "type": "string",
+                        "description": "Why this skill is relevant to the current model step, based on current context.",
+                    },
                 },
-                "required": ["name"],
+                "required": ["name", "reason"],
             },
         },
     }
+
+
+def _remaining_skills(context: dict | None) -> list[dict]:
+    if not context:
+        return []
+    return [
+        item for item in context["catalog"]
+        if item["id"] not in context["loaded"]
+    ]
+
+
+def _start_selection(context: dict) -> None:
+    remaining = _remaining_skills(context)
+    if not remaining:
+        return
+    event = _skill_event(
+        context["target_id"],
+        "selecting",
+        "Selecting relevant skills",
+        available=[
+            {"name": item["name"], "description": item["description"]}
+            for item in remaining
+        ],
+    )
+    context["selection_event_id"] = event["id"]
+    context["events"].append(event)
 
 
 def _skills_for_target(target_id: str) -> list[dict]:

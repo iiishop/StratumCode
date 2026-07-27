@@ -175,8 +175,21 @@ Rules:
   criterion, constraint, hypothesis, or investigation target.
 - Conversational prompts such as "you think?" or "what do you think?" request
   judgment about the adjacent task; do not create a separate requirement for them.
+- SRC1 is the current request. user_history sources are context, not requirements;
+  include a prior directive only when SRC1 clearly continues or refers to it, and
+  never revive unrelated older requests.
 - Unknowns should be concrete facts, decisions, or delivery uncertainties relevant
   to implementation, validation, scope, or later follow-up.
+- Do not create unknowns for how to organize, format, score, rank, or explain the
+  requested answer. Those are response-composition choices, not unresolved task facts.
+- In read_only work, every code, documentation, or runtime fact directly needed
+  to produce the requested answer, review, audit, or report is blocking and uses
+  investigate_project. Defer only optional follow-up findings outside the requested
+  deliverable.
+- For audit/report requests that name multiple categories, create at least one
+  unknown for each requested category before splitting any one category into
+  sub-questions. If the unknown budget is tight, combine sub-questions inside a
+  category instead of dropping another requested category.
 - Write one acceptance criterion per independent observable final state or state
   transition, usually 1-4 criteria. Never split by file or implementation step.
 - For a question or investigation, an evidence-backed answer or determination is
@@ -192,7 +205,10 @@ Rules:
 - Task Analysis never chooses clearify before reading the project. Use
   investigate_project for blocking questions; Investigation may escalate a
   still-unresolved user-visible product decision to clearify after gathering
-  project evidence."""
+  project evidence.
+- If the user explicitly says a choice is a product decision, keep it as a
+  blocking product_decision unknown with investigate_project strategy so
+  Investigation can verify whether project evidence already decides it."""
 
 TASK_CONTRACT_AUDITOR = """\
 You are the contradiction finder for a proposed Task Contract. Write reasons in
@@ -267,15 +283,26 @@ Only when no difference can be found, return:
 }}"""
 
 INVESTIGATION_STAGE = """\
-## Current stage: investigate before patch planning
+## Current stage: investigate
 
-Understand enough of the current project to enter patch planning. Do not edit files.
+Resolve the task contract with project evidence. Do not edit files. For implement
+work, gather enough facts to enter patch planning. For read_only work, produce the
+requested evidence-backed answer, review, audit, or report instead of a generic
+project overview.
 
 Principles:
 - Maintain multiple grounded beliefs instead of one global hypothesis.
 - Reduce the task unknowns with the cheapest useful evidence. Code/doc/runtime
   unknowns should be investigated; user-visible product decisions become
   clearify only after project evidence cannot decide them.
+- Resolve every blocking fact required by a read_only deliverable before finishing.
+  Do not replace requested audit categories with framework or project-structure facts.
+- When a read_only contract has no project unknowns, answer its acceptance criteria
+  directly in finish_investigation.summary. Do not scan the workspace, merely restate
+  the question, classify the request, explain why investigation is unnecessary, mention
+  the current workspace, or speculate about project code the user did not ask about.
+- Use clearify only for an unresolved blocking product_decision. A direct question
+  that can be answered from established facts does not need conversational orientation.
 - Prefer current project facts over framework defaults or general knowledge.
 - Use code_nav for symbol/function/class questions and grep/read for literal
   text. Use python_static_check first for Python duplicate/dead-code/import
@@ -309,6 +336,7 @@ task status semantics, and readiness for patch planning."""
 INVESTIGATION_CONTEXT = """\
 ## Task analysis
 Intent: {intent_type} - {intent_summary}
+Execution mode: {execution_mode}
 Acceptance criteria:
 {acceptance_criteria}
 
@@ -353,6 +381,17 @@ at a time. The runtime derives task_updates and carries unresolved contract unkn
 Then call finish_investigation with reason, summary, recommended_next_step, and
 patch_planning_facts when code work should continue.
 
+For read_only work, summary is the final user deliverable. Compose it only from
+the audited recorded resolutions and satisfy every acceptance criterion,
+including requested ordering and per-item fields. Do not add new findings.
+For technical-debt or dead-code reports, rank severity by proven runtime or
+maintenance impact. Entrypoint/package-shape ambiguity is not a High-severity
+"project cannot run" defect unless project metadata, docs, tests, or the user's
+requested runtime contract proves the repository must be directly executable.
+Do not list a symbol as a dead-code finding when cited evidence shows any real
+caller. Classify overlap with another helper as duplication or organization
+debt, not dead code.
+
 Use belief_ids for summarized conclusions. Use resolution.evidence only for exact
 observation ids or raw tool_call_ids already present in the conversation.
 
@@ -372,6 +411,20 @@ resolution, decide whether its answer is:
 - clearify: behavior that neither the user nor project evidence authorizes, so
   the requester must decide;
 - investigate: unsupported, incomplete, or contradicted by current evidence.
+
+For read_only reviews and reports, recommendations describe possible future
+changes; they are not claims that their proposed identifiers already exist.
+Direct comparisons and absence findings grounded in cited code observations do
+not need a hypothesis-verifier. Use verify only for a material indirect inference
+that the cited observations cannot establish by inspection.
+Do not treat library-style modules, public classes, or an empty entrypoint as
+dead code unless project metadata, tests, docs, or the user-requested runtime
+contract proves the repository must be directly executable. Without that proof,
+the grounded conclusion is only that the entrypoint/package shape is unclear.
+If a resolution ranks that ambiguity as High severity or says the project cannot
+run without such proof, return investigate.
+If a resolution lists a symbol as dead code while the cited evidence shows a
+real caller, return investigate.
 
 Code evidence establishes what the project currently does. It cannot establish
 which new product policy the requester intends. A reference baseline authorizes
@@ -962,6 +1015,7 @@ def build_investigation_context(
         INVESTIGATION_CONTEXT.format(
             intent_type=analysis.get("intent", {}).get("type", "other"),
             intent_summary=analysis.get("intent", {}).get("summary", ""),
+            execution_mode=analysis.get("execution_mode", "read_only"),
             acceptance_criteria="\n".join(
                 f"- {item.get('id', '')}: {item.get('text', '')}"
                 for item in analysis.get("acceptance_criteria", [])

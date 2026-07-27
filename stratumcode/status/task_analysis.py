@@ -468,6 +468,8 @@ def _analysis_from_slots(message: str, context: list[str], intent_slot: dict, ac
         execution_mode = "read_only"
     summary = str(intent_data.get("summary") or fallback["intent"]["summary"]).strip()
     acceptance = _runtime_acceptance_slots(acceptance_data, message, context)
+    unknowns = _runtime_unknowns(unknown_data, acceptance, fallback)
+    unknowns = _ensure_explicit_product_decision_unknown(message, unknowns, acceptance)
     data = {
         "intent": {"type": intent_type, "summary": summary},
         "execution_mode": execution_mode,
@@ -480,7 +482,7 @@ def _analysis_from_slots(message: str, context: list[str], intent_slot: dict, ac
         "clues": _unique_clues(_slot_clues(intent_meta.get("clues")) + fallback["clues"]),
         "reference_baselines": intent_meta.get("reference_baselines", []),
         "investigation_targets": intent_meta.get("investigation_targets", []),
-        "unknowns": _runtime_unknowns(unknown_data, acceptance, fallback),
+        "unknowns": unknowns,
     }
     if execution_mode_recovered:
         data["analyzer_warnings"] = [
@@ -805,6 +807,70 @@ def _runtime_unknowns(data: dict, acceptance: list[dict], fallback: dict) -> lis
         return _limited_unknowns(items, acceptance)
     except ValueError:
         return fallback["unknowns"]
+
+
+def _ensure_explicit_product_decision_unknown(
+    message: str,
+    unknowns: list[dict],
+    acceptance: list[dict],
+) -> list[dict]:
+    decision = _explicit_product_decision_question(message)
+    if not decision:
+        return unknowns
+    if any(item.get("type") == "product_decision" for item in unknowns):
+        items = [dict(item) for item in unknowns]
+        for item in items:
+            if item.get("type") != "product_decision":
+                continue
+            item["question"] = item.get("question") or decision
+            item["blocking"] = True
+            item["resolution_strategy"] = "investigate_project"
+            item["why"] = item.get("why") or "The user explicitly marked this as a product decision."
+        return [{**item, "id": f"U{index}"} for index, item in enumerate(items, start=1)]
+    items = [dict(item) for item in unknowns]
+    limit = app_settings.get_task_limit("task_unknowns") or 5
+    if limit and len(items) >= limit:
+        drop_index = next(
+            (
+                index
+                for index in range(len(items) - 1, -1, -1)
+                if items[index].get("type") != "product_decision"
+            ),
+            len(items) - 1,
+        )
+        items.pop(drop_index)
+    criteria_ids = [
+        item["id"] for item in acceptance
+        if "产品" in item.get("text", "") or "decision" in item.get("text", "").casefold()
+    ] or [item["id"] for item in acceptance]
+    items.append({
+        "id": "",
+        "question": decision,
+        "blocking": True,
+        "type": "product_decision",
+        "why": "The user explicitly marked this as a product decision.",
+        "resolution_strategy": "investigate_project",
+        "acceptance_criteria_ids": criteria_ids,
+    })
+    return [{**item, "id": f"U{index}"} for index, item in enumerate(items, start=1)]
+
+
+def _explicit_product_decision_question(message: str) -> str:
+    text = " ".join(str(message or "").split())
+    if not re.search(r"产品决定|product\s+decision", text, re.IGNORECASE):
+        return ""
+    parts = [part.strip() for part in re.split(r"[。！？!?；;\n]", text) if part.strip()]
+    decision = next(
+        (
+            part for part in parts
+            if re.search(r"产品决定|product\s+decision", part, re.IGNORECASE)
+            and ("还是" in part or re.search(r"\bor\b", part, re.IGNORECASE))
+        ),
+        "",
+    )
+    if not decision:
+        return ""
+    return decision if decision.endswith(("?", "？")) else f"{decision}？"
 
 
 def _slot_ids(value, ids: list[str]) -> list[str]:

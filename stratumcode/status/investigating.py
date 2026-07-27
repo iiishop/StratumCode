@@ -107,7 +107,13 @@ def handle(run):
     investigation_analysis = run.analysis
     unresolved = (run.last_investigation or {}).get("unknowns")
     if isinstance(unresolved, list) and unresolved:
-        investigation_analysis = {**run.analysis, "unknowns": unresolved}
+        investigation_analysis = {
+            **run.analysis,
+            "unknowns": _merge_items_by_id(
+                run.analysis.get("unknowns", []),
+                unresolved,
+            ),
+        }
     for event in investigator.investigation_stream(
         message=request,
         analysis=investigation_analysis,

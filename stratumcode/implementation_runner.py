@@ -8,7 +8,7 @@ from itertools import count
 from pathlib import Path
 from uuid import uuid4
 
-from . import app_settings, mcp, model_settings, patch_authorization, prompt, providers
+from . import app_settings, mcp, model_settings, patch_authorization, prompt, providers, skill_runtime
 from .patch_engine import PatchError, rollback_patch
 from .agent.tools import openai_tool_schema
 from .agent_runtime import (
@@ -16,6 +16,7 @@ from .agent_runtime import (
     call_model as _call_model,
     content_text as _content_text,
     empty_usage as _empty_usage,
+    execute_skill_tool_call,
     output_truncated as _output_truncated,
     start_event,
     usage_delta as _usage_delta,
@@ -127,6 +128,11 @@ def implementation_stream(
             function = call.get("function") or {}
             name = function.get("name") or ""
             call_id = call.get("id") or f"{run_id}-tool-{round_index}"
+            if name == "load_skill":
+                _, output, _ = execute_skill_tool_call(call)
+                yield from skill_runtime.pop_events()
+                messages.append({"role": "tool", "tool_call_id": call_id, "content": output})
+                continue
             try:
                 arguments = _tool_arguments(function.get("arguments"))
                 arguments = _prepare_tool_arguments(name, arguments, patch_plan)
@@ -870,6 +876,11 @@ def _validation_stream(
             function = call.get("function") or {}
             name = function.get("name") or ""
             call_id = call.get("id") or f"{run_id}-tool-{round_index}"
+            if name == "load_skill":
+                _, output, _ = execute_skill_tool_call(call)
+                yield from skill_runtime.pop_events()
+                messages.append({"role": "tool", "tool_call_id": call_id, "content": output})
+                continue
             try:
                 arguments = _tool_arguments(function.get("arguments"))
                 if name == "finish_validation":

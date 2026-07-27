@@ -5,8 +5,8 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from uuid import uuid4
 
-from . import skill_runtime
-from .agent_runtime import start_event
+from . import model_settings, skill_runtime
+from .agent_runtime import finish_initial_skill_selection, start_event
 
 
 class ChatState(StrEnum):
@@ -113,6 +113,7 @@ def _chat_events(run: ChatRun) -> Iterator[dict]:
     while run.state not in _TERMINAL_CHAT_STATES:
         try:
             with skill_runtime.target_scope(f"state:{run.state.value}"):
+                yield from _select_initial_skills(run)
                 yield from skill_runtime.pop_events()
                 events = state_handlers[run.state](run)
                 if events is not None:
@@ -135,6 +136,43 @@ def _chat_events(run: ChatRun) -> Iterator[dict]:
 
 def _chat_finish_state(run: ChatRun) -> ChatState:
     return ChatState.SAVING_SESSION if run.session_id and run.last_investigation else ChatState.COMPLETED
+
+
+def _select_initial_skills(run: ChatRun) -> Iterator[dict]:
+    setting = (
+        model_settings.resolve(model_settings.DEFAULT_STAGE)
+        or model_settings.resolve(model_settings.EVIDENCE_STAGE)
+    )
+    if setting is None:
+        return
+    prompt_text = skill_runtime.initial_selection_prompt(_skill_selection_context(run))
+    yield from skill_runtime.pop_events()
+    finish_initial_skill_selection(
+        setting["provider"],
+        setting["model_id"],
+        prompt_text,
+    )
+
+
+def _skill_selection_context(run: ChatRun) -> str:
+    lines = [
+        f"state: {run.state.value}",
+        f"user_request: {run.message}",
+    ]
+    if run.analysis:
+        lines.append(f"task_summary: {run.analysis.get('summary') or run.analysis.get('intent', {}).get('summary') or ''}")
+        lines.append(f"execution_mode: {run.analysis.get('execution_mode') or ''}")
+    if run.last_investigation:
+        lines.append(f"investigation_summary: {run.last_investigation.get('summary') or ''}")
+    if run.design_plan:
+        lines.append(f"design_summary: {run.design_plan.get('summary') or run.design_plan.get('title') or ''}")
+    if run.patch_plan:
+        lines.append(f"patch_plan_summary: {run.patch_plan.get('summary') or ''}")
+    if run.changed_files:
+        lines.append("changed_files: " + ", ".join(run.changed_files))
+    if run.validation_result:
+        lines.append(f"validation_summary: {run.validation_result.get('summary') or ''}")
+    return "\n".join(line for line in lines if line.strip())
 
 
 def stream(request: dict, workspace_dir: str = ".") -> Iterator[dict]:

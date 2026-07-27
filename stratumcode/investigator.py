@@ -9,7 +9,7 @@ from itertools import count
 from pathlib import Path
 from uuid import uuid4
 
-from . import app_settings, clearify_runtime, model_settings, prompt, providers
+from . import app_settings, clearify_runtime, model_settings, prompt, providers, skill_runtime
 from .agent.tools import openai_tool_schema
 from .agent_runtime import (
     add_usage as _add_usage,
@@ -18,6 +18,7 @@ from .agent_runtime import (
     assistant_visible_text as _assistant_visible_text,
     content_text as _content_text,
     empty_usage as _empty_usage,
+    execute_skill_tool_call,
     start_event,
     tool_error_json,
     usage_delta as _usage_delta,
@@ -35,6 +36,25 @@ from .tools import registry
 INVESTIGATION_CAPABILITY = "investigation"
 PROJECT_EVIDENCE_CAPABILITY = "investigation.project_evidence"
 MAX_REPEATED_TOOL_ERRORS = 3
+READ_ONLY_SUMMARY_MIN_RESOLUTION_RATIO = 0.35
+DEBT_REPORT_TERMS = (
+    "技术债", "技術債", "死代码", "死碼", "technical debt", "dead code",
+)
+ENTRYPOINT_TERMS = ("main.py", "entrypoint", "entry point", "入口")
+PACKAGE_SHAPE_TERMS = (
+    "used_in_project: false", "无入口", "沒有入口", "没有 cli", "沒有 cli",
+    "no cli", "no script", "没有脚本", "沒有腳本", "pyproject.toml",
+    "setup.py", "__init__.py",
+)
+ENTRYPOINT_OVERCLAIM_TERMS = (
+    "项目不能运行", "项目无法运行", "不能运行", "无法运行",
+    "project cannot run", "cannot run the project",
+)
+ENTRYPOINT_OVERCLAIM_PATTERN = re.compile(
+    r"(?:项目)?(?:不能|无法|無法|不可).{0,12}运行"
+    r"|(?:the\s+)?project cannot run|cannot run the project",
+    re.IGNORECASE,
+)
 MAX_REPEATED_RECORD_NO_PROGRESS = 3
 DISCOVERY_BATCH_OBSERVATIONS = 3
 REQUIRED_FINDING_SLOT_ATTEMPTS = 2
@@ -196,6 +216,20 @@ def investigation_stream(
         elif _recorded_resolves_initial_unknowns(recorded_findings, analysis):
             current_tools = [_finish_tool_schema()]
             current_tool_choice = {"type": "function", "function": {"name": "finish_investigation"}}
+        elif (
+            analysis.get("execution_mode") == "read_only"
+            and not analysis.get("unknowns")
+        ):
+            messages.append({"role": "user", "content": (
+                "The task contract has no project facts to investigate. Answer the user's "
+                "request directly in finish_investigation.summary. The summary must satisfy "
+                "the acceptance criteria; do not merely classify, restate, or explain why "
+                "the request does not require project inspection. Do not mention the current "
+                "workspace, speculate about its code, or offer additional project work unless "
+                "the user requested it."
+            )})
+            current_tools = [_finish_tool_schema()]
+            current_tool_choice = {"type": "function", "function": {"name": "finish_investigation"}}
         elif resolution_required_ids:
             messages.append({"role": "user", "content": _resolution_required_prompt(
                 resolution_required_ids,
@@ -263,6 +297,15 @@ def investigation_stream(
             function = raw_call.get("function") or {}
             name = function.get("name") or ""
             arguments = {}
+            if name == "load_skill":
+                _, output, _ = execute_skill_tool_call(raw_call)
+                yield from skill_runtime.pop_events()
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": call_id,
+                    "content": output,
+                })
+                continue
             try:
                 arguments = _investigation_tool_arguments(
                     name,
@@ -488,6 +531,8 @@ def investigation_stream(
                             recorded_findings,
                             last_quality_audit,
                             observations=observations,
+                            strict_grounding=_analysis_requests_implementation(analysis),
+                            allow_verification=_analysis_requests_implementation(analysis),
                         )
                         semantic_repair_required_ids = _semantic_repair_resolution_ids(
                             recorded_findings,
@@ -573,6 +618,8 @@ def investigation_stream(
                             recorded_findings,
                             last_quality_audit,
                             observations=observations,
+                            strict_grounding=_analysis_requests_implementation(analysis),
+                            allow_verification=_analysis_requests_implementation(analysis),
                         )
                         semantic_repair_required_ids = _semantic_repair_resolution_ids(
                             recorded_findings,
@@ -619,7 +666,11 @@ def investigation_stream(
                         )})
                         break
                     final = _finish_payload(
-                        _finish_arguments(recorded_findings, arguments),
+                        _finish_arguments(
+                            recorded_findings,
+                            arguments,
+                            prefer_finish_summary=not _analysis_requests_implementation(analysis),
+                        ),
                         analysis=analysis,
                         observations=observations,
                         repair_conflicts=True,
@@ -690,12 +741,15 @@ def investigation_stream(
                     answer = clearify_runtime.wait(question_id)
                     output = _clearify_tool_result(answer)
                     resolution = _clearify_resolution(arguments, answer)
-                    answered_clearify_ids.add(resolution["unknown_id"])
-                    clearify_questions.pop(resolution["unknown_id"], None)
-                    recorded_findings = _merge_recorded_findings(
-                        recorded_findings,
-                        {"resolutions": [resolution]},
-                    )
+                    repeated_tool_error_name = ""
+                    repeated_tool_error_count = 0
+                    if resolution:
+                        answered_clearify_ids.add(resolution["unknown_id"])
+                        clearify_questions.pop(resolution["unknown_id"], None)
+                        recorded_findings = _merge_recorded_findings(
+                            recorded_findings,
+                            {"resolutions": [resolution]},
+                        )
                     yield start_event(call_id, "tool", {
                         "name": name,
                         "description": "Ask the user for clarification",
@@ -704,10 +758,11 @@ def investigation_stream(
                         "input": json.dumps(arguments, ensure_ascii=False, indent=2),
                         "output": output,
                     })
-                    yield start_event(f"{call_id}-task-update", "task_update", {
-                        "analysis_id": analysis.get("id", ""),
-                        "items": _investigation_task_updates(None, [], [resolution]),
-                    })
+                    if resolution:
+                        yield start_event(f"{call_id}-task-update", "task_update", {
+                            "analysis_id": analysis.get("id", ""),
+                            "items": _investigation_task_updates(None, [], [resolution]),
+                        })
                     messages.append({
                         "role": "tool",
                         "tool_call_id": call_id,
@@ -1087,19 +1142,24 @@ def _is_hypothesis_verifier_call(name: str, arguments: dict) -> bool:
     return agent.strip().removeprefix("@").casefold() == "hypothesis-verifier"
 
 
+def _analysis_is_read_only(analysis: dict | None) -> bool:
+    return str((analysis or {}).get("execution_mode") or "").strip().casefold() == "read_only"
+
+
 def _recorded_resolves_initial_unknowns(recorded: dict, analysis: dict | None) -> bool:
     initial = [item for item in (analysis or {}).get("unknowns", []) if isinstance(item, dict) and item.get("id")]
     if not initial:
         return False
     required_ids = {str(item["id"]) for item in initial}
-    required_ids.update(
-        str(item["id"])
-        for item in (
-            _unknowns(recorded.get("unknowns"))
-            + _unknowns(recorded.get("new_unknowns"))
+    if not _analysis_is_read_only(analysis):
+        required_ids.update(
+            str(item["id"])
+            for item in (
+                _unknowns(recorded.get("unknowns"))
+                + _unknowns(recorded.get("new_unknowns"))
+            )
+            if item.get("blocking")
         )
-        if item.get("blocking")
-    )
     resolved = {
         str(item.get("unknown_id") or "").strip()
         for item in recorded.get("resolutions", [])
@@ -1772,7 +1832,11 @@ def _record_resolution_slot_ids(
 ) -> list[str]:
     unknowns = _merge_unknowns(
         _initial_unknowns(analysis)
-        + _unknowns(recorded_findings.get("new_unknowns"))
+        + (
+            []
+            if _analysis_is_read_only(analysis)
+            else _unknowns(recorded_findings.get("new_unknowns"))
+        )
     )
     investigable = {
         item["id"]
@@ -1970,6 +2034,8 @@ def _runtime_new_unknowns(
     recorded_findings: dict,
     resolutions: list[dict] | None = None,
 ) -> list[dict]:
+    if _analysis_is_read_only(analysis):
+        return []
     if any(
         item.get("status") != "resolved"
         for item in resolutions or []
@@ -2189,7 +2255,11 @@ def _finalize_investigation(
                 last_arguments = _tool_arguments(function.get("arguments"))
                 _require_control_reason(last_arguments, "finish_investigation")
                 final = _finish_payload(
-                    _finish_arguments(recorded_findings or _empty_recorded_findings(), last_arguments),
+                    _finish_arguments(
+                        recorded_findings or _empty_recorded_findings(),
+                        last_arguments,
+                        prefer_finish_summary=not _analysis_requests_implementation(analysis),
+                    ),
                     analysis=analysis,
                     observations=observations or [],
                 )
@@ -2290,7 +2360,11 @@ def _finalize_investigation(
     if last_arguments:
         try:
             return _finish_payload(
-                _finish_arguments(recorded_findings or _empty_recorded_findings(), last_arguments),
+                _finish_arguments(
+                    recorded_findings or _empty_recorded_findings(),
+                    last_arguments,
+                    prefer_finish_summary=not _analysis_requests_implementation(analysis),
+                ),
                 analysis=analysis,
                 observations=observations or [],
                 repair_conflicts=True,
@@ -2314,10 +2388,9 @@ def _runtime_recovered_investigation(
 ) -> dict:
     facts = _runtime_patch_facts(observations, recorded_findings)
     initial_unknowns = _initial_unknowns(analysis)
-    recorded_unknowns = (
-        _unknowns(recorded_findings.get("unknowns"))
-        + _unknowns(recorded_findings.get("new_unknowns"))
-    )
+    recorded_unknowns = _unknowns(recorded_findings.get("unknowns"))
+    if not _analysis_is_read_only(analysis):
+        recorded_unknowns += _unknowns(recorded_findings.get("new_unknowns"))
     known_unknowns = _merge_unknowns(initial_unknowns + recorded_unknowns)
     resolutions = _complete_resolutions(
         _resolutions(recorded_findings.get("resolutions")),
@@ -2325,16 +2398,26 @@ def _runtime_recovered_investigation(
         recorded_unknowns,
     )
     unknowns = _unresolved_from_resolutions(resolutions, known_unknowns)
+    read_only_complete = _analysis_is_read_only(analysis) and not unknowns
+    read_only_summary = "\n\n".join(
+        str(item.get("answer") or "").strip()
+        for item in resolutions
+        if item.get("status") == "resolved" and str(item.get("answer") or "").strip()
+    )
     return {
-        "summary": "Runtime recovered from repeated invalid investigation tool arguments.",
+        "summary": (
+            read_only_summary
+            if read_only_complete and read_only_summary
+            else "Runtime recovered from repeated invalid investigation tool arguments."
+        ),
         "ready_for_patch_planning": False,
         "runtime_recovered": True,
-        "runtime_failure": True,
+        "runtime_failure": not read_only_complete,
         "recovery_reason": reason,
         "beliefs": recorded_findings.get("beliefs", []),
         "resolutions": resolutions,
         "unknowns": unknowns,
-        "open_questions": [reason],
+        "open_questions": [] if read_only_complete else [reason],
         "patch_planning_facts": facts,
         "patch_planning_context": facts,
     }
@@ -2460,7 +2543,7 @@ def _clearify_tool_result(answer: dict | None) -> str:
     }, ensure_ascii=False)
 
 
-def _clearify_resolution(arguments: dict, answer: dict | None) -> dict:
+def _clearify_resolution(arguments: dict, answer: dict | None) -> dict | None:
     answer = answer or {}
     text = str(
         answer.get("response")
@@ -2472,6 +2555,8 @@ def _clearify_resolution(arguments: dict, answer: dict | None) -> dict:
         raise ValueError("clearify answer is empty")
     target_ids = _target_unknown_ids(arguments)
     if not target_ids:
+        if arguments.get("orientation"):
+            return None
         raise ValueError("clearify answer has no target unknown")
     return {
         "unknown_id": target_ids[0],
@@ -2806,7 +2891,7 @@ def _finish_payload(
     repairs: list[str] = []
     explicit_unknowns = _unknowns(arguments.get("unknowns"))
     unknowns = list(explicit_unknowns)
-    new_unknowns = _unknowns(arguments.get("new_unknowns"))
+    new_unknowns = [] if _analysis_is_read_only(analysis) else _unknowns(arguments.get("new_unknowns"))
     initial_unknowns = _initial_unknowns(analysis)
     user_decisions = _string_list(arguments.get("user_decisions_required"))
     decision_questions = [_decision_question(item) for item in user_decisions]
@@ -2918,6 +3003,7 @@ def _finish_payload(
         "readiness": readiness,
         "protocol_repairs": repairs,
     }
+    final["summary"] = _downgrade_unproven_entrypoint_overclaims(final["summary"], analysis)
     final["project_facts"] = _investigation_project_facts(
         beliefs,
         resolutions,
@@ -2926,6 +3012,52 @@ def _finish_payload(
     if repair_request:
         final["resolution_repair"] = repair_request
     return final
+
+
+def _downgrade_unproven_entrypoint_overclaims(summary: str, analysis: dict | None) -> str:
+    if not summary or not _analysis_is_read_only(analysis) or not _is_debt_report_request(analysis):
+        return summary
+    return re.sub(
+        r"(?ms)(^#{2,4}[^\n]*(?:High|高严重度|高嚴重度)[^\n]*\n.*?)(?=^#{2,4}\s|\Z)",
+        lambda match: _downgrade_entrypoint_overclaim_block(match.group(1)),
+        summary,
+    )
+
+
+def _downgrade_entrypoint_overclaim_block(block: str) -> str:
+    if not _is_entrypoint_overclaim(block):
+        return block
+    downgraded = re.sub(r"^##\s+High\b", "## Medium", block)
+    downgraded = downgraded.replace("高严重度", "中严重度").replace("高嚴重度", "中嚴重度")
+    downgraded = ENTRYPOINT_OVERCLAIM_PATTERN.sub(
+        "入口/包形态不明确，不能仅凭入口缺失证明项目不能运行",
+        downgraded,
+    )
+    return downgraded
+
+
+def _is_debt_report_request(analysis: dict | None) -> bool:
+    texts = [
+        str((analysis or {}).get("summary") or ""),
+        *[
+            str(item.get("text") or "")
+            for item in (analysis or {}).get("requirements", [])
+            if isinstance(item, dict)
+        ],
+    ]
+    joined = " ".join(texts).casefold()
+    return any(term in joined for term in DEBT_REPORT_TERMS)
+
+
+def _is_entrypoint_overclaim(value: str) -> bool:
+    lowered = value.casefold()
+    return (
+        any(term in lowered for term in ENTRYPOINT_TERMS + PACKAGE_SHAPE_TERMS)
+        and (
+            any(term in lowered for term in ENTRYPOINT_OVERCLAIM_TERMS)
+            or bool(ENTRYPOINT_OVERCLAIM_PATTERN.search(value))
+        )
+    )
 
 
 def _investigation_project_facts(
@@ -3031,6 +3163,8 @@ def _apply_investigation_audit(
     audit: dict,
     *,
     observations: list[dict] | None = None,
+    strict_grounding: bool = True,
+    allow_verification: bool = True,
 ) -> tuple[dict, list[dict], dict[str, str]]:
     result = {field: list(recorded.get(field, [])) for field in FINDING_FIELDS}
     beliefs = [dict(item) for item in result["beliefs"] if isinstance(item, dict)]
@@ -3038,13 +3172,17 @@ def _apply_investigation_audit(
     for belief in beliefs:
         if belief.get("status") not in {"supported", "strongly_supported", "runtime_confirmed"}:
             continue
-        unsupported = _unsupported_grounding_literals(
-            {
-                "answer": belief.get("statement", ""),
-                "evidence": belief.get("evidence", []),
-            },
-            _empty_recorded_findings(),
-            observations or [],
+        unsupported = (
+            _unsupported_grounding_literals(
+                {
+                    "answer": belief.get("statement", ""),
+                    "evidence": belief.get("evidence", []),
+                },
+                _empty_recorded_findings(),
+                observations or [],
+            )
+            if strict_grounding
+            else []
         )
         supporting_ids = _supporting_observation_ids(unsupported, observations or [])
         if supporting_ids:
@@ -3083,10 +3221,14 @@ def _apply_investigation_audit(
         status = str(verdict.get("status") or "").strip()
         reason = str(verdict.get("reason") or "").strip()
         if status == "grounded":
-            unsupported = _unsupported_grounding_literals(
-                resolution,
-                result,
-                observations or [],
+            unsupported = (
+                _unsupported_grounding_literals(
+                    resolution,
+                    result,
+                    observations or [],
+                )
+                if strict_grounding
+                else []
             )
             supporting_ids = _supporting_observation_ids(unsupported, observations or [])
             if supporting_ids:
@@ -3099,10 +3241,14 @@ def _apply_investigation_audit(
                     result,
                     observations or [],
                 )
-            missing_state_writes = _missing_grounding_state_writes(
-                resolution,
-                result,
-                observations or [],
+            missing_state_writes = (
+                _missing_grounding_state_writes(
+                    resolution,
+                    result,
+                    observations or [],
+                )
+                if strict_grounding
+                else []
             )
             if not unsupported and not missing_state_writes:
                 resolution["status"] = "resolved"
@@ -3116,7 +3262,7 @@ def _apply_investigation_audit(
                 reason = STATE_WRITE_REASON_PREFIX + " " + ", ".join(missing_state_writes)
         if status == "verify":
             hypothesis = str(verdict.get("hypothesis") or "").strip()
-            if hypothesis:
+            if hypothesis and allow_verification:
                 resolution["status"] = "partially_resolved"
                 resolution["reason"] = reason
                 verification_requests.append({
@@ -3433,21 +3579,43 @@ def _record_task_updates(arguments: dict) -> list[dict]:
     )
 
 
-def _finish_arguments(recorded: dict, finish: dict) -> dict:
+def _finish_arguments(
+    recorded: dict,
+    finish: dict,
+    *,
+    prefer_finish_summary: bool = False,
+) -> dict:
     facts = _runtime_patch_facts([], recorded)
-    summary = "\n\n".join(
+    resolution_summary = "\n\n".join(
         str(item.get("answer") or "").strip()
         for item in recorded.get("resolutions", [])
         if isinstance(item, dict)
         and item.get("status") == "resolved"
         and str(item.get("answer") or "").strip()
     )
+    finish_summary = str(finish.get("summary") or "").strip()
+    if (
+        prefer_finish_summary
+        and finish_summary
+        and resolution_summary
+        and len(finish_summary)
+        < len(resolution_summary) * READ_ONLY_SUMMARY_MIN_RESOLUTION_RATIO
+    ):
+        raise ValueError(
+            "read_only finish summary drops too much audited resolution detail; "
+            "rewrite the final deliverable to satisfy every acceptance criterion"
+        )
+    summary = (
+        finish_summary
+        if prefer_finish_summary and finish_summary
+        else resolution_summary or finish_summary
+    )
     combined: dict = {
         field: list(recorded.get(field, []))
         for field in FINDING_FIELDS
     }
     combined.update({
-        "summary": summary or str(finish.get("summary") or "").strip(),
+        "summary": summary,
         "ready_for_patch_planning": _recommended_next_step(finish) == "patch_planning",
         "recommended_next_step": _recommended_next_step(finish),
         "patch_planning_facts": facts,

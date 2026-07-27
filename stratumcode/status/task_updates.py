@@ -455,6 +455,11 @@ def _investigation_continuation_findings(investigation: dict | None) -> list[str
     for item in investigation.get("beliefs", [])[:8] if isinstance(investigation.get("beliefs"), list) else []:
         if isinstance(item, dict) and item.get("statement"):
             lines.append(f"- {item.get('id') or 'belief'}: {item['statement']}")
+    for item in investigation.get("resolutions", [])[:12] if isinstance(investigation.get("resolutions"), list) else []:
+        if isinstance(item, dict) and item.get("answer"):
+            lines.append(
+                f"- resolved {item.get('unknown_id') or 'unknown'}: {item['answer']}"
+            )
     for item in investigation.get("task_updates", [])[:8] if isinstance(investigation.get("task_updates"), list) else []:
         if isinstance(item, dict) and item.get("status") == "unknown" and item.get("text"):
             lines.append(f"- unresolved {item.get('id') or 'unknown'}: {item['text']}")

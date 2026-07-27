@@ -9,7 +9,7 @@ from dataclasses import asdict
 from itertools import count
 from uuid import uuid4
 
-from . import app_settings, model_settings, prompt, providers
+from . import app_settings, model_settings, prompt, providers, skill_runtime
 from .agent import EvidencePolicy, EvidenceRun, RunState
 from .agent.policy import DISCOVERY_TOOLS, EvidencePhase
 from .agent.tools import agent_tools
@@ -19,6 +19,7 @@ from .agent_runtime import (
     assistant_message as _assistant_message,
     assistant_visible_text as _assistant_visible_text,
     empty_usage as _empty_usage,
+    execute_skill_tool_call,
     start_event,
     tool_error_json,
     usage_delta as _usage_delta,
@@ -176,11 +177,21 @@ def evidence_stream(
         empty_tool_rounds = 0
         concluded = False
         compaction_messages: list[dict] = []
+        round_error_names: set[str] = set()
         for raw_call in tool_calls:
             call_id = raw_call.get("id") or f"call-{uuid4().hex[:8]}"
             function = raw_call.get("function") or {}
             name = function.get("name", "")
             maybe_step = None
+            if name == "load_skill":
+                _, output, _ = execute_skill_tool_call(raw_call)
+                yield from skill_runtime.pop_events()
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": call_id,
+                    "content": output,
+                })
+                continue
             try:
                 arguments = json.loads(function.get("arguments") or "{}")
                 if not isinstance(arguments, dict):
@@ -221,11 +232,13 @@ def evidence_stream(
                 if name == "record_evidence" or policy.checkpoint_due:
                     policy.note_checkpoint_failure()
                 error_name = name or "invalid"
-                if error_name == repeated_tool_error_name:
-                    repeated_tool_error_count += 1
-                else:
-                    repeated_tool_error_name = error_name
-                    repeated_tool_error_count = 1
+                if error_name not in round_error_names:
+                    if error_name == repeated_tool_error_name:
+                        repeated_tool_error_count += 1
+                    else:
+                        repeated_tool_error_name = error_name
+                        repeated_tool_error_count = 1
+                    round_error_names.add(error_name)
                 stop_evidence = repeated_tool_error_count >= MAX_REPEATED_TOOL_ERRORS
                 yield start_event(call_id, _tool_event_type(name), {
                     "name": name or "invalid",
