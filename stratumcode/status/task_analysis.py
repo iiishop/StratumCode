@@ -20,7 +20,7 @@ TASK_CERTAINTIES = {"certain", "uncertain", "guess"}
 TASK_CLUE_KINDS = {"file", "line", "symbol", "route", "other"}
 IMPLEMENTATION_INTENT_TYPES = {"feature", "bugfix", "refactor"}
 DEFAULT_TASK_SLOT_ATTEMPTS = 2
-TASK_CONTRACT_AUDIT_MODES = ("counterexample", "literal_entailment")
+TASK_CONTRACT_AUDIT_MODES = ("material_counterexample",)
 
 
 def _message_requests_implementation(message: str) -> bool:
@@ -56,6 +56,7 @@ def analyze_task(message: str, context: list[str], workspace_dir: str, session_c
         return call_model(provider_setting, model_id, messages, **kwargs)
 
     analyzer_errors = []
+    semantic_repairs = []
     selected_context = [item for item in context if not _workspace_snapshot_line(str(item))]
     source_catalog = _session_sources(message, selected_context, session_context)
     slot_context = selected_context
@@ -81,37 +82,41 @@ def analyze_task(message: str, context: list[str], workspace_dir: str, session_c
     canonical_intent = _canonical_analysis(
         message, selected_context, source_catalog, intent_slot or {}, {}, {}
     )
-    acceptance_slot, errors = _task_slot_json(
-        provider,
-        model,
-        tracked_call_model,
-        content_text,
-        [
-            system,
-            {"role": "user", "content": prompt.build_task_acceptance_slot_user(
-                message=message,
-                directory=workspace_dir,
-                context=slot_context,
-                intent_slot=_intent_slot_payload(canonical_intent),
-                source_catalog=source_catalog,
-            )},
-        ],
-        "acceptance_contract",
-        required=lambda data: _acceptance_contract_validation(
+    acceptance_slot = _conditional_bugfix_acceptance(canonical_intent)
+    acceptance_recovered = False
+    if acceptance_slot is None:
+        acceptance_slot, errors = _task_slot_json(
             provider=provider,
             model=model,
             call_model=tracked_call_model,
             content_text=content_text,
-            data=data,
-            message=message,
-            source_catalog=source_catalog,
-            canonical_intent=canonical_intent,
-        ),
-    )
-    analyzer_errors.extend(errors)
-    acceptance_recovered = acceptance_slot is None
-    if acceptance_recovered:
-        acceptance_slot = _requirement_acceptance_fallback(canonical_intent)
+            messages=[
+                system,
+                {"role": "user", "content": prompt.build_task_acceptance_slot_user(
+                    message=message,
+                    directory=workspace_dir,
+                    context=slot_context,
+                    intent_slot=_intent_slot_payload(canonical_intent),
+                    source_catalog=source_catalog,
+                )},
+            ],
+            label="acceptance_contract",
+            required=lambda data: _acceptance_contract_validation(
+                provider=provider,
+                model=model,
+                call_model=tracked_call_model,
+                content_text=content_text,
+                data=data,
+                message=message,
+                source_catalog=source_catalog,
+                canonical_intent=canonical_intent,
+                repair_warnings=semantic_repairs,
+            ),
+        )
+        analyzer_errors.extend(errors)
+        acceptance_recovered = acceptance_slot is None
+        if acceptance_recovered:
+            acceptance_slot = _requirement_acceptance_fallback(canonical_intent)
     canonical_acceptance = _canonical_analysis(
         message, selected_context, source_catalog, intent_slot or {}, acceptance_slot or {}, {}
     )
@@ -149,14 +154,12 @@ def analyze_task(message: str, context: list[str], workspace_dir: str, session_c
         analyzer_errors.append(str(exc))
         minimal_recovery_error = str(exc)
         analysis = _minimal_task_analysis(message, context)
-    _sanitize_optional_contract(
-        provider=provider,
-        model=model,
-        call_model=tracked_call_model,
-        content_text=content_text,
-        source_catalog=source_catalog,
-        analysis=analysis,
-    )
+    _sanitize_optional_contract(analysis)
+    if semantic_repairs:
+        analysis["analyzer_warnings"] = (
+            list(analysis.get("analyzer_warnings", []))
+            + semantic_repairs
+        )
     analysis["model"] = model
     analysis["provider"] = provider["name"]
     analysis["analyzer_attempts"] = analyzer_attempts
@@ -196,6 +199,9 @@ def _task_slot_json(
             if assistant.get("tool_calls"):
                 raise ValueError("tool calls are not allowed")
             data = _json_object(raw)
+            nested = data.get(label)
+            if isinstance(nested, dict):
+                data = nested
             validation = required(data) if required else True
             if validation is not True:
                 raise ValueError(
@@ -275,6 +281,10 @@ def _intent_slot_payload(analysis: dict) -> dict:
         "intent": analysis.get("intent", {}),
         "requirements": analysis.get("requirements", []),
         "constraints": analysis.get("constraint_statements", []),
+        "hypotheses": [
+            item for item in analysis.get("hypotheses", [])
+            if item.get("certainty") != "guess"
+        ],
         "clues": analysis.get("clues", []),
         "reference_baselines": analysis.get("reference_baselines", []),
         "investigation_targets": analysis.get("investigation_targets", []),
@@ -302,6 +312,47 @@ def _requirement_acceptance_fallback(analysis: dict) -> dict:
         and str(item.get("text") or "").strip()
         and str(item.get("id") or "").strip()
     ]
+    return {"acceptance_criteria": criteria}
+
+
+def _conditional_bugfix_acceptance(analysis: dict) -> dict | None:
+    if analysis.get("intent", {}).get("type") != "bugfix":
+        return None
+    hypotheses = [
+        str(item.get("text") or "").strip()
+        for item in analysis.get("hypotheses", [])
+        if item.get("certainty") == "uncertain"
+        and str(item.get("text") or "").strip()
+    ]
+    if not hypotheses:
+        return None
+    language = app_settings.get_output_language()
+    target = hypotheses[0]
+    conditional = {
+        "zh": f"如果调查确认用户所述问题（{target}），修复后该问题不再发生。",
+        "ja": f"調査でユーザーの申告（{target}）が確認された場合、修正後はその問題が再発しない。",
+    }.get(
+        language,
+        f"If Investigation confirms the reported issue ({target}), the fix prevents it from recurring.",
+    )
+    requirements = analysis.get("requirements", [])
+    if not requirements:
+        return None
+    criteria = [{
+        "text": conditional,
+        "authority": "derived",
+        "derived_from": [str(requirements[0].get("id") or "REQ1")],
+    }]
+    criteria.extend(
+        {
+            "text": str(item.get("text") or "").strip(),
+            "authority": "derived",
+            "derived_from": [str(item.get("id") or "")],
+        }
+        for item in requirements[1:]
+        if str(item.get("text") or "").strip()
+        and str(item.get("id") or "").strip()
+    )
     return {"acceptance_criteria": criteria}
 
 
@@ -391,6 +442,7 @@ def _acceptance_contract_validation(
     message: str,
     source_catalog: list[dict],
     canonical_intent: dict,
+    repair_warnings: list[str],
 ) -> bool | str:
     if not _canonical_acceptance_present(
         data,
@@ -422,6 +474,9 @@ def _acceptance_contract_validation(
                 "scope": candidate.get("scope", {}),
             },
         },
+        removable_contract=data,
+        repair_requirements=canonical_intent.get("requirements", []),
+        repair_warnings=repair_warnings,
     )
 
 
@@ -432,41 +487,132 @@ def _semantic_contract_audit(
     call_model,
     content_text,
     payload: dict,
+    removable_contract: dict | None = None,
+    repair_requirements: list[dict] | None = None,
+    repair_warnings: list[str] | None = None,
 ) -> bool | str:
-    for audit_mode in TASK_CONTRACT_AUDIT_MODES:
-        equivalent, issues, error = _task_contract_audit(
-            provider=provider,
-            model=model,
-            call_model=call_model,
-            content_text=content_text,
-            payload=payload,
-            audit_mode=audit_mode,
+    equivalent, issues, error = _task_contract_audit(
+        provider=provider,
+        model=model,
+        call_model=call_model,
+        content_text=content_text,
+        payload=payload,
+    )
+    if error:
+        return error
+    if equivalent and not issues:
+        return True
+    if removable_contract is not None:
+        issues = _repair_contract_differences(
+            removable_contract,
+            issues,
+            repair_requirements or [],
+            repair_warnings if repair_warnings is not None else [],
         )
-        if error:
-            return error
-        if equivalent and not issues:
+        if not issues:
+            return True
+    reasons = [
+        f"{item.get('path') or 'contract'}: {item.get('reason') or 'semantic drift'}"
+        for item in issues
+        if isinstance(item, dict)
+    ]
+    return "semantic contract drift: " + (
+        "; ".join(reasons) or "auditor rejected the derived contract"
+    )
+
+
+def _repair_contract_differences(
+    contract: dict,
+    issues: list[dict],
+    requirements: list[dict],
+    warnings: list[str],
+) -> list[dict]:
+    removable = re.compile(
+        r"^(behavior_contract\.(?:inputs|outputs|success_behaviors)"
+        r"|scope\.(?:in|undecided))(?:\[(\d+)\])?$"
+    )
+    removals: dict[str, set[int] | None] = {}
+    acceptance_issues: dict[int, dict] = {}
+    remaining = []
+    for issue in issues:
+        path = str(issue.get("path") or "") if isinstance(issue, dict) else ""
+        match = removable.fullmatch(path)
+        acceptance_match = re.fullmatch(r"acceptance_criteria\[(\d+)\]", path)
+        if acceptance_match and isinstance(issue, dict):
+            acceptance_issues[int(acceptance_match.group(1))] = issue
             continue
-        reasons = [
-            f"{item.get('path') or 'contract'}: {item.get('reason') or 'semantic drift'}"
-            for item in issues
-            if isinstance(item, dict)
-        ]
-        return "semantic contract drift: " + (
-            "; ".join(reasons) or "auditor rejected the derived contract"
+        if not match:
+            remaining.append(issue)
+            continue
+        root, raw_index = match.groups()
+        if raw_index is None:
+            removals[root] = None
+        elif root not in removals:
+            removals[root] = {int(raw_index)}
+        elif (root_indexes := removals[root]) is not None:
+            root_indexes.add(int(raw_index))
+    for root, indexes in removals.items():
+        section, field = root.split(".", 1)
+        parent = contract.get(section)
+        if not isinstance(parent, dict):
+            continue
+        values = parent.get(field)
+        if indexes is None:
+            parent[field] = []
+        elif isinstance(values, list):
+            parent[field] = [
+                item for index, item in enumerate(values)
+                if index not in indexes
+            ]
+        warnings.append(
+            f"acceptance_contract: removed unsupported {root} after semantic review"
         )
-    return True
+    criteria = contract.get("acceptance_criteria")
+    requirement_by_id = {
+        str(item.get("id") or ""): item
+        for item in requirements
+        if isinstance(item, dict) and item.get("id")
+    }
+    repaired_indexes = set()
+    if isinstance(criteria, list):
+        repaired_criteria = []
+        for index, criterion in enumerate(criteria):
+            issue = acceptance_issues.get(index)
+            if issue is None or not isinstance(criterion, dict):
+                repaired_criteria.append(criterion)
+                continue
+            derived_ids = [
+                str(item)
+                for item in criterion.get("derived_from", [])
+                if str(item) in requirement_by_id
+            ]
+            replacements = [
+                {
+                    "text": requirement_by_id[item]["text"],
+                    "authority": "derived",
+                    "derived_from": [item],
+                }
+                for item in derived_ids
+            ]
+            if not replacements:
+                repaired_criteria.append(criterion)
+                continue
+            repaired_criteria.extend(replacements)
+            repaired_indexes.add(index)
+            warnings.append(
+                "acceptance_contract: replaced unsupported "
+                f"acceptance_criteria[{index}] with canonical requirement"
+            )
+        contract["acceptance_criteria"] = repaired_criteria
+    remaining.extend(
+        issue
+        for index, issue in acceptance_issues.items()
+        if index not in repaired_indexes
+    )
+    return remaining
 
 
-def _sanitize_optional_contract(
-    *,
-    provider: dict,
-    model: str,
-    call_model,
-    content_text,
-    source_catalog: list[dict],
-    analysis: dict,
-) -> None:
-    unknowns = analysis.get("unknowns", [])
+def _sanitize_optional_contract(analysis: dict) -> None:
     hypotheses = analysis.get("hypotheses", [])
     warnings = analysis.setdefault("analyzer_warnings", [])
     analysis["hypotheses"] = [
@@ -478,60 +624,6 @@ def _sanitize_optional_contract(
             warnings.append(
                 f"hypotheses[{index}]: removed because no authoritative source supports it"
             )
-    if not any(item.get("resolution_strategy") == "clearify" for item in unknowns):
-        return
-    payload = {
-        "source_catalog": source_catalog,
-        "requirements": analysis.get("requirements", []),
-        "hypotheses": analysis.get("hypotheses", []),
-        "reference_baselines": analysis.get("reference_baselines", []),
-        "candidate_contract": {
-            "acceptance_criteria": analysis.get("acceptance_criteria", []),
-            "unknowns": unknowns,
-        },
-    }
-    reviews = []
-    for audit_mode in TASK_CONTRACT_AUDIT_MODES:
-        _equivalent, issues, error = _task_contract_audit(
-            provider=provider,
-            model=model,
-            call_model=call_model,
-            content_text=content_text,
-            payload=payload,
-            audit_mode=audit_mode,
-        )
-        if error:
-            warnings.append(f"optional contract review skipped: {error}")
-            return
-        reviews.append({
-            match.group(0): str(item.get("reason") or "semantic drift")
-            for item in issues
-            if isinstance(item, dict)
-            and (match := re.match(
-                r"^unknowns\[\d+\]",
-                str(item.get("path") or ""),
-            ))
-        })
-    rejected = set.union(*(set(review) for review in reviews))
-    rejected_unknowns = {
-        int(match.group(1))
-        for path in rejected
-        if (match := re.fullmatch(r"unknowns\[(\d+)\]", path))
-    }
-    analysis["unknowns"] = [
-        {**item, "id": f"U{new_index}"}
-        for new_index, (old_index, item) in enumerate(
-            (
-                (index, item)
-                for index, item in enumerate(unknowns)
-                if index not in rejected_unknowns
-            ),
-            start=1,
-        )
-    ]
-    for path in sorted(rejected):
-        reason = next(review[path] for review in reviews if path in review)
-        warnings.append(f"{path}: removed after semantic review: {reason}")
 
 
 def _task_contract_audit(
@@ -541,7 +633,6 @@ def _task_contract_audit(
     call_model,
     content_text,
     payload: dict,
-    audit_mode: str,
 ) -> tuple[bool, list[dict], str]:
     assistant = call_model(
         provider,
@@ -554,7 +645,7 @@ def _task_contract_audit(
                 ),
             },
             {"role": "user", "content": json.dumps({
-                "audit_mode": audit_mode,
+                "audit_modes": list(TASK_CONTRACT_AUDIT_MODES),
                 **payload,
             }, ensure_ascii=False)},
         ],
@@ -583,13 +674,22 @@ def _runtime_unknowns(data: dict, acceptance: list[dict], fallback: dict) -> lis
             question = str(raw_item.get("question") or raw_item.get("text") or raw_item.get("description") or "").strip()
             if not question:
                 continue
+            blocking = bool(raw_item.get("blocking", True))
+            requested_strategy = str(
+                raw_item.get("resolution_strategy") or "investigate_project"
+            ).strip().casefold()
+            strategy = (
+                "deferred"
+                if requested_strategy == "deferred" or not blocking
+                else "investigate_project"
+            )
             items.append({
                 "id": f"U{len(items) + 1}",
                 "question": question,
-                "blocking": bool(raw_item.get("blocking", True)),
+                "blocking": blocking,
                 "type": str(raw_item.get("type") or "code_fact").strip().casefold(),
                 "why": str(raw_item.get("why") or raw_item.get("reason") or "").strip(),
-                "resolution_strategy": str(raw_item.get("resolution_strategy") or "investigate_project").strip().casefold(),
+                "resolution_strategy": strategy,
                 "acceptance_criteria_ids": _slot_ids(raw_item.get("acceptance_slots"), criteria_ids),
             })
         else:

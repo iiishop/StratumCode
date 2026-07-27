@@ -316,6 +316,10 @@ def _canonicalize_task_contract(analysis: dict) -> None:
     raw_requirements, factual_claims = _partition_user_requirements(
         analysis.get("requirements")
     )
+    factual_claims = list(dict.fromkeys([
+        *factual_claims,
+        *_explicit_user_factual_claims(origin),
+    ]))
     requirements = _canonical_statements(
         raw_requirements,
         "requirement",
@@ -323,7 +327,34 @@ def _canonicalize_task_contract(analysis: dict) -> None:
         warnings,
         authoritative=True,
     )
-    if not requirements and origin and not factual_claims:
+    canonical_requirements = []
+    for requirement in requirements:
+        clauses = _requirement_clauses(str(requirement.get("text") or ""))
+        explicit_claims = [
+            clause for clause in clauses
+            if _is_explicit_user_factual_claim(clause)
+        ]
+        directive_clauses = [
+            clause for clause in clauses
+            if clause not in explicit_claims
+        ]
+        if explicit_claims and directive_clauses:
+            factual_claims.extend(explicit_claims)
+            canonical_requirements.extend(
+                {**requirement, "text": clause}
+                for clause in directive_clauses
+            )
+        else:
+            canonical_requirements.append(requirement)
+    requirements = canonical_requirements
+    factual_claims = list(dict.fromkeys(factual_claims))
+    intent = analysis.get("intent")
+    intent_type = str(intent.get("type") or "") if isinstance(intent, dict) else ""
+    if (
+        not requirements
+        and origin
+        and (not factual_claims or intent_type in {"question", "investigation"})
+    ):
         requirements = [{
             "text": origin,
             "authority": "user_explicit",
@@ -386,15 +417,19 @@ def _canonicalize_task_contract(analysis: dict) -> None:
     analysis["reference_baselines"] = references
     hypotheses = analysis.setdefault("hypotheses", [])
     known_hypotheses = {
-        _normalized(str(item.get("text") or ""))
+        _hypothesis_key(str(item.get("text") or ""))
         for item in hypotheses
         if isinstance(item, dict)
     }
-    hypotheses.extend(
-        {"text": text, "certainty": "uncertain"}
-        for text in factual_claims
-        if _normalized(text) not in known_hypotheses
-    )
+    for text in factual_claims:
+        normalized_text = _hypothesis_key(text)
+        if any(
+            known in normalized_text or normalized_text in known
+            for known in known_hypotheses
+        ):
+            continue
+        hypotheses.append({"text": text, "certainty": "uncertain"})
+        known_hypotheses.add(normalized_text)
     for hypothesis in analysis.get("hypotheses", []):
         text = str(hypothesis.get("text") or "") if isinstance(hypothesis, dict) else ""
         if text and not _matching_source_refs(text, sources, user_only=True):
@@ -502,6 +537,24 @@ def _partition_user_requirements(value: object) -> tuple[object, list[str]]:
     directives = []
     factual_claims = []
     for item in value:
+        if isinstance(item, dict):
+            text = str(item.get("text") or item.get("description") or "").strip()
+            clauses = _requirement_clauses(text)
+            factual_clauses = [
+                clause for clause in clauses
+                if _is_explicit_user_factual_claim(clause)
+            ]
+            directive_clauses = [
+                clause for clause in clauses
+                if clause not in factual_clauses
+            ]
+            if factual_clauses and directive_clauses:
+                directives.extend(
+                    {**item, "text": clause, "role": "directive"}
+                    for clause in directive_clauses
+                )
+                factual_claims.extend(factual_clauses)
+                continue
         if isinstance(item, dict) and item.get("role") == "factual_claim":
             text = str(item.get("text") or item.get("description") or "").strip()
             if text:
@@ -509,6 +562,41 @@ def _partition_user_requirements(value: object) -> tuple[object, list[str]]:
             continue
         directives.append(item)
     return directives, factual_claims
+
+
+def _explicit_user_factual_claims(origin: str) -> list[str]:
+    return [
+        clause
+        for clause in _requirement_clauses(origin)
+        if _is_explicit_user_factual_claim(clause)
+    ]
+
+
+def _is_explicit_user_factual_claim(text: str) -> bool:
+    lowered = str(text or "").casefold()
+    return any(marker in lowered for marker in (
+        "我确定", "我认为", "我觉得", "我发现", "我记得", "看起来", "似乎",
+        "i am certain", "i think", "i believe", "i found", "it seems",
+    ))
+
+
+def _hypothesis_key(text: str) -> str:
+    value = _normalized(text).strip("。.!? ")
+    for marker in (
+        "我确定", "我认为", "我觉得", "我发现", "我记得",
+        "i am certain", "i think", "i believe", "i found",
+    ):
+        if value.startswith(marker):
+            return value[len(marker):].strip(" ：:,")
+    return value
+
+
+def _requirement_clauses(text: str) -> list[str]:
+    return [
+        clause.strip()
+        for clause in re.split(r"[。!?；;\n]+|\.(?:\s+|$)", str(text or ""))
+        if clause.strip()
+    ]
 
 
 def _canonical_statements(
@@ -602,7 +690,23 @@ def _canonical_clues(value, sources: dict[str, dict], warnings: list[str]) -> tu
 def _canonical_unknowns(
     value, targets: list[str], references: list[dict], rejected: list[str]
 ) -> list[dict]:
-    items = [{
+    raw_items = []
+    if isinstance(value, list):
+        for raw in value:
+            text = str(
+                raw.get("question") or raw.get("text") or ""
+                if isinstance(raw, dict) else raw
+            ).strip()
+            if text and not any(_normalized(term) in _normalized(text) for term in rejected):
+                item = dict(raw) if isinstance(raw, dict) else {"question": text}
+                if not _reference_related_unknown(item, references):
+                    raw_items.append(item)
+    has_project_unknown = any(
+        str(item.get("resolution_strategy") or "investigate_project") == "investigate_project"
+        and str(item.get("type") or "code_fact") in {"code_fact", "doc_fact", "runtime_fact"}
+        for item in raw_items
+    )
+    items = [] if has_project_unknown else [{
         "question": target,
         "type": "code_fact",
         "blocking": True,
@@ -616,17 +720,7 @@ def _canonical_unknowns(
         "resolution_strategy": "investigate_project",
         "reference_id": reference["id"],
     } for reference in references)
-    if isinstance(value, list):
-        for raw in value:
-            text = str(
-                raw.get("question") or raw.get("text") or ""
-                if isinstance(raw, dict) else raw
-            ).strip()
-            if text and not any(_normalized(term) in _normalized(text) for term in rejected):
-                item = dict(raw) if isinstance(raw, dict) else {"question": text}
-                if _reference_related_unknown(item, references):
-                    continue
-                items.append(item)
+    items.extend(raw_items)
     result = []
     seen = set()
     for item in items:

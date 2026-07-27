@@ -100,7 +100,12 @@ For acceptance_contract:
 {{
   "acceptance_criteria": [
     {{"text": "observable behavior that must be true when done", "authority": "derived", "derived_from": ["REQ1"]}}
-  ],
+  ]
+}}
+
+Only when the source materially distinguishes behavior or scope,
+acceptance_contract may also contain:
+{{
   "behavior_contract": {{
     "inputs": [{{"text": "user/system input", "authority": "derived", "derived_from": ["REQ1"]}}],
     "outputs": [{{"text": "observable output", "authority": "derived", "derived_from": ["REQ1"]}}],
@@ -114,6 +119,8 @@ For acceptance_contract:
     "undecided": [{{"text": "unresolved product decision", "authority": "derived", "derived_from": ["REQ1"]}}]
   }}
 }}
+Omit these optional keys instead of restating acceptance criteria or adding
+normal engineering expectations.
 
 For unknowns:
 {{
@@ -123,7 +130,7 @@ For unknowns:
       "blocking": true,
       "type": "code_fact|doc_fact|runtime_fact|product_decision|engineering_decision|risk|deferred",
       "why": "why this question matters",
-      "resolution_strategy": "investigate_project|clearify|deferred",
+      "resolution_strategy": "investigate_project|deferred",
       "reference_id": "REF1 when this question may be answered by a reference baseline",
       "acceptance_slots": [1]
     }}
@@ -140,9 +147,13 @@ Rules:
   Mark desired outcomes, constraints, and product choices as role=directive.
   Mark claims about current code, docs, runtime behavior, causes, versions, or
   external reality as role=factual_claim and repeat them in hypotheses with
-  certainty=uncertain until Investigation verifies them.
-- Never derive acceptance criteria from a factual_claim. It is evidence to
-  investigate, not an authorized implementation outcome.
+  certainty=uncertain until Investigation verifies them. Preserve a minimal
+  verbatim user excerpt as the hypothesis text; do not paraphrase it.
+- A factual_claim alone never authorizes acceptance criteria. When a separate
+  directive explicitly asks to fix or answer that claim, it does authorize a
+  conditional target: state the observable result if Investigation confirms the
+  scenario, without asserting that the current code already has the claimed
+  defect or cause.
 - constraints, scope.out, and boundaries require a supporting source_ref and source_excerpt.
 - Derived fields must name the requirement or reference they derive from and must
   not introduce a new product decision.
@@ -156,12 +167,20 @@ Rules:
   to implementation, validation, scope, or later follow-up.
 - Write one acceptance criterion per independent observable final state or state
   transition, usually 1-4 criteria. Never split by file or implementation step.
+- For a question or investigation, an evidence-backed answer or determination is
+  the requested observable result. Rephrasing the question as that result is not
+  a new product decision.
+- When the user requests tests for behaviors in the same task, test coverage of
+  those requested behaviors is derived from both the test requirement and the
+  behavior requirements; include all relevant requirement ids.
 - Explicit user behavior overrides a reference baseline; the baseline supplies
   only behavior the user left unspecified.
 - Questions about a reference baseline's interaction, state, animation, or
   transition must use its reference_id and investigate_project, never clearify.
-- Use clearify only for user-visible product decisions; runtime normalizes
-  deferred, engineering, and invalid strategy combinations."""
+- Task Analysis never chooses clearify before reading the project. Use
+  investigate_project for blocking questions; Investigation may escalate a
+  still-unresolved user-visible product decision to clearify after gathering
+  project evidence."""
 
 TASK_CONTRACT_AUDITOR = """\
 You are the contradiction finder for a proposed Task Contract. Write reasons in
@@ -172,21 +191,36 @@ source catalog. A user source proves provenance, not factual truth. Do not searc
 for a rationale that makes the candidate valid, and do not use common product or
 UI conventions to fill gaps.
 Candidate statements are claims under review and never evidence for one another.
+Treat the requirements as one joint contract. derived_from ids are provenance
+links, not a rule that isolates each candidate from the other requirements.
 Reject factual claims about current code, docs, runtime behavior, causes,
 versions, or external reality when they appear as requirements or acceptance
 criteria. Such claims belong in hypotheses and require Investigation evidence.
 
-The input audit_mode selects the required review:
-- counterexample: construct a concrete state or transition where the source
-  requirement and candidate produce different observable results;
-- literal_entailment: require every material candidate detail to be entailed by
-  its cited source, preserving ambiguity instead of choosing an interpretation.
+The input audit_modes list selects the required reviews. Apply every listed mode
+within this one review:
+- material_counterexample: construct a plausible concrete state or transition
+  where the joint source contract succeeds and the candidate fails, or vice
+  versa. Wording differences and ordinary definitional elaboration are not
+  differences.
 
 Look for the strongest change in actor, trigger, timing, ordering, cardinality,
 negation, scope, or observable outcome. A distinction such as an item appearing
 versus a user interacting with it is material. When source wording permits
 multiple interpretations, selecting one concrete interpretation is a difference;
 the candidate must preserve the uncertainty or defer it to Investigation.
+For a question or investigation, a candidate may express the requested answer as
+an evidence-backed determination without changing the question's subject,
+alternatives, boundaries, or requested output. Do not reject such a candidate
+merely because it uses declarative wording or does not require exact answer labels.
+When the user requests tests in the same task as specified behaviors, tests that
+cover those behaviors do not add scope.
+Allow the ordinary definitional behavior needed to make a requested capability
+observable. For example, filtering by priority entails that a non-empty priority
+selection returns matching items, and an empty filter applies no restriction.
+This does not authorize a specific API signature, sentinel value, UI trigger, or
+implementation. A counterexample may not redefine the requested capability so
+that it no longer performs its ordinary function.
 
 A reference baseline authorizes only its target and
 inherit_unspecified_behavior policy before Investigation. It does not establish
@@ -202,6 +236,9 @@ choice that source priority, the reference policy, and project Investigation
 cannot resolve. For hypotheses, reject project claims not established by an
 authoritative or verified source; an unsupported possibility belongs in an
 investigation target rather than a contract claim.
+API shape, sentinel values, internal data representation, file placement, test
+framework, and implementation mechanism are engineering facts or decisions to
+resolve from the project, never clearify questions.
 
 Return equivalent=false with every concrete difference you find:
 {{
