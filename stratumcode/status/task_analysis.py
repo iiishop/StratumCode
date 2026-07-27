@@ -3,10 +3,15 @@ from __future__ import annotations
 import json
 import logging
 import re
+from collections.abc import Iterator
 from itertools import count
 
 from .. import app_settings, model_settings, prompt
-from ..agent_runtime import call_model as _runtime_call_model, content_text as _runtime_content_text
+from ..agent_runtime import (
+    call_model as _runtime_call_model,
+    content_text as _runtime_content_text,
+    stage_progress,
+)
 from .task_contract import (
     _ensure_task_contract,
     _limited_unknowns,
@@ -31,7 +36,17 @@ def _message_requests_implementation(message: str) -> bool:
         "create", "add", "implement", "change", "update", "adjust", "make", "set", "do not", "don't",
     ))
 
-def analyze_task(message: str, context: list[str], workspace_dir: str, session_context: dict | None = None, *, call_model=_runtime_call_model, content_text=_runtime_content_text, resolve_model=model_settings.resolve) -> dict:
+def analyze_task_stream(
+    message: str,
+    context: list[str],
+    workspace_dir: str,
+    session_context: dict | None = None,
+    *,
+    progress_event_id: str = "",
+    call_model=_runtime_call_model,
+    content_text=_runtime_content_text,
+    resolve_model=model_settings.resolve,
+) -> Iterator[dict]:
     setting = (
         resolve_model(model_settings.DEFAULT_STAGE)
         or resolve_model(model_settings.EVIDENCE_STAGE)
@@ -61,6 +76,15 @@ def analyze_task(message: str, context: list[str], workspace_dir: str, session_c
     source_catalog = _session_sources(message, selected_context, session_context)
     slot_context = selected_context
     system = {"role": "system", "content": prompt.build_task_analyzer(app_settings.get_output_language())}
+    progress = []
+    if progress_event_id:
+        yield stage_progress(
+            progress_event_id,
+            progress,
+            "intent_scope",
+            "Task intent and scope",
+            description=message,
+        )
     intent_slot, errors = _task_slot_json(
         provider,
         model,
@@ -82,8 +106,26 @@ def analyze_task(message: str, context: list[str], workspace_dir: str, session_c
     canonical_intent = _canonical_analysis(
         message, selected_context, source_catalog, intent_slot or {}, {}, {}
     )
+    if progress_event_id:
+        yield stage_progress(
+            progress_event_id,
+            progress,
+            "intent_scope",
+            "Task intent and scope",
+            description=message,
+            detail=f"{len(canonical_intent.get('requirements', []))} requirements",
+            state="done",
+        )
     acceptance_slot = _conditional_bugfix_acceptance(canonical_intent)
     acceptance_recovered = False
+    if progress_event_id:
+        yield stage_progress(
+            progress_event_id,
+            progress,
+            "acceptance_contract",
+            "Acceptance contract",
+            description=str(canonical_intent.get("intent", {}).get("summary") or message),
+        )
     if acceptance_slot is None:
         acceptance_slot, errors = _task_slot_json(
             provider=provider,
@@ -121,6 +163,23 @@ def analyze_task(message: str, context: list[str], workspace_dir: str, session_c
         message, selected_context, source_catalog, intent_slot or {}, acceptance_slot or {}, {}
     )
     acceptance_slots = canonical_acceptance["acceptance_criteria"]
+    if progress_event_id:
+        yield stage_progress(
+            progress_event_id,
+            progress,
+            "acceptance_contract",
+            "Acceptance contract",
+            description=str(canonical_intent.get("intent", {}).get("summary") or message),
+            detail=f"{len(acceptance_slots)} acceptance criteria",
+            state="done",
+        )
+        yield stage_progress(
+            progress_event_id,
+            progress,
+            "unknowns",
+            "Investigation unknowns",
+            description="Identify facts and decisions that still require verification.",
+        )
     unknowns_slot, errors = _task_slot_json(
         provider,
         model,
@@ -175,7 +234,43 @@ def analyze_task(message: str, context: list[str], workspace_dir: str, session_c
         analysis["analyzer_errors"] = [minimal_recovery_error]
         analysis["analyzer_error"] = "minimal recovery: task analyzer slot recovery used runtime defaults for invalid or missing content"
     analysis["evidence_hypothesis"] = _analysis_hypothesis(message, analysis)
+    if progress_event_id:
+        yield stage_progress(
+            progress_event_id,
+            progress,
+            "unknowns",
+            "Investigation unknowns",
+            description="Identify facts and decisions that still require verification.",
+            detail=f"{len(analysis.get('unknowns', []))} unknowns",
+            state="done",
+        )
     return analysis
+
+
+def analyze_task(
+    message: str,
+    context: list[str],
+    workspace_dir: str,
+    session_context: dict | None = None,
+    *,
+    call_model=_runtime_call_model,
+    content_text=_runtime_content_text,
+    resolve_model=model_settings.resolve,
+) -> dict:
+    stream = analyze_task_stream(
+        message,
+        context,
+        workspace_dir,
+        session_context,
+        call_model=call_model,
+        content_text=content_text,
+        resolve_model=resolve_model,
+    )
+    while True:
+        try:
+            next(stream)
+        except StopIteration as stopped:
+            return stopped.value
 
 
 def _task_slot_json(

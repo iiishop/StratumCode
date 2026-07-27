@@ -313,7 +313,7 @@ def _canonicalize_task_contract(analysis: dict) -> None:
     }
     warnings = analysis.setdefault("analyzer_warnings", [])
     origin = str(analysis.get("origin_message") or sources.get("SRC1", {}).get("text") or "").strip()
-    raw_requirements, factual_claims = _partition_user_requirements(
+    raw_requirements, factual_claims, permission_requirement_ids = _partition_user_requirements(
         analysis.get("requirements")
     )
     factual_claims = list(dict.fromkeys([
@@ -350,13 +350,23 @@ def _canonicalize_task_contract(analysis: dict) -> None:
     factual_claims = list(dict.fromkeys(factual_claims))
     intent = analysis.get("intent")
     intent_type = str(intent.get("type") or "") if isinstance(intent, dict) else ""
+    origin_clauses = _requirement_clauses(origin)
+    origin_directives = [
+        clause
+        for clause in origin_clauses
+        if not _is_non_requirement_clause(clause)
+    ]
     if (
         not requirements
-        and origin
+        and origin_directives
         and (not factual_claims or intent_type in {"question", "investigation"})
     ):
         requirements = [{
-            "text": origin,
+            "text": (
+                origin
+                if len(origin_directives) == len(origin_clauses)
+                else ". ".join(origin_directives)
+            ),
             "authority": "user_explicit",
             "source_refs": ["SRC1"],
             "derived_from": [],
@@ -441,11 +451,66 @@ def _canonicalize_task_contract(analysis: dict) -> None:
     analysis["constraint_statements"] = constraints
     analysis["constraints"] = [item["text"] for item in constraints]
 
+    raw_criteria = analysis.get("acceptance_criteria")
+    filtered_criteria = []
+    removed_criterion_ids = set()
+    for index, item in enumerate(raw_criteria if isinstance(raw_criteria, list) else [], start=1):
+        item_id = str(item.get("id") or f"AC{index}").strip() if isinstance(item, dict) else f"AC{index}"
+        text = str(item.get("text") or item.get("description") or "") if isinstance(item, dict) else str(item)
+        derived_from = item.get("derived_from") if isinstance(item, dict) else []
+        clauses = _requirement_clauses(text)
+        meaningful_clauses = [
+            clause for clause in clauses
+            if not _is_non_requirement_clause(clause)
+        ]
+        if (
+            not meaningful_clauses
+            or (
+                isinstance(derived_from, list)
+                and derived_from
+                and set(map(str, derived_from)) <= permission_requirement_ids
+            )
+        ):
+            removed_criterion_ids.add(item_id)
+        else:
+            cleaned_text = (
+                text.strip()
+                if len(meaningful_clauses) == len(clauses)
+                else ". ".join(meaningful_clauses)
+            )
+            filtered_criteria.append(
+                {**item, "text": cleaned_text}
+                if isinstance(item, dict)
+                else cleaned_text
+            )
+    if removed_criterion_ids:
+        analysis["unknowns"] = [
+            item
+            for item in analysis.get("unknowns", [])
+            if not (
+                isinstance(item, dict)
+                and isinstance(item.get("acceptance_criteria_ids"), list)
+                and item["acceptance_criteria_ids"]
+                and set(map(str, item["acceptance_criteria_ids"])) <= removed_criterion_ids
+            )
+        ]
     criteria = _canonical_statements(
-        analysis.get("acceptance_criteria"), "acceptance_criteria", sources, warnings,
+        filtered_criteria,
+        "acceptance_criteria", sources, warnings,
         default_derived_from=requirement_id_list,
         valid_derived_ids={*requirement_ids, *(item["id"] for item in references)},
     )
+    if not criteria:
+        criteria = _canonical_statements(
+            [
+                {"text": item["text"], "derived_from": [item["id"]]}
+                for item in requirements
+            ],
+            "acceptance_criteria",
+            sources,
+            warnings,
+            valid_derived_ids=requirement_ids,
+        )
     analysis["acceptance_criteria"] = [
         {"id": f"AC{index}", **item}
         for index, item in enumerate(criteria, start=1)
@@ -531,24 +596,40 @@ def _canonicalize_task_contract(analysis: dict) -> None:
     analysis["_canonicalized"] = True
 
 
-def _partition_user_requirements(value: object) -> tuple[object, list[str]]:
+def _partition_user_requirements(value: object) -> tuple[object, list[str], set[str]]:
     if not isinstance(value, list):
-        return value, []
+        return value, [], set()
     directives = []
     factual_claims = []
-    for item in value:
+    permission_ids = set()
+    for index, item in enumerate(value, start=1):
+        text = (
+            str(item.get("text") or item.get("description") or "").strip()
+            if isinstance(item, dict)
+            else str(item).strip()
+        )
+        clauses = _requirement_clauses(text)
+        permission_clauses = [
+            clause for clause in clauses
+            if _is_non_requirement_clause(clause)
+        ]
+        factual_clauses = [
+            clause for clause in clauses
+            if clause not in permission_clauses and _is_explicit_user_factual_claim(clause)
+        ]
+        directive_clauses = [
+            clause for clause in clauses
+            if clause not in factual_clauses and clause not in permission_clauses
+        ]
+        if permission_clauses and not directive_clauses and not factual_clauses:
+            permission_ids.add(
+                str(item.get("id") or f"REQ{index}").strip()
+                if isinstance(item, dict)
+                else f"REQ{index}"
+            )
+            continue
         if isinstance(item, dict):
-            text = str(item.get("text") or item.get("description") or "").strip()
-            clauses = _requirement_clauses(text)
-            factual_clauses = [
-                clause for clause in clauses
-                if _is_explicit_user_factual_claim(clause)
-            ]
-            directive_clauses = [
-                clause for clause in clauses
-                if clause not in factual_clauses
-            ]
-            if factual_clauses and directive_clauses:
+            if (factual_clauses or permission_clauses) and directive_clauses:
                 directives.extend(
                     {**item, "text": clause, "role": "directive"}
                     for clause in directive_clauses
@@ -560,8 +641,12 @@ def _partition_user_requirements(value: object) -> tuple[object, list[str]]:
             if text:
                 factual_claims.append(text)
             continue
-        directives.append(item)
-    return directives, factual_claims
+        if isinstance(item, dict) and not factual_clauses and not permission_clauses:
+            directives.append(item)
+            continue
+        directives.extend(directive_clauses)
+        factual_claims.extend(factual_clauses)
+    return directives, factual_claims, permission_ids
 
 
 def _explicit_user_factual_claims(origin: str) -> list[str]:
@@ -578,6 +663,21 @@ def _is_explicit_user_factual_claim(text: str) -> bool:
         "我确定", "我认为", "我觉得", "我发现", "我记得", "看起来", "似乎",
         "i am certain", "i think", "i believe", "i found", "it seems",
     ))
+
+
+def _is_user_permission(text: str) -> bool:
+    lowered = " ".join(str(text or "").casefold().split())
+    return any(lowered.startswith(marker) for marker in (
+        "you can ", "you may ", "you are allowed to ", "feel free to ", "i allow you to ",
+        "你可以", "允许你", "我允许", "可使用", "可以使用",
+    ))
+
+
+def _is_non_requirement_clause(text: str) -> bool:
+    lowered = " ".join(str(text or "").casefold().split()).strip("。.!? ")
+    return _is_user_permission(lowered) or lowered in {
+        "you think", "what do you think", "你觉得", "你认为呢",
+    }
 
 
 def _hypothesis_key(text: str) -> str:

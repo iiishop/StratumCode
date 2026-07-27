@@ -470,7 +470,10 @@ def _handle_agent_tool(
         record_args = dict(arguments)
         record_args.pop("source_tool_call_id", None)
         excerpt = arguments.get("excerpt", "")
-        if _normalized(excerpt) in {"(no matches)", "(no results)"}:
+        if (
+            _normalized(excerpt) in {"(no matches)", "(no results)"}
+            and observed.get("name") not in {"glob", "grep"}
+        ):
             raise ValueError("empty search results cannot be recorded as evidence excerpt")
         observed_output = observed["result"].output
         if not excerpt or _normalized(excerpt) not in _normalized(observed_output):

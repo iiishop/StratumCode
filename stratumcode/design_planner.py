@@ -13,6 +13,7 @@ from .agent_runtime import (
     call_model as _call_model,
     content_text as _content_text,
     empty_usage as _empty_usage,
+    stage_progress,
     start_event,
     usage_delta as _usage_delta,
 )
@@ -41,6 +42,7 @@ def design_planning_stream(
     usage_total = _empty_usage(pricing_rules)
     run_id = uuid4().hex[:10]
     stage_id = f"{run_id}-stage"
+    progress = []
 
     yield start_event(stage_id, "stage", {
         "name": "design_planning",
@@ -80,6 +82,16 @@ def design_planning_stream(
     slots = []
     runtime_warnings = []
     for index, criterion in enumerate(criteria, start=1):
+        progress_id = f"requirement-{index}"
+        progress_label = f"Requirement {criterion.get('id') or index}"
+        progress_description = str(criterion.get("text") or "")
+        yield stage_progress(
+            stage_id,
+            progress,
+            progress_id,
+            progress_label,
+            description=progress_description,
+        )
         slot = yield from _content_json_stream(
             provider,
             model,
@@ -106,6 +118,15 @@ def design_planning_stream(
             runtime_warnings.append(f"Requirement slot {index} fell back to ambiguous after invalid model content.")
             slot = _default_requirement_slot(criterion)
         slots.append(slot)
+        yield stage_progress(
+            stage_id,
+            progress,
+            progress_id,
+            progress_label,
+            description=progress_description,
+            detail=str(slot.get("concept") or "Runtime fallback"),
+            state="done",
+        )
     decision_messages = [
         system,
         {"role": "user", "content": prompt.build_design_decision_slots_user(
@@ -123,6 +144,14 @@ def design_planning_stream(
     plan = None
     semantic_attempts = app_settings.get_round_limit("design_json_attempts") or DEFAULT_DESIGN_JSON_ATTEMPTS
     for semantic_attempt in _attempt_indexes(semantic_attempts):
+        yield stage_progress(
+            stage_id,
+            progress,
+            "design-decisions",
+            "Design decisions",
+            description="Bind requirements to grounded implementation decisions.",
+            detail=f"Attempt {semantic_attempt}",
+        )
         decision_data = yield from _content_json_stream(
             provider,
             model,
@@ -156,6 +185,15 @@ def design_planning_stream(
             )},
         ])
     if decision_data is None:
+        yield stage_progress(
+            stage_id,
+            progress,
+            "design-decisions",
+            "Design decisions",
+            description="Bind requirements to grounded implementation decisions.",
+            detail="No valid decision content",
+            state="error",
+        )
         yield start_event(f"{run_id}-output", "output", {
             "content": "Design planning failed to produce valid decision content after repeated invalid responses.",
             "streaming": False,
@@ -176,6 +214,14 @@ def design_planning_stream(
     if issues:
         requirement_slots, reference_slots = _missing_decision_slots(plan, analysis)
         if requirement_slots or reference_slots:
+            yield stage_progress(
+                stage_id,
+                progress,
+                "design-decisions",
+                "Design decisions",
+                description="Bind requirements to grounded implementation decisions.",
+                detail="Repairing missing coverage",
+            )
             repair_data = yield from _content_json_stream(
                 provider,
                 model,
@@ -220,12 +266,30 @@ def design_planning_stream(
                 plan = normalize_design_plan(plan, analysis, investigation)
                 issues = validate_design_plan(plan, analysis, investigation)
     if issues:
+        yield stage_progress(
+            stage_id,
+            progress,
+            "design-decisions",
+            "Design decisions",
+            description="Bind requirements to grounded implementation decisions.",
+            detail="Runtime validation failed",
+            state="error",
+        )
         yield start_event(f"{run_id}-output", "output", {
             "content": "Design plan rejected by runtime validator:\n" + "\n".join(f"- {item}" for item in issues),
             "streaming": False,
         })
         yield {"op": "update", "id": stage_id, "patch": {"state": "error", "phase": "design_validation_failed"}}
         return
+    yield stage_progress(
+        stage_id,
+        progress,
+        "design-decisions",
+        "Design decisions",
+        description="Bind requirements to grounded implementation decisions.",
+        detail=f"{len(plan.get('design_decisions', []))} decisions",
+        state="done",
+    )
     yield start_event(f"{run_id}-design", "design_plan", plan)
     yield {"op": "update", "id": stage_id, "patch": {"state": "done", "phase": "design_planned"}}
     yield {"op": "done", "design_plan": plan}

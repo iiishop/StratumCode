@@ -1173,8 +1173,7 @@ def _positive_project_observation(item: dict) -> bool:
         return False
     if not item.get("target_unknown_ids"):
         return False
-    summary = str(item.get("summary") or "").casefold()
-    return "(no matches)" not in summary
+    return True
 
 
 def _supporting_belief(item: dict) -> bool:
@@ -3241,7 +3240,10 @@ def _final_observations(
 
 
 def _is_grounding_code_literal(value: str) -> bool:
-    if value.casefold().endswith((".css", ".html", ".js", ".json", ".jsx", ".md", ".py", ".ts", ".tsx", ".vue")):
+    if value.casefold().endswith((
+        ".cfg", ".css", ".html", ".ini", ".js", ".json", ".jsx", ".lock",
+        ".md", ".py", ".toml", ".ts", ".tsx", ".txt", ".vue", ".yaml", ".yml",
+    )):
         return False
     return value.startswith(("v-if", "v-show", "@")) or any(
         marker in value
@@ -3869,13 +3871,19 @@ def _resolve_task_update_conflicts(
         for item in task_updates or []
         if isinstance(item, dict) and str(item.get("status") or "").strip() == "known"
     }
-    conflicts = [item for item in unknowns if item.get("id") in known_ids]
+    conflicts = [
+        item for item in unknowns
+        if any(_same_unknown_id(item.get("id"), known_id) for known_id in known_ids)
+    ]
     if not conflicts:
         return unknowns
     if not repair_conflicts:
         raise ValueError("unknowns should contain only unresolved items")
     repairs.append("Removed unknowns already marked known by task_updates")
-    return [item for item in unknowns if item.get("id") not in known_ids]
+    return [
+        item for item in unknowns
+        if not any(_same_unknown_id(item.get("id"), known_id) for known_id in known_ids)
+    ]
 
 
 def _investigation_task_updates(value, unknowns: list[dict], resolutions: list[dict] | None = None) -> list[dict]:

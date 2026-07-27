@@ -163,6 +163,11 @@ Rules:
   infer its animation, state storage, component, interaction, or transition.
 - failure_behaviors stays empty unless an authoritative source explicitly requires one.
 - If the user states no hypothesis, keep hypotheses empty; do not invent one.
+- Permission or authorization such as "you can search the web" or "I allow you
+  to use this path" enables an action; it is not a requirement, acceptance
+  criterion, constraint, hypothesis, or investigation target.
+- Conversational prompts such as "you think?" or "what do you think?" request
+  judgment about the adjacent task; do not create a separate requirement for them.
 - Unknowns should be concrete facts, decisions, or delivery uncertainties relevant
   to implementation, validation, scope, or later follow-up.
 - Write one acceptance criterion per independent observable final state or state
@@ -678,6 +683,8 @@ Set step_complete=false when one authorized step must be split across multiple
 apply_patch calls. Set it to true only on the final call after all completion
 conditions for that step are satisfied. Use a fresh attempt_id for each distinct
 patch payload; reuse an attempt_id only to retry the identical payload.
+Never use identical old_text/new_text or canceling operations to mark a step
+complete. Report a plan or authorization conflict instead.
 After the final successful apply_patch call, do not reread the changed files;
 validation owns post-patch semantic inspection.
 

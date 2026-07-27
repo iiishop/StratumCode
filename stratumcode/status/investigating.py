@@ -216,13 +216,13 @@ def handle(run):
     has_unknown_task = _has_task_status(run.last_investigation, "unknown")
     if next_step == "done":
         run.transition(chat._chat_finish_state(run), "Investigation ended without an implementation path.")
+    elif next_step == "failed":
+        run.transition(chat.ChatState.FAILED, "Investigation failed.")
     elif run.last_investigation and _investigation_allows_patch(run.last_investigation) and _wants_implementation(run.analysis, request):
         run.transition(chat.ChatState.DESIGNING, "Investigation is ready for implementation planning.")
     elif next_step == "continue_investigation" or has_unknown_task or has_blocked_task:
         run.findings = _merge_findings(run.findings, _investigation_continuation_findings(run.last_investigation))
         run.transition(chat.ChatState.INVESTIGATING, "Investigation requested another pass.")
-    elif next_step == "failed":
-        run.transition(chat.ChatState.FAILED, "Investigation failed.")
     else:
         run.transition(chat._chat_finish_state(run), "Investigation ended without an implementation path.")
 

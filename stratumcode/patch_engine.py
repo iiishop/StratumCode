@@ -291,6 +291,8 @@ def _prepare_file(file_patch: dict, root: Path) -> dict:
     edits = _compile_operations(text, operations, encoding)
     after_body = _apply_edits(body, edits)
     after = bom + after_body
+    if after == before:
+        raise PatchError("NO_CHANGES", f"patch produced no changes: {rel}")
     removed_bytes = sum(edit.end - edit.start for edit in edits)
     added_bytes = sum(len(edit.replacement) for edit in edits)
     return {

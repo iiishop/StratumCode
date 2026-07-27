@@ -16,6 +16,7 @@ from .agent_runtime import (
     call_model as _call_model,
     content_text as _content_text,
     empty_usage as _empty_usage,
+    stage_progress,
     start_event,
     usage_delta as _usage_delta,
 )
@@ -69,6 +70,7 @@ def patch_planning_stream(
     usage_total = _empty_usage(pricing_rules)
     run_id = uuid4().hex[:10]
     stage_id = f"{run_id}-stage"
+    progress = []
 
     yield start_event(stage_id, "stage", {
         "name": "patch_planning",
@@ -102,6 +104,9 @@ def patch_planning_stream(
     for index, decision in enumerate(decisions, start=1):
         if revision_ids is not None and str(decision.get("id") or "") not in revision_ids:
             continue
+        progress_id = f"decision-{index}"
+        progress_label = f"Plan {decision.get('id') or index}"
+        progress_description = str(decision.get("decision") or "")
         messages = [
             system,
             {"role": "user", "content": prompt.build_patch_step_slot_user(
@@ -115,8 +120,17 @@ def patch_planning_stream(
             )},
         ]
         slot = None
+        slot_issues = []
         attempts = app_settings.get_round_limit("patch_json_attempts") or DEFAULT_PATCH_JSON_ATTEMPTS
         for semantic_attempt in _attempt_indexes(attempts):
+            yield stage_progress(
+                stage_id,
+                progress,
+                progress_id,
+                progress_label,
+                description=progress_description,
+                detail=f"Attempt {semantic_attempt}",
+            )
             slot = yield from _content_json_stream(
                 provider,
                 model,
@@ -147,6 +161,15 @@ def patch_planning_stream(
             ])
         if slot and slot_issues:
             reason = "Patch step remains ungrounded after semantic repair: " + "; ".join(slot_issues)
+            yield stage_progress(
+                stage_id,
+                progress,
+                progress_id,
+                progress_label,
+                description=progress_description,
+                detail="Project grounding failed",
+                state="error",
+            )
             yield start_event(f"{run_id}-ungrounded", "output", {
                 "content": reason,
                 "streaming": False,
@@ -160,11 +183,29 @@ def patch_planning_stream(
                 }}
             return
         if not slot:
+            yield stage_progress(
+                stage_id,
+                progress,
+                progress_id,
+                progress_label,
+                description=progress_description,
+                detail="No usable step returned",
+                state="done",
+            )
             continue
         tests_or_checks.extend(_strings(slot.get("tests_or_checks")))
         risks.extend(_strings(slot.get("risks")))
         _merge_acceptance_verification(acceptance_verification, slot.get("acceptance_verification"))
         if slot.get("needed") is False:
+            yield stage_progress(
+                stage_id,
+                progress,
+                progress_id,
+                progress_label,
+                description=progress_description,
+                detail="No code change required",
+                state="done",
+            )
             skipped_decision_slots.append({
                 "decision_slot": index,
                 "reason": str(slot.get("skip_reason") or "Model marked this design decision as requiring no code change.").strip(),
@@ -178,6 +219,15 @@ def patch_planning_stream(
             step_content,
             slot.get("step_content"),
             decision_slot=index,
+        )
+        yield stage_progress(
+            stage_id,
+            progress,
+            progress_id,
+            progress_label,
+            description=progress_description,
+            detail=f"{len(slot.get('step_content') or [])} steps",
+            state="done",
         )
     verification = {
         "tests_or_checks": tests_or_checks,
@@ -206,6 +256,14 @@ def patch_planning_stream(
         ]
         attempts = app_settings.get_round_limit("patch_json_attempts") or DEFAULT_PATCH_JSON_ATTEMPTS
         for semantic_attempt in _attempt_indexes(attempts):
+            yield stage_progress(
+                stage_id,
+                progress,
+                "patch-verification",
+                "Patch verification",
+                description="Map planned steps and checks back to acceptance criteria.",
+                detail=f"Attempt {semantic_attempt}",
+            )
             verification = yield from _content_json_stream(
                 provider,
                 model,
@@ -234,6 +292,15 @@ def patch_planning_stream(
             ])
         if verification_issues:
             reason = "Patch verification remains invalid after semantic repair: " + "; ".join(verification_issues)
+            yield stage_progress(
+                stage_id,
+                progress,
+                "patch-verification",
+                "Patch verification",
+                description="Map planned steps and checks back to acceptance criteria.",
+                detail="Verification failed",
+                state="error",
+            )
             yield start_event(f"{run_id}-verification-failed", "output", {
                 "content": reason,
                 "streaming": False,
@@ -243,6 +310,15 @@ def patch_planning_stream(
                 "phase": "patch_planning_failed",
             }}
             return
+        yield stage_progress(
+            stage_id,
+            progress,
+            "patch-verification",
+            "Patch verification",
+            description="Map planned steps and checks back to acceptance criteria.",
+            detail=f"{len(verification.get('tests_or_checks') or [])} checks",
+            state="done",
+        )
         audit_messages = [
             {
                 "role": "system",
@@ -261,7 +337,16 @@ def patch_planning_stream(
                 skipped_decision_slots=skipped_decision_slots,
             )},
         ]
+        audit_issues = []
         for semantic_attempt in _attempt_indexes(attempts):
+            yield stage_progress(
+                stage_id,
+                progress,
+                "verification-audit",
+                "Verification audit",
+                description="Challenge the proposed coverage, checks, and skipped decisions.",
+                detail=f"Attempt {semantic_attempt}",
+            )
             audited = yield from _content_json_stream(
                 provider,
                 model,
@@ -291,6 +376,15 @@ def patch_planning_stream(
             ])
         else:
             reason = "Patch verification audit remains invalid after repair: " + "; ".join(audit_issues)
+            yield stage_progress(
+                stage_id,
+                progress,
+                "verification-audit",
+                "Verification audit",
+                description="Challenge the proposed coverage, checks, and skipped decisions.",
+                detail="Audit failed",
+                state="error",
+            )
             yield start_event(f"{run_id}-verification-audit-failed", "output", {
                 "content": reason,
                 "streaming": False,
@@ -300,6 +394,15 @@ def patch_planning_stream(
                 "phase": "patch_planning_failed",
             }}
             return
+        yield stage_progress(
+            stage_id,
+            progress,
+            "verification-audit",
+            "Verification audit",
+            description="Challenge the proposed coverage, checks, and skipped decisions.",
+            detail="Audit passed",
+            state="done",
+        )
         rejected_skips = _rejected_skip_reviews(verification.get("skip_reviews"))
         if rejected_skips:
             reason = "Patch verification rejected runtime skip candidates: " + "; ".join(

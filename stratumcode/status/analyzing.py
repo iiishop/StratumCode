@@ -21,11 +21,12 @@ def handle(run):
         "provider": "",
         "inherited": False,
     })
-    run.analysis = task_analysis.analyze_task(
+    run.analysis = yield from task_analysis.analyze_task_stream(
         run.message,
         run.context,
         run.workspace_dir,
         session_context=run.analyzer_session_context,
+        progress_event_id=analyze_stage,
         call_model=task_analysis._runtime_call_model,
         content_text=task_analysis._runtime_content_text,
         resolve_model=task_analysis.model_settings.resolve,

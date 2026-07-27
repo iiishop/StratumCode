@@ -24,6 +24,32 @@ def start_event(event_id: str, event_type: str, data: dict) -> dict:
     return {"op": "start", "id": event_id, "event": event_type, "data": data}
 
 
+def stage_progress(
+    event_id: str,
+    items: list[dict],
+    item_id: str,
+    label: str,
+    *,
+    description: str = "",
+    detail: str = "",
+    state: str = "running",
+) -> dict:
+    item = next((entry for entry in items if entry.get("id") == item_id), None)
+    if item is None:
+        item = {"id": item_id, "label": label}
+        items.append(item)
+    item.update({
+        "description": description,
+        "detail": detail,
+        "state": state,
+    })
+    return {
+        "op": "update",
+        "id": event_id,
+        "patch": {"progress": [dict(entry) for entry in items]},
+    }
+
+
 def call_model(
     provider: dict,
     model: str,

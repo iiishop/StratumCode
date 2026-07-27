@@ -6,6 +6,7 @@ import html
 import urllib.request
 from html.parser import HTMLParser
 from urllib.parse import parse_qs, unquote, urlencode, urlsplit
+from xml.etree import ElementTree
 
 from ..spec import ToolDef, ToolResult
 
@@ -27,9 +28,9 @@ class _DuckDuckGoParser(HTMLParser):
         self._capture = ""
 
     def handle_starttag(self, tag, attrs):
-        attrs = dict(attrs)
+        attrs = {key: value or "" for key, value in attrs}
         classes = attrs.get("class", "").split()
-        if tag == "a" and "result__a" in classes:
+        if tag == "a" and {"result__a", "result-link"} & set(classes):
             self._push_current()
             self._current = {
                 "title": "",
@@ -37,13 +38,13 @@ class _DuckDuckGoParser(HTMLParser):
                 "snippet": "",
             }
             self._capture = "title"
-        elif self._current is not None and "result__snippet" in classes:
+        elif self._current is not None and {"result__snippet", "result-snippet"} & set(classes):
             self._capture = "snippet"
 
     def handle_endtag(self, tag):
         if tag == "a" and self._capture == "title":
             self._capture = ""
-        elif self._current is not None and self._capture == "snippet" and tag in {"a", "div"}:
+        elif self._current is not None and self._capture == "snippet" and tag in {"a", "div", "td"}:
             self._push_current()
 
     def close(self):
@@ -89,7 +90,7 @@ class _BingParser(HTMLParser):
         self._capture = ""
 
     def handle_starttag(self, tag, attrs):
-        attrs = dict(attrs)
+        attrs = {key: value or "" for key, value in attrs}
         classes = attrs.get("class", "").split()
         if tag == "li" and "b_algo" in classes:
             self._push_current()
@@ -171,7 +172,7 @@ TOOL = websearch_tool
 
 
 def _search_ddg(query: str, limit: int) -> list[dict[str, str]]:
-    url = "https://html.duckduckgo.com/html/?" + urlencode({"q": query})
+    url = "https://lite.duckduckgo.com/lite/?" + urlencode({"q": query})
     request = urllib.request.Request(
         url,
         headers={
@@ -188,17 +189,23 @@ def _search_ddg(query: str, limit: int) -> list[dict[str, str]]:
 
 
 def _search_bing(query: str, limit: int) -> list[dict[str, str]]:
-    url = "https://www.bing.com/search?" + urlencode({"q": query})
+    url = "https://www.bing.com/search?" + urlencode({"q": query, "format": "rss"})
     request = urllib.request.Request(
         url,
         headers={
-            "Accept": "text/html",
+            "Accept": "application/rss+xml",
             "User-Agent": "Mozilla/5.0 (compatible; StratumCode/0.1)",
         },
     )
     with urllib.request.urlopen(request, timeout=15) as response:
-        body = response.read(500_000).decode("utf-8", errors="replace")
-    parser = _BingParser()
-    parser.feed(body)
-    parser.close()
-    return parser.results[:limit]
+        body = response.read(500_000)
+    root = ElementTree.fromstring(body)
+    return [
+        {
+            "title": " ".join((item.findtext("title") or "").split()),
+            "url": (item.findtext("link") or "").strip(),
+            "snippet": " ".join(html.unescape(item.findtext("description") or "").split()),
+        }
+        for item in root.findall("./channel/item")[:limit]
+        if (item.findtext("title") or "").strip() and (item.findtext("link") or "").strip()
+    ]
