@@ -6,6 +6,8 @@ from ..agent_runtime import start_event
 from .investigating import prepare_investigation
 from . import task_analysis
 
+SKILL_LABEL = "Task analyzer"
+
 
 def handle(run):
     from .. import chat

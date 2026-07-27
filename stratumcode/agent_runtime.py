@@ -8,11 +8,12 @@ from itertools import count
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
-from . import app_settings, providers
-from .agent.tools import agent_tools
+from . import app_settings, providers, skill_runtime
 from .agent.policy import DISCOVERY_TOOLS
+from .agent.tools import agent_tools
 
 DEFAULT_MODEL_REQUEST_ATTEMPTS = 3
+MAX_SKILL_LOAD_ROUNDS = 4
 MODEL_RETRY_STATUS_CODES = {429, 502, 503, 504}
 MODEL_RETRY_DELAYS = (0.5, 1.0)
 MODEL_STREAM_DEADLINE_SECONDS = 180
@@ -51,6 +52,86 @@ def stage_progress(
 
 
 def call_model(
+    provider: dict,
+    model: str,
+    messages: list[dict],
+    *,
+    tools: list[dict] | None = None,
+    tool_choice=None,
+    use_skills: bool = True,
+) -> dict:
+    catalog = skill_runtime.catalog_prompt()
+    if not use_skills or not catalog:
+        return _call_model_once(
+            provider,
+            model,
+            messages,
+            tools=tools,
+            tool_choice=tool_choice,
+        )
+
+    current_tools = list(agent_tools(DISCOVERY_TOOLS) if tools is None else tools)
+    current_tools.append(skill_runtime.tool_schema())
+    current_messages = [
+        *messages,
+        {"role": "system", "content": catalog},
+        *skill_runtime.loaded_messages(),
+    ]
+    total_usage: dict = {}
+    for _ in range(MAX_SKILL_LOAD_ROUNDS):
+        assistant = _call_model_once(
+            provider,
+            model,
+            current_messages,
+            tools=current_tools,
+            tool_choice=tool_choice,
+        )
+        _merge_model_usage(total_usage, assistant.get("_usage") or {})
+        calls = assistant.get("tool_calls") or []
+        skill_calls = [
+            call
+            for call in calls
+            if ((call.get("function") or {}).get("name") or "") == "load_skill"
+        ]
+        if not skill_calls:
+            skill_runtime.finish_selection([])
+            assistant["_usage"] = total_usage
+            return assistant
+
+        skill_runtime.finish_selection([
+            str(_tool_arguments((call.get("function") or {}).get("arguments")).get("name") or "")
+            for call in skill_calls
+        ])
+        current_messages.append(assistant_message(assistant))
+        for call in calls:
+            function = call.get("function") or {}
+            call_id = call.get("id") or f"skill-call-{next(_CALL_IDS)}"
+            if function.get("name") == "load_skill":
+                try:
+                    arguments = json.loads(function.get("arguments") or "{}")
+                    if not isinstance(arguments, dict):
+                        raise TypeError("load_skill arguments must be an object")
+                    output = skill_runtime.load_skill(str(arguments.get("name") or ""))
+                except (json.JSONDecodeError, OSError, TypeError, ValueError) as exc:
+                    output = tool_error_json(exc, "load_skill")
+            else:
+                output = tool_error_json(
+                    ValueError("retry this tool after skill loading completes"),
+                    str(function.get("name") or "invalid"),
+                )
+            current_messages.append({
+                "role": "tool",
+                "tool_call_id": call_id,
+                "content": output,
+            })
+        tool_choice = None
+    raise ValueError("model exceeded the skill loading round limit")
+
+
+_CALL_IDS = count()
+
+
+def _call_model_once(
     provider: dict,
     model: str,
     messages: list[dict],
@@ -104,6 +185,24 @@ def call_model(
     message["finish_reason"] = choices[0].get("finish_reason")
     message["_usage"] = data.get("usage") or {}
     return message
+
+
+def _merge_model_usage(total: dict, usage: dict) -> None:
+    for key, value in usage.items():
+        if isinstance(value, int | float):
+            total[key] = total.get(key, 0) + value
+        elif key not in total:
+            total[key] = value
+
+
+def _tool_arguments(value) -> dict:
+    if isinstance(value, dict):
+        return value
+    try:
+        parsed = json.loads(value or "{}")
+    except json.JSONDecodeError:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
 
 
 def _effective_output_tokens(provider: dict) -> int:

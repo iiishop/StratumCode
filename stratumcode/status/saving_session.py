@@ -4,6 +4,8 @@ from .. import sessions
 from .task_contract import run_request
 from .task_updates import _beliefs_as_knowledge, _merge_items_by_id
 
+SKILL_TARGET = False
+
 
 def handle(run):
     from .. import chat

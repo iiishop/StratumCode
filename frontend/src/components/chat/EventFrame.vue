@@ -64,6 +64,7 @@ const expanded = computed(() => props.collapsible ? props.open : true)
 .event-frame--output { --event: #1756d1; }
 .event-frame--task-analysis { --event: #6658c7; }
 .event-frame--stage { --event: #1756d1; }
+.event-frame--skill { --event: #0f7d65; }
 .event-frame--state-transition { --event: #7c8ba0; }
 .event-frame--hypothesis { --event: #1756d1; }
 .event-frame--evidence { --event: #0f7d65; }

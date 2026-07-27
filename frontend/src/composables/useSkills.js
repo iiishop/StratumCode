@@ -14,6 +14,9 @@ export function useSkills() {
   const local = ref([])
   const results = ref([])
   const roots = ref([])
+  const targets = ref([])
+  const assignments = ref({})
+  const modes = ref({})
   const preview = ref(null)
   const runtime = ref({ available: false, npx: { available: false, command: '' } })
   const loading = ref(false)
@@ -29,6 +32,7 @@ export function useSkills() {
       local.value = data.items || []
       roots.value = data.roots || []
       runtime.value = data.runtime || runtime.value
+      applyConfiguration(data)
     } catch (reason) {
       error.value = reason.message
     } finally {
@@ -121,7 +125,34 @@ export function useSkills() {
     }
   }
 
-  return { local, results, roots, preview, runtime, loading, searching, busy, error, load, search, add, create, remove, installRuntime, show }
+  async function configure(targetId, skillIds, mode) {
+    busy.value = `target:${targetId}`
+    error.value = ''
+    try {
+      const data = await request('/skills/configure', {
+        target_id: targetId,
+        skill_ids: skillIds,
+        mode,
+      })
+      applyConfiguration(data)
+    } catch (reason) {
+      error.value = reason.message
+    } finally {
+      busy.value = ''
+    }
+  }
+
+  function applyConfiguration(data) {
+    targets.value = data.targets || targets.value
+    assignments.value = data.assignments || assignments.value
+    modes.value = data.modes || modes.value
+  }
+
+  return {
+    local, results, roots, targets, assignments, modes, preview, runtime,
+    loading, searching, busy, error,
+    load, search, add, create, remove, installRuntime, show, configure,
+  }
 }
 
 function sourceFor(item) {

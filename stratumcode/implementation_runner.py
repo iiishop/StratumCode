@@ -476,14 +476,34 @@ def _from_import_present(literal: str, text: str) -> bool:
 
 
 def _means_file_absent(text: str) -> bool:
-    return ("不存在" in text and "包含" not in text) or any(
+    return any(
         term in text
-        for term in ("file does not exist", "file not exist", "file absent", "file deleted")
+        for term in (
+            "文件不存在",
+            "文件不应存在",
+            "文件已删除",
+            "路径不存在",
+            "file does not exist",
+            "file not exist",
+            "file absent",
+            "file deleted",
+        )
     )
 
 
 def _means_file_present(text: str) -> bool:
-    return any(term in text for term in ("存在", "exists", "present")) and not _means_file_absent(text)
+    return any(
+        term in text
+        for term in (
+            "文件存在",
+            "文件应存在",
+            "文件已创建",
+            "路径存在",
+            "file exists",
+            "file is present",
+            "file present",
+        )
+    ) and not _means_file_absent(text)
 
 
 def _means_literal_absent(text: str) -> bool:

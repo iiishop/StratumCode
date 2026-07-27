@@ -7,7 +7,7 @@ from collections.abc import Iterator
 from itertools import count
 from uuid import uuid4
 
-from . import app_settings, hypothesis_verifier, mcp, model_settings, prompt, providers
+from . import app_settings, hypothesis_verifier, mcp, model_settings, prompt, providers, skill_runtime
 from .agent.tools import openai_tool_schema
 from .agent_runtime import (
     add_usage as _add_usage,
@@ -26,13 +26,14 @@ from .tools.spec import ToolResult
 
 def run_stream(agent: str, task: str, workspace_dir: str = ".") -> Iterator[dict]:
     name = normalize_agent_name(agent)
-    if name == "mcp-installer":
-        yield from mcp_install_stream(task, workspace_dir)
-        return
-    if name == "hypothesis-verifier":
-        yield from hypothesis_verify_stream(task, workspace_dir)
-        return
-    raise ValueError(f"unknown subagent: {agent}")
+    with skill_runtime.target_scope(f"subagent:{name}"):
+        if name == "mcp-installer":
+            yield from mcp_install_stream(task, workspace_dir)
+            return
+        if name == "hypothesis-verifier":
+            yield from hypothesis_verify_stream(task, workspace_dir)
+            return
+        raise ValueError(f"unknown subagent: {agent}")
 
 
 def hypothesis_verify_stream(task: str, workspace_dir: str = ".") -> Iterator[dict]:

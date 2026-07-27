@@ -882,8 +882,9 @@ def _json_candidates(text: str) -> list[str]:
     candidates.extend(match.group(1).strip() for match in re.finditer(r"```(?:json)?\s*([\s\S]*?)```", text, re.IGNORECASE))
     candidates.append(text)
     for index, char in enumerate(text):
-        if char == "{":
+        if char in "{[":
             candidates.append(text[index:])
+    candidates.extend(text[match.start():] for match in re.finditer(r"\bnull\b", text))
     result = []
     seen = set()
     for candidate in candidates:

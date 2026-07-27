@@ -5,6 +5,8 @@ from .investigating import prepare_investigation
 from .session_memory import _select_session_memory, _session_context
 from .user_context import _workspace_snapshot
 
+SKILL_TARGET = False
+
 
 def handle(run):
     from .. import chat

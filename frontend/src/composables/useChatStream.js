@@ -18,6 +18,7 @@ export function useChatStream(onRender, onPacket) {
       patch_plan: timeline.showPatchPlan,
       patch: timeline.showPatch,
       stage: timeline.showStage,
+      skill: timeline.showSkill,
       state_transition: timeline.showStateTransition,
       hypothesis: timeline.showHypothesis,
       evidence: timeline.showEvidence,

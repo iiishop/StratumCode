@@ -5,7 +5,7 @@ from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-from . import app_settings, chat, clearify_runtime, lsp, mcp, model_settings, providers, sessions, skills, subagents, workspaces
+from . import app_settings, chat, clearify_runtime, lsp, mcp, model_settings, providers, sessions, skill_runtime, skills, subagents, workspaces
 from .tools import registry
 
 
@@ -70,7 +70,10 @@ _ROUTES: dict[tuple[str, str], object] = {
         "active": workspaces.active(h.workspace_dir),
     }),
     ("GET", "/api/mcp"):             lambda h, b: (mcp.load_enabled(), h._json({"items": mcp.list_all()})),
-    ("GET", "/api/skills"):          lambda h, b: h._json(skills.list_local()),
+    ("GET", "/api/skills"):          lambda h, b: h._json({
+        **skills.list_local(),
+        **skill_runtime.configuration(),
+    }),
     ("GET", "/api/files/list"):      lambda h, b: h._handle_file_list(),
     ("GET", "/api/tools"):           lambda h, b: (mcp.load_enabled(), h._json([t.to_json() for t in registry.list_all()])),
 
@@ -90,6 +93,11 @@ _ROUTES: dict[tuple[str, str], object] = {
     ("POST", "/api/skills/create"):         lambda h, b: h._json(skills.create(str(b.get("name") or ""), str(b.get("description") or ""), str(b.get("content") or ""))),
     ("POST", "/api/skills/delete"):         lambda h, b: h._json(skills.delete(str(b.get("path") or ""))),
     ("POST", "/api/skills/preview"):        lambda h, b: h._json(skills.preview(str(b.get("path") or ""), str(b.get("source") or ""))),
+    ("POST", "/api/skills/configure"):      lambda h, b: h._json(skill_runtime.save_assignments(
+        str(b.get("target_id") or ""),
+        b.get("skill_ids") if isinstance(b.get("skill_ids"), list) else [],
+        str(b.get("mode") or "merge"),
+    )),
     ("POST", "/api/skills/runtime/install"):lambda h, b: h._json({"runtime": skills.install_runtime()}),
     ("POST", "/api/files/preview"):         lambda h, b: h._handle_file_preview(b),
 }

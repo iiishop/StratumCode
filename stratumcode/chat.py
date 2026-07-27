@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-import json
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from enum import StrEnum
 from uuid import uuid4
 
+from . import skill_runtime
 from .agent_runtime import start_event
 
 
@@ -112,9 +112,14 @@ def _chat_events(run: ChatRun) -> Iterator[dict]:
     state_handlers = handlers()
     while run.state not in _TERMINAL_CHAT_STATES:
         try:
-            events = state_handlers[run.state](run)
-            if events is not None:
-                yield from events
+            with skill_runtime.target_scope(f"state:{run.state.value}"):
+                yield from skill_runtime.pop_events()
+                events = state_handlers[run.state](run)
+                if events is not None:
+                    for event in events:
+                        yield from skill_runtime.pop_events()
+                        yield event
+                yield from skill_runtime.pop_events()
             yield from run.pop_transition_events()
         except Exception as exc:
             run.error = str(exc)

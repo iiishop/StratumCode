@@ -28,7 +28,7 @@ from .status.task_contract import (
     LEGACY_NEEDS_USER_STATUS,
     _unknowns as _contract_unknowns,
 )
-from .status.task_analysis import _analysis_requests_implementation
+from .status.task_analysis import _analysis_requests_implementation, _json_candidates
 from .status.task_updates import _unknown_task_status
 from .tools import registry
 
@@ -39,7 +39,7 @@ MAX_REPEATED_RECORD_NO_PROGRESS = 3
 DISCOVERY_BATCH_OBSERVATIONS = 3
 REQUIRED_FINDING_SLOT_ATTEMPTS = 2
 REQUIRED_AUDIT_ATTEMPTS = 2
-OBSERVATION_EVIDENCE_CHARS = 2000
+OBSERVATION_EVIDENCE_CHARS = 8000
 FINDING_FIELDS = (
     "beliefs",
     "resolutions",
@@ -929,7 +929,7 @@ def _tool_call_subject(name: str, arguments: dict) -> str:
 
 
 def _tool_cache_key(name: str, arguments: dict) -> str:
-    ignored = {"reason"}
+    ignored = set() if name in {"record_investigation_findings", "finish_investigation"} else {"reason"}
     comparable = {
         key: value
         for key, value in arguments.items()
@@ -1411,7 +1411,13 @@ def _record_findings_by_slots(
             else "one JSON object" + ("." if required else " or null.")
         )
         for attempt in range(attempts):
-            assistant = _call_model(provider, model, slot_messages, tools=[])
+            assistant = _call_model(
+                provider,
+                model,
+                slot_messages,
+                tools=[],
+                use_skills=False,
+            )
             if usage := _usage_delta(pricing_rules, assistant.pop("_usage", {})):
                 _add_usage(usage_total, usage)
                 usage_events.append(start_event(
@@ -1419,7 +1425,10 @@ def _record_findings_by_slots(
                     "usage",
                     {"delta": usage, "total": usage_total},
                 ))
-            raw = _content_text(assistant.get("content"))
+            raw = _normalize_record_slot_answer(
+                _content_text(assistant.get("content")),
+                path,
+            )
             slot_messages.append({"role": "assistant", "content": raw})
             if _valid_record_slot_value(raw, path, required=required):
                 break
@@ -1428,6 +1437,8 @@ def _record_findings_by_slots(
                     f"The {path} slot has the wrong shape. Return {expected}"
                 )})
         if not _valid_record_slot_value(raw, path, required=required):
+            if not required:
+                return [] if path == "new_unknowns" else None
             raise ValueError(f"{path} must return {expected}")
         return raw
 
@@ -1851,6 +1862,30 @@ def _valid_record_slot_value(value: str, path: str, *, required: bool) -> bool:
             and bool(str(parsed.get("answer") or parsed.get("reason") or "").strip())
         )
     return True
+
+
+def _normalize_record_slot_answer(value: str, path: str) -> str:
+    text = str(value or "").strip()
+    if text.startswith("```"):
+        text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text, flags=re.IGNORECASE).strip()
+    parsed: JSONValue = None
+    for candidate in _json_candidates(text):
+        try:
+            parsed, _ = json.JSONDecoder().raw_decode(candidate)
+            break
+        except json.JSONDecodeError:
+            continue
+    else:
+        return text
+    field = path.split("[", 1)[0]
+    if isinstance(parsed, dict) and field in parsed:
+        parsed = parsed[field]
+    if path.startswith(("beliefs[", "resolutions[")) and isinstance(parsed, list):
+        if not parsed:
+            parsed = None
+        elif len(parsed) == 1:
+            parsed = parsed[0]
+    return json.dumps(parsed, ensure_ascii=False)
 
 
 def _runtime_slot_beliefs(
@@ -3679,6 +3714,21 @@ def _complete_resolutions(resolutions: list[dict], initial_unknowns: list[dict],
     initial_by_id = {item["id"]: item for item in initial_unknowns}
     for resolution in resolutions:
         source = initial_by_id.get(resolution["unknown_id"])
+        if (
+            resolution.get("status") == "needs_clearify"
+            and source
+            and source.get("type") != "product_decision"
+        ):
+            grounded = bool(
+                resolution.get("answer")
+                and (resolution.get("evidence") or resolution.get("belief_ids"))
+            )
+            resolution["status"] = "resolved" if grounded else "partially_resolved"
+            resolution["reason"] = (
+                "Only product decisions may require user clarification; "
+                "this project fact is grounded." if grounded else
+                "Only product decisions may require user clarification."
+            )
         if (
             resolution.get("status") == "deferred"
             and source

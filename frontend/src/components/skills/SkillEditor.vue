@@ -4,6 +4,7 @@ import { renderMarkdown } from '../../lib/markdown'
 
 const props = defineProps({
   modelValue: { type: String, default: '' },
+  readonly: { type: Boolean, default: false },
 })
 
 const emit = defineEmits(['update:modelValue'])
@@ -231,7 +232,7 @@ function collectMetaRows(value, prefix, result) {
 }
 
 function startEditMeta() {
-  if (!parsed.value) return
+  if (props.readonly || !parsed.value) return
   const raw = props.modelValue || ''
   const lines = raw.split(/\r?\n/)
   const end = lines.findIndex((line, index) => index > 0 && line.trim() === '---')
@@ -250,6 +251,7 @@ function commitEditMeta() {
 }
 
 function startEdit(id) {
+  if (props.readonly) return
   editingIdx.value = id
   editText.value = bodyBlocks.value.find(block => block.id === id)?.raw || ''
   nextTick(focusEditor)
