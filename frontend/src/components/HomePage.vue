@@ -211,6 +211,7 @@ const agentRunning = computed(() => isStreaming.value)
 const contextRatio = computed(() => `${contextPercent.value}%`)
 let gsapCtx
 let saveTimer
+let saveTimerSessionId = null
 
 function setMsgRef(id, el) { if (el) msgRefs[id] = el }
 
@@ -322,9 +323,33 @@ async function copyCurrentSession() {
 }
 
 function scheduleSave() {
-  if (!props.session?.id) return
+  const sessionId = props.session?.id
+  if (!sessionId) return
   clearTimeout(saveTimer)
-  saveTimer = setTimeout(() => emit('save-session-state', snapshotState()), 220)
+  saveTimerSessionId = sessionId
+  saveTimer = setTimeout(() => {
+    saveTimer = null
+    const targetSessionId = saveTimerSessionId
+    saveTimerSessionId = null
+    saveSessionState(targetSessionId)
+  }, 220)
+}
+
+function saveSessionState(sessionId = props.session?.id) {
+  if (!sessionId) return
+  emit('save-session-state', {
+    session_id: sessionId,
+    state: snapshotState(),
+  })
+}
+
+function flushPendingSave(sessionId = saveTimerSessionId || props.session?.id) {
+  if (!saveTimer) return
+  clearTimeout(saveTimer)
+  saveTimer = null
+  const targetSessionId = sessionId || saveTimerSessionId
+  saveTimerSessionId = null
+  saveSessionState(targetSessionId)
 }
 
 function clearState() {
@@ -495,10 +520,7 @@ async function continueAfterAnswer(answer) {
   // Immediately persist answer_status='submitted' — no debounce window.
   // Vue 3 emit is fire-and-forget; the parent saveActiveSessionState awaits the backend.
   const sessionId = props.session?.id
-  if (sessionId) {
-    const snapshot = snapshotState()
-    emit('save-session-state', snapshot)
-  }
+  if (sessionId) saveSessionState(sessionId)
 }
 
 async function answerQuestion(answer) {
@@ -663,33 +685,17 @@ onUnmounted(() => {
   abortChat()
   gsapCtx?.revert()
   // Flush pending save before unmount so answer_status='submitted' is persisted.
-  if (saveTimer) {
-    clearTimeout(saveTimer)
-    saveTimer = null
-    const sessionId = props.session?.id
-    if (sessionId) {
-      const snapshot = snapshotState()
-      emit('save-session-state', snapshot)
-    }
-  }
+  flushPendingSave()
   clearTimeout(copySessionTimer)
 })
 
-watch(() => props.session?.id, (id) => {
+watch(() => props.session?.id, (id, oldId) => {
   if (!id) {
     clearState()
     return
   }
   // Flush any pending save for the previous session before restoreState overwrites memory.
-  if (saveTimer) {
-    clearTimeout(saveTimer)
-    saveTimer = null
-    const sessionId = props.session?.id
-    if (sessionId) {
-      const snapshot = snapshotState()
-      emit('save-session-state', snapshot)
-    }
-  }
+  flushPendingSave(oldId)
   restoreState(props.session?.state || {})
 }, { immediate: true })
 

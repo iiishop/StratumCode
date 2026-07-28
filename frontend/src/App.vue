@@ -184,12 +184,15 @@ async function removeWorkspace(id) {
   }
 }
 
-async function saveActiveSessionState(state) {
-  if (!activeSession.value?.id) return
-  await sessionStore.saveState(activeSession.value.id, state)
-  const item = sessionStore.items.value.find(item => item.id === activeSession.value.id)
-  if (item) item.usage = state.usage
-  activeSession.value.usage = state.usage
+async function saveActiveSessionState(payload) {
+  const sessionId = payload?.session_id || activeSession.value?.id
+  const state = payload?.state || payload
+  if (!sessionId || !state) return
+  await sessionStore.saveState(sessionId, state)
+  const usage = state.usage ? JSON.parse(JSON.stringify(state.usage)) : {}
+  const item = sessionStore.items.value.find(item => item.id === sessionId)
+  if (item) item.usage = usage
+  if (activeSession.value?.id === sessionId) activeSession.value.usage = usage
 }
 
 function dedupName(name) {
