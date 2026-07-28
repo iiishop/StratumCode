@@ -344,6 +344,8 @@ async function restoreState(state = {}) {
   await nextTick()
 
   const rawMessages = state.messages || []
+  // NOTE(IS1): answer_status is preserved — event.data is wrapped via reactive()
+  // and ChatEvent passes event.data as :event to UserQuestionEvent.
   const CHUNK = 30
 
   for (let i = 0; i < rawMessages.length; i += CHUNK) {

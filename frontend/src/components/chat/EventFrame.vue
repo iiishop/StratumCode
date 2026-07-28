@@ -80,6 +80,7 @@ const expanded = computed(() => props.collapsible ? props.open : true)
 .event-frame--accepted { --event: #00a878; }
 .event-frame--rejected { --event: #e11d74; }
 .event-frame--error { --event: #c44747; }
+.event-frame--no_progress { --event: #9a6a00; }
 .event-frame--usage { --event: #7c8ba0; }
 
 .event-frame__rail {
@@ -241,6 +242,11 @@ const expanded = computed(() => props.collapsible ? props.open : true)
   color: #5c4200;
   background: rgba(245, 200, 66, .22);
   animation: status-glow 1.8s ease-in-out infinite;
+}
+
+.event-frame--no_progress .event-frame__status {
+  color: #6e4c00;
+  background: rgba(245, 200, 66, .18);
 }
 
 .event-frame__chevron {

@@ -12,6 +12,29 @@ const diagnostics = computed(() => {
 
 const displayOutput = computed(() => String(props.event.output || '').replace(/\n?<lsp-diagnostics>[\s\S]*?<\/lsp-diagnostics>/, '').trimEnd())
 
+const frameSymbol = computed(() => {
+  if (props.event.name === 'resolve_unknowns') return 'R'
+  return props.event.symbol || 'T'
+})
+
+const frameLabel = computed(() => {
+  if (props.event.name === 'resolve_unknowns') return 'RESOLVE UNKNOWN'
+  return props.event.name
+})
+
+const frameDetail = computed(() => {
+  if (props.event.name !== 'resolve_unknowns') return props.event.description
+  try {
+    const input = JSON.parse(props.event.input || '{}')
+    const ids = Array.isArray(input.resolutions)
+      ? input.resolutions.map(item => item?.unknown_id || item?.id).filter(Boolean)
+      : []
+    return ids.length ? `Resolve ${ids.join(', ')}` : 'Resolve investigation unknowns'
+  } catch {
+    return 'Resolve investigation unknowns'
+  }
+})
+
 const lspStatus = computed(() => {
   const meta = props.event.metadata || {}
   if (props.event.name !== 'read' || !('lsp_checked' in meta)) return null
@@ -28,20 +51,46 @@ const lspStatus = computed(() => {
     detail: meta.lsp_error || 'no matching enabled LSP server',
   }
 })
+
+const investigationContract = computed(() => {
+  const meta = props.event.metadata || {}
+  const contract = props.event.investigation_contract || meta.investigation_contract || null
+  return contract && typeof contract === 'object' ? contract : null
+})
+
+const contractItems = computed(() => {
+  const contract = investigationContract.value
+  if (!contract) return []
+  return [
+    ['Hypothesis', contract.hypothesis],
+    ['Expected', contract.expected_observation],
+    ['Impact', contract.decision_impact],
+    ['Stop', contract.stop_condition],
+  ].filter(([, value]) => String(value || '').trim())
+})
 </script>
 
 <template>
   <EventFrame
     kind="tool"
-    :symbol="event.symbol || 'T'"
-    :label="event.name"
-    :detail="event.description"
+    :symbol="frameSymbol"
+    :label="frameLabel"
+    :detail="frameDetail"
     :status="event.status"
     :open="event.open"
     collapsible
     @toggle="event.open = !event.open"
   >
     <div class="tool-io">
+      <div v-if="contractItems.length" class="tool-io__contract">
+        <span>CONTRACT</span>
+        <dl>
+          <template v-for="([label, value]) in contractItems" :key="label">
+            <dt>{{ label }}</dt>
+            <dd><HighlightedText :text="String(value)" /></dd>
+          </template>
+        </dl>
+      </div>
       <div><span>INPUT</span><pre><HighlightedText :text="event.input" context="tool-data" /></pre></div>
       <div v-if="diagnostics.length" class="tool-io__diagnostics">
         <span>LSP</span>
@@ -108,6 +157,35 @@ const lspStatus = computed(() => {
 
 .tool-io__diagnostics li + li {
   margin-top: 4px;
+}
+
+.tool-io__contract dl {
+  min-width: 0;
+  margin: 0;
+  padding: 9px 12px;
+  border: 1px solid rgba(102, 88, 199, .14);
+  border-radius: 8px;
+  background: rgba(102, 88, 199, .045);
+}
+
+.tool-io__contract dt {
+  margin: 0 0 3px;
+  color: #4f45a4;
+  font: 800 9px/1.35 var(--mono, monospace);
+  letter-spacing: .04em;
+  text-transform: uppercase;
+}
+
+.tool-io__contract dd {
+  min-width: 0;
+  margin: 0 0 8px;
+  color: var(--text, #3f5274);
+  font: var(--font-code, 12px)/1.5 var(--mono, monospace);
+  overflow-wrap: anywhere;
+}
+
+.tool-io__contract dd:last-child {
+  margin-bottom: 0;
 }
 
 .tool-io__lsp p {

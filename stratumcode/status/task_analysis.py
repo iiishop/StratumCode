@@ -31,6 +31,7 @@ TASK_CLUE_KINDS = {"file", "line", "symbol", "route", "other"}
 DEFAULT_TASK_SLOT_ATTEMPTS = 2
 TASK_CONTRACT_AUDIT_MODES = ("material_counterexample",)
 IMPLEMENT_INTENT_TYPES = {"bugfix", "feature", "refactor"}
+CLUE_METADATA_FIELDS = {"note", "source_ref", "source_refs", "source_excerpt"}
 
 
 def _analysis_requests_implementation(analysis: dict | None) -> bool:
@@ -1166,18 +1167,21 @@ def _unique_clues(items: list[dict]) -> list[dict]:
     result = []
     seen = set()
     for item in items:
-        key = (
-            str(item.get("kind") or ""),
-            str(item.get("value") or ""),
-            str(item.get("path") or ""),
-            str(item.get("line") or ""),
-            str(item.get("symbol") or ""),
-        )
+        key = _clue_identity(item)
         if key in seen:
             continue
         seen.add(key)
         result.append(item)
     return result
+
+
+def _clue_identity(item: dict) -> str:
+    payload = {
+        key: value
+        for key, value in item.items()
+        if key not in CLUE_METADATA_FIELDS and value not in (None, "", [], {})
+    }
+    return json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
 
 
 def _analysis_hypothesis(message: str, analysis: dict) -> str:

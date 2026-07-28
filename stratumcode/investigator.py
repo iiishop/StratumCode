@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import platform
 import re
@@ -56,10 +57,16 @@ ENTRYPOINT_OVERCLAIM_PATTERN = re.compile(
     re.IGNORECASE,
 )
 MAX_REPEATED_RECORD_NO_PROGRESS = 3
-DISCOVERY_BATCH_OBSERVATIONS = 3
+MAX_DUPLICATE_NO_PROGRESS = 2
 REQUIRED_FINDING_SLOT_ATTEMPTS = 2
 REQUIRED_AUDIT_ATTEMPTS = 2
 OBSERVATION_EVIDENCE_CHARS = 8000
+DISCOVERY_CONTRACT_FIELDS = (
+    "hypothesis",
+    "expected_observation",
+    "decision_impact",
+    "stop_condition",
+)
 FINDING_FIELDS = (
     "beliefs",
     "resolutions",
@@ -68,6 +75,8 @@ FINDING_FIELDS = (
     "user_decisions_required",
     "task_updates",
 )
+RESOLUTION_KINDS = {"direct_fact", "derived_inference", "user_decision", "deferred"}
+SEMANTIC_AUDIT_KINDS = {"derived_inference"}
 # Compatibility hook for integrations that patched this set before tool capabilities existed.
 PROJECT_EVIDENCE_TOOLS: set[str] = set()
 CLEARIFY_RESOLUTION_REASON = "Answered by the user through clearify."
@@ -146,6 +155,8 @@ def investigation_stream(
         if isinstance(item, dict) and item.get("fresh", True)
     ]
     tool_cache = {}
+    tool_cache_observation_ids: dict[str, str] = {}
+    audit_cache: dict[str, dict] = {}
     recorded_findings = _continued_recorded_findings(previous_findings, observations)
     finalization_reason = "Investigation model stopped before finish_investigation; summarizing observed facts."
     pending_observation_ids: list[str] = []
@@ -160,6 +171,10 @@ def investigation_stream(
     last_quality_audit: dict = {}
     last_record_signature = _recorded_findings_signature(recorded_findings)
     repeated_record_no_progress = 0
+    duplicate_no_progress_signature = ""
+    duplicate_no_progress_count = 0
+    force_synthesis_reason = ""
+    observation_synthesis_reason = ""
 
     for round_index in _round_indexes(max_rounds, start=0):
         thinking_id = f"{run_id}-thinking-{round_index}"
@@ -205,18 +220,24 @@ def investigation_stream(
             }
             messages.append({"role": "user", "content": (
                 "The semantic quality gate rejected these recorded resolutions. "
-                "Call record_investigation_findings now to replace only these resolutions "
+                "Call resolve_unknowns now to replace only these resolutions "
                 "with claims supported by the observations; finish_investigation is not "
                 f"allowed until they pass: {json.dumps(reasons, ensure_ascii=False)}"
             )})
-            current_tools = [_record_findings_tool_schema()]
+            current_tools = [_resolve_unknowns_tool_schema()]
             current_tool_choice = {
                 "type": "function",
-                "function": {"name": "record_investigation_findings"},
+                "function": {"name": "resolve_unknowns"},
             }
         elif _recorded_resolves_initial_unknowns(recorded_findings, analysis):
             current_tools = [_finish_tool_schema()]
             current_tool_choice = {"type": "function", "function": {"name": "finish_investigation"}}
+        elif force_synthesis_reason:
+            messages.append({"role": "user", "content": force_synthesis_reason})
+            current_tools = [_resolve_unknowns_tool_schema(), _record_findings_tool_schema(), _finish_tool_schema()]
+        elif observation_synthesis_reason and pending_observation_ids:
+            messages.append({"role": "user", "content": observation_synthesis_reason})
+            current_tools = [_resolve_unknowns_tool_schema(), _record_findings_tool_schema(), _finish_tool_schema()]
         elif (
             analysis.get("execution_mode") == "read_only"
             and not analysis.get("unknowns")
@@ -238,15 +259,7 @@ def investigation_stream(
                 observations,
                 analysis,
             )})
-            current_tools = [_record_findings_tool_schema(), _finish_tool_schema()]
-        elif len(pending_observation_ids) >= DISCOVERY_BATCH_OBSERVATIONS:
-            messages.append({"role": "user", "content": (
-                "You have a full unrecorded discovery batch: "
-                f"{', '.join(pending_observation_ids[-6:])}. "
-                "Call record_investigation_findings before any more discovery. "
-                "Then call finish_investigation if the task contract is covered."
-            )})
-            current_tools = [_record_findings_tool_schema(), _finish_tool_schema()]
+            current_tools = [_resolve_unknowns_tool_schema(), _record_findings_tool_schema(), _finish_tool_schema()]
         allowed_tool_names = {
             str(((tool.get("function") or {}).get("name")) or "")
             for tool in current_tools
@@ -396,36 +409,11 @@ def investigation_stream(
                         output = json.dumps({
                             "error": "resolution_required",
                             "retryable": True,
-                            "required_tool": "record_investigation_findings",
+                            "required_tool": "resolve_unknowns",
                             "target_unknown_ids": resolution_required_ids,
                             "message": (
                                 "Existing project evidence is already recorded for these unknowns. "
-                                "Record explicit resolutions before calling more discovery tools."
-                            ),
-                        }, ensure_ascii=False)
-                        yield start_event(call_id, _tool_event_type(name), {
-                            "name": name or "invalid",
-                            "description": "Investigation tool",
-                            "status": "error",
-                            "open": False,
-                            "input": json.dumps(arguments, ensure_ascii=False, indent=2),
-                            "output": output,
-                        })
-                        messages.append({
-                            "role": "tool",
-                            "tool_call_id": call_id,
-                            "content": output,
-                        })
-                        continue
-                    if len(pending_observation_ids) >= DISCOVERY_BATCH_OBSERVATIONS:
-                        output = json.dumps({
-                            "error": "discovery_batch_needs_recording",
-                            "retryable": True,
-                            "required_tool": "record_investigation_findings",
-                            "pending_observation_ids": pending_observation_ids[-6:],
-                            "message": (
-                                "Record the current discovery batch before calling more discovery tools. "
-                                "Call record_investigation_findings next, then finish_investigation if the task contract is covered."
+                                "Resolve explicit unknowns before calling more discovery tools."
                             ),
                         }, ensure_ascii=False)
                         yield start_event(call_id, _tool_event_type(name), {
@@ -443,8 +431,92 @@ def investigation_stream(
                         })
                         continue
                     raise ValueError(f"tool not allowed at this investigation step: {name}")
+                if name == "resolve_unknowns":
+                    arguments = _resolve_unknown_arguments(arguments)
+                    _require_control_reason(arguments, name)
+                    resolutions = _resolutions(arguments.get("resolutions"))
+                    if not resolutions:
+                        raise ValueError("resolve_unknowns requires at least one valid resolution")
+                    _validate_resolution_refs(
+                        resolutions,
+                        _beliefs(recorded_findings.get("beliefs")),
+                        observations,
+                    )
+                    recorded_findings = _merge_recorded_findings(
+                        recorded_findings,
+                        {"resolutions": resolutions},
+                    )
+                    recorded_findings = _bind_grounding_evidence(
+                        recorded_findings,
+                        observations,
+                    )
+                    pending_observation_ids = [
+                        item for item in pending_observation_ids
+                        if item not in {
+                            evidence_id
+                            for resolution in resolutions
+                            for evidence_id in resolution.get("evidence", [])
+                        }
+                    ]
+                    if not pending_observation_ids:
+                        observation_synthesis_reason = ""
+                    semantic_repair_required_ids = _semantic_repair_resolution_ids(
+                        recorded_findings,
+                    )
+                    task_updates = _investigation_task_updates(None, [], resolutions)
+                    output = json.dumps({
+                        "resolved": True,
+                        "counts": {"resolutions": len(resolutions)},
+                        "unknown_ids": [item["unknown_id"] for item in resolutions],
+                    }, ensure_ascii=False)
+                    yield start_event(call_id, "tool", {
+                        "name": name,
+                        "description": "Resolve investigation unknowns",
+                        "status": "done",
+                        "open": False,
+                        "input": json.dumps(arguments, ensure_ascii=False, indent=2),
+                        "output": output,
+                        "symbol": "R",
+                    })
+                    if task_updates:
+                        yield start_event(f"{call_id}-task-update", "task_update", {
+                            "analysis_id": analysis.get("id", ""),
+                            "items": task_updates,
+                        })
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": call_id,
+                        "content": output,
+                    })
+                    continue
                 if name == "record_investigation_findings":
                     _require_control_reason(arguments, name)
+                    if (
+                        pending_observation_ids
+                        and not resolution_required_ids
+                        and not _has_finding_fields(arguments)
+                    ):
+                        pending_observation_ids.clear()
+                        observation_synthesis_reason = ""
+                        output = json.dumps({
+                            "recorded": False,
+                            "code": "no_material_findings",
+                            "next_action": "continue_discovery",
+                        }, ensure_ascii=False)
+                        yield start_event(call_id, "tool", {
+                            "name": name,
+                            "description": "Record investigation findings",
+                            "status": "done",
+                            "open": False,
+                            "input": json.dumps(arguments, ensure_ascii=False, indent=2),
+                            "output": output,
+                        })
+                        messages.append({
+                            "role": "tool",
+                            "tool_call_id": call_id,
+                            "content": output,
+                        })
+                        continue
                     if analysis.get("_canonicalized") or not _has_finding_fields(arguments):
                         if not pending_observation_ids and not resolution_required_ids:
                             output = json.dumps({
@@ -513,40 +585,7 @@ def investigation_stream(
                         observations,
                     )
                     pending_observation_ids.clear()
-                    if analysis.get("_canonicalized"):
-                        last_quality_audit = yield from _audit_recorded_findings(
-                            provider=provider,
-                            model=model,
-                            messages=[
-                                item for item in messages[:-1]
-                                if item.get("role") != "system"
-                            ],
-                            pricing_rules=pricing_rules,
-                            usage_total=usage_total,
-                            run_id=run_id,
-                            analysis=analysis,
-                            observations=observations,
-                            recorded_findings=recorded_findings,
-                        )
-                        recorded_findings, requests, questions = _apply_investigation_audit(
-                            recorded_findings,
-                            last_quality_audit,
-                            observations=observations,
-                            strict_grounding=_analysis_requests_implementation(analysis),
-                            allow_verification=_analysis_requests_implementation(analysis),
-                        )
-                        semantic_repair_required_ids = _semantic_repair_resolution_ids(
-                            recorded_findings,
-                        )
-                        known_requests = {
-                            (item.get("unknown_id"), item.get("hypothesis"))
-                            for item in verification_queue
-                        } | attempted_verifications
-                        verification_queue.extend(
-                            item for item in requests
-                            if (item.get("unknown_id"), item.get("hypothesis")) not in known_requests
-                        )
-                        clearify_questions.update(questions)
+                    observation_synthesis_reason = ""
                     record_signature = _recorded_findings_signature(recorded_findings)
                     if record_signature == last_record_signature:
                         repeated_record_no_progress += 1
@@ -593,6 +632,14 @@ def investigation_stream(
                     continue
                 if name == "finish_investigation":
                     _require_control_reason(arguments, name)
+                    recorded_findings = _apply_direct_resolution_gate(
+                        recorded_findings,
+                        observations,
+                        strict_grounding=_analysis_requests_implementation(analysis),
+                    )
+                    semantic_repair_required_ids = _semantic_repair_resolution_ids(
+                        recorded_findings,
+                    )
                     if (
                         analysis.get("_canonicalized")
                         and not _audit_covers_resolutions(
@@ -614,6 +661,7 @@ def investigation_stream(
                             analysis=analysis,
                             observations=observations,
                             recorded_findings=recorded_findings,
+                            audit_cache=audit_cache,
                         )
                         recorded_findings, requests, questions = _apply_investigation_audit(
                             recorded_findings,
@@ -784,27 +832,57 @@ def investigation_stream(
                     continue
                 cache_key = _tool_cache_key(name, arguments)
                 if cache_key in tool_cache:
-                    output = tool_cache[cache_key]
-                    repeated_tool_error_name = ""
-                    repeated_tool_error_count = 0
+                    cached_observation_id = tool_cache_observation_ids.get(cache_key, "")
+                    if duplicate_no_progress_signature == cache_key:
+                        duplicate_no_progress_count += 1
+                    else:
+                        duplicate_no_progress_signature = cache_key
+                        duplicate_no_progress_count = 1
+                    next_action = (
+                        "resolve_unknowns"
+                        if pending_observation_ids or cached_observation_id
+                        else "choose_different_evidence"
+                    )
+                    output = _duplicate_no_progress_json(
+                        name,
+                        duplicate_count=duplicate_no_progress_count,
+                        cached_observation_id=cached_observation_id,
+                        required_next_action=next_action,
+                    )
+                    if duplicate_no_progress_count >= MAX_DUPLICATE_NO_PROGRESS:
+                        force_synthesis_reason = _duplicate_no_progress_prompt(
+                            name,
+                            cached_observation_id,
+                            pending_observation_ids,
+                        )
                     yield start_event(call_id, _tool_event_type(name), {
                         "name": name,
                         "description": "Investigation tool",
-                        "status": "done",
+                        "status": "no_progress",
                         "open": False,
                         "input": json.dumps(arguments, ensure_ascii=False, indent=2),
                         "output": output,
                         "deduplicated": True,
+                        "cached_observation_id": cached_observation_id,
                     })
                     messages.append({
                         "role": "tool",
                         "tool_call_id": call_id,
-                        "content": (
-                            "Duplicate tool call. Previous result summary: "
-                            f"{_short_observation(output)}. "
-                            "Do not repeat this call again; record the finding or choose a different check."
-                        ),
+                        "content": output,
                     })
+                    if duplicate_no_progress_count >= MAX_REPEATED_TOOL_ERRORS:
+                        finalization_reason = (
+                            "Runtime stopped after repeated duplicate no-progress tool calls: "
+                            f"{name or 'invalid'}."
+                        )
+                        stop_investigation = True
+                        yield start_event(f"{run_id}-safety-duplicate-no-progress", "safety_stop", {
+                            "reason": "duplicate_no_progress",
+                            "message": finalization_reason,
+                            "tool": name or "invalid",
+                            "cached_observation_id": cached_observation_id,
+                        })
+                        break
                     continue
                 output = yield from _run_tool_stream(
                     name,
@@ -819,8 +897,18 @@ def investigation_stream(
                 repeated_tool_error_name = ""
                 repeated_tool_error_count = 0
                 tool_cache[cache_key] = output
-                observations.append(_tool_observation(name, call_id, output))
+                observation = _tool_observation(name, call_id, output)
+                observations.append(observation)
+                tool_cache_observation_ids[cache_key] = observation["id"]
                 pending_observation_ids.append(call_id)
+                if (
+                    observation.get("target_unknown_ids")
+                    and not observation.get("orientation")
+                ):
+                    observation_synthesis_reason = _observation_synthesis_prompt(observation)
+                duplicate_no_progress_signature = ""
+                duplicate_no_progress_count = 0
+                force_synthesis_reason = ""
                 if verification_request and _is_hypothesis_verifier_call(name, arguments):
                     attempted_verifications.add((
                         verification_request["unknown_id"],
@@ -907,6 +995,7 @@ def investigation_stream(
             analysis=analysis,
             observations=observations,
             recorded_findings=recorded_findings,
+            audit_cache=audit_cache,
             reason=finalization_reason,
         )
     if last_quality_audit:
@@ -944,6 +1033,7 @@ def _investigation_tools() -> list[dict]:
         _investigation_tool_schema(tool.name, tool.description, tool.parameters)
         for tool in registry.list_for_capability(INVESTIGATION_CAPABILITY)
     ]
+    tools.append(_resolve_unknowns_tool_schema())
     tools.append(_record_findings_tool_schema())
     tools.append(_finish_tool_schema())
     return tools
@@ -990,6 +1080,14 @@ def _tool_call_subject(name: str, arguments: dict) -> str:
     if name == "subagent":
         value = arguments.get("agent") or arguments.get("name")
         return f"({value})" if value else ""
+    if name == "resolve_unknowns":
+        ids = [
+            str(item.get("unknown_id") or item.get("id") or "").strip()
+            for item in arguments.get("resolutions", [])
+            if isinstance(item, dict)
+        ]
+        ids = [item for item in ids if item]
+        return f"({', '.join(ids[:4])})" if ids else ""
     if name in {"record_investigation_findings", "finish_investigation"}:
         summary = str(arguments.get("summary") or "").strip()
         return f"({summary[:80]})" if summary else ""
@@ -997,13 +1095,71 @@ def _tool_call_subject(name: str, arguments: dict) -> str:
 
 
 def _tool_cache_key(name: str, arguments: dict) -> str:
-    ignored = set() if name in {"record_investigation_findings", "finish_investigation"} else {"reason"}
+    ignored = (
+        set()
+        if name in {"record_investigation_findings", "resolve_unknowns", "finish_investigation"}
+        else {"reason", *DISCOVERY_CONTRACT_FIELDS}
+    )
     comparable = {
         key: value
         for key, value in arguments.items()
         if key not in ignored
     }
     return f"{name}:{json.dumps(comparable, ensure_ascii=False, sort_keys=True)}"
+
+
+def _duplicate_no_progress_json(
+    tool_name: str,
+    *,
+    duplicate_count: int,
+    cached_observation_id: str,
+    required_next_action: str,
+) -> str:
+    return json.dumps({
+        "code": "duplicate_no_progress",
+        "tool": tool_name or "invalid",
+        "cached_observation_id": cached_observation_id,
+        "duplicate_count": duplicate_count,
+        "retryable": False,
+        "required_next_action": required_next_action,
+        "message": (
+            "The same successful tool arguments were already observed. "
+            "This call produced no new investigation progress."
+        ),
+    }, ensure_ascii=False)
+
+
+def _duplicate_no_progress_prompt(
+    tool_name: str,
+    cached_observation_id: str,
+    pending_observation_ids: list[str],
+) -> str:
+    ids = _dedupe_strings([cached_observation_id, *pending_observation_ids])
+    return (
+        "The investigation repeated the same successful discovery tool call without "
+        f"new progress: {tool_name or 'invalid'}. Do not call that discovery action again. "
+        "Use resolve_unknowns if the cached observation answers a blocking unknown, "
+        "record_investigation_findings if it contains material findings, or "
+        "finish_investigation if investigation is already sufficient. "
+        f"Relevant observation ids: {', '.join(ids) if ids else 'none'}."
+    )
+
+
+def _observation_synthesis_prompt(observation: dict) -> str:
+    targets = ", ".join(str(item) for item in observation.get("target_unknown_ids", []) if str(item).strip())
+    contract = observation.get("investigation_contract") if isinstance(observation.get("investigation_contract"), dict) else {}
+    return "\n".join([
+        "A targeted discovery observation must be consumed before more discovery.",
+        f"Observation id: {observation.get('id', '')}",
+        f"Target unknowns: {targets or 'none'}",
+        f"Hypothesis: {contract.get('hypothesis', '')}",
+        f"Expected observation: {contract.get('expected_observation', '')}",
+        f"Decision impact: {contract.get('decision_impact', '')}",
+        f"Stop condition: {contract.get('stop_condition', '')}",
+        "Call resolve_unknowns if this observation resolves or narrows an unknown, "
+        "record_investigation_findings if it supports a material belief/new unknown, "
+        "or finish_investigation if the task is already covered. Do not call more discovery first.",
+    ])
 
 
 def _tool_repair_error_json(exc: Exception, tool_name: str, raw_arguments: str, partial_arguments: dict) -> str:
@@ -1031,7 +1187,13 @@ def _missing_fields_from_error(
     fields = []
     lowered = message.casefold()
     partial_arguments = partial_arguments or {}
-    for field in ("reason", "target_unknown_ids", "summary", "recommended_next_step"):
+    for field in (
+        "reason",
+        "target_unknown_ids",
+        "summary",
+        "recommended_next_step",
+        *DISCOVERY_CONTRACT_FIELDS,
+    ):
         if field in lowered and not partial_arguments.get(field):
             fields.append(field)
     return fields
@@ -1096,6 +1258,23 @@ def _require_finding_fields(arguments: dict) -> None:
             "record_investigation_findings must include at least one non-empty findings array; canonical arrays are "
             "beliefs, resolutions, unknowns, new_unknowns, user_decisions_required, or task_updates"
         )
+
+
+def _resolve_unknown_arguments(arguments: dict) -> dict:
+    normalized = dict(arguments)
+    normalized["resolutions"] = _resolutions(normalized.get("resolutions"))
+    return normalized
+
+
+def _resolution_kind(raw: dict, status: str) -> str:
+    value = str(raw.get("kind") or "").strip()
+    if value in RESOLUTION_KINDS:
+        return value
+    if status == "deferred":
+        return "deferred"
+    if status == "needs_clearify":
+        return "user_decision"
+    return "derived_inference"
 
 
 def _record_arguments(arguments: dict) -> dict:
@@ -1334,7 +1513,7 @@ def _resolution_required_prompt(
     return "\n".join([
         "Existing project evidence is sufficient to write an explicit resolution.",
         "Do not call more discovery tools for these unknowns.",
-        "Call record_investigation_findings with resolutions for: " + ", ".join(unknown_ids),
+        "Call resolve_unknowns with resolutions for: " + ", ".join(unknown_ids),
         "Each resolution must include unknown_id, status, answer, evidence or belief_ids, and reason.",
         "If an unknown is still not fully resolved, record a partially_resolved resolution naming the precise missing evidence.",
         "Questions:",
@@ -1378,10 +1557,31 @@ def _investigation_tool_schema(name: str, description: str, parameters: dict) ->
         "type": "boolean",
         "description": "True only for a broad first-pass orientation call that cannot yet target a specific unknown.",
     }
+    if name != "clearify":
+        properties["hypothesis"] = {
+            "type": "string",
+            "description": "One falsifiable claim this call will test. Do not use a generic exploration goal.",
+        }
+        properties["expected_observation"] = {
+            "type": "string",
+            "description": "The concrete result that would support, oppose, or narrow the hypothesis.",
+        }
+        properties["decision_impact"] = {
+            "type": "string",
+            "description": "How the result will update a target unknown, belief, or next investigation branch.",
+        }
+        properties["stop_condition"] = {
+            "type": "string",
+            "description": "When this line of investigation should stop or switch to recording/resolution.",
+        }
     required = schema.setdefault("required", [])
     for field in ("target_unknown_ids", "reason"):
         if field not in required:
             required.append(field)
+    if name != "clearify":
+        for field in DISCOVERY_CONTRACT_FIELDS:
+            if field not in required:
+                required.append(field)
     return openai_tool_schema(name, description, schema)
 
 
@@ -1411,6 +1611,54 @@ def _record_findings_tool_schema() -> dict:
                 },
             },
             "required": ["reason"],
+        },
+    )
+
+
+def _resolve_unknowns_tool_schema() -> dict:
+    return openai_tool_schema(
+        "resolve_unknowns",
+        "Record explicit resolutions for investigation unknowns using existing observation or belief ids only.",
+        {
+            "type": "object",
+            "properties": {
+                "reason": {
+                    "type": "string",
+                    "description": "One short reason why these unknowns can be resolved now.",
+                },
+                "resolutions": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "unknown_id": {"type": "string"},
+                            "status": {
+                                "type": "string",
+                                "enum": ["resolved", "partially_resolved", "needs_clearify", "deferred"],
+                            },
+                            "kind": {
+                                "type": "string",
+                                "enum": ["direct_fact", "derived_inference", "user_decision", "deferred"],
+                                "description": "Use direct_fact only when the cited observation directly states the answer; use derived_inference for cross-file or causal reasoning.",
+                            },
+                            "answer": {"type": "string"},
+                            "evidence": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                                "description": "Existing observation ids that support the answer.",
+                            },
+                            "belief_ids": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                                "description": "Existing belief ids that support the answer.",
+                            },
+                            "reason": {"type": "string"},
+                        },
+                        "required": ["unknown_id", "status", "answer", "reason"],
+                    },
+                },
+            },
+            "required": ["reason", "resolutions"],
         },
     )
 
@@ -1572,53 +1820,23 @@ def _audit_recorded_findings(
     analysis: dict,
     observations: list[dict],
     recorded_findings: dict,
+    audit_cache: dict[str, dict] | None = None,
 ) -> Iterator[dict]:
     initial_unknowns = _initial_unknowns(analysis)
-    resolved_ids = [
-        str(item.get("unknown_id") or "").strip()
+    target_resolutions = [
+        item
         for item in recorded_findings.get("resolutions", [])
         if isinstance(item, dict)
-        and str(item.get("status") or "") in {"resolved", "partially_resolved"}
-        and not _is_user_product_decision(item, initial_unknowns)
-        and str(item.get("answer") or "").strip()
-        and str(item.get("unknown_id") or "").strip()
+        and _resolution_requires_semantic_audit(item, initial_unknowns)
+    ]
+    resolved_ids = [
+        str(item.get("unknown_id") or "").strip()
+        for item in target_resolutions
     ]
     if not resolved_ids:
         return {"verdicts": []}
-    context = json.dumps({
-        "authoritative_task_contract": {
-            "statements": analysis.get("statements", []),
-            "acceptance_criteria": analysis.get("acceptance_criteria", []),
-            "constraints": analysis.get("constraint_statements", []),
-            "scope": analysis.get("scope_statements", {}),
-            "reference_baselines": analysis.get("reference_baselines", []),
-            "unknowns": analysis.get("unknowns", []),
-        },
-        "proposed_findings": {
-            "beliefs": recorded_findings.get("beliefs", []),
-            "resolutions": recorded_findings.get("resolutions", []),
-        },
-        "observation_index": [
-            {
-                "id": item.get("id", ""),
-                "tool": item.get("tool", ""),
-                "title": item.get("title", ""),
-                "summary": item.get("summary", ""),
-                "evidence_excerpt": item.get("evidence_excerpt", ""),
-                "verification": item.get("verification", {}),
-                "target_unknown_ids": item.get("target_unknown_ids", []),
-                "reason": item.get("reason", ""),
-            }
-            for item in observations
-            if isinstance(item, dict)
-        ],
-        "required_unknown_ids": resolved_ids,
-    }, ensure_ascii=False)
-    audit_messages = [{"role": "system", "content": prompt.build_investigation_auditor(
-        app_settings.get_output_language()
-    )}]
     usage_events: list[dict] = []
-    audit = {"verdicts": []}
+    verdicts: list[dict] = []
     partial_ids = {
         str(item.get("unknown_id") or "").strip()
         for item in recorded_findings.get("resolutions", [])
@@ -1636,61 +1854,118 @@ def _audit_recorded_findings(
             and observation.get("id") in resolution.get("evidence", [])
         )
     }
-    for attempt in range(REQUIRED_AUDIT_ATTEMPTS):
-        audit_attempt = attempt
-
-        def ask(_path: str, slot_prompt: str) -> JSONValue:
-            assistant = _call_model(provider, model, [
-                *audit_messages,
-                {"role": "user", "content": f"{slot_prompt}\ncontext: {context}"},
-            ], tools=[])
-            if usage := _usage_delta(pricing_rules, assistant.pop("_usage", {})):
-                _add_usage(usage_total, usage)
-                usage_events.append(start_event(
-                    f"{run_id}-usage-investigation-audit-{audit_attempt}",
-                    "usage",
-                    {"delta": usage, "total": usage_total},
-                ))
-            return _content_text(assistant.get("content"))
-
-        filled = json2slots({"verdicts": "____"}, ask)
-        audit = _normalize_investigation_audit(filled, resolved_ids)
-        covered_ids = {
-            item["unknown_id"] for item in audit["verdicts"]
+    contract = {
+        "statements": analysis.get("statements", []),
+        "acceptance_criteria": analysis.get("acceptance_criteria", []),
+        "constraints": analysis.get("constraint_statements", []),
+        "scope": analysis.get("scope_statements", {}),
+        "reference_baselines": analysis.get("reference_baselines", []),
+        "unknowns": analysis.get("unknowns", []),
+    }
+    all_beliefs = [
+        item for item in recorded_findings.get("beliefs", [])
+        if isinstance(item, dict)
+    ]
+    for resolution in target_resolutions:
+        unknown_id = str(resolution.get("unknown_id") or "").strip()
+        target_belief_ids = set(_reference_list(resolution.get("belief_ids")))
+        target_beliefs = [
+            item for item in all_beliefs
+            if str(item.get("id") or "").strip() in target_belief_ids
+        ]
+        target_observation_ids = set(_reference_list(resolution.get("evidence"))) | {
+            evidence_id
+            for belief in target_beliefs
+            for evidence_id in _reference_list(belief.get("evidence"))
         }
+        context = json.dumps({
+            "authoritative_task_contract": contract,
+            "proposed_findings": {
+                "beliefs": target_beliefs,
+                "resolutions": [resolution],
+            },
+            "observation_index": [
+                {
+                    "id": item.get("id", ""),
+                    "tool": item.get("tool", ""),
+                    "title": item.get("title", ""),
+                    "summary": item.get("summary", ""),
+                    "evidence_excerpt": item.get("evidence_excerpt", ""),
+                    "verification": item.get("verification", {}),
+                    "target_unknown_ids": item.get("target_unknown_ids", []),
+                    "reason": item.get("reason", ""),
+                }
+                for item in observations
+                if isinstance(item, dict)
+                and str(item.get("id") or "").strip() in target_observation_ids
+            ],
+            "required_unknown_ids": [unknown_id],
+        }, ensure_ascii=False)
+        cache_key = "audit:v2:" + hashlib.sha256(context.encode("utf-8")).hexdigest()
+        if audit_cache is not None and cache_key in audit_cache:
+            verdicts.extend(audit_cache[cache_key].get("verdicts", []))
+            continue
+        audit_messages = [{"role": "system", "content": prompt.build_investigation_auditor(
+            app_settings.get_output_language()
+        )}]
+        audit = {"verdicts": []}
+        for attempt in range(REQUIRED_AUDIT_ATTEMPTS):
+
+            def ask(_path: str, slot_prompt: str) -> JSONValue:
+                assistant = _call_model(provider, model, [
+                    *audit_messages,
+                    {"role": "user", "content": f"{slot_prompt}\ncontext: {context}"},
+                ], tools=[])
+                if usage := _usage_delta(pricing_rules, assistant.pop("_usage", {})):
+                    _add_usage(usage_total, usage)
+                    usage_events.append(start_event(
+                        f"{run_id}-usage-investigation-audit-{len(usage_events)}",
+                        "usage",
+                        {"delta": usage, "total": usage_total},
+                    ))
+                return _content_text(assistant.get("content"))
+
+            filled = json2slots({"verdicts": "____"}, ask)
+            audit = _normalize_investigation_audit(filled, [unknown_id])
+            covered_ids = {
+                item["unknown_id"] for item in audit["verdicts"]
+            }
+            invalid_grounded_ids = {
+                item["unknown_id"]
+                for item in audit["verdicts"]
+                if item["status"] == "grounded"
+                and item["unknown_id"] in partial_ids - independently_verified_ids
+            }
+            if covered_ids == {unknown_id} and not invalid_grounded_ids:
+                break
+            problem = (
+                "A partial resolution was incorrectly marked grounded without independent "
+                "verification. Return verify with one atomic hypothesis, or investigate, for: "
+                + ", ".join(sorted(invalid_grounded_ids))
+                if invalid_grounded_ids
+                else "The audit omitted conclusions. Return exactly one verdict for: "
+                + unknown_id
+            )
+            audit_messages.append({"role": "user", "content": problem})
         invalid_grounded_ids = {
             item["unknown_id"]
             for item in audit["verdicts"]
             if item["status"] == "grounded"
             and item["unknown_id"] in partial_ids - independently_verified_ids
         }
-        if covered_ids == set(resolved_ids) and not invalid_grounded_ids:
-            break
-        problem = (
-            "A partial resolution was incorrectly marked grounded without independent "
-            "verification. Return verify with one atomic hypothesis, or investigate, for: "
-            + ", ".join(sorted(invalid_grounded_ids))
-            if invalid_grounded_ids
-            else "The audit omitted conclusions. Return exactly one verdict for each of: "
-            + ", ".join(resolved_ids)
-        )
-        audit_messages.append({"role": "user", "content": problem})
-    invalid_grounded_ids = {
-        item["unknown_id"]
-        for item in audit["verdicts"]
-        if item["status"] == "grounded"
-        and item["unknown_id"] in partial_ids - independently_verified_ids
-    }
-    for item in audit["verdicts"]:
-        if item["unknown_id"] in invalid_grounded_ids:
-            item["status"] = "investigate"
-            item["reason"] = (
-                "The partial conclusion was not independently verified and cannot be "
-                "promoted from the same evidence."
-            )
+        for item in audit["verdicts"]:
+            if item["unknown_id"] in invalid_grounded_ids:
+                item["status"] = "investigate"
+                item["reason"] = (
+                    "The partial conclusion was not independently verified and cannot be "
+                    "promoted from the same evidence."
+                )
+        if audit_cache is not None:
+            audit_cache[cache_key] = audit
+        verdicts.extend(audit["verdicts"])
     for event in usage_events:
         yield event
-    return audit
+    return {"verdicts": verdicts}
 
 
 def _normalize_investigation_audit(value, resolved_ids: list[str]) -> dict:
@@ -2115,6 +2390,7 @@ def _finalize_investigation(
     analysis: dict | None = None,
     observations: list[dict] | None = None,
     recorded_findings: dict | None = None,
+    audit_cache: dict[str, dict] | None = None,
     reason: str = "Investigation needs a final structured summary.",
 ) -> Iterator[dict]:
     messages.append({"role": "user", "content": prompt.build_investigation_finalize(reason)})
@@ -2142,7 +2418,7 @@ def _finalize_investigation(
             provider,
             model,
             messages,
-            tools=[_record_findings_tool_schema(), _finish_tool_schema()],
+            tools=[_resolve_unknowns_tool_schema(), _record_findings_tool_schema(), _finish_tool_schema()],
             tool_choice="required",
         )
         if usage := _usage_delta(pricing_rules, assistant.pop("_usage", {})):
@@ -2157,7 +2433,7 @@ def _finalize_investigation(
         last_content = content or last_content
         record_calls = [
             call for call in tool_calls
-            if ((call.get("function") or {}).get("name") == "record_investigation_findings")
+            if ((call.get("function") or {}).get("name") in {"resolve_unknowns", "record_investigation_findings"})
         ]
         finish_call = next(
             (call for call in tool_calls if ((call.get("function") or {}).get("name") == "finish_investigation")),
@@ -2179,10 +2455,23 @@ def _finalize_investigation(
         for record_call in record_calls:
             call_id = record_call.get("id") or f"call-{uuid4().hex[:8]}"
             function = record_call.get("function") or {}
+            record_name = str(function.get("name") or "")
             try:
-                record_arguments = _record_arguments(_tool_arguments(function.get("arguments")))
-                _require_control_reason(record_arguments, "record_investigation_findings")
-                if (analysis or {}).get("_canonicalized") or not _has_finding_fields(record_arguments):
+                record_arguments = _tool_arguments(function.get("arguments"))
+                if record_name == "resolve_unknowns":
+                    record_arguments = _resolve_unknown_arguments(record_arguments)
+                    _require_control_reason(record_arguments, "resolve_unknowns")
+                    if not record_arguments.get("resolutions"):
+                        raise ValueError("resolve_unknowns requires at least one valid resolution")
+                    _validate_resolution_refs(
+                        record_arguments["resolutions"],
+                        _beliefs((recorded_findings or {}).get("beliefs")),
+                        observations or [],
+                    )
+                else:
+                    record_arguments = _record_arguments(record_arguments)
+                    _require_control_reason(record_arguments, "record_investigation_findings")
+                if record_name != "resolve_unknowns" and ((analysis or {}).get("_canonicalized") or not _has_finding_fields(record_arguments)):
                     record_arguments = yield from _record_findings_by_slots(
                         provider=provider,
                         model=model,
@@ -2210,6 +2499,10 @@ def _finalize_investigation(
                     recorded_findings,
                     observations or [],
                 )
+                recorded_findings = _apply_direct_resolution_gate(
+                    recorded_findings,
+                    observations or [],
+                )
                 if (analysis or {}).get("_canonicalized"):
                     quality_audit = yield from _audit_recorded_findings(
                         provider=provider,
@@ -2224,6 +2517,7 @@ def _finalize_investigation(
                         analysis=analysis or {},
                         observations=observations or [],
                         recorded_findings=recorded_findings,
+                        audit_cache=audit_cache,
                     )
                     recorded_findings, _, _ = _apply_investigation_audit(
                         recorded_findings,
@@ -2233,28 +2527,30 @@ def _finalize_investigation(
                 messages.append({
                     "role": "tool",
                     "tool_call_id": call_id,
-                    "content": json.dumps({"recorded": True}, ensure_ascii=False),
+                    "content": json.dumps({"recorded": True, "tool": record_name}, ensure_ascii=False),
                 })
             except Exception as exc:
-                last_error = f"record_investigation_findings arguments were invalid: {exc}"
+                last_error = f"{record_name or 'record_investigation_findings'} arguments were invalid: {exc}"
                 raw_arguments = function.get("arguments") or "{}"
-                partial_arguments = _record_arguments(_partial_tool_arguments(raw_arguments))
+                partial_arguments = _partial_tool_arguments(raw_arguments)
+                if record_name != "resolve_unknowns":
+                    partial_arguments = _record_arguments(partial_arguments)
                 if _has_finding_fields(partial_arguments):
                     recorded_findings = _merge_recorded_findings(
                         recorded_findings or _empty_recorded_findings(),
                         partial_arguments,
                     )
-                if repeated_tool_error_name == "record_investigation_findings":
+                if repeated_tool_error_name == record_name:
                     repeated_tool_error_count += 1
                 else:
-                    repeated_tool_error_name = "record_investigation_findings"
+                    repeated_tool_error_name = record_name
                     repeated_tool_error_count = 1
                 messages.append({
                     "role": "tool",
                     "tool_call_id": call_id,
                     "content": _tool_repair_error_json(
                         exc,
-                        "record_investigation_findings",
+                        record_name or "record_investigation_findings",
                         raw_arguments,
                         partial_arguments,
                     ),
@@ -2315,7 +2611,7 @@ def _finalize_investigation(
                 else:
                     return final
         elif content:
-            last_error = "Investigation finalization must use record_investigation_findings and finish_investigation tool calls."
+            last_error = "Investigation finalization must use resolve_unknowns or record_investigation_findings, then finish_investigation."
         else:
             last_error = "Investigation finalization started before finish_investigation was called."
 
@@ -2647,12 +2943,17 @@ def _run_tool_stream(name: str, call_id: str, arguments: dict, workspace_dir: st
     target_unknown_ids = _target_unknown_ids(arguments)
     reason = str(arguments.pop("reason", "") or "").strip()
     orientation = bool(arguments.pop("orientation", False))
+    discovery_contract = {
+        field: str(arguments.pop(field, "") or "").strip()
+        for field in DISCOVERY_CONTRACT_FIELDS
+    }
     arguments.pop("target_unknown_ids", None)
     _validate_tool_contract(
         name,
         target_unknown_ids=target_unknown_ids,
         reason=reason,
         orientation=orientation,
+        discovery_contract=discovery_contract,
         analysis=analysis,
     )
 
@@ -2676,6 +2977,7 @@ def _run_tool_stream(name: str, call_id: str, arguments: dict, workspace_dir: st
             done["target_unknown_ids"] = target_unknown_ids
             done["reason"] = reason
             done["orientation"] = orientation
+            done["investigation_contract"] = discovery_contract
             return json.dumps(done, ensure_ascii=False)
 
     tool = registered_tool
@@ -2689,6 +2991,7 @@ def _run_tool_stream(name: str, call_id: str, arguments: dict, workspace_dir: st
         "target_unknown_ids": target_unknown_ids,
         "reason": reason,
         "orientation": orientation,
+        "investigation_contract": discovery_contract,
     })
     result = asyncio.run(tool.execute(arguments, {"directory": workspace_dir}))
     yield {"op": "update", "id": call_id, "patch": {
@@ -2700,6 +3003,7 @@ def _run_tool_stream(name: str, call_id: str, arguments: dict, workspace_dir: st
             "target_unknown_ids": target_unknown_ids,
             "reason": reason,
             "orientation": orientation,
+            "investigation_contract": discovery_contract,
         },
     }}
     return json.dumps({
@@ -2707,6 +3011,7 @@ def _run_tool_stream(name: str, call_id: str, arguments: dict, workspace_dir: st
         "target_unknown_ids": target_unknown_ids,
         "reason": reason,
         "orientation": orientation,
+        "investigation_contract": discovery_contract,
         "title": result.title,
         "output": result.output,
         "metadata": {
@@ -2714,6 +3019,7 @@ def _run_tool_stream(name: str, call_id: str, arguments: dict, workspace_dir: st
             "target_unknown_ids": target_unknown_ids,
             "reason": reason,
             "orientation": orientation,
+            "investigation_contract": discovery_contract,
         },
     }, ensure_ascii=False)
 
@@ -2725,9 +3031,20 @@ def _validate_tool_contract(
     reason: str,
     orientation: bool,
     analysis: dict | None,
+    discovery_contract: dict[str, str] | None = None,
 ) -> None:
     if not reason:
         raise ValueError(f"{name} requires reason")
+    discovery_contract = discovery_contract or {}
+    if name != "clearify":
+        missing = [
+            field for field in DISCOVERY_CONTRACT_FIELDS
+            if not str(discovery_contract.get(field) or "").strip()
+        ]
+        if missing:
+            raise ValueError(
+                f"{name} requires discovery contract fields: " + ", ".join(missing)
+            )
     known = {
         str(item.get("id") or "").strip(): item
         for item in (analysis or {}).get("unknowns", [])
@@ -2787,6 +3104,14 @@ def _tool_observation(name: str, call_id: str, output: str) -> dict:
         "verification": data.get("run") if isinstance(data.get("run"), dict) else {},
         "target_unknown_ids": data.get("target_unknown_ids") or metadata.get("target_unknown_ids") or [],
         "reason": data.get("reason") or metadata.get("reason") or "",
+        "orientation": bool(data.get("orientation") or metadata.get("orientation")),
+        "investigation_contract": (
+            data.get("investigation_contract")
+            if isinstance(data.get("investigation_contract"), dict)
+            else metadata.get("investigation_contract")
+            if isinstance(metadata.get("investigation_contract"), dict)
+            else {}
+        ),
         "path": metadata.get("path", ""),
         "mtime_ns": metadata.get("mtime_ns"),
         "size": metadata.get("size"),
@@ -2885,7 +3210,7 @@ def _resolution_repair_request(
         "misplaced_resolution_ids": misplaced,
         "instruction": (
             "Reuse existing evidence. Do not call discovery tools. "
-            "Call record_investigation_findings with explicit resolutions for these ids."
+            "Call resolve_unknowns with explicit resolutions for these ids."
         ),
     }
 
@@ -2941,7 +3266,7 @@ def _resolution_repair_prompt(repair: dict) -> str:
         lines.append(f"These ids look like resolved answers were written into unknowns instead: {misplaced}")
     lines.extend([
         "Do not call discovery tools or read more files.",
-        "Call record_investigation_findings with explicit resolutions for every missing id.",
+        "Call resolve_unknowns with explicit resolutions for every missing id.",
         "Each resolution must include unknown_id, status, answer, evidence or belief_ids, and reason.",
         "Then call finish_investigation again with the same final summary and next step.",
     ])
@@ -3355,6 +3680,51 @@ def _apply_investigation_audit(
     return result, verification_requests, clearify_questions
 
 
+def _resolution_requires_semantic_audit(resolution: dict, initial_unknowns: list[dict]) -> bool:
+    if _is_user_product_decision(resolution, initial_unknowns):
+        return False
+    if str(resolution.get("kind") or "derived_inference") not in SEMANTIC_AUDIT_KINDS:
+        return False
+    return (
+        str(resolution.get("status") or "") in {"resolved", "partially_resolved"}
+        and str(resolution.get("answer") or "").strip()
+        and str(resolution.get("unknown_id") or "").strip()
+    )
+
+
+def _apply_direct_resolution_gate(
+    recorded: dict,
+    observations: list[dict],
+    *,
+    strict_grounding: bool = True,
+) -> dict:
+    direct_ids = [
+        str(item.get("unknown_id") or "").strip()
+        for item in recorded.get("resolutions", [])
+        if isinstance(item, dict)
+        and str(item.get("kind") or "") == "direct_fact"
+        and str(item.get("status") or "") == "resolved"
+        and str(item.get("unknown_id") or "").strip()
+    ]
+    if not direct_ids:
+        return recorded
+    gated, _, _ = _apply_investigation_audit(
+        recorded,
+        {"verdicts": [
+            {
+                "unknown_id": unknown_id,
+                "status": "grounded",
+                "reason": "Direct fact passed deterministic grounding checks.",
+            }
+            for unknown_id in direct_ids
+        ]},
+        observations=observations,
+        strict_grounding=strict_grounding,
+        allow_verification=False,
+    )
+    return gated
+
+
 def _unsupported_grounding_literals(
     resolution: dict,
     recorded: dict,
@@ -3584,9 +3954,7 @@ def _audit_covers_resolutions(
         str(item.get("unknown_id") or "").strip()
         for item in recorded.get("resolutions", [])
         if isinstance(item, dict)
-        and str(item.get("status") or "") == "resolved"
-        and not _is_user_product_decision(item, initial_unknowns)
-        and str(item.get("unknown_id") or "").strip()
+        and _resolution_requires_semantic_audit(item, initial_unknowns)
     }
     audited_ids = {
         str(item.get("unknown_id") or "").strip()
@@ -3783,6 +4151,7 @@ def _resolutions(value) -> list[dict]:
         items.append({
             "unknown_id": unknown_id,
             "status": status,
+            "kind": _resolution_kind(raw, status),
             "answer": str(raw.get("answer") or "").strip(),
             "evidence": _string_list(raw.get("evidence")),
             "belief_ids": _string_list(raw.get("belief_ids")),

@@ -180,6 +180,11 @@ Rules:
   never revive unrelated older requests.
 - Unknowns should be concrete facts, decisions, or delivery uncertainties relevant
   to implementation, validation, scope, or later follow-up.
+- Unknowns must be atomic and falsifiable. Split lifecycle questions by one
+  observable transition or boundary: writer, snapshot/serialization, frontend API
+  call, backend persistence, backend load, restore/render, race/runtime version.
+  Do not create one broad unknown that asks where state lives, how it is saved,
+  how it is loaded, and how it renders.
 - Do not create unknowns for how to organize, format, score, rank, or explain the
   requested answer. Those are response-composition choices, not unresolved task facts.
 - In read_only work, every code, documentation, or runtime fact directly needed
@@ -307,6 +312,16 @@ Principles:
 - Use code_nav for symbol/function/class questions and grep/read for literal
   text. Use python_static_check first for Python duplicate/dead-code/import
   audits. Reuse previous observations before repeating discovery.
+- Every discovery tool call must be hypothesis-driven. Provide target_unknown_ids,
+  hypothesis, expected_observation, decision_impact, and stop_condition. The
+  hypothesis must be falsifiable, the expected observation must name what the tool
+  result can show, and the decision impact must say which unknown/belief/branch
+  will change. "Learn more" or "inspect related code" is not a valid reason.
+- After a targeted discovery observation, consume it before more discovery:
+  call resolve_unknowns if it answers or narrows an unknown, call
+  record_investigation_findings if it supports a material belief/new unknown, or
+  finish_investigation if the task is covered. Do not keep reading adjacent files
+  unless the previous observation produced a recorded next unknown or branch.
 - When requested behavior is attached to a state transition, search the state
   identifier and account for every writer or producer, including event handlers,
   watchers, callbacks, and programmatic updates, plus the shared consumer.
