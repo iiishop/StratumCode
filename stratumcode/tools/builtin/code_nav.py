@@ -404,6 +404,7 @@ code_nav_tool = ToolDef(
     },
     execute=_code_nav,
     capabilities=("investigation", "investigation.project_evidence"),
+    event_type="code_nav",
 )
 
 TOOL = code_nav_tool

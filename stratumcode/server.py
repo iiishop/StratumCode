@@ -5,7 +5,7 @@ from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-from . import app_settings, chat, clearify_runtime, lsp, mcp, model_settings, providers, sessions, skill_runtime, skills, subagents, workspaces
+from . import app_settings, chat, clearify_runtime, lsp, mcp, model_settings, providers, sessions, skill_runtime, skills, subagents, terminal_manager, workspaces
 from .tools import registry
 
 
@@ -76,6 +76,7 @@ _ROUTES: dict[tuple[str, str], object] = {
     }),
     ("GET", "/api/files/list"):      lambda h, b: h._handle_file_list(),
     ("GET", "/api/tools"):           lambda h, b: (mcp.load_enabled(), h._json([t.to_json() for t in registry.list_all()])),
+    ("GET", "/api/terminal/processes"): lambda h, b: h._json({"items": terminal_manager.list_sessions(background_only=True)}),
 
     # POST — 独立路由（不在前缀组里的）
     ("POST", "/api/model-settings/save"):   lambda h, b: (model_settings.save(b["stage"], int(b["provider_id"]), b["model_id"]), h._json({"ok": True})),
@@ -85,6 +86,8 @@ _ROUTES: dict[tuple[str, str], object] = {
     ("POST", "/api/workspaces/activate"):   lambda h, b: (workspaces.activate(int(b["id"])), h._json({"ok": True})),
     ("POST", "/api/workspaces/delete"):     lambda h, b: (workspaces.delete(int(b["id"]), h.workspace_dir), h._json({"ok": True})),
     ("POST", "/api/tools/run"):             lambda h, b: h._handle_run(b),
+    ("POST", "/api/terminal/read"):         lambda h, b: h._json(terminal_manager.read(str(b.get("session_id") or ""), max_output_chars=int(b.get("max_output_chars") or 12_000))),
+    ("POST", "/api/terminal/kill"):         lambda h, b: h._json(terminal_manager.terminate(str(b.get("session_id") or ""), reason="user")),
     ("POST", "/api/chat"):                  lambda h, b: h._handle_chat(b),
     ("POST", "/api/chat/answer"):           lambda h, b: h._handle_chat_answer(b),
     ("POST", "/api/subagents/mcp-install"): lambda h, b: h._handle_mcp_install(b),

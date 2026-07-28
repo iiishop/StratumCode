@@ -58,6 +58,7 @@ const expanded = computed(() => props.collapsible ? props.open : true)
 }
 .event-frame--thinking { --event: #c48b00; }
 .event-frame--code-nav { --event: #6658c7; }
+.event-frame--terminal { --event: #0f7d65; }
 .event-frame--subagent { --event: #6658c7; }
 .event-frame--diff { --event: #e56b2f; }
 .event-frame--patch { --event: #e56b2f; }
@@ -119,6 +120,7 @@ const expanded = computed(() => props.collapsible ? props.open : true)
 
 .event-frame--thinking .event-frame__node,
 .event-frame--code-nav .event-frame__node,
+.event-frame--terminal .event-frame__node,
 .event-frame--tool .event-frame__node,
 .event-frame--subagent .event-frame__node {
   color: #fff;

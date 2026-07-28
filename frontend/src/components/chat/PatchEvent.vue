@@ -217,14 +217,7 @@ onUnmounted(() => rollbackTimeline?.revert())
           <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="3" y1="9" x2="21" y2="9"/><line x1="9" y1="21" x2="9" y2="9"/></svg>
           <span>Diff</span>
         </div>
-        <div class="pe__diff">
-          <div
-            v-for="(line, i) in diffLines"
-            :key="i"
-            class="pe__diff-line"
-            :class="`pe__diff-line--${line.type}`"
-          ><span class="pe__diff-marker">{{ line.prefix }}</span><span v-html="line.html"></span></div>
-        </div>
+        <pre class="pe__diff"><code><template v-for="(line, i) in diffLines" :key="i"><span class="pe__diff-line" :class="`pe__diff-line--${line.type}`"><span class="pe__diff-marker">{{ line.prefix }}</span><span v-html="line.html"></span></span></template></code></pre>
       </section>
 
       <!-- no diff fallback -->
@@ -515,19 +508,19 @@ onUnmounted(() => rollbackTimeline?.revert())
   max-height: 420px;
   border-radius: 0 0 7px 7px;
   background: #f8fafd;
-  font: 11px/1.55 var(--mono, monospace);
+  font: 12px/1.6 var(--mono, monospace);
   color: #304863;
 }
 .pe__diff-line {
   display: block;
   padding: 0 12px;
-  white-space: pre-wrap;
+  white-space: pre;
 }
 .pe__diff-line--add {
-  background: linear-gradient(90deg, rgba(0,168,120,.1), rgba(0,168,120,.04));
+  background: linear-gradient(90deg, rgba(0, 168, 120, .08), rgba(0, 168, 120, .04));
 }
 .pe__diff-line--remove {
-  background: linear-gradient(90deg, rgba(225,29,116,.09), rgba(225,29,116,.03));
+  background: linear-gradient(90deg, rgba(225, 29, 116, .07), rgba(225, 29, 116, .03));
 }
 .pe__diff-line--hunk {
   color: #4c3fc3;
@@ -546,7 +539,7 @@ onUnmounted(() => rollbackTimeline?.revert())
 }
 .pe__diff-marker {
   display: inline-block;
-  width: 16px;
+  width: 18px;
   color: #8291a5;
   user-select: none;
 }

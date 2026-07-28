@@ -245,7 +245,7 @@ def evidence_stream(
                         repeated_tool_error_count = 1
                     round_error_names.add(error_name)
                 stop_evidence = repeated_tool_error_count >= MAX_REPEATED_TOOL_ERRORS
-                yield start_event(call_id, _tool_event_type(name), {
+                yield start_event(call_id, registry.event_type(name), {
                     "name": name or "invalid",
                     "description": (
                         registry.get(name).description
@@ -449,7 +449,7 @@ def _handle_agent_tool(
         if policy:
             arguments = policy.prepare_discovery(name, arguments)
         tool = registry.get(name)
-        yield start_event(call_id, _tool_event_type(name), {
+        yield start_event(call_id, registry.event_type(name), {
             "name": name,
             "description": tool.description,
             "status": "running",
@@ -608,14 +608,6 @@ def _handle_agent_tool(
         return json.dumps(data, ensure_ascii=False), True, None
 
     raise ValueError(f"unknown agent tool: {name}")
-
-
-def _tool_event_type(name: str) -> str:
-    if name == "code_nav":
-        return "code_nav"
-    if name in {"apply_patch", "rollback_patch", "patch_history"}:
-        return "patch"
-    return "tool"
 
 
 def _normalized(value: str) -> str:

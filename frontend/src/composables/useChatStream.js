@@ -5,33 +5,8 @@ export function useChatStream(onRender, onPacket) {
   let controller = null
 
   function startEvent(message, packet, active) {
-    const handlers = {
-      thinking: timeline.showThinking,
-      tool: timeline.showTool,
-      code_nav: timeline.showCodeNav,
-      subagent: timeline.showSubagent,
-      diff: timeline.showDiff,
-      output: timeline.showOutput,
-      task_analysis: timeline.showTaskAnalysis,
-      task_update: timeline.showTaskUpdate,
-      design_plan: timeline.showDesignPlan,
-      patch_plan: timeline.showPatchPlan,
-      patch: timeline.showPatch,
-      stage: timeline.showStage,
-      skill: timeline.showSkill,
-      state_transition: timeline.showStateTransition,
-      hypothesis: timeline.showHypothesis,
-      evidence: timeline.showEvidence,
-      evidence_relation: timeline.showEvidenceRelation,
-      verdict: timeline.showVerdict,
-      step_result: timeline.showStepResult,
-      safety_stop: timeline.showSafetyStop,
-      user_question: timeline.showUserQuestion,
-      usage: timeline.showUsage,
-    }
-    const handler = handlers[packet.event]
-    if (!handler) return
-    const data = handler(message, packet.data)
+    if (!packet.event) return
+    const data = timeline.appendEvent(message, packet.event, packet.data)
     active.set(packet.id, { type: packet.event, data })
     onPacket?.(packet, packet.event, data)
   }

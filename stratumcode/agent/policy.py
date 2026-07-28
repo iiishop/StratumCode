@@ -7,7 +7,7 @@ from .. import prompt
 from .evidence import EvidenceRun
 from .tools import CONTROL_TOOL_NAMES
 
-DISCOVERY_TOOLS = ("glob", "grep", "read", "code_nav", "websearch", "webfetch", "subagent")
+DISCOVERY_TOOLS = ("glob", "grep", "read", "code_nav", "websearch", "webfetch", "terminal", "process", "read_terminal", "subagent")
 EVIDENCE_TOOLS = CONTROL_TOOL_NAMES
 
 

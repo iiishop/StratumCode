@@ -2,6 +2,7 @@
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { gsap } from 'gsap'
 import { animate, stagger } from 'animejs'
+import TerminalPanel from './TerminalPanel.vue'
 
 const props = defineProps({
   tab: { type: String, default: 'evidence' },
@@ -33,7 +34,7 @@ const phases = [
   ['audit', 'Audit'],
   ['evaluate', 'Evaluate'],
 ]
-const tabs = ['evidence', 'mcp', 'subagents', 'tasks', 'tools']
+const tabs = ['evidence', 'terminal', 'mcp', 'subagents', 'tasks', 'tools']
 const taskGroupKinds = ['goal', 'work', 'acceptance', 'behavior', 'boundary', 'constraint', 'hypothesis', 'unknown']
 const taskKindLabels = {
   goal: 'Goals',
@@ -477,6 +478,10 @@ function onRowLeave(el) {
           <strong>{{ run.verdict.verdict }}</strong>
           <p>{{ run.verdict.summary }}</p>
         </section>
+      </template>
+
+      <template v-else-if="tab === 'terminal'">
+        <TerminalPanel />
       </template>
 
       <template v-else-if="tab === 'mcp'">

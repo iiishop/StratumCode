@@ -30,6 +30,7 @@ patch_history_tool = ToolDef(
         },
     },
     execute=_patch_history,
+    event_type="patch",
 )
 
 TOOL = patch_history_tool

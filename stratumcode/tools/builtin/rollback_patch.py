@@ -31,6 +31,7 @@ rollback_patch_tool = ToolDef(
         "required": ["rollback_id"],
     },
     execute=_rollback_patch,
+    event_type="patch",
 )
 
 TOOL = rollback_patch_tool

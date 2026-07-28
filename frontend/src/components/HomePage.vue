@@ -722,6 +722,10 @@ watch(() => props.activeWorkspace?.id, () => {
           <span class="chat__topbtn-label">Tools</span>
           <span class="chat__topbtn-badge chat__topbtn-badge--yellow">{{ toolCatalog.length }}</span>
         </button>
+        <button class="chat__topbtn" :class="{ 'is-on': inspectorTab === 'terminal' }" @click="toggleInspector('terminal')" title="Terminal">
+          <span aria-hidden="true">&gt;_</span>
+          <span class="chat__topbtn-label">Terminal</span>
+        </button>
         <button class="chat__topbtn" :class="{ 'is-on': inspectorTab === 'mcp' }" @click="toggleInspector('mcp')" title="MCP">
           <span aria-hidden="true">M</span>
           <span class="chat__topbtn-label">MCP</span>

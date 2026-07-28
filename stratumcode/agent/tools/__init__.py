@@ -14,6 +14,9 @@ COMPACT_DESCRIPTIONS = {
     "code_nav": "Use LSP semantic symbols, inspect, definition, references, or hover.",
     "webfetch": "Fetch URL text.",
     "websearch": "Search the public web.",
+    "terminal": "Run a workspace terminal command, optionally in the background.",
+    "process": "List, poll, wait, or kill terminal sessions.",
+    "read_terminal": "Read recent output from a terminal session.",
     "subagent": "Delegate to a focused subagent.",
 }
 

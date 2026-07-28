@@ -29,10 +29,12 @@ class ToolDef:
     parameters: dict[str, Any]  # JSON Schema object
     execute: Callable[..., Any]  # async (params: dict, ctx: dict) -> ToolResult
     capabilities: tuple[str, ...] = ()
+    event_type: str = "tool"
 
     def to_json(self) -> dict:
         return {
             "name": self.name,
             "description": self.description,
             "parameters": self.parameters,
+            "event_type": self.event_type,
         }

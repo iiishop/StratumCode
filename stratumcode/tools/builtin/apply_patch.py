@@ -80,6 +80,7 @@ apply_patch_tool = ToolDef(
         "required": ["authorization_id", "plan_hash", "patch_id", "step_id", "reason", "files"],
     },
     execute=_apply_patch,
+    event_type="patch",
 )
 
 TOOL = apply_patch_tool

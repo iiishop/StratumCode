@@ -30,8 +30,11 @@ BUILTIN: list[ToolDef] = _discover()
 from .common import _expand_braces, _ignored, _resolve  # noqa: E402,F401
 from .glob import _glob, glob_tool  # noqa: E402,F401
 from .grep import _grep, grep_tool  # noqa: E402,F401
+from .process import _process, process_tool  # noqa: E402,F401
 from .read import _read, read_tool  # noqa: E402,F401
+from .read_terminal import _read_terminal, read_terminal_tool  # noqa: E402,F401
 from .subagent import _subagent, subagent_tool  # noqa: E402,F401
+from .terminal import _terminal, terminal_tool  # noqa: E402,F401
 from .webfetch import _validate_web_url, _webfetch, webfetch_tool  # noqa: E402,F401
 from .websearch import _BingParser, _DuckDuckGoParser, _decode_ddg_url, _websearch, websearch_tool  # noqa: E402,F401
 
@@ -45,16 +48,22 @@ __all__ = [
     "_glob",
     "_grep",
     "_ignored",
+    "_process",
     "_read",
+    "_read_terminal",
     "_resolve",
     "_subagent",
+    "_terminal",
     "_validate_web_url",
     "_webfetch",
     "_websearch",
     "glob_tool",
     "grep_tool",
+    "process_tool",
     "read_tool",
+    "read_terminal_tool",
     "subagent_tool",
+    "terminal_tool",
     "webfetch_tool",
     "websearch_tool",
 ]

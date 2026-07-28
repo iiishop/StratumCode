@@ -354,7 +354,7 @@ def investigation_stream(
                             ),
                         },
                     }, ensure_ascii=False)
-                    yield start_event(call_id, _tool_event_type(name), {
+                    yield start_event(call_id, registry.event_type(name), {
                         "name": name or "invalid",
                         "description": "Investigation tool",
                         "status": "error",
@@ -387,7 +387,7 @@ def investigation_stream(
                                 "do not repeat discovery or recording tools."
                             ),
                         }, ensure_ascii=False)
-                        yield start_event(call_id, _tool_event_type(name), {
+                        yield start_event(call_id, registry.event_type(name), {
                             "name": name or "invalid",
                             "description": "Investigation tool",
                             "status": "error",
@@ -412,7 +412,7 @@ def investigation_stream(
                                 "Resolve explicit unknowns before calling more discovery tools."
                             ),
                         }, ensure_ascii=False)
-                        yield start_event(call_id, _tool_event_type(name), {
+                        yield start_event(call_id, registry.event_type(name), {
                             "name": name or "invalid",
                             "description": "Investigation tool",
                             "status": "error",
@@ -430,7 +430,7 @@ def investigation_stream(
                         name,
                         allowed_tools=sorted(allowed_tool_names),
                     )
-                    yield start_event(call_id, _tool_event_type(name), {
+                    yield start_event(call_id, registry.event_type(name), {
                         "name": name or "invalid",
                         "description": "Investigation tool",
                         "status": "error",
@@ -479,7 +479,11 @@ def investigation_stream(
                     semantic_repair_required_ids = _semantic_repair_resolution_ids(
                         recorded_findings,
                     )
-                    task_updates = _investigation_task_updates(None, [], resolutions)
+                    task_updates = _investigation_task_updates(
+                        None,
+                        _initial_unknowns(_analysis_with_recorded_unknowns(analysis, recorded_findings)),
+                        resolutions,
+                    )
                     output = json.dumps({
                         "resolved": True,
                         "counts": {"resolutions": len(resolutions)},
@@ -766,7 +770,7 @@ def investigation_stream(
                     target_ids = _target_unknown_ids(arguments)
                     target_ids = [
                         item for item in target_ids
-                        if item not in asked_clearify_ids
+                        if not any(_same_unknown_id(item, asked_id) for asked_id in asked_clearify_ids)
                     ]
                     arguments["target_unknown_ids"] = target_ids
                     if not target_ids:
@@ -798,7 +802,10 @@ def investigation_stream(
                     }
                     target_ids = [
                         item for item in target_ids
-                        if item not in answered_by_previous_round
+                        if not any(
+                            _same_unknown_id(item, answered_id)
+                            for answered_id in answered_by_previous_round
+                        )
                     ]
                     arguments["target_unknown_ids"] = target_ids
                     if not target_ids:
@@ -826,7 +833,9 @@ def investigation_stream(
                     if resolution_records:
                         for resolution in resolution_records:
                             asked_clearify_ids.add(resolution["unknown_id"])
-                            clearify_questions.pop(resolution["unknown_id"], None)
+                            for question_id in list(clearify_questions):
+                                if _same_unknown_id(question_id, resolution["unknown_id"]):
+                                    clearify_questions.pop(question_id, None)
                         recorded_findings = _merge_recorded_findings(
                             recorded_findings,
                             {"resolutions": resolution_records},
@@ -842,7 +851,11 @@ def investigation_stream(
                     if resolution_records:
                         yield start_event(f"{call_id}-task-update", "task_update", {
                             "analysis_id": analysis.get("id", ""),
-                            "items": _investigation_task_updates(None, [], resolution_records),
+                            "items": _investigation_task_updates(
+                                None,
+                                _initial_unknowns(_analysis_with_recorded_unknowns(analysis, recorded_findings)),
+                                resolution_records,
+                            ),
                         })
                     messages.append({
                         "role": "tool",
@@ -875,7 +888,7 @@ def investigation_stream(
                             cached_observation_id,
                             pending_observation_ids,
                         )
-                    yield start_event(call_id, _tool_event_type(name), {
+                    yield start_event(call_id, registry.event_type(name), {
                         "name": name,
                         "description": "Investigation tool",
                         "status": "no_progress",
@@ -952,7 +965,7 @@ def investigation_stream(
                         repeated_tool_error_name = error_name
                         repeated_tool_error_count = 1
                     round_error_names.add(error_name)
-                yield start_event(call_id, _tool_event_type(name), {
+                yield start_event(call_id, registry.event_type(name), {
                     "name": name or "invalid",
                     "description": "Investigation tool",
                     "status": "error",
@@ -3057,7 +3070,7 @@ def _run_tool_stream(name: str, call_id: str, arguments: dict, workspace_dir: st
             return json.dumps(done, ensure_ascii=False)
 
     tool = registered_tool
-    yield start_event(call_id, _tool_event_type(name), {
+    yield start_event(call_id, registry.event_type(name), {
         "name": name,
         "description": tool.description,
         "status": "running",
@@ -3205,14 +3218,6 @@ def _observation_evidence_excerpt(value) -> str:
         return text
     half = OBSERVATION_EVIDENCE_CHARS // 2
     return f"{text[:half]}\n...\n{text[-half:]}"
-
-
-def _tool_event_type(name: str) -> str:
-    if name == "code_nav":
-        return "code_nav"
-    if name in {"apply_patch", "rollback_patch", "patch_history"}:
-        return "patch"
-    return "tool"
 
 
 def _reject_batched_hypothesis(task: str) -> None:
@@ -3414,6 +3419,7 @@ def _finish_payload(
     else:
         _validate_resolution_refs(resolutions, beliefs, observations or [])
     resolutions = _enforce_resolution_evidence(resolutions, initial_unknowns, strict=not repair_conflicts)
+    unknowns = _drop_resolved_unknowns(unknowns, resolutions, repairs)
     unresolved = _unresolved_from_resolutions(resolutions, initial_unknowns)
     unknowns = _merge_unknowns(unresolved + unknowns + decision_unknowns + new_unknowns)
     patch_context = _patch_context(arguments.get("patch_planning_facts"), repairs, repair_conflicts)
@@ -3508,7 +3514,11 @@ def _finish_payload(
         "new_unknowns": new_unknowns,
         "user_decisions_required": user_decisions,
         "unknowns": unknowns,
-        "task_updates": _investigation_task_updates(arguments.get("task_updates"), unknowns, resolutions),
+        "task_updates": _investigation_task_updates(
+            arguments.get("task_updates"),
+            initial_unknowns + unknowns,
+            resolutions,
+        ),
         "patch_planning_context": patch_context,
         "patch_planning_facts": patch_context,
         "recommended_next_step": str(arguments.get("recommended_next_step") or "").strip(),
@@ -4563,6 +4573,23 @@ def _unresolved_from_resolutions(resolutions: list[dict], initial_unknowns: list
     return unresolved
 
 
+def _drop_resolved_unknowns(unknowns: list[dict], resolutions: list[dict], repairs: list[str]) -> list[dict]:
+    resolved_ids = [
+        str(item.get("unknown_id") or "").strip()
+        for item in resolutions
+        if isinstance(item, dict) and item.get("status") == "resolved"
+    ]
+    if not resolved_ids:
+        return unknowns
+    filtered = [
+        item for item in unknowns
+        if not any(_same_unknown_id(item.get("id"), resolved_id) for resolved_id in resolved_ids)
+    ]
+    if len(filtered) != len(unknowns):
+        repairs.append("Removed unknowns already resolved by resolutions")
+    return filtered
+
+
 def _question_from_resolution(resolution: dict) -> str:
     text = str(resolution.get("answer") or resolution.get("reason") or "").strip()
     if _looks_like_question(text):
@@ -4795,6 +4822,8 @@ def _investigation_task_updates(value, unknowns: list[dict], resolutions: list[d
         unknown_id = resolution.get("unknown_id", "")
         if not unknown_id or any(_same_unknown_id(unknown_id, known_id) for known_id in known_ids):
             continue
+        source = _find_by_unknown_id(unknowns, unknown_id, id_field="id")
+        text = (source or {}).get("question") or resolution.get("answer") or unknown_id
         resolution_status = resolution.get("status")
         status = {
             "resolved": "known",
@@ -4808,7 +4837,7 @@ def _investigation_task_updates(value, unknowns: list[dict], resolutions: list[d
             "id": unknown_id,
             "target_id": unknown_id,
             "kind": "unknown",
-            "text": resolution.get("answer") or unknown_id,
+            "text": text,
             "status": status,
             "reason": resolution.get("reason", ""),
             "trace": trace[:6],

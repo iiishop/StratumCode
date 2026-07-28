@@ -2,6 +2,7 @@
 import { computed, provide } from 'vue'
 import ThinkingEvent from './ThinkingEvent.vue'
 import ToolEvent from './ToolEvent.vue'
+import TerminalEvent from './TerminalEvent.vue'
 import CodeNavEvent from './CodeNavEvent.vue'
 import SubagentEvent from './SubagentEvent.vue'
 import DiffEvent from './DiffEvent.vue'
@@ -33,6 +34,7 @@ provide('messageEvents', computed(() => props.events))
 const eventComponents = {
   thinking: ThinkingEvent,
   tool: ToolEvent,
+  terminal: TerminalEvent,
   code_nav: CodeNavEvent,
   subagent: SubagentEvent,
   diff: DiffEvent,

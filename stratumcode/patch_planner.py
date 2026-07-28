@@ -343,7 +343,7 @@ def patch_planning_stream(
                 stage_id,
                 progress,
                 "verification-audit",
-                "Verification audit",
+                "Verification content audit",
                 description="Challenge the proposed coverage, checks, and skipped decisions.",
                 detail=f"Attempt {semantic_attempt}",
             )
@@ -380,7 +380,7 @@ def patch_planning_stream(
                 stage_id,
                 progress,
                 "verification-audit",
-                "Verification audit",
+                "Verification content audit",
                 description="Challenge the proposed coverage, checks, and skipped decisions.",
                 detail="Audit failed",
                 state="error",
@@ -398,7 +398,7 @@ def patch_planning_stream(
             stage_id,
             progress,
             "verification-audit",
-            "Verification audit",
+            "Verification content audit",
             description="Challenge the proposed coverage, checks, and skipped decisions.",
             detail="Audit passed",
             state="done",
@@ -623,7 +623,16 @@ def validate_patch_plan(plan: dict, analysis: dict, design_plan: dict, workspace
             issues.append(f"step {step_id} {file_issue}")
         mentioned_files = _mentioned_workspace_files(step, workspace_files)
         structured_file = str(step.get("file") or "").replace("\\", "/")
-        unlisted_files = sorted(mentioned_files - {structured_file})
+        reference_files = _derived_reference_files(
+            step,
+            analysis,
+            design_plan,
+            workspace,
+            workspace_files,
+            step_id,
+            issues,
+        )
+        unlisted_files = sorted(mentioned_files - {structured_file, *reference_files})
         if unlisted_files:
             issues.append(
                 f"step {step_id} references files outside its structured file: "
@@ -1487,6 +1496,31 @@ def _decision_acceptance_ids(decision_ids: list[str], design_plan: dict) -> list
     ])
 
 
+def _decision_reference_ids(decision_ids: list[str], design_plan: dict) -> list[str]:
+    return _unique_strings([
+        reference_id
+        for item in design_plan.get("design_decisions", [])
+        if isinstance(item, dict) and item.get("id") in decision_ids
+        for reference_id in _strings(item.get("reference_ids"))
+    ])
+
+
+def _reference_files(reference_ids: list[str], analysis: dict) -> list[str]:
+    source_paths = {
+        str(item.get("id") or ""): str(item.get("path") or "").strip()
+        for item in analysis.get("source_catalog", [])
+        if isinstance(item, dict) and item.get("id") and str(item.get("path") or "").strip()
+    }
+    wanted = set(reference_ids)
+    return _unique_strings([
+        source_paths[source_id]
+        for baseline in analysis.get("reference_baselines", [])
+        if isinstance(baseline, dict) and str(baseline.get("id") or "") in wanted
+        for source_id in _strings(baseline.get("source_refs"))
+        if source_id in source_paths
+    ])
+
+
 def _canonical_workspace_file(file: str, workspace: Path) -> str:
     workspace = workspace.resolve()
     raw = str(file or "").strip()
@@ -1543,6 +1577,33 @@ def _known_workspace_files(workspace: Path) -> set[str]:
         dirs[:] = [name for name in dirs if name not in IGNORED_DIRS]
         for name in files:
             result.add((Path(root) / name).relative_to(workspace).as_posix())
+    return result
+
+
+def _derived_reference_files(
+    step: dict,
+    analysis: dict,
+    design_plan: dict,
+    workspace: Path,
+    workspace_files: set[str],
+    step_id: str,
+    issues: list[str],
+) -> set[str]:
+    reference_ids = _decision_reference_ids(_strings(step.get("decision_ids")), design_plan)
+    result = set()
+    for raw in _reference_files(reference_ids, analysis):
+        try:
+            file = _canonical_workspace_file(raw, workspace)
+        except ValueError as exc:
+            issues.append(f"step {step_id} derived reference file {exc}: {raw}")
+            continue
+        if file not in workspace_files:
+            issues.append(f"step {step_id} derived reference file does not exist: {file}")
+            continue
+        if file == str(step.get("file") or "").replace("\\", "/"):
+            issues.append(f"step {step_id} write file cannot also be a reference file: {file}")
+            continue
+        result.add(file)
     return result
 
 

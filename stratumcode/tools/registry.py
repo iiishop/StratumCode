@@ -34,6 +34,11 @@ def get(name: str) -> ToolDef | None:
     return _registry.get(name)
 
 
+def event_type(name: str) -> str:
+    tool = get(name)
+    return tool.event_type if tool else "tool"
+
+
 def unregister(name: str) -> None:
     _registry.pop(name, None)
 

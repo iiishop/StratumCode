@@ -23,8 +23,9 @@ from .agent_runtime import (
 )
 from .tools import registry
 
-IMPLEMENTATION_TOOLS = ("read", "apply_patch")
-VALIDATION_TOOLS = ("read", "code_nav")
+TERMINAL_TOOLS = ("terminal", "process", "read_terminal")
+IMPLEMENTATION_TOOLS = ("read", *TERMINAL_TOOLS, "apply_patch")
+VALIDATION_TOOLS = ("read", "code_nav", *TERMINAL_TOOLS)
 LEGACY_USER_DECISION_VERDICT = "user_decision"
 
 
@@ -692,8 +693,7 @@ def _run_tool(name: str, call_id: str, arguments: dict, workspace_dir: str) -> I
         })
         return output
 
-    event_type = "patch" if name in {"apply_patch", "patch_history", "rollback_patch"} else ("code_nav" if name == "code_nav" else "tool")
-    yield start_event(call_id, event_type, {
+    yield start_event(call_id, tool.event_type, {
         "name": name,
         "description": tool.description,
         "status": "running",
