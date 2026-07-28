@@ -317,11 +317,10 @@ Principles:
   hypothesis must be falsifiable, the expected observation must name what the tool
   result can show, and the decision impact must say which unknown/belief/branch
   will change. "Learn more" or "inspect related code" is not a valid reason.
-- After a targeted discovery observation, consume it before more discovery:
-  call resolve_unknowns if it answers or narrows an unknown, call
-  record_investigation_findings if it supports a material belief/new unknown, or
-  finish_investigation if the task is covered. Do not keep reading adjacent files
-  unless the previous observation produced a recorded next unknown or branch.
+- Continue discovery while the current hypothesis still has uncovered evidence
+  requirements. Call resolve_unknowns only when an unknown has a real answer or
+  a meaningful partial answer; call record_investigation_findings only for
+  material beliefs/new unknowns, not as an unlock button.
 - When requested behavior is attached to a state transition, search the state
   identifier and account for every writer or producer, including event handlers,
   watchers, callbacks, and programmatic updates, plus the shared consumer.
@@ -389,12 +388,19 @@ INVESTIGATION_FINALIZE = """\
 
 Use only the tool results already present in this conversation.
 
-First call record_investigation_findings with only a reason. The runtime will
-request beliefs, resolutions, user_decisions_required, and new_unknowns one slot
-at a time. The runtime derives task_updates and carries unresolved contract unknowns.
+If explicit unknowns can be resolved from existing observations, call
+resolve_unknowns. If broader findings still need slot recording, call
+record_investigation_findings with only a reason. The runtime derives task_updates
+and carries unresolved contract unknowns.
 
 Then call finish_investigation with reason, summary, recommended_next_step, and
 patch_planning_facts when code work should continue.
+
+For implement bugfix work, finish_investigation must include bugfix_readiness.
+Set every readiness flag true only when existing evidence identifies the observed
+failure or failing boundary, the root cause or first failing boundary, the patch
+target, the expected behavior change, and a validation scenario. If any flag is
+false, use recommended_next_step=continue_investigation.
 
 For read_only work, summary is the final user deliverable. Compose it only from
 the audited recorded resolutions and satisfy every acceptance criterion,

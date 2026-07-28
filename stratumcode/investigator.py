@@ -174,7 +174,6 @@ def investigation_stream(
     duplicate_no_progress_signature = ""
     duplicate_no_progress_count = 0
     force_synthesis_reason = ""
-    observation_synthesis_reason = ""
 
     for round_index in _round_indexes(max_rounds, start=0):
         thinking_id = f"{run_id}-thinking-{round_index}"
@@ -234,9 +233,6 @@ def investigation_stream(
             current_tool_choice = {"type": "function", "function": {"name": "finish_investigation"}}
         elif force_synthesis_reason:
             messages.append({"role": "user", "content": force_synthesis_reason})
-            current_tools = [_resolve_unknowns_tool_schema(), _record_findings_tool_schema(), _finish_tool_schema()]
-        elif observation_synthesis_reason and pending_observation_ids:
-            messages.append({"role": "user", "content": observation_synthesis_reason})
             current_tools = [_resolve_unknowns_tool_schema(), _record_findings_tool_schema(), _finish_tool_schema()]
         elif (
             analysis.get("execution_mode") == "read_only"
@@ -430,7 +426,29 @@ def investigation_stream(
                             "content": output,
                         })
                         continue
-                    raise ValueError(f"tool not allowed at this investigation step: {name}")
+                    output = _tool_blocked_error_json(
+                        name,
+                        allowed_tools=sorted(allowed_tool_names),
+                    )
+                    yield start_event(call_id, _tool_event_type(name), {
+                        "name": name or "invalid",
+                        "description": "Investigation tool",
+                        "status": "error",
+                        "open": False,
+                        "input": json.dumps(arguments, ensure_ascii=False, indent=2),
+                        "output": output,
+                    })
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": call_id,
+                        "content": output,
+                    })
+                    messages.append({"role": "user", "content": (
+                        "The tool was blocked by the current investigation state. "
+                        "Choose one of the allowed tools from the tool result; do not retry "
+                        "the blocked discovery call with the same arguments."
+                    )})
+                    continue
                 if name == "resolve_unknowns":
                     arguments = _resolve_unknown_arguments(arguments)
                     _require_control_reason(arguments, name)
@@ -458,8 +476,6 @@ def investigation_stream(
                             for evidence_id in resolution.get("evidence", [])
                         }
                     ]
-                    if not pending_observation_ids:
-                        observation_synthesis_reason = ""
                     semantic_repair_required_ids = _semantic_repair_resolution_ids(
                         recorded_findings,
                     )
@@ -496,11 +512,10 @@ def investigation_stream(
                         and not resolution_required_ids
                         and not _has_finding_fields(arguments)
                     ):
-                        pending_observation_ids.clear()
-                        observation_synthesis_reason = ""
                         output = json.dumps({
                             "recorded": False,
                             "code": "no_material_findings",
+                            "pending_observation_ids": pending_observation_ids,
                             "next_action": "continue_discovery",
                         }, ensure_ascii=False)
                         yield start_event(call_id, "tool", {
@@ -558,10 +573,10 @@ def investigation_stream(
                         pending_observation_ids,
                         resolution_required_ids,
                     ):
-                        pending_observation_ids.clear()
                         output = json.dumps({
                             "recorded": False,
                             "code": "no_material_findings",
+                            "pending_observation_ids": pending_observation_ids,
                             "next_action": "continue_discovery",
                         }, ensure_ascii=False)
                         yield start_event(call_id, "tool", {
@@ -585,7 +600,6 @@ def investigation_stream(
                         observations,
                     )
                     pending_observation_ids.clear()
-                    observation_synthesis_reason = ""
                     record_signature = _recorded_findings_signature(recorded_findings)
                     if record_signature == last_record_signature:
                         repeated_record_no_progress += 1
@@ -901,11 +915,6 @@ def investigation_stream(
                 observations.append(observation)
                 tool_cache_observation_ids[cache_key] = observation["id"]
                 pending_observation_ids.append(call_id)
-                if (
-                    observation.get("target_unknown_ids")
-                    and not observation.get("orientation")
-                ):
-                    observation_synthesis_reason = _observation_synthesis_prompt(observation)
                 duplicate_no_progress_signature = ""
                 duplicate_no_progress_count = 0
                 force_synthesis_reason = ""
@@ -1145,21 +1154,22 @@ def _duplicate_no_progress_prompt(
     )
 
 
-def _observation_synthesis_prompt(observation: dict) -> str:
-    targets = ", ".join(str(item) for item in observation.get("target_unknown_ids", []) if str(item).strip())
-    contract = observation.get("investigation_contract") if isinstance(observation.get("investigation_contract"), dict) else {}
-    return "\n".join([
-        "A targeted discovery observation must be consumed before more discovery.",
-        f"Observation id: {observation.get('id', '')}",
-        f"Target unknowns: {targets or 'none'}",
-        f"Hypothesis: {contract.get('hypothesis', '')}",
-        f"Expected observation: {contract.get('expected_observation', '')}",
-        f"Decision impact: {contract.get('decision_impact', '')}",
-        f"Stop condition: {contract.get('stop_condition', '')}",
-        "Call resolve_unknowns if this observation resolves or narrows an unknown, "
-        "record_investigation_findings if it supports a material belief/new unknown, "
-        "or finish_investigation if the task is already covered. Do not call more discovery first.",
-    ])
+def _tool_blocked_error_json(tool_name: str, *, allowed_tools: list[str]) -> str:
+    required_action = allowed_tools[0] if len(allowed_tools) == 1 else "choose_allowed_tool"
+    return json.dumps({
+        "error": {
+            "code": "tool_blocked_by_investigation_state",
+            "tool": tool_name or "invalid",
+            "retryable": False,
+            "blocked_tool": tool_name or "invalid",
+            "allowed_tools": allowed_tools,
+            "required_action": required_action,
+            "message": (
+                "This tool is not available in the current investigation state. "
+                "Use an allowed control tool or wait until discovery is available again."
+            ),
+        },
+    }, ensure_ascii=False)
 
 
 def _tool_repair_error_json(exc: Exception, tool_name: str, raw_arguments: str, partial_arguments: dict) -> str:
@@ -1173,6 +1183,17 @@ def _tool_repair_error_json(exc: Exception, tool_name: str, raw_arguments: str, 
         str(exc),
         partial_arguments,
     )
+    if tool_name == "finish_investigation" and "bugfix_readiness" in str(exc):
+        error["required_argument_shape"] = {
+            "bugfix_readiness": {
+                "failure_reproduced_or_observed": True,
+                "root_cause_or_failing_boundary_identified": True,
+                "patch_target_identified": True,
+                "expected_behavior_change_defined": True,
+                "validation_scenario_defined": True,
+                "reason": "Evidence-backed reason for each readiness field.",
+            }
+        }
     error["repair_instruction"] = (
         "Reuse partial_arguments. Return only the same tool call with missing/invalid fields corrected; "
         "do not restart discovery or repeat the identical arguments."
@@ -1192,6 +1213,7 @@ def _missing_fields_from_error(
         "target_unknown_ids",
         "summary",
         "recommended_next_step",
+        "bugfix_readiness",
         *DISCOVERY_CONTRACT_FIELDS,
     ):
         if field in lowered and not partial_arguments.get(field):
@@ -2373,6 +2395,18 @@ def _finish_tool_schema() -> dict:
                     "type": "string",
                     "enum": ["patch_planning", "continue_investigation", "done"],
                 },
+                "bugfix_readiness": {
+                    "type": "object",
+                    "description": "Required when finishing an implement bugfix for patch planning.",
+                    "properties": {
+                        "failure_reproduced_or_observed": {"type": "boolean"},
+                        "root_cause_or_failing_boundary_identified": {"type": "boolean"},
+                        "patch_target_identified": {"type": "boolean"},
+                        "expected_behavior_change_defined": {"type": "boolean"},
+                        "validation_scenario_defined": {"type": "boolean"},
+                        "reason": {"type": "string"},
+                    },
+                },
             },
             "required": ["reason", "summary", "recommended_next_step"],
         },
@@ -3281,6 +3315,7 @@ def _finish_payload(
     expected_step: dict | None = None,
     required_items: list[dict] | None = None,
     repair_conflicts: bool = False,
+    strict_readiness: bool = False,
 ) -> dict:
     repairs: list[str] = []
     explicit_unknowns = _unknowns(arguments.get("unknowns"))
@@ -3357,11 +3392,42 @@ def _finish_payload(
         resolutions=resolutions,
         unknowns=unknowns,
         patch_context=patch_context,
+        finish_arguments=arguments,
     )
+    if strict_readiness and model_ready:
+        strict_reasons = [
+            str(reason)
+            for reason in readiness.get("reasons", [])
+            if str(reason).startswith("bugfix_readiness:")
+        ]
+        if strict_reasons:
+            raise ValueError(
+                "bugfix_readiness is required when ready_for_patch_planning is true: "
+                + ", ".join(strict_reasons)
+            )
+    bugfix_reasons = [
+        str(reason)
+        for reason in readiness.get("reasons", [])
+        if str(reason).startswith("bugfix_readiness:")
+    ]
+    if bugfix_reasons and not unknowns:
+        unknowns = _merge_unknowns([{
+            "id": "bugfix_readiness",
+            "question": (
+                "Which project evidence confirms the observed failure or boundary, root cause, "
+                "patch target, expected behavior change, and validation scenario for this bugfix?"
+            ),
+            "blocking": True,
+            "resolution_strategy": "investigate_project",
+        }])
     ready = readiness["ready"]
     hard_readiness_reasons = [
         reason for reason in readiness.get("reasons", [])
-        if reason.endswith(":not_resolved") or reason.endswith(":missing_evidence")
+        if (
+            reason.endswith(":not_resolved")
+            or reason.endswith(":missing_evidence")
+            or reason.startswith("bugfix_readiness:")
+        )
     ]
     if not ready and model_ready and patch_context and not any(
         item.get("blocking") and item.get("resolution_strategy") == "clearify"
@@ -4272,6 +4338,7 @@ def _runtime_readiness(
     resolutions: list[dict],
     unknowns: list[dict],
     patch_context: list[str],
+    finish_arguments: dict | None = None,
 ) -> dict:
     blockers = [item for item in unknowns if item.get("blocking")]
     reasons = []
@@ -4299,12 +4366,42 @@ def _runtime_readiness(
             reasons.append(f"{item['id']}:missing_evidence")
     if isinstance(analysis, dict) and analysis.get("acceptance_criteria") and not patch_context:
         reasons.append("missing_patch_planning_facts")
+    if _requires_bugfix_readiness(analysis, model_ready):
+        reasons.extend(_bugfix_readiness_reasons(finish_arguments or {}))
     ready = not reasons
     return {
         "ready": ready,
         "model_ready": model_ready,
         "reasons": reasons,
     }
+
+
+def _requires_bugfix_readiness(analysis: dict | None, model_ready: bool) -> bool:
+    if not model_ready or not isinstance(analysis, dict):
+        return False
+    intent = analysis.get("intent") if isinstance(analysis.get("intent"), dict) else {}
+    return (
+        str(intent.get("type") or "").strip() == "bugfix"
+        and analysis.get("execution_mode") == "implement"
+    )
+
+
+def _bugfix_readiness_reasons(arguments: dict) -> list[str]:
+    readiness = arguments.get("bugfix_readiness")
+    if not isinstance(readiness, dict):
+        return ["bugfix_readiness:missing"]
+    fields = [
+        "failure_reproduced_or_observed",
+        "root_cause_or_failing_boundary_identified",
+        "patch_target_identified",
+        "expected_behavior_change_defined",
+        "validation_scenario_defined",
+    ]
+    return [
+        f"bugfix_readiness:{field}"
+        for field in fields
+        if readiness.get(field) is not True
+    ]
 
 
 def _initial_unknowns(analysis: dict | None) -> list[dict]:
@@ -4766,6 +4863,29 @@ def _step_result(final: dict, *, implementation_intent: bool = True) -> dict:
             "patch_planning_context": final.get("patch_planning_context", []),
             "resolutions": final.get("resolutions", []),
             "unknowns": [],
+        }
+    readiness = final.get("readiness")
+    readiness_reasons = [
+        str(reason)
+        for reason in (readiness.get("reasons", []) if isinstance(readiness, dict) else [])
+        if str(reason).strip()
+    ]
+    if implementation_intent and (
+        readiness_reasons
+        or str(final.get("recommended_next_step") or "").strip() == "patch_planning"
+    ):
+        unresolved = readiness_reasons or ["patch_planning_not_ready"]
+        return {
+            "next_step": "continue_investigation",
+            "continue_reason": "Patch planning readiness is incomplete: " + "; ".join(unresolved[:3]),
+            "target_unknown_ids": unresolved,
+            "unresolved_unknown_ids": unresolved,
+            "summary": final.get("summary", ""),
+            "beliefs": final.get("beliefs", []),
+            "ready_for_patch_planning": False,
+            "patch_planning_context": final.get("patch_planning_context", []),
+            "resolutions": final.get("resolutions", []),
+            "unknowns": final.get("unknowns", []),
         }
     open_questions = final.get("open_questions") or []
     question = str(open_questions[0]) if open_questions else ""
