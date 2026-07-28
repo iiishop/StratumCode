@@ -14,8 +14,9 @@ function toggleReason(key) {
 }
 
 const changes = computed(() => {
-  if (Array.isArray(props.event.changes)) return props.event.changes
-  return (props.event.items || []).map(item => ({ action: 'update', item }))
+  const items = props.event.items || []
+  if (Array.isArray(props.event.changes) && props.event.changes.length) return props.event.changes
+  return items.map(item => ({ action: 'update', item }))
 })
 
 const counts = computed(() => changes.value.reduce((acc, change) => {

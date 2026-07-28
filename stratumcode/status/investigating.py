@@ -134,7 +134,10 @@ def handle(run):
                 [],
             )
             event["data"]["items"] = applied["items"]
-            event["data"]["changes"] = applied["changes"]
+            if applied["changes"]:
+                event["data"]["changes"] = applied["changes"]
+            else:
+                event["data"].pop("changes", None)
             run.analysis["task_updates"] = applied["items"]
         if event.get("op") == "start" and event.get("event") == "user_question" and event.get("data", {}).get("clearify_tool"):
             yield event
@@ -187,11 +190,13 @@ def handle(run):
                 _beliefs_as_knowledge(run.analysis["id"], last_investigation.get("beliefs", [])),
             )
             run.analysis["task_updates"] = last_investigation["task_updates"]
-            yield start_event(f"{run.analysis['id']}-task-final", "task_update", {
+            data = {
                 "analysis_id": run.analysis["id"],
                 "items": run.analysis["task_updates"],
-                "changes": applied["changes"],
-            })
+            }
+            if applied["changes"]:
+                data["changes"] = applied["changes"]
+            yield start_event(f"{run.analysis['id']}-task-final", "task_update", data)
             if pending_question:
                 run.last_investigation = last_investigation
                 yield event
