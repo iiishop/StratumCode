@@ -205,6 +205,7 @@ def _resolved_unknowns(investigation: dict) -> dict[str, dict]:
         unknown_id = str(item.get("unknown_id") or "").strip()
         if unknown_id:
             resolved[unknown_id] = item
+            resolved[_task_id_tail(unknown_id)] = item
     return resolved
 
 
@@ -303,7 +304,9 @@ def _task_id_scope(value: str | None) -> str:
 
 def _task_id_tail(value: str | None) -> str:
     value = str(value or "")
-    return value.split(":", 1)[1] if _task_id_scope(value) else value
+    while _task_id_scope(value):
+        value = value.split(":", 1)[1]
+    return value
 
 
 def _same_task_id(left: str | None, right: str | None, analysis_id: str = "") -> bool:

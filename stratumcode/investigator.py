@@ -694,12 +694,18 @@ def investigation_stream(
                         verification_queue.extend(
                             item for item in requests
                             if (item.get("unknown_id"), item.get("hypothesis")) not in attempted
+                            and _unknown_blocks_finish(item.get("unknown_id"), analysis, recorded_findings)
                         )
-                        clearify_questions.update(questions)
+                        clearify_questions.update({
+                            unknown_id: question
+                            for unknown_id, question in questions.items()
+                            if _unknown_blocks_finish(unknown_id, analysis, recorded_findings)
+                        })
                     pending_resolution_statuses = {
                         str(item.get("status") or "")
                         for item in recorded_findings.get("resolutions", [])
                         if isinstance(item, dict)
+                        and _unknown_blocks_finish(item.get("unknown_id"), analysis, recorded_findings)
                     }
                     if (
                         verification_queue
@@ -1194,10 +1200,18 @@ def _tool_repair_error_json(exc: Exception, tool_name: str, raw_arguments: str, 
                 "reason": "Evidence-backed reason for each readiness field.",
             }
         }
-    error["repair_instruction"] = (
-        "Reuse partial_arguments. Return only the same tool call with missing/invalid fields corrected; "
-        "do not restart discovery or repeat the identical arguments."
-    )
+    if tool_name == "clearify" and "requires product_decision targets" in str(exc):
+        error["retryable"] = False
+        error["required_action"] = "resolve_or_investigate_contract_unknown"
+        error["repair_instruction"] = (
+            "Do not retry clearify for non-product-decision unknowns. "
+            "Resolve the contract unknown from project evidence or continue discovery."
+        )
+    else:
+        error["repair_instruction"] = (
+            "Reuse partial_arguments. Return only the same tool call with missing/invalid fields corrected; "
+            "do not restart discovery or repeat the identical arguments."
+        )
     return json.dumps(payload, ensure_ascii=False)
 
 
@@ -1364,9 +1378,9 @@ def _recorded_resolves_initial_unknowns(recorded: dict, analysis: dict | None) -
     initial = [item for item in (analysis or {}).get("unknowns", []) if isinstance(item, dict) and item.get("id")]
     if not initial:
         return False
-    required_ids = {str(item["id"]) for item in initial}
+    required_ids = [str(item["id"]) for item in initial]
     if not _analysis_is_read_only(analysis):
-        required_ids.update(
+        required_ids.extend(
             str(item["id"])
             for item in (
                 _unknowns(recorded.get("unknowns"))
@@ -1374,12 +1388,12 @@ def _recorded_resolves_initial_unknowns(recorded: dict, analysis: dict | None) -
             )
             if item.get("blocking")
         )
-    resolved = {
+    resolved = [
         str(item.get("unknown_id") or "").strip()
         for item in recorded.get("resolutions", [])
         if isinstance(item, dict) and str(item.get("status") or "") in {"resolved", "deferred"}
-    }
-    return required_ids <= resolved
+    ]
+    return all(any(_same_unknown_id(required_id, item) for item in resolved) for required_id in required_ids)
 
 
 def _pending_clearify_unknown(
@@ -1405,17 +1419,35 @@ def _pending_clearify_unknown(
         if (
             item.get("blocking")
             and item.get("type") == "product_decision"
-            and item["id"] not in completed
+            and not any(_same_unknown_id(item["id"], completed_id) for completed_id in completed)
             and (
                 item.get("resolution_strategy") == "clearify"
-                or item["id"] in needs_clearify
+                or any(_same_unknown_id(item["id"], pending_id) for pending_id in needs_clearify)
             )
         ):
             result = dict(item)
-            if question := (audit_questions or {}).get(item["id"]):
+            question = next(
+                (
+                    question
+                    for unknown_id, question in (audit_questions or {}).items()
+                    if _same_unknown_id(unknown_id, item["id"])
+                ),
+                "",
+            )
+            if question:
                 result["question"] = question
             return result
     return None
+
+
+def _unknown_blocks_finish(unknown_id: str | None, analysis: dict | None, recorded: dict) -> bool:
+    candidates = (
+        _initial_unknowns(analysis)
+        + _unknowns(recorded.get("unknowns"))
+        + _unknowns(recorded.get("new_unknowns"))
+    )
+    source = _find_by_unknown_id(candidates, unknown_id, id_field="id")
+    return bool(source.get("blocking", True)) if source else True
 
 
 def _analysis_with_recorded_unknowns(analysis: dict, recorded: dict) -> dict:
@@ -1455,7 +1487,12 @@ def _unknowns_needing_resolution(recorded: dict, observations: list[dict], analy
         if isinstance(item, dict) and str(item.get("unknown_id") or "").strip()
     }
     supported = _supported_unknown_ids(recorded, observations)
-    return [str(item["id"]) for item in initial if str(item["id"]) not in accounted and str(item["id"]) in supported]
+    return [
+        str(item["id"])
+        for item in initial
+        if not any(_same_unknown_id(item["id"], known_id) for known_id in accounted)
+        and any(_same_unknown_id(item["id"], supported_id) for supported_id in supported)
+    ]
 
 
 def _supported_unknown_ids(recorded: dict, observations: list[dict]) -> set[str]:
@@ -1913,6 +1950,7 @@ def _audit_recorded_findings(
                     "title": item.get("title", ""),
                     "summary": item.get("summary", ""),
                     "evidence_excerpt": item.get("evidence_excerpt", ""),
+                    "path": item.get("path", ""),
                     "verification": item.get("verification", {}),
                     "target_unknown_ids": item.get("target_unknown_ids", []),
                     "reason": item.get("reason", ""),
@@ -2000,10 +2038,14 @@ def _normalize_investigation_audit(value, resolved_ids: list[str]) -> dict:
             continue
         unknown_id = str(item.get("unknown_id") or "").strip()
         status = str(item.get("status") or "").strip()
-        if unknown_id not in resolved_ids or status not in allowed:
+        matched_id = next(
+            (known_id for known_id in resolved_ids if _same_unknown_id(unknown_id, known_id)),
+            "",
+        )
+        if not matched_id or status not in allowed:
             continue
-        by_id[unknown_id] = {
-            "unknown_id": unknown_id,
+        by_id[matched_id] = {
+            "unknown_id": matched_id,
             "status": status,
             "reason": str(item.get("reason") or "").strip(),
             "hypothesis": str(item.get("hypothesis") or "").strip(),
@@ -3231,8 +3273,12 @@ def _resolution_repair_request(
     initial_ids = [item["id"] for item in initial_unknowns if item.get("blocking")]
     if not initial_ids:
         return None
-    resolution_ids = {item["unknown_id"] for item in explicit_resolutions}
-    missing = [unknown_id for unknown_id in initial_ids if unknown_id not in resolution_ids]
+    resolution_ids = [item["unknown_id"] for item in explicit_resolutions]
+    missing = [
+        unknown_id
+        for unknown_id in initial_ids
+        if not any(_same_unknown_id(unknown_id, resolved_id) for resolved_id in resolution_ids)
+    ]
     if not missing:
         return None
     misplaced = _misplaced_resolution_ids(arguments.get("unknowns"), initial_ids)
@@ -3277,16 +3323,22 @@ def _has_resolution_repair_signal(
 def _misplaced_resolution_ids(value, initial_ids: list[str]) -> list[str]:
     if not isinstance(value, list):
         return []
-    initial_id_set = set(initial_ids)
     misplaced = set()
     for raw in value:
         if not isinstance(raw, dict):
             continue
         unknown_id = str(raw.get("unknown_id") or raw.get("id") or "").strip()
         status = str(raw.get("status") or "").strip()
-        if unknown_id in initial_id_set and status in {"resolved", "known", "done", "complete", "completed"}:
+        if (
+            any(_same_unknown_id(unknown_id, initial_id) for initial_id in initial_ids)
+            and status in {"resolved", "known", "done", "complete", "completed"}
+        ):
             misplaced.add(unknown_id)
-    return [unknown_id for unknown_id in initial_ids if unknown_id in misplaced]
+    return [
+        unknown_id
+        for unknown_id in initial_ids
+        if any(_same_unknown_id(unknown_id, item) for item in misplaced)
+    ]
 
 
 def _resolution_repair_prompt(repair: dict) -> str:
@@ -3661,18 +3713,13 @@ def _apply_investigation_audit(
         if unsupported:
             belief["status"] = "unverified"
     resolutions = [dict(item) for item in result["resolutions"] if isinstance(item, dict)]
-    by_id = {
-        str(item.get("unknown_id") or "").strip(): item
-        for item in resolutions
-        if str(item.get("unknown_id") or "").strip()
-    }
     verification_requests = []
     clearify_questions: dict[str, str] = {}
     for verdict in audit.get("verdicts", []):
         if not isinstance(verdict, dict):
             continue
         unknown_id = str(verdict.get("unknown_id") or "").strip()
-        resolution = by_id.get(unknown_id)
+        resolution = _find_by_unknown_id(resolutions, unknown_id)
         if (
             resolution is None
             or resolution.get("reason") == CLEARIFY_RESOLUTION_REASON
@@ -3913,11 +3960,9 @@ def _supporting_observation_ids(
 
 
 def _grounding_observation_text(observation: dict) -> str:
-    return str(
-        observation.get("_grounding_evidence")
-        or observation.get("evidence_excerpt")
-        or observation.get("summary")
-        or ""
+    return "\n".join(
+        text for field in ("path", "_grounding_evidence", "evidence_excerpt", "summary")
+        if (text := str(observation.get(field) or "").strip())
     )
 
 
@@ -4016,18 +4061,18 @@ def _audit_covers_resolutions(
     analysis: dict | None = None,
 ) -> bool:
     initial_unknowns = _initial_unknowns(analysis)
-    resolved_ids = {
+    resolved_ids = [
         str(item.get("unknown_id") or "").strip()
         for item in recorded.get("resolutions", [])
         if isinstance(item, dict)
         and _resolution_requires_semantic_audit(item, initial_unknowns)
-    }
-    audited_ids = {
+    ]
+    audited_ids = [
         str(item.get("unknown_id") or "").strip()
         for item in audit.get("verdicts", [])
         if isinstance(item, dict) and str(item.get("unknown_id") or "").strip()
-    }
-    return resolved_ids <= audited_ids
+    ]
+    return all(any(_same_unknown_id(resolved_id, audited_id) for audited_id in audited_ids) for resolved_id in resolved_ids)
 
 
 def _merge_recorded_findings(current: dict, update: dict) -> dict:
@@ -4069,6 +4114,8 @@ def _identity_key(item) -> str:
         return str(item)
     for field in ("unknown_id", "id", "text", "statement", "question"):
         value = str(item.get(field) or "").strip()
+        if field == "unknown_id":
+            value = _normalize_unknown_id(value)
         if value:
             return f"{field}:{value}"
     return ""
@@ -4344,11 +4391,10 @@ def _runtime_readiness(
     reasons = []
     if blockers:
         reasons.append("blocking_unknowns_remain")
-    by_id = {item["unknown_id"]: item for item in resolutions}
     for item in initial_unknowns:
         if not item.get("blocking"):
             continue
-        resolution = by_id.get(item["id"])
+        resolution = _find_by_unknown_id(resolutions, item["id"])
         if not resolution or resolution.get("status") != "resolved":
             if (
                 resolution
@@ -4414,9 +4460,8 @@ def _initial_unknowns(analysis: dict | None) -> list[dict]:
 
 
 def _complete_resolutions(resolutions: list[dict], initial_unknowns: list[dict], unknowns: list[dict]) -> list[dict]:
-    initial_by_id = {item["id"]: item for item in initial_unknowns}
     for resolution in resolutions:
-        source = initial_by_id.get(resolution["unknown_id"])
+        source = _find_by_unknown_id(initial_unknowns, resolution["unknown_id"], id_field="id")
         if (
             resolution.get("status") == "needs_clearify"
             and source
@@ -4442,17 +4487,16 @@ def _complete_resolutions(resolutions: list[dict], initial_unknowns: list[dict],
             resolution["reason"] = (
                 "A blocking task-contract unknown cannot be deferred without resolving it."
             )
-    by_id = {item["unknown_id"]: item for item in resolutions}
-    unresolved_ids = {item["id"] for item in unknowns}
+    unresolved_ids = [item["id"] for item in unknowns]
     for item in initial_unknowns:
-        if item["id"] in by_id:
+        if _find_by_unknown_id(resolutions, item["id"]):
             continue
         status = "partially_resolved"
         if item.get("resolution_strategy") == "clearify":
             status = "needs_clearify"
         elif item.get("resolution_strategy") == "deferred" or not item.get("blocking"):
             status = "deferred"
-        if item["id"] in unresolved_ids or item.get("blocking"):
+        if any(_same_unknown_id(item["id"], unknown_id) for unknown_id in unresolved_ids) or item.get("blocking"):
             resolutions.append({
                 "unknown_id": item["id"],
                 "status": status,
@@ -4467,9 +4511,8 @@ def _complete_resolutions(resolutions: list[dict], initial_unknowns: list[dict],
 def _enforce_resolution_evidence(resolutions: list[dict], initial_unknowns: list[dict], *, strict: bool = True) -> list[dict]:
     if not strict:
         return resolutions
-    by_id = {item["id"]: item for item in initial_unknowns}
     for resolution in resolutions:
-        source = by_id.get(resolution["unknown_id"])
+        source = _find_by_unknown_id(initial_unknowns, resolution["unknown_id"], id_field="id")
         if not source:
             continue
         if (
@@ -4492,7 +4535,7 @@ def _is_user_product_decision(
         return False
     unknown_id = str(resolution.get("unknown_id") or "").strip()
     return any(
-        str(item.get("id") or "").strip() == unknown_id
+        _same_unknown_id(item.get("id"), unknown_id)
         and item.get("type") == "product_decision"
         for item in unknowns
         if isinstance(item, dict)
@@ -4500,12 +4543,11 @@ def _is_user_product_decision(
 
 
 def _unresolved_from_resolutions(resolutions: list[dict], initial_unknowns: list[dict]) -> list[dict]:
-    by_id = {item["id"]: item for item in initial_unknowns}
     unresolved = []
     for resolution in resolutions:
         if resolution["status"] == "resolved":
             continue
-        source = by_id.get(resolution["unknown_id"], {})
+        source = _find_by_unknown_id(initial_unknowns, resolution["unknown_id"], id_field="id") or {}
         strategy = "investigate_project"
         if resolution["status"] == "needs_clearify":
             strategy = "clearify"
@@ -4586,6 +4628,16 @@ def _same_unknown_id(left: str | None, right: str | None) -> bool:
     if not left_text or not right_text:
         return False
     return left_text == right_text or _unknown_id_tail(left_text) == _unknown_id_tail(right_text)
+
+
+def _find_by_unknown_id(items: list[dict], unknown_id: str | None, *, id_field: str = "unknown_id") -> dict | None:
+    return next(
+        (
+            item for item in items
+            if isinstance(item, dict) and _same_unknown_id(item.get(id_field), unknown_id)
+        ),
+        None,
+    )
 
 
 def _is_placeholder_question(value: str | None, unknown_id: str | None = "") -> bool:
@@ -4671,11 +4723,12 @@ def _require_items_accounted(required_items, task_updates, resolutions, repair_c
         for item in task_updates or []
         if isinstance(item, dict) and str(item.get("status") or "") in {"known", "deferred", "blocked"}
     }
-    resolution_ids = {item["unknown_id"] for item in resolutions}
+    resolution_ids = [item["unknown_id"] for item in resolutions]
     missing = [
         str(item.get("id") or "").strip()
         for item in required_items
-        if isinstance(item, dict) and str(item.get("id") or "").strip() not in update_ids | resolution_ids
+        if isinstance(item, dict)
+        and not any(_same_unknown_id(item.get("id"), known_id) for known_id in [*update_ids, *resolution_ids])
     ]
     if missing and not repair_conflicts:
         raise ValueError("finish_investigation must account for every initial hypothesis/unknown")
