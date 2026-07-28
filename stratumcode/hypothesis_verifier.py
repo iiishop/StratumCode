@@ -12,7 +12,7 @@ from uuid import uuid4
 from . import app_settings, model_settings, prompt, providers, skill_runtime
 from .agent import EvidencePolicy, EvidenceRun, RunState
 from .agent.policy import DISCOVERY_TOOLS, EvidencePhase
-from .agent.tools import agent_tools
+from .agent.tools import CONTROL_TOOL_NAMES, agent_tools
 from .agent_runtime import (
     add_usage as _add_usage,
     call_model as _call_model,
@@ -115,7 +115,7 @@ def evidence_stream(
         or DEFAULT_EMPTY_TOOL_ROUNDS
     )
     for round_index in _round_indexes(policy.max_rounds, start=0):
-        allowed_tools, tool_choice, _ = policy.next_request(run)
+        allowed_tools, tool_choice, policy_instruction = policy.next_request(run)
         phase_before = policy.phase
         step_result = None
         thinking_id = f"{run_id}-thinking-{round_index}"
@@ -125,16 +125,19 @@ def evidence_stream(
             "open": True,
         })
         tool_schemas = agent_tools(discovery_tools, allowed_tools)
+        request_messages = messages
+        if tool_choice == "required" and policy_instruction:
+            request_messages = [*messages, {"role": "user", "content": policy_instruction}]
         if tool_choice == "required":
             assistant = _call_model(
                 provider,
                 model,
-                messages,
+                request_messages,
                 tools=tool_schemas,
                 tool_choice="required",
             )
         else:
-            assistant = _call_model(provider, model, messages, tools=tool_schemas)
+            assistant = _call_model(provider, model, request_messages, tools=tool_schemas)
         if usage := _usage_delta(pricing_rules, assistant.pop("_usage", {})):
             _add_usage(usage_total, usage)
             yield start_event(f"{run_id}-usage-{round_index}", "usage", {
@@ -197,6 +200,8 @@ def evidence_stream(
                 if not isinstance(arguments, dict):
                     raise ValueError("tool arguments must be an object")
                 if name not in set(allowed_tools):
+                    if name in set(discovery_tools) | set(CONTROL_TOOL_NAMES):
+                        raise ValueError(_blocked_tool_message(name, allowed_tools, policy_instruction))
                     raise ValueError(f"unknown agent tool: {name or 'tool'}")
                 gen = _handle_agent_tool(
                     name=name,
@@ -387,6 +392,12 @@ def _observed_call_summary(observed_calls: dict[str, dict]) -> str:
         )[:200]
         lines.append(f"- {call_id} {observed['name']}: {result.title} :: {excerpt}")
     return "\n".join(line for line in lines if line.strip())
+
+
+def _blocked_tool_message(name: str, allowed_tools: tuple[str, ...], instruction: str) -> str:
+    allowed = ", ".join(allowed_tools) or "none"
+    detail = f" {instruction}" if instruction else ""
+    return f"agent tool currently unavailable: {name}. Allowed now: {allowed}.{detail}"
 
 
 def _useful_excerpt_candidate(line: str) -> bool:

@@ -218,10 +218,18 @@ def handle(run):
         run.transition(chat.ChatState.INVESTIGATING, "Investigation queued a clearify decision.")
         return
     next_step = ((run.last_investigation or {}).get("step_result") or {}).get("next_step")
+    blocking_unknown_ids = _blocking_unknown_ids(run.last_investigation)
     has_blocked_task = _has_task_status(run.last_investigation, "blocked")
     has_unknown_task = _has_task_status(run.last_investigation, "unknown")
     if next_step == "done":
         run.transition(chat._chat_finish_state(run), "Investigation ended without an implementation path.")
+    elif next_step == "failed" and blocking_unknown_ids:
+        step = (run.last_investigation or {}).setdefault("step_result", {})
+        step["next_step"] = "continue_investigation"
+        step["target_unknown_ids"] = blocking_unknown_ids
+        step["unresolved_unknown_ids"] = blocking_unknown_ids
+        run.findings = _merge_findings(run.findings, _investigation_continuation_findings(run.last_investigation))
+        run.transition(chat.ChatState.INVESTIGATING, "Investigation still has unresolved blocking unknowns.")
     elif next_step == "failed":
         run.transition(chat.ChatState.FAILED, "Investigation failed.")
     elif (
@@ -262,6 +270,18 @@ def _has_task_status(investigation: dict | None, status: str) -> bool:
         if item.get("status") == status:
             return True
     return False
+
+
+def _blocking_unknown_ids(investigation: dict | None) -> list[str]:
+    if not investigation or not isinstance(investigation.get("unknowns"), list):
+        return []
+    return [
+        str(item.get("id") or "").strip()
+        for item in investigation["unknowns"]
+        if isinstance(item, dict)
+        and item.get("blocking")
+        and str(item.get("id") or "").strip()
+    ]
 
 
 def _fallback_question(run, request: str) -> dict:

@@ -2,19 +2,29 @@ from __future__ import annotations
 
 import json
 import re
-from copy import deepcopy
 from collections.abc import Iterator
+from copy import deepcopy
 from itertools import count
 from uuid import uuid4
 
 from . import app_settings, model_settings, prompt, providers
 from .agent_runtime import (
     add_usage as _add_usage,
+)
+from .agent_runtime import (
     call_model as _call_model,
+)
+from .agent_runtime import (
     content_text as _content_text,
+)
+from .agent_runtime import (
     empty_usage as _empty_usage,
+)
+from .agent_runtime import (
     stage_progress,
     start_event,
+)
+from .agent_runtime import (
     usage_delta as _usage_delta,
 )
 from .planning_facts import normalize_project_facts as _project_facts
@@ -113,6 +123,7 @@ def design_planning_stream(
             usage_total,
             run_id,
             f"slot-{index}",
+            required=_requirement_slot_validation,
         )
         if slot is None:
             runtime_warnings.append(f"Requirement slot {index} fell back to ambiguous after invalid model content.")
@@ -818,6 +829,7 @@ def _content_json_stream(
     usage_total: dict,
     run_id: str,
     label: str,
+    required=None,
 ) -> Iterator[dict]:
     last_invalid_key = ""
     repeated_invalid = 0
@@ -829,7 +841,11 @@ def _content_json_stream(
             yield start_event(f"{run_id}-usage-{label}-{attempt}", "usage", {"delta": usage, "total": usage_total})
         text = _content_text(assistant.get("content"))
         try:
-            return _json_from_text(text)
+            data = _json_from_text(text)
+            issue = required(data) if required is not None else True
+            if issue is True:
+                return data
+            raise ValueError(str(issue) or "content JSON failed slot validation")
         except (json.JSONDecodeError, ValueError) as exc:
             invalid_key = f"{text[:1000]}::{exc}"
             repeated_invalid = repeated_invalid + 1 if invalid_key == last_invalid_key else 1
@@ -845,6 +861,20 @@ def _content_json_stream(
             if repeated_invalid >= DEFAULT_DESIGN_JSON_ATTEMPTS:
                 return None
     return None
+
+
+def _requirement_slot_validation(data: dict) -> bool | str:
+    required_text = ("concept", "behavior", "alignment_status")
+    missing = [
+        field for field in required_text
+        if not str(data.get(field) or "").strip()
+    ]
+    if missing:
+        return "missing required requirement_alignment field(s): " + ", ".join(missing)
+    status = str(data.get("alignment_status") or "").strip()
+    if status not in {"matched", "missing", "ambiguous"}:
+        return "alignment_status must be matched, missing, or ambiguous"
+    return True
 
 
 def _default_requirement_slot(criterion: dict) -> dict:

@@ -9,14 +9,18 @@ from itertools import count
 from .. import app_settings, model_settings, prompt
 from ..agent_runtime import (
     call_model as _runtime_call_model,
+)
+from ..agent_runtime import (
     content_text as _runtime_content_text,
+)
+from ..agent_runtime import (
     stage_progress,
 )
+from .session_memory import _session_sources
 from .task_contract import (
     _ensure_task_contract,
     _limited_unknowns,
 )
-from .session_memory import _session_sources
 
 LOGGER = logging.getLogger(__name__)
 
@@ -1076,7 +1080,69 @@ def _validate_task_analysis(data: dict) -> dict:
     )
     result["hypotheses"] = _optional_field(lambda: _hypotheses(data.get("hypotheses")), [])
     result["clues"] = _optional_field(lambda: _clues(data.get("clues")), [])
-    return _ensure_task_contract(result)
+    result = _ensure_task_contract(result)
+    _merge_input_output_acceptance(result)
+    return result
+
+
+def _merge_input_output_acceptance(analysis: dict) -> None:
+    criteria = [
+        item for item in analysis.get("acceptance_criteria", [])
+        if isinstance(item, dict)
+    ]
+    if len(criteria) < 2:
+        return
+    input_items = [item for item in criteria if _is_io_acceptance(item.get("text"), "input")]
+    output_items = [item for item in criteria if _is_io_acceptance(item.get("text"), "output")]
+    if not input_items or not output_items or len(input_items) + len(output_items) != len(criteria):
+        return
+    input_text = "；".join(str(item.get("text") or "").strip() for item in input_items)
+    output_text = "；".join(str(item.get("text") or "").strip() for item in output_items)
+    text = (
+        f"当{input_text}时，{output_text}。"
+        if _contains_cjk(input_text + output_text)
+        else f"Given {input_text}, {output_text}."
+    )
+    merged = {
+        "id": "AC1",
+        "text": text,
+        "authority": "derived",
+        "source_refs": [],
+        "derived_from": sorted({
+            raw
+            for item in criteria
+            for raw in (item.get("derived_from") or [])
+            if str(raw).strip()
+        }),
+    }
+    analysis["acceptance_criteria"] = [merged]
+    for unknown in analysis.get("unknowns", []):
+        if isinstance(unknown, dict) and unknown.get("acceptance_criteria_ids"):
+            unknown["acceptance_criteria_ids"] = ["AC1"]
+    statements = []
+    for item in analysis.get("statements", []):
+        if not (
+            isinstance(item, dict)
+            and str(item.get("id") or "").startswith("AC")
+        ):
+            statements.append(item)
+    analysis["statements"] = [*statements, merged]
+    analysis.setdefault("analyzer_warnings", []).append(
+        "acceptance_contract: merged input/output fragments into one observable criterion"
+    )
+
+
+def _is_io_acceptance(value: object, kind: str) -> bool:
+    text = str(value or "").strip().casefold()
+    if not text:
+        return False
+    if kind == "input":
+        return text.startswith(("input ", "accept input", "takes input", "given input", "输入"))
+    return text.startswith(("output ", "return ", "returns ", "produce ", "produces ", "输出", "返回"))
+
+
+def _contains_cjk(value: str) -> bool:
+    return bool(re.search(r"[\u4e00-\u9fff]", value))
 
 
 def _optional_field(parser, fallback):

@@ -695,10 +695,15 @@ def investigation_stream(
                         arguments.setdefault("reason", "Resolve the blocking product decision.")
                         arguments.setdefault("question", clearify_unknown["question"])
                     target_ids = _target_unknown_ids(arguments)
-                    if target_ids and target_ids[0] in answered_clearify_ids:
+                    target_ids = [
+                        item for item in target_ids
+                        if item not in answered_clearify_ids
+                    ]
+                    arguments["target_unknown_ids"] = target_ids
+                    if not target_ids:
                         output = json.dumps({
                             "skipped": True,
-                            "reason": "This clearify unknown was already answered in the current round.",
+                            "reason": "These clearify unknowns were already answered in the current round.",
                         }, ensure_ascii=False)
                         messages.append({
                             "role": "tool",
@@ -716,15 +721,21 @@ def investigation_stream(
                             recorded_findings,
                         ),
                     )
-                    if any(
-                        item.get("unknown_id") in target_ids
-                        and item.get("reason") == CLEARIFY_RESOLUTION_REASON
+                    answered_by_previous_round = {
+                        str(item.get("unknown_id") or "").strip()
                         for item in recorded_findings.get("resolutions", [])
                         if isinstance(item, dict)
-                    ):
+                        and item.get("reason") == CLEARIFY_RESOLUTION_REASON
+                    }
+                    target_ids = [
+                        item for item in target_ids
+                        if item not in answered_by_previous_round
+                    ]
+                    arguments["target_unknown_ids"] = target_ids
+                    if not target_ids:
                         output = json.dumps({
                             "skipped": True,
-                            "reason": "This clearify unknown already has an authoritative user answer.",
+                            "reason": "These clearify unknowns already have authoritative user answers.",
                         }, ensure_ascii=False)
                         messages.append({
                             "role": "tool",
@@ -740,15 +751,16 @@ def investigation_stream(
                     ))
                     answer = clearify_runtime.wait(question_id)
                     output = _clearify_tool_result(answer)
-                    resolution = _clearify_resolution(arguments, answer)
+                    resolutions = _clearify_resolutions(arguments, answer)
                     repeated_tool_error_name = ""
                     repeated_tool_error_count = 0
-                    if resolution:
-                        answered_clearify_ids.add(resolution["unknown_id"])
-                        clearify_questions.pop(resolution["unknown_id"], None)
+                    if resolutions:
+                        for resolution in resolutions:
+                            answered_clearify_ids.add(resolution["unknown_id"])
+                            clearify_questions.pop(resolution["unknown_id"], None)
                         recorded_findings = _merge_recorded_findings(
                             recorded_findings,
-                            {"resolutions": [resolution]},
+                            {"resolutions": resolutions},
                         )
                     yield start_event(call_id, "tool", {
                         "name": name,
@@ -758,10 +770,10 @@ def investigation_stream(
                         "input": json.dumps(arguments, ensure_ascii=False, indent=2),
                         "output": output,
                     })
-                    if resolution:
+                    if resolutions:
                         yield start_event(f"{call_id}-task-update", "task_update", {
                             "analysis_id": analysis.get("id", ""),
-                            "items": _investigation_task_updates(None, [], [resolution]),
+                            "items": _investigation_task_updates(None, [], resolutions),
                         })
                     messages.append({
                         "role": "tool",
@@ -2544,6 +2556,11 @@ def _clearify_tool_result(answer: dict | None) -> str:
 
 
 def _clearify_resolution(arguments: dict, answer: dict | None) -> dict | None:
+    resolutions = _clearify_resolutions(arguments, answer)
+    return resolutions[0] if resolutions else None
+
+
+def _clearify_resolutions(arguments: dict, answer: dict | None) -> list[dict]:
     answer = answer or {}
     text = str(
         answer.get("response")
@@ -2556,16 +2573,19 @@ def _clearify_resolution(arguments: dict, answer: dict | None) -> dict | None:
     target_ids = _target_unknown_ids(arguments)
     if not target_ids:
         if arguments.get("orientation"):
-            return None
+            return []
         raise ValueError("clearify answer has no target unknown")
-    return {
-        "unknown_id": target_ids[0],
-        "status": "resolved",
-        "answer": text,
-        "evidence": [],
-        "belief_ids": [],
-        "reason": CLEARIFY_RESOLUTION_REASON,
-    }
+    return [
+        {
+            "unknown_id": unknown_id,
+            "status": "resolved",
+            "answer": text,
+            "evidence": [],
+            "belief_ids": [],
+            "reason": CLEARIFY_RESOLUTION_REASON,
+        }
+        for unknown_id in target_ids
+    ]
 
 
 def _run_tool_stream(name: str, call_id: str, arguments: dict, workspace_dir: str, analysis: dict | None = None) -> Iterator[dict]:
@@ -4249,26 +4269,29 @@ def _investigation_task_updates(value, unknowns: list[dict], resolutions: list[d
 
 
 def _step_result(final: dict, *, implementation_intent: bool = True) -> dict:
-    if final.get("runtime_failure"):
+    blockers = [item for item in final.get("unknowns", []) if item.get("blocking")]
+    investigate = [item for item in blockers if item.get("resolution_strategy") == "investigate_project"]
+    clearify = [item for item in blockers if item.get("resolution_strategy") == "clearify"]
+    unresolved_ids = [item["id"] for item in blockers if item.get("id")]
+    if final.get("runtime_failure") and not blockers:
         return {
             "next_step": "failed",
             "continue_reason": final.get("summary") or "Investigation failed before producing a valid final result.",
-            "target_unknown_ids": [],
+            "target_unknown_ids": unresolved_ids,
+            "unresolved_unknown_ids": unresolved_ids,
             "summary": "",
             "beliefs": [],
             "ready_for_patch_planning": False,
             "patch_planning_context": [],
             "resolutions": [],
-            "unknowns": [],
+            "unknowns": final.get("unknowns", []),
         }
-    blockers = [item for item in final.get("unknowns", []) if item.get("blocking")]
-    investigate = [item for item in blockers if item.get("resolution_strategy") == "investigate_project"]
-    clearify = [item for item in blockers if item.get("resolution_strategy") == "clearify"]
     if investigate:
         return {
             "next_step": "continue_investigation",
             "continue_reason": "; ".join(item["question"] for item in investigate[:3]),
             "target_unknown_ids": [item["id"] for item in investigate],
+            "unresolved_unknown_ids": unresolved_ids,
             "summary": final.get("summary", ""),
             "beliefs": final.get("beliefs", []),
             "ready_for_patch_planning": False,
@@ -4292,6 +4315,7 @@ def _step_result(final: dict, *, implementation_intent: bool = True) -> dict:
             "next_step": "continue_investigation",
             "continue_reason": question,
             "target_unknown_ids": [item["id"]],
+            "unresolved_unknown_ids": unresolved_ids,
             "summary": final.get("summary", ""),
             "beliefs": final.get("beliefs", []),
             "ready_for_patch_planning": False,
@@ -4304,6 +4328,7 @@ def _step_result(final: dict, *, implementation_intent: bool = True) -> dict:
             "next_step": "write_code",
             "continue_reason": final.get("summary") or app_settings.text("ready_patch"),
             "target_unknown_ids": [],
+            "unresolved_unknown_ids": [],
             "summary": final.get("summary", ""),
             "beliefs": final.get("beliefs", []),
             "ready_for_patch_planning": True,
@@ -4316,6 +4341,7 @@ def _step_result(final: dict, *, implementation_intent: bool = True) -> dict:
             "next_step": "done",
             "continue_reason": final.get("summary") or "Investigation complete.",
             "target_unknown_ids": [],
+            "unresolved_unknown_ids": [],
             "summary": final.get("summary", ""),
             "beliefs": final.get("beliefs", []),
             "ready_for_patch_planning": False,
@@ -4331,6 +4357,7 @@ def _step_result(final: dict, *, implementation_intent: bool = True) -> dict:
         or final.get("summary")
         or "Investigation complete.",
         "target_unknown_ids": [],
+        "unresolved_unknown_ids": unresolved_ids,
         "summary": final.get("summary", "") if open_questions else "",
         "beliefs": final.get("beliefs", []),
         "ready_for_patch_planning": False,
