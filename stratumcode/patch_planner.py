@@ -604,6 +604,7 @@ def validate_patch_plan(plan: dict, analysis: dict, design_plan: dict, workspace
         if not item.get("verification"):
             issues.append(f"acceptance_mapping {item.get('acceptance_id') or '?'} has no verification")
     workspace = Path(workspace_dir or ".").resolve()
+    workspace_files = _known_workspace_files(workspace)
     for step in steps:
         step_id = step.get("id") or "?"
         if not step.get("id"):
@@ -620,6 +621,14 @@ def validate_patch_plan(plan: dict, analysis: dict, design_plan: dict, workspace
             issues.append(f"step {step_id} has no target")
         if file_issue := _planned_file_issue(step["file"], mode, workspace):
             issues.append(f"step {step_id} {file_issue}")
+        mentioned_files = _mentioned_workspace_files(step, workspace_files)
+        structured_file = str(step.get("file") or "").replace("\\", "/")
+        unlisted_files = sorted(mentioned_files - {structured_file})
+        if unlisted_files:
+            issues.append(
+                f"step {step_id} references files outside its structured file: "
+                + ", ".join(unlisted_files)
+            )
         if not step.get("action"):
             issues.append(f"step {step_id} has no action")
         if not step.get("required_behavior_if_removed"):
@@ -845,7 +854,6 @@ def _plan_from_content(data: dict, analysis: dict, design_plan: dict, investigat
     skipped_decisions = _skipped_decisions(data.get("skipped_decision_slots"), design_plan, facts)
     if not steps and not skipped_decisions:
         raise ValueError("step_content must contain at least one implementation step")
-    step_ids = [step["id"] for step in steps]
     criteria = [
         item for item in analysis.get("acceptance_criteria", [])
         if isinstance(item, dict) and str(item.get("id") or "").strip()
@@ -1102,7 +1110,7 @@ def _verification_slot_issues(
             facts,
         )
     )
-    _, merge_issues = _step_merge_groups(slot.get("step_merge_groups"), len(steps))
+    _, merge_issues = _step_merge_groups(slot.get("step_merge_groups"), steps)
     issues.extend(merge_issues)
     _, revision_issues = _step_revision_updates(slot.get("step_revisions"), len(steps))
     issues.extend(revision_issues)
@@ -1236,11 +1244,12 @@ def _canonical_verification_checks(slot: dict, steps: list[dict], facts: list[di
     return _unique_strings(result)
 
 
-def _step_merge_groups(value, step_count: int) -> tuple[list[dict], list[str]]:
+def _step_merge_groups(value, steps: int | list[dict]) -> tuple[list[dict], list[str]]:
     if value is None:
         return [], []
     if not isinstance(value, list):
         return [], ["step_merge_groups must be an array"]
+    step_count = steps if isinstance(steps, int) else len(steps)
     groups = []
     used = set()
     issues = []
@@ -1256,6 +1265,21 @@ def _step_merge_groups(value, step_count: int) -> tuple[list[dict], list[str]]:
         if overlap:
             issues.append("step_merge_groups repeats step slots: " + ", ".join(map(str, sorted(overlap))))
             continue
+        if isinstance(steps, list):
+            files = {
+                str(steps[slot - 1].get("file") or "").replace("\\", "/").casefold()
+                for slot in slots
+            }
+            modes = {
+                str(steps[slot - 1].get("mode") or "modify").strip().casefold()
+                for slot in slots
+            }
+            if len(files) != 1:
+                issues.append("step_merge_groups cannot merge steps from different files")
+                continue
+            if len(modes) != 1:
+                issues.append("step_merge_groups cannot merge steps with different modes")
+                continue
         if not str(item.get("reason") or "").strip():
             issues.append("step_merge_groups item has no reason")
             continue
@@ -1330,7 +1354,7 @@ def _apply_verified_step_revisions(steps: list[dict], value) -> None:
 
 
 def _merge_verified_step_groups(steps: list[dict], value) -> None:
-    groups, _ = _step_merge_groups(value, len(steps))
+    groups, _ = _step_merge_groups(value, steps)
     remove = set()
     for group in groups:
         slots = group["slots"]
@@ -1509,6 +1533,37 @@ def _planned_file_issue(file: str, mode: str, workspace: Path) -> str:
     if mode == "create" and target.exists():
         return f"create target already exists: {file}"
     return ""
+
+
+def _known_workspace_files(workspace: Path) -> set[str]:
+    result = set()
+    if not workspace.is_dir():
+        return result
+    for root, dirs, files in os.walk(workspace, onerror=lambda _error: None):
+        dirs[:] = [name for name in dirs if name not in IGNORED_DIRS]
+        for name in files:
+            result.add((Path(root) / name).relative_to(workspace).as_posix())
+    return result
+
+
+def _mentioned_workspace_files(step: dict, workspace_files: set[str]) -> set[str]:
+    text = " ".join([
+        str(step.get("target") or ""),
+        str(step.get("action") or ""),
+        str(step.get("required_behavior_if_removed") or ""),
+        " ".join(step.get("completion_conditions") or []),
+    ]).replace("\\", "/").casefold()
+    basename_counts = {}
+    for file in workspace_files:
+        basename = Path(file).name.casefold()
+        basename_counts[basename] = basename_counts.get(basename, 0) + 1
+    result = set()
+    for file in workspace_files:
+        relative = file.casefold()
+        basename = Path(file).name.casefold()
+        if relative in text or (basename_counts.get(basename) == 1 and basename in text):
+            result.add(file)
+    return result
 
 
 def _slot_ids(value, ids: list[str]) -> list[str]:
