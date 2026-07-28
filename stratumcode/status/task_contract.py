@@ -35,14 +35,14 @@ def request_from_analysis(analysis: dict | None, fallback: str = "") -> str:
         去除首尾空白后的 origin message、intent summary 或 fallback。
     """
     if isinstance(analysis, dict):
-        origin = str(analysis.get("origin_message") or "").strip()
-        if origin:
-            return origin
         intent = analysis.get("intent")
         if isinstance(intent, dict):
             summary = str(intent.get("summary") or "").strip()
             if summary:
                 return summary
+        origin = str(analysis.get("origin_message") or "").strip()
+        if origin:
+            return origin
     return str(fallback or "").strip()
 
 
@@ -387,8 +387,14 @@ def _canonicalize_task_contract(analysis: dict) -> None:
     analysis["requirements"] = requirements
     requirement_id_list = [item["id"] for item in requirements]
     requirement_ids = set(requirement_id_list)
+    candidate_summary = str(
+        intent.get("summary") or "" if isinstance(intent, dict) else ""
+    ).strip()
+    analysis.setdefault("intent", {})
     intent_statements = _canonical_statements(
-        [{"text": origin, "derived_from": requirement_id_list}],
+        [{"text": candidate_summary, "derived_from": requirement_id_list}]
+        if candidate_summary
+        else [],
         "intent.summary",
         sources,
         warnings,

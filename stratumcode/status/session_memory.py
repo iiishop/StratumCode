@@ -7,6 +7,48 @@ def _attach_session_relationship(analysis: dict, existing_tasks: list[dict]) -> 
     parent = str(analysis.get("parent_goal_id") or "").strip()
     if parent and any(item.get("id") == parent for item in existing_tasks):
         analysis["root_goal_id"] = parent
+        return
+    parent = _implicit_parent_goal_id(analysis, existing_tasks)
+    if parent:
+        analysis["parent_goal_id"] = parent
+        analysis["root_goal_id"] = parent
+
+
+def _implicit_parent_goal_id(analysis: dict, existing_tasks: list[dict]) -> str:
+    goals = [
+        item for item in existing_tasks
+        if isinstance(item, dict)
+        and item.get("kind") == "goal"
+        and str(item.get("status") or "active") != "known"
+        and str(item.get("id") or "").strip()
+    ]
+    if len(goals) != 1:
+        return ""
+    text = " ".join(str(value or "") for value in (
+        analysis.get("origin_message"),
+        (analysis.get("intent") or {}).get("summary")
+        if isinstance(analysis.get("intent"), dict)
+        else "",
+    ))
+    return str(goals[0]["id"]) if _looks_like_continuation(text) else ""
+
+
+def _looks_like_continuation(value: str) -> bool:
+    text = " ".join(str(value or "").casefold().split())
+    return any(marker in text for marker in (
+        "continue",
+        "follow up",
+        "previous",
+        "above",
+        "继续",
+        "接着",
+        "上次",
+        "刚才",
+        "之前",
+        "所以",
+        "进行修复",
+        "修复吧",
+    ))
 
 
 def _session_context(state: dict) -> dict:

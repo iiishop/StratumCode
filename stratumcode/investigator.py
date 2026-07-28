@@ -71,6 +71,7 @@ FINDING_FIELDS = (
 # Compatibility hook for integrations that patched this set before tool capabilities existed.
 PROJECT_EVIDENCE_TOOLS: set[str] = set()
 CLEARIFY_RESOLUTION_REASON = "Answered by the user through clearify."
+CLEARIFY_UNRESOLVED_REASON = "User could not answer through clearify; continue project investigation."
 GROUNDING_LITERAL_REASON_PREFIX = "Cited observations do not contain the claimed code literal(s):"
 STATE_WRITE_REASON_PREFIX = "Cited observations contain state writes omitted from the resolution:"
 RECORD_RECOVERY_REASON = "Record pending observations and required resolutions."
@@ -291,7 +292,7 @@ def investigation_stream(
             continue
 
         round_error_names: set[str] = set()
-        answered_clearify_ids: set[str] = set()
+        asked_clearify_ids: set[str] = set()
         for raw_call in tool_calls:
             call_id = raw_call.get("id") or f"call-{uuid4().hex[:8]}"
             function = raw_call.get("function") or {}
@@ -697,13 +698,13 @@ def investigation_stream(
                     target_ids = _target_unknown_ids(arguments)
                     target_ids = [
                         item for item in target_ids
-                        if item not in answered_clearify_ids
+                        if item not in asked_clearify_ids
                     ]
                     arguments["target_unknown_ids"] = target_ids
                     if not target_ids:
                         output = json.dumps({
                             "skipped": True,
-                            "reason": "These clearify unknowns were already answered in the current round.",
+                            "reason": "These clearify unknowns were already asked in the current round.",
                         }, ensure_ascii=False)
                         messages.append({
                             "role": "tool",
@@ -751,16 +752,16 @@ def investigation_stream(
                     ))
                     answer = clearify_runtime.wait(question_id)
                     output = _clearify_tool_result(answer)
-                    resolutions = _clearify_resolutions(arguments, answer)
+                    resolution_records = _clearify_resolution_records(arguments, answer)
                     repeated_tool_error_name = ""
                     repeated_tool_error_count = 0
-                    if resolutions:
-                        for resolution in resolutions:
-                            answered_clearify_ids.add(resolution["unknown_id"])
+                    if resolution_records:
+                        for resolution in resolution_records:
+                            asked_clearify_ids.add(resolution["unknown_id"])
                             clearify_questions.pop(resolution["unknown_id"], None)
                         recorded_findings = _merge_recorded_findings(
                             recorded_findings,
-                            {"resolutions": resolutions},
+                            {"resolutions": resolution_records},
                         )
                     yield start_event(call_id, "tool", {
                         "name": name,
@@ -770,10 +771,10 @@ def investigation_stream(
                         "input": json.dumps(arguments, ensure_ascii=False, indent=2),
                         "output": output,
                     })
-                    if resolutions:
+                    if resolution_records:
                         yield start_event(f"{call_id}-task-update", "task_update", {
                             "analysis_id": analysis.get("id", ""),
-                            "items": _investigation_task_updates(None, [], resolutions),
+                            "items": _investigation_task_updates(None, [], resolution_records),
                         })
                     messages.append({
                         "role": "tool",
@@ -2561,13 +2562,15 @@ def _clearify_resolution(arguments: dict, answer: dict | None) -> dict | None:
 
 
 def _clearify_resolutions(arguments: dict, answer: dict | None) -> list[dict]:
+    return [
+        item for item in _clearify_resolution_records(arguments, answer)
+        if item.get("status") == "resolved"
+    ]
+
+
+def _clearify_resolution_records(arguments: dict, answer: dict | None) -> list[dict]:
     answer = answer or {}
-    text = str(
-        answer.get("response")
-        or answer.get("text")
-        or answer.get("selected_option_label")
-        or ""
-    ).strip()
+    text = _clearify_answer_text(answer)
     if not text:
         raise ValueError("clearify answer is empty")
     target_ids = _target_unknown_ids(arguments)
@@ -2575,17 +2578,63 @@ def _clearify_resolutions(arguments: dict, answer: dict | None) -> list[dict]:
         if arguments.get("orientation"):
             return []
         raise ValueError("clearify answer has no target unknown")
+    status = "partially_resolved" if _clearify_answer_is_non_answer(text) else "resolved"
+    reason = CLEARIFY_UNRESOLVED_REASON if status == "partially_resolved" else CLEARIFY_RESOLUTION_REASON
     return [
         {
             "unknown_id": unknown_id,
-            "status": "resolved",
+            "status": status,
             "answer": text,
             "evidence": [],
             "belief_ids": [],
-            "reason": CLEARIFY_RESOLUTION_REASON,
+            "reason": reason,
         }
         for unknown_id in target_ids
     ]
+
+
+def _clearify_answer_text(answer: dict) -> str:
+    return str(
+        answer.get("response")
+        or answer.get("text")
+        or answer.get("selected_option_label")
+        or ""
+    ).strip()
+
+
+def _clearify_answer_is_non_answer(text: str) -> bool:
+    normalized = " ".join(text.casefold().split())
+    if not normalized:
+        return True
+    if any(marker in normalized for marker in ("but", "但是", "但")) and any(
+        marker in normalized
+        for marker in ("choose", "select", "use ", "option", "方案", "选择", "用")
+    ):
+        return False
+    return any(
+        marker in normalized
+        for marker in (
+            "don't know",
+            "do not know",
+            "not sure",
+            "no idea",
+            "cannot answer",
+            "can't answer",
+            "you check",
+            "you investigate",
+            "please investigate",
+            "不知道",
+            "不清楚",
+            "不确定",
+            "无法确定",
+            "无法回答",
+            "没法回答",
+            "你再查",
+            "你再检查",
+            "你查一下",
+            "你继续查",
+        )
+    )
 
 
 def _run_tool_stream(name: str, call_id: str, arguments: dict, workspace_dir: str, analysis: dict | None = None) -> Iterator[dict]:

@@ -490,13 +490,27 @@ async function continueAfterAnswer(answer) {
   })
   const data = await response.json().catch(() => ({}))
   if (!response.ok) throw new Error(data.error || `Answer submit failed (${response.status})`)
+  // Immediately persist answer_status='submitted' — no debounce window.
+  // Vue 3 emit is fire-and-forget; the parent saveActiveSessionState awaits the backend.
+  const sessionId = props.session?.id
+  if (sessionId) {
+    const snapshot = snapshotState()
+    emit('save-session-state', snapshot)
+  }
 }
 
 async function answerQuestion(answer) {
   try {
     await continueAfterAnswer(answer)
   } catch (error) {
-    const { message } = questionEventFor(answer)
+    const { message, event } = questionEventFor(answer)
+    // Roll back optimistic UI update so the question reverts to pending.
+    if (event?.data) {
+      event.data.answer_status = 'pending'
+      delete event.data.selected_option_id
+      delete event.data.selected_option_label
+      delete event.data.response
+    }
     message?.events?.push({
       id: `${message.id}-answer-submit-error`,
       type: 'output',
@@ -643,12 +657,36 @@ onMounted(() => {
     gsap.fromTo('.chat__composer', { y: 12, autoAlpha: 0 }, { y: 0, autoAlpha: 1, duration: 0.46, ease: 'power2.out', delay: 0.16 })
   }, chatRef.value)
 })
-onUnmounted(() => { abortChat(); gsapCtx?.revert(); clearTimeout(saveTimer); clearTimeout(copySessionTimer) })
+onUnmounted(() => {
+  abortChat()
+  gsapCtx?.revert()
+  // Flush pending save before unmount so answer_status='submitted' is persisted.
+  if (saveTimer) {
+    clearTimeout(saveTimer)
+    saveTimer = null
+    const sessionId = props.session?.id
+    if (sessionId) {
+      const snapshot = snapshotState()
+      emit('save-session-state', snapshot)
+    }
+  }
+  clearTimeout(copySessionTimer)
+})
 
 watch(() => props.session?.id, (id) => {
   if (!id) {
     clearState()
     return
+  }
+  // Flush any pending save for the previous session before restoreState overwrites memory.
+  if (saveTimer) {
+    clearTimeout(saveTimer)
+    saveTimer = null
+    const sessionId = props.session?.id
+    if (sessionId) {
+      const snapshot = snapshotState()
+      emit('save-session-state', snapshot)
+    }
   }
   restoreState(props.session?.state || {})
 }, { immediate: true })
