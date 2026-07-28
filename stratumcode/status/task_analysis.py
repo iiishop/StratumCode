@@ -30,6 +30,7 @@ TASK_CERTAINTIES = {"certain", "uncertain", "guess"}
 TASK_CLUE_KINDS = {"file", "line", "symbol", "route", "other"}
 DEFAULT_TASK_SLOT_ATTEMPTS = 2
 TASK_CONTRACT_AUDIT_MODES = ("material_counterexample",)
+IMPLEMENT_INTENT_TYPES = {"bugfix", "feature", "refactor"}
 
 
 def _analysis_requests_implementation(analysis: dict | None) -> bool:
@@ -1082,7 +1083,21 @@ def _validate_task_analysis(data: dict) -> dict:
     result["clues"] = _optional_field(lambda: _clues(data.get("clues")), [])
     result = _ensure_task_contract(result)
     _merge_input_output_acceptance(result)
+    _normalize_execution_mode(result)
     return result
+
+
+def _normalize_execution_mode(analysis: dict) -> None:
+    if analysis.get("execution_mode") != "read_only":
+        return
+    if analysis.get("intent", {}).get("type") not in IMPLEMENT_INTENT_TYPES:
+        return
+    if not analysis.get("acceptance_criteria"):
+        return
+    analysis["execution_mode"] = "implement"
+    analysis.setdefault("analyzer_warnings", []).append(
+        "intent_scope: read_only conflicts with implementation intent and acceptance criteria; changed to implement"
+    )
 
 
 def _merge_input_output_acceptance(analysis: dict) -> None:
