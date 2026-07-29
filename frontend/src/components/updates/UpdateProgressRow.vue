@@ -1,5 +1,6 @@
 <script setup>
-import { computed } from 'vue'
+import { computed, ref } from 'vue'
+import { parseBlock } from '../../lib/markdown'
 
 const props = defineProps({
   title: { type: String, required: true },
@@ -11,6 +12,12 @@ const props = defineProps({
   progress: { type: Number, default: 0 },
   state: { type: String, default: 'idle' },
   message: { type: String, default: '' },
+  releaseName: { type: String, default: '' },
+  releaseBody: { type: String, default: '' },
+  releaseUrl: { type: String, default: '' },
+  releaseDate: { type: String, default: '' },
+  commitsBehind: { type: Number, default: 0 },
+  branchName: { type: String, default: '' },
 })
 
 const emit = defineEmits(['start', 'restart'])
@@ -18,17 +25,63 @@ const running = computed(() => props.state === 'running')
 const done = computed(() => props.state === 'done')
 const failed = computed(() => props.state === 'error')
 const progressStyle = computed(() => ({ '--progress': `${Math.min(100, Math.max(0, props.progress))}%` }))
+const notesExpanded = ref(false)
+const parsedNotes = computed(() => props.releaseBody ? parseBlock(props.releaseBody) : '')
+
+const relativeTime = computed(() => {
+  if (!props.releaseDate) return ''
+  const diff = Date.now() - new Date(props.releaseDate).getTime()
+  const mins = Math.floor(diff / 60000)
+  if (mins < 1) return 'just now'
+  if (mins < 60) return `${mins}m ago`
+  const hours = Math.floor(mins / 60)
+  if (hours < 24) return `${hours}h ago`
+  const days = Math.floor(hours / 24)
+  if (days < 30) return `${days}d ago`
+  const months = Math.floor(days / 30)
+  return `${months}mo ago`
+})
+
+const statusText = computed(() => {
+  if (done) return 'Updated'
+  if (running) return 'Updating…'
+  return props.available ? 'Update available' : 'Current'
+})
+
+const accentTrack = computed(() => props.title.toLowerCase().includes('dev') ? 'dev' : 'stable')
 </script>
 
 <template>
   <article
     class="update-row"
-    :class="{ 'is-running': running, 'is-done': done, 'is-error': failed, 'is-disabled': disabled }"
+    :class="[`track--${accentTrack}`, { 'is-running': running, 'is-done': done, 'is-error': failed, 'is-disabled': disabled }]"
     :style="progressStyle"
   >
-    <div class="update-row__top">
-      <h3>{{ title }}</h3>
-      <span class="update-row__state">{{ available ? 'Update available' : 'Current' }}</span>
+    <div class="update-row__header">
+      <div class="update-row__channel">
+        <h3>{{ title }}</h3>
+        <span class="update-row__badge" :class="{ 'is-alert': available && !failed, 'is-done': done }">
+          {{ statusText }}
+        </span>
+      </div>
+      <a
+        v-if="releaseUrl"
+        class="update-row__gh-link"
+        :href="releaseUrl"
+        target="_blank"
+        rel="noopener"
+        title="View on GitHub"
+      >
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" /><polyline points="15 3 21 3 21 9" /><line x1="10" y1="14" x2="21" y2="3" />
+        </svg>
+      </a>
+    </div>
+
+    <div v-if="releaseName" class="update-row__release-meta">
+      <span class="update-row__release-name">{{ releaseName }}</span>
+      <span v-if="relativeTime" class="update-row__release-date">{{ relativeTime }}</span>
+      <span v-if="accentTrack === 'dev' && commitsBehind" class="update-row__behind">{{ commitsBehind }} commits behind {{ branchName || 'main' }}</span>
     </div>
 
     <div class="update-row__stage">
@@ -57,39 +110,133 @@ const progressStyle = computed(() => ({ '--progress': `${Math.min(100, Math.max(
     </div>
 
     <p class="update-row__detail">{{ message || detail }}</p>
+
+    <div v-if="releaseBody" class="update-row__notes">
+      <button class="update-row__notes-toggle" type="button" @click="notesExpanded = !notesExpanded">
+        {{ notesExpanded ? 'Hide release notes' : 'Show release notes' }}
+        <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" :class="{ 'is-open': notesExpanded }">
+          <polyline points="6 9 12 15 18 9" />
+        </svg>
+      </button>
+      <div v-if="notesExpanded" class="update-row__notes-body" v-html="parsedNotes"></div>
+    </div>
   </article>
 </template>
 
 <style scoped>
 .update-row {
   position: relative;
-  padding: 14px;
+  padding: 16px;
   border: 1px solid var(--border);
   border-radius: var(--radius);
   background: var(--bg-raised);
+  overflow: hidden;
 }
+
+.update-row::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 3px;
+  border-radius: 3px 0 0 3px;
+  background: var(--border-strong);
+}
+
+.track--stable::before { background: var(--accent); }
+.track--dev::before { background: #10b981; }
 
 .update-row.is-disabled {
-  opacity: 0.55;
+  opacity: 0.5;
 }
 
-.update-row__top {
+.update-row__header {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 12px;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+
+.update-row__channel {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.update-row__channel h3 {
+  margin: 0;
+  color: var(--text-h);
+  font: 570 13px/1.2 var(--heading);
+}
+
+.update-row__badge {
+  flex-shrink: 0;
+  padding: 1px 7px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--text-muted);
+  font: 9.5px/1.3 var(--mono);
+  background: var(--code-bg);
+}
+
+.update-row__badge.is-alert {
+  border-color: rgba(245, 200, 66, 0.7);
+  color: #8a6d14;
+  background: var(--yellow-bg);
+}
+
+.update-row__badge.is-done {
+  border-color: rgba(16, 185, 129, 0.4);
+  color: #065f46;
+  background: rgba(16, 185, 129, 0.1);
+}
+
+.update-row__gh-link {
+  flex-shrink: 0;
+  display: grid;
+  width: 28px;
+  height: 28px;
+  place-items: center;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text-muted);
+  transition: color 120ms, border-color 120ms, background 120ms;
+}
+
+.update-row__gh-link:hover {
+  color: var(--accent);
+  border-color: var(--accent-border);
+  background: var(--accent-bg);
+}
+
+.update-row__release-meta {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px 10px;
   margin-bottom: 10px;
 }
 
-.update-row__top h3 {
-  margin: 0;
+.update-row__release-name {
+  font: 500 12px/1.3 var(--heading);
   color: var(--text-h);
-  font: 560 13px/1.2 var(--heading);
 }
 
-.update-row__state {
+.update-row__release-date {
+  padding: 1px 6px;
+  border-radius: 999px;
+  font: 9.5px/1 var(--mono);
   color: var(--text-muted);
+  background: var(--code-bg);
+  border: 1px solid var(--border);
+}
+
+.update-row__behind {
   font: 10px/1 var(--mono);
+  color: var(--text-muted);
 }
 
 .update-row__stage {
@@ -116,9 +263,6 @@ const progressStyle = computed(() => ({ '--progress': `${Math.min(100, Math.max(
   font: 12px/1 var(--mono);
   transition: opacity 180ms ease, transform 180ms ease;
   white-space: nowrap;
-}
-
-.update-row__current {
   color: var(--text-h);
 }
 
@@ -141,10 +285,12 @@ const progressStyle = computed(() => ({ '--progress': `${Math.min(100, Math.max(
   color: #ffffff;
   background: var(--accent);
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.2);
-  transition:
-    left 260ms cubic-bezier(0.16, 1, 0.3, 1),
-    transform 260ms cubic-bezier(0.16, 1, 0.3, 1),
-    opacity 220ms ease;
+  transition: left 260ms cubic-bezier(0.16, 1, 0.3, 1), transform 260ms cubic-bezier(0.16, 1, 0.3, 1), opacity 220ms ease;
+}
+
+.track--dev .update-row__arrow {
+  background: #10b981;
+  border-color: rgba(16, 185, 129, 0.5);
 }
 
 .update-row__arrow:disabled {
@@ -162,14 +308,17 @@ const progressStyle = computed(() => ({ '--progress': `${Math.min(100, Math.max(
   overflow: hidden;
   border: 1px solid rgba(23, 86, 209, 0.34);
   border-radius: 999px;
-  background:
-    linear-gradient(90deg, rgba(255, 255, 255, 0.28), transparent 28%),
-    var(--accent);
+  background: linear-gradient(90deg, rgba(255, 255, 255, 0.28), transparent 28%), var(--accent);
   box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.12);
   opacity: 0;
   pointer-events: none;
   transform: translateY(-50%);
   transition: width 260ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.track--dev .update-row__track {
+  background: linear-gradient(90deg, rgba(255, 255, 255, 0.28), transparent 28%), #10b981;
+  border-color: rgba(16, 185, 129, 0.34);
 }
 
 .update-row__track-target {
@@ -181,6 +330,8 @@ const progressStyle = computed(() => ({ '--progress': `${Math.min(100, Math.max(
   font: 12px/1 var(--mono);
   white-space: nowrap;
 }
+
+/* --- running / done states (kept from original) --- */
 
 .update-row.is-running .update-row__version {
   padding-left: 4px;
@@ -226,12 +377,18 @@ const progressStyle = computed(() => ({ '--progress': `${Math.min(100, Math.max(
   background: var(--accent);
 }
 
+.track--dev.is-done .update-row__track {
+  background: #10b981;
+}
+
 .update-row.is-done .update-row__arrow {
   position: absolute;
   left: calc(100% - 27px);
   opacity: 1;
   animation: update-knob-finish 300ms cubic-bezier(0.55, 0, 1, 0.45) both;
 }
+
+/* --- shine / particles --- */
 
 .update-row__shine {
   position: absolute;
@@ -272,6 +429,8 @@ const progressStyle = computed(() => ({ '--progress': `${Math.min(100, Math.max(
   animation: update-particle 480ms ease-out both;
 }
 
+/* --- restart --- */
+
 .update-row__restart {
   height: 30px;
   padding: 0 12px;
@@ -282,16 +441,19 @@ const progressStyle = computed(() => ({ '--progress': `${Math.min(100, Math.max(
   font: 11px/1 var(--mono);
 }
 
+.track--dev .update-row__restart {
+  border-color: #10b981;
+  background: #10b981;
+}
+
+/* --- detail --- */
+
 .update-row__detail {
-  display: -webkit-box;
-  min-height: 32px;
-  margin: 9px 0 0;
-  overflow: hidden;
+  margin: 10px 0 0;
   color: var(--text-muted);
   font-size: 11px;
-  line-height: 1.45;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 2;
+  line-height: 1.5;
+  min-height: 18px;
 }
 
 .update-row.is-error {
@@ -301,6 +463,102 @@ const progressStyle = computed(() => ({ '--progress': `${Math.min(100, Math.max(
 .update-row.is-error .update-row__detail {
   color: var(--err);
 }
+
+/* --- release notes --- */
+
+.update-row__notes {
+  margin-top: 10px;
+}
+
+.update-row__notes-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text-muted);
+  background: var(--code-bg);
+  font: 10px/1 var(--mono);
+  cursor: pointer;
+  transition: color 120ms, border-color 120ms;
+}
+
+.update-row__notes-toggle:hover {
+  color: var(--accent-text);
+  border-color: var(--accent-border);
+}
+
+.update-row__notes-toggle svg {
+  transition: transform 180ms;
+}
+
+.update-row__notes-toggle svg.is-open {
+  transform: rotate(180deg);
+}
+
+.update-row__notes-body {
+  margin-top: 8px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: rgba(248, 250, 253, 0.6);
+  max-height: 260px;
+  overflow-y: auto;
+  font-size: 11px;
+  line-height: 1.55;
+  color: var(--text-muted);
+}
+
+.update-row__notes-body :deep(h2),
+.update-row__notes-body :deep(h3) {
+  margin: 12px 0 4px;
+  font-size: 12px;
+  color: var(--text-h);
+}
+
+.update-row__notes-body :deep(h2):first-child,
+.update-row__notes-body :deep(h3):first-child {
+  margin-top: 0;
+}
+
+.update-row__notes-body :deep(p) {
+  margin: 4px 0;
+}
+
+.update-row__notes-body :deep(ul),
+.update-row__notes-body :deep(ol) {
+  margin: 4px 0;
+  padding-left: 18px;
+}
+
+.update-row__notes-body :deep(li) {
+  margin: 2px 0;
+}
+
+.update-row__notes-body :deep(code) {
+  padding: 1px 4px;
+  border-radius: 3px;
+  background: var(--code-bg);
+  font-size: 10px;
+}
+
+.update-row__notes-body :deep(a) {
+  color: var(--accent);
+}
+
+.update-row__notes-body :deep(blockquote) {
+  margin: 6px 0;
+  padding: 4px 10px;
+  border-left: 2px solid var(--border-strong);
+  color: var(--text-muted);
+}
+
+.update-row__notes-body :deep(strong) {
+  color: var(--text-h);
+}
+
+/* --- keyframes --- */
 
 @keyframes update-label-flash {
   0%, 100% { opacity: 1; }

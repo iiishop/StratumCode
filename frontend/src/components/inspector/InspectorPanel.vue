@@ -60,8 +60,16 @@ const activeTaskAnalysis = computed(() => {
   return arr.length ? arr[arr.length - 1] : null
 })
 const activeTab = computed(() => tabs.find(item => item.id === props.tab) || tabs[0])
-const openUnknownCount = computed(() => activeTaskAnalysis.value ? remainingTaskCountFor(activeTaskAnalysis.value) : 0)
 const panelStyle = computed(() => ({ '--inspector-width': `${props.width}px` }))
+const tabDescriptions = {
+  evidence: 'Hypotheses, supporting facts, and verdicts for this run.',
+  terminal: 'Background commands launched by the workspace.',
+  mcp: 'Connected MCP servers and exposed tools.',
+  subagents: 'Delegated work and agent results.',
+  tasks: 'Task contract, unknowns, and acceptance criteria.',
+  tools: 'Built-in tools available to the agent.',
+}
+const activeDescription = computed(() => tabDescriptions[props.tab] || 'Details for the current session.')
 
 function analysisRowsFor(analysis) {
   if (!analysis) return []
@@ -405,9 +413,9 @@ function onRowLeave(el) {
     <header class="inspector__head">
       <div class="inspector__title">
         <span class="inspector__mark">{{ activeTab.icon }}</span>
-        <div>
+        <div class="inspector__title-copy">
           <strong>{{ activeTab.label }}</strong>
-          <small>{{ runs.length }} runs / {{ openUnknownCount }} open unknowns / {{ mcpServers.length }} MCP</small>
+          <small>{{ activeDescription }}</small>
         </div>
       </div>
       <button class="inspector__close" type="button" aria-label="Close inspector" @click="emit('close')">×</button>
@@ -1152,56 +1160,77 @@ function onRowLeave(el) {
   position: sticky;
   top: 0;
   z-index: 2;
-  height: 68px;
-  padding: 0 14px 0 16px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 36px;
+  column-gap: 14px;
+  height: 90px;
+  align-items: center;
+  padding: 16px 18px 16px 18px;
   border-bottom-color: var(--border);
-  background: rgba(255, 255, 255, 0.94);
+  background:
+    linear-gradient(135deg, rgba(23, 86, 209, 0.055), transparent 48%),
+    rgba(255, 255, 255, 0.96);
   backdrop-filter: blur(16px);
 }
 
-.inspector__title {
-  display: flex;
+.inspector__head::before {
+  display: none;
+}
+
+.inspector__head .inspector__title {
+  display: grid;
+  grid-template-columns: 42px minmax(0, 1fr);
   min-width: 0;
   align-items: center;
-  gap: 10px;
+  gap: 13px;
 }
 
 .inspector__mark {
   display: grid;
-  width: 34px;
-  height: 34px;
-  flex: 0 0 34px;
+  width: 42px;
+  height: 42px;
+  flex: 0 0 42px;
   place-items: center;
   border: 1px solid var(--accent-border);
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius);
   color: #ffffff;
-  background: var(--accent);
-  font: 700 11px/1 var(--mono);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.18);
+  background:
+    linear-gradient(135deg, rgba(255, 255, 255, 0.18), transparent 42%),
+    var(--accent);
+  font: 800 12px/1 var(--mono);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.2),
+    0 10px 24px rgba(23, 86, 209, 0.18);
 }
 
-.inspector__title > div {
+.inspector__head .inspector__title-copy {
+  display: grid;
+  gap: 7px;
   min-width: 0;
 }
 
 .inspector__head strong {
   color: var(--text-h);
-  font: 570 15px/1.15 var(--heading);
-  letter-spacing: -0.015em;
+  font: 620 18px/1.05 var(--heading);
+  letter-spacing: -0.02em;
 }
 
 .inspector__head small {
-  max-width: 280px;
+  overflow: hidden;
   color: var(--text-muted);
-  font: 9.5px/1.3 var(--mono);
+  font: 10px/1.35 var(--mono);
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .inspector__close {
-  width: 31px;
-  height: 31px;
-  border: 1px solid transparent;
+  width: 36px;
+  height: 36px;
+  margin-left: 0;
+  border: 1px solid var(--border);
   border-radius: var(--radius-sm);
   color: var(--text-muted);
+  background: #ffffff;
 }
 
 .inspector__close:hover {
@@ -1211,7 +1240,7 @@ function onRowLeave(el) {
 }
 
 .inspector__content {
-  height: calc(100% - 68px);
+  height: calc(100% - 90px);
   padding: 14px;
   background:
     linear-gradient(rgba(23, 86, 209, 0.035) 1px, transparent 1px),

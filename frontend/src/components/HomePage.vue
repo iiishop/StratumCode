@@ -1153,9 +1153,9 @@ watch(() => props.activeWorkspace?.id, () => {
 .chat__todo-text { font-size: 12px; color: var(--text-h); line-height: 1.4; }
 
 .panel-enter-active,
-.panel-leave-active { transition: opacity 180ms ease, transform 220ms cubic-bezier(0.16, 1, 0.3, 1); }
+.panel-leave-active { transition: opacity 220ms ease, transform 260ms cubic-bezier(0.16, 1, 0.3, 1); }
 .panel-enter-from,
-.panel-leave-to { opacity: 0; transform: translateX(14px); }
+.panel-leave-to { opacity: 0; transform: translateX(28px) scale(0.985); }
 
 /* ---- file context ---- */
 .chat__files { display: flex; align-items: center; gap: 6px; padding: 6px 32px; flex-wrap: wrap; flex-shrink: 0; }
@@ -2195,13 +2195,13 @@ watch(() => props.activeWorkspace?.id, () => {
 
 .panel-enter-active,
 .panel-leave-active {
-  transition: opacity 180ms ease, transform 220ms cubic-bezier(0.16, 1, 0.3, 1);
+  transition: opacity 220ms ease, transform 260ms cubic-bezier(0.16, 1, 0.3, 1);
 }
 
 .panel-enter-from,
 .panel-leave-to {
   opacity: 0;
-  transform: translateX(14px);
+  transform: translateX(28px) scale(0.985);
 }
 
 @media (max-width: 780px) {

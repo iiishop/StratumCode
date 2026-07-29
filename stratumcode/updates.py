@@ -19,10 +19,17 @@ def status() -> dict:
     current_version = _local_version()
     current_commit = _git(["rev-parse", "HEAD"], check=False).strip()
     short_commit = _git(["rev-parse", "--short", "HEAD"], check=False).strip()
-    latest_release = _latest_release()
-    remote_commit = _remote_main_commit()
-    commits_behind = _commits_behind()
+    latest_release, release_error = _latest_release()
+    remote_commit, remote_error = _remote_main_commit()
+    commits_behind, behind_error = _commits_behind()
     latest_version = latest_release.get("tag_name", "").lstrip("v")
+    diagnostics = []
+    if release_error:
+        diagnostics.append({"source": "github_release", "message": release_error, "hint": "GitHub API unreachable or rate-limited. Check network or try again later."})
+    if remote_error:
+        diagnostics.append({"source": "git_remote", "message": remote_error, "hint": "Cannot reach origin remote. Verify network and `git remote -v`."})
+    if behind_error:
+        diagnostics.append({"source": "git_behind", "message": behind_error, "hint": "Cannot fetch from origin. Check network or remote URL."})
     return {
         "repo": REPO,
         "current_version": current_version,
@@ -35,6 +42,7 @@ def status() -> dict:
         "remote_short_commit": remote_commit[:7],
         "commits_behind": commits_behind,
         "dev_available": commits_behind > 0,
+        "diagnostics": diagnostics,
     }
 
 
@@ -100,33 +108,39 @@ def _local_version() -> str:
     return "0.0.0"
 
 
-def _latest_release() -> dict:
+def _latest_release():
     try:
         with urlopen(_request(f"{GITHUB_API}/releases/latest"), timeout=8) as response:
             data = json.loads(response.read().decode("utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return {}
-    return {
+    except (OSError, json.JSONDecodeError) as exc:
+        return {}, str(exc)
+    release = {
         "tag_name": str(data.get("tag_name") or ""),
         "name": str(data.get("name") or ""),
         "html_url": str(data.get("html_url") or ""),
         "body": str(data.get("body") or ""),
         "published_at": str(data.get("published_at") or ""),
     }
+    return release, None
 
 
-def _remote_main_commit() -> str:
-    out = _git(["ls-remote", "origin", "refs/heads/main"], check=False, timeout=20)
-    return out.split()[0] if out.strip() else ""
+def _remote_main_commit():
+    try:
+        out = _git(["ls-remote", "origin", "refs/heads/main"], check=False, timeout=20)
+        if not out.strip():
+            return "", "git ls-remote returned empty — origin remote missing or unreachable"
+        return out.split()[0], None
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError) as exc:
+        return "", str(exc)
 
 
-def _commits_behind() -> int:
+def _commits_behind():
     try:
         _git(["fetch", "origin", "main"], timeout=60)
         out = _git(["rev-list", "--count", "HEAD..origin/main"], timeout=20)
-        return int(out.strip() or "0")
-    except (subprocess.CalledProcessError, ValueError):
-        return 0
+        return int(out.strip() or "0"), None
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError, ValueError) as exc:
+        return 0, str(exc)
 
 
 def _dirty_paths() -> list[str]:

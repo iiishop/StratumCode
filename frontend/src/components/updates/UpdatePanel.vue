@@ -15,13 +15,19 @@ const rows = reactive({
   dev: { state: 'idle', progress: 0, message: '' },
 })
 
+const release = computed(() => props.status.latest_release || {})
 const releaseNotes = computed(() => {
-  const release = props.status.latest_release || {}
-  if (!props.status.stable_available) return 'Latest stable release is already installed.'
-  const published = release.published_at ? ` Published ${release.published_at.slice(0, 10)}.` : ''
-  return `Release ${props.status.latest_version} is available.${published} Open GitHub for full notes.`
+  if (!props.status.stable_available) return 'Your installation is current. No update needed.'
+  return ''
 })
 const devTarget = computed(() => props.status.remote_short_commit || 'origin/main')
+const devDetail = computed(() => {
+  if (!props.status.dev_available) return 'Local commit is current with origin/main.'
+  return ''
+})
+
+const diagnostics = computed(() => props.status.diagnostics || [])
+const showDiagnostics = computed(() => diagnostics.value.length > 0)
 
 async function start(channel) {
   activeChannel.value = channel
@@ -56,7 +62,7 @@ async function restart() {
       <header class="update-panel__head">
         <div>
           <h2>Updates</h2>
-          <p>Stable follows GitHub releases. Dev follows origin/main.</p>
+          <p>{{ status.repo || 'iiishop/StratumCode' }} — Stable follows GitHub releases, dev tracks origin/main</p>
         </div>
         <button class="update-panel__close" type="button" aria-label="Close updates" @click="emit('close')">
           <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round">
@@ -66,6 +72,17 @@ async function restart() {
       </header>
 
       <div class="update-panel__body">
+        <div v-if="showDiagnostics" class="update-panel__warnings">
+          <div v-for="(d, i) in diagnostics" :key="i" class="update-panel__warning">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/>
+            </svg>
+            <div>
+              <p class="update-panel__warning-msg">{{ d.message }}</p>
+              <p class="update-panel__warning-hint">{{ d.hint }}</p>
+            </div>
+          </div>
+        </div>
         <UpdateProgressRow
           title="Stable release"
           :current-label="`v${status.current_version}`"
@@ -76,6 +93,10 @@ async function restart() {
           :progress="rows.stable.progress"
           :state="rows.stable.state"
           :message="rows.stable.message"
+          :release-name="release.name"
+          :release-body="release.body"
+          :release-url="release.html_url"
+          :release-date="release.published_at"
           @start="start('stable')"
           @restart="restart"
         />
@@ -83,12 +104,14 @@ async function restart() {
           title="Dev update"
           :current-label="status.short_commit || 'unknown'"
           :target-label="devTarget"
-          :detail="status.dev_available ? `${status.commits_behind} commits available from main.` : 'Local commit is current with main.'"
+          :detail="devDetail"
           :available="status.dev_available"
           :disabled="Boolean(activeChannel && activeChannel !== 'dev')"
           :progress="rows.dev.progress"
           :state="rows.dev.state"
           :message="rows.dev.message"
+          :commits-behind="status.commits_behind"
+          branch-name="main"
           @start="start('dev')"
           @restart="restart"
         />
@@ -102,7 +125,8 @@ async function restart() {
   position: fixed;
   inset: 0;
   z-index: 40;
-  background: rgba(16, 42, 92, 0.16);
+  background: rgba(16, 42, 92, 0.18);
+  backdrop-filter: blur(2px);
 }
 
 .update-panel {
@@ -110,13 +134,13 @@ async function restart() {
   right: 18px;
   bottom: 50px;
   z-index: 41;
-  width: min(620px, calc(100vw - 28px));
+  width: min(640px, calc(100vw - 28px));
   max-height: min(720px, calc(100dvh - 72px));
   overflow: hidden;
   border: 1px solid var(--border-strong);
   border-radius: var(--radius-lg);
   background: rgba(255, 255, 255, 0.98);
-  box-shadow: var(--shadow-md);
+  box-shadow: 0 4px 32px rgba(16, 42, 92, 0.12), 0 0 0 1px rgba(16, 42, 92, 0.04);
 }
 
 .update-panel__head {
@@ -135,9 +159,10 @@ async function restart() {
 }
 
 .update-panel__head p {
-  margin: 5px 0 0;
+  margin: 4px 0 0;
   color: var(--text-muted);
-  font-size: 11px;
+  font-size: 10.5px;
+  line-height: 1.4;
 }
 
 .update-panel__close {
@@ -160,12 +185,44 @@ async function restart() {
 
 .update-panel__body {
   display: grid;
-  gap: 14px;
+  gap: 12px;
   padding: 16px;
   overflow: auto;
 }
 
-@media (max-width: 620px) {
+.update-panel__warnings {
+  display: grid;
+  gap: 6px;
+}
+
+.update-panel__warning {
+  display: flex;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1px solid rgba(245, 200, 66, 0.5);
+  border-radius: var(--radius-sm);
+  background: var(--yellow-bg);
+  color: #8a6d14;
+}
+
+.update-panel__warning svg {
+  flex-shrink: 0;
+  margin-top: 1px;
+}
+
+.update-panel__warning-msg {
+  margin: 0;
+  font: 500 11px/1.4 var(--mono);
+}
+
+.update-panel__warning-hint {
+  margin: 3px 0 0;
+  font-size: 10.5px;
+  line-height: 1.35;
+  opacity: 0.78;
+}
+
+@media (max-width: 640px) {
   .update-panel {
     right: 10px;
     bottom: 44px;

@@ -9,6 +9,7 @@ const DEFAULT_STATUS = {
   remote_short_commit: '',
   commits_behind: 0,
   dev_available: false,
+  diagnostics: [],
 }
 
 async function request(path, body) {
