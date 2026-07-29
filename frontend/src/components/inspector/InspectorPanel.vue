@@ -1,5 +1,5 @@
 <script setup>
-import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, nextTick, onUnmounted, ref, watch } from 'vue'
 import { gsap } from 'gsap'
 import { animate, stagger } from 'animejs'
 import TerminalPanel from './TerminalPanel.vue'
@@ -15,6 +15,7 @@ const props = defineProps({
   mcpServers: { type: Array, default: () => [] },
   subagents: { type: Array, default: () => [] },
   width: { type: Number, default: 392 },
+  tabs: { type: Array, default: () => [] },
 })
 const emit = defineEmits([
   'close',
@@ -36,13 +37,15 @@ const phases = [
   ['audit', 'Audit'],
   ['evaluate', 'Evaluate'],
 ]
-const tabs = [
-  { id: 'evidence', label: 'Evidence', icon: '◎' },
-  { id: 'terminal', label: 'Terminal', icon: '>_' },
-  { id: 'mcp', label: 'MCP', icon: 'M' },
-  { id: 'subagents', label: 'Agents', icon: '@' },
-  { id: 'tasks', label: 'Tasks', icon: 'T' },
-  { id: 'tools', label: 'Tools', icon: '#' },
+const fallbackTabs = [
+  {
+    id: 'evidence',
+    label: 'Evidence',
+    icon: '◎',
+    color: '#1756d1',
+    soft: '#e8f0ff',
+    description: 'Hypotheses, supporting facts, and verdicts for this run.',
+  },
 ]
 const taskGroupKinds = ['goal', 'work', 'acceptance', 'behavior', 'boundary', 'constraint', 'hypothesis', 'unknown']
 const taskKindLabels = {
@@ -59,17 +62,14 @@ const activeTaskAnalysis = computed(() => {
   const arr = props.taskAnalyses || []
   return arr.length ? arr[arr.length - 1] : null
 })
-const activeTab = computed(() => tabs.find(item => item.id === props.tab) || tabs[0])
-const panelStyle = computed(() => ({ '--inspector-width': `${props.width}px` }))
-const tabDescriptions = {
-  evidence: 'Hypotheses, supporting facts, and verdicts for this run.',
-  terminal: 'Background commands launched by the workspace.',
-  mcp: 'Connected MCP servers and exposed tools.',
-  subagents: 'Delegated work and agent results.',
-  tasks: 'Task contract, unknowns, and acceptance criteria.',
-  tools: 'Built-in tools available to the agent.',
-}
-const activeDescription = computed(() => tabDescriptions[props.tab] || 'Details for the current session.')
+const panelTabs = computed(() => props.tabs.length ? props.tabs : fallbackTabs)
+const activeTab = computed(() => panelTabs.value.find(item => item.id === props.tab) || panelTabs.value[0])
+const panelStyle = computed(() => ({
+  '--inspector-width': `${props.width}px`,
+  '--inspector-accent': activeTab.value?.color || '#1756d1',
+  '--inspector-accent-soft': activeTab.value?.soft || '#e8f0ff',
+}))
+const activeDescription = computed(() => activeTab.value?.description || 'Details for the current session.')
 
 function analysisRowsFor(analysis) {
   if (!analysis) return []
@@ -229,11 +229,6 @@ function taskAnswers(value) {
     .filter(answer => answer.text)
 }
 
-onMounted(() => {
-  if (!matchMedia('(prefers-reduced-motion: reduce)').matches) {
-    gsap.fromTo(root.value, { x: 24, autoAlpha: 0 }, { x: 0, autoAlpha: 1, duration: .42, ease: 'power3.out' })
-  }
-})
 function clampPanelWidth(value) {
   const max = Math.min(640, window.innerWidth - 40)
   return Math.min(max, Math.max(320, value))
@@ -1168,7 +1163,7 @@ function onRowLeave(el) {
   padding: 16px 18px 16px 18px;
   border-bottom-color: var(--border);
   background:
-    linear-gradient(135deg, rgba(23, 86, 209, 0.055), transparent 48%),
+    linear-gradient(135deg, var(--inspector-accent-soft), transparent 48%),
     rgba(255, 255, 255, 0.96);
   backdrop-filter: blur(16px);
 }
@@ -1191,16 +1186,16 @@ function onRowLeave(el) {
   height: 42px;
   flex: 0 0 42px;
   place-items: center;
-  border: 1px solid var(--accent-border);
+  border: 1px solid var(--inspector-accent-soft);
   border-radius: var(--radius);
   color: #ffffff;
   background:
     linear-gradient(135deg, rgba(255, 255, 255, 0.18), transparent 42%),
-    var(--accent);
+    var(--inspector-accent);
   font: 800 12px/1 var(--mono);
   box-shadow:
     inset 0 1px 0 rgba(255, 255, 255, 0.2),
-    0 10px 24px rgba(23, 86, 209, 0.18);
+    0 10px 24px color-mix(in srgb, var(--inspector-accent) 22%, transparent);
 }
 
 .inspector__head .inspector__title-copy {

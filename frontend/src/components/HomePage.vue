@@ -6,6 +6,7 @@ import { useChatStream } from '../composables/useChatStream'
 import FileReference from './FileReference.vue'
 import FileMentionDropdown from './FileMentionDropdown.vue'
 import InspectorPanel from './inspector/InspectorPanel.vue'
+import InspectorRail from './inspector/InspectorRail.vue'
 import { extractInlineFileRefs, languageFromPath, tokenizeInlineFileRefs } from '../lib/fileRefs'
 
 const props = defineProps({
@@ -22,7 +23,9 @@ const emit = defineEmits([
 
 /* ── todos ── */
 const inspectorTab = ref(null)
+const inspectorOpen = ref(false)
 const inspectorWidth = ref(392)
+const inspectorRail = ref(null)
 const todos = reactive([
   { id: 1, content: 'Implement agent chat backend', done: false },
   { id: 2, content: 'Add provider connection testing', done: true },
@@ -187,6 +190,61 @@ const visibleSubagents = computed(() => {
   for (const agent of subagentRuns) byName.set(agent.name, agent)
   return [...byName.values()]
 })
+const inspectorTabs = computed(() => [
+  {
+    id: 'evidence',
+    label: 'Evidence',
+    icon: '◎',
+    color: '#1756d1',
+    soft: '#e8f0ff',
+    description: 'Hypotheses, supporting facts, and verdicts for this run.',
+    count: evidenceRuns.length,
+  },
+  {
+    id: 'terminal',
+    label: 'Terminal',
+    icon: '>_',
+    color: '#12846f',
+    soft: '#e3f5f0',
+    description: 'Background commands launched by the workspace.',
+  },
+  {
+    id: 'mcp',
+    label: 'MCP',
+    icon: 'M',
+    color: '#8f45d8',
+    soft: '#f0e7fb',
+    description: 'Connected MCP servers and exposed tools.',
+    count: props.mcpServers.length,
+  },
+  {
+    id: 'subagents',
+    label: 'Agents',
+    icon: '@',
+    color: '#cf4d78',
+    soft: '#fae6ee',
+    description: 'Delegated work and agent results.',
+    count: visibleSubagents.value.length,
+  },
+  {
+    id: 'tasks',
+    label: 'Tasks',
+    icon: 'T',
+    color: '#c57716',
+    soft: '#f9eddc',
+    description: 'Task contract, unknowns, and acceptance criteria.',
+    count: todos.filter(t => !t.done).length,
+  },
+  {
+    id: 'tools',
+    label: 'Tools',
+    icon: '#',
+    color: '#536675',
+    soft: '#e9eef2',
+    description: 'Built-in tools available to the agent.',
+    count: toolCatalog.value.length,
+  },
+])
 const sessionName = computed(() => props.session?.name || 'New session')
 const sessionUsage = reactive({
   input_tokens: 0,
@@ -226,7 +284,74 @@ function toggleTodo(id) {
 }
 
 function toggleInspector(tab) {
-  inspectorTab.value = inspectorTab.value === tab ? null : tab
+  if (inspectorOpen.value && inspectorTab.value === tab) {
+    closeInspector()
+    return
+  }
+  openInspector(tab)
+}
+
+function openInspector(tab) {
+  inspectorTab.value = tab
+  inspectorOpen.value = true
+}
+
+function closeInspector() {
+  inspectorOpen.value = false
+}
+
+function panelAfterLeave() {
+  if (!inspectorOpen.value) inspectorTab.value = null
+}
+
+function panelTravel(el) {
+  return el.getBoundingClientRect().width
+}
+
+function railElement() {
+  return inspectorRail.value?.$el || inspectorRail.value
+}
+
+function railDockX(width) {
+  return window.matchMedia('(max-width: 980px)').matches ? 48 - width : -width
+}
+
+function panelEnter(el, done) {
+  const rail = railElement()
+  const travel = panelTravel(el)
+  const dockX = railDockX(travel)
+  if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+    if (rail) gsap.set(rail, { x: dockX })
+    done()
+    return
+  }
+  gsap.killTweensOf([el, rail].filter(Boolean))
+  const timeline = gsap.timeline({
+    defaults: { duration: 0.36, ease: 'power3.out' },
+    onComplete: () => {
+      gsap.set(el, { clearProps: 'transform,opacity,visibility' })
+      done()
+    },
+  })
+  timeline.fromTo(el, { x: travel, autoAlpha: 0 }, { x: 0, autoAlpha: 1 }, 0)
+  if (rail) timeline.to(rail, { x: dockX }, 0)
+}
+
+function panelLeave(el, done) {
+  const rail = railElement()
+  const travel = panelTravel(el)
+  if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+    if (rail) gsap.set(rail, { x: 0 })
+    done()
+    return
+  }
+  gsap.killTweensOf([el, rail].filter(Boolean))
+  const timeline = gsap.timeline({
+    defaults: { duration: 0.32, ease: 'power2.inOut' },
+    onComplete: done,
+  })
+  timeline.to(el, { x: travel, autoAlpha: 0 }, 0)
+  if (rail) timeline.to(rail, { x: 0 }, 0)
 }
 
 function currentEvidenceRun() {
@@ -456,7 +581,7 @@ async function send(answer = null) {
   isStreaming.value = true
   currentChatState.value = 'initializing'
   Object.assign(agentStatus, { state: 'running', phase: 'starting', contextUsed: 0 })
-  inspectorTab.value = 'evidence'
+  openInspector('evidence')
   nextTick(() => { scrollBottom(); animateLast() })
   try {
     const request = {
@@ -599,10 +724,10 @@ function onAgentPacket(packet, type, data) {
     data.origin_message ||= messages[messages.length - 2]?.content || ''
     data.open = true
     taskAnalyses.push(data)
-    inspectorTab.value = 'tasks'
+    openInspector('tasks')
   } else if (packet.op === 'start' && type === 'task_update') {
     data.changes = applyTaskUpdate(data)
-    inspectorTab.value = 'tasks'
+    openInspector('tasks')
   } else if (packet.op === 'start' && type === 'user_question') {
     const analysis = analysisForId(data.analysis_id) || activeTaskAnalysis.value
     data.analysis_id ||= analysis?.id || ''
@@ -718,40 +843,15 @@ watch(() => props.activeWorkspace?.id, () => {
         </div>
       </div>
 
-      <div class="chat__topbar-right">
-        <button class="chat__topbtn" :class="{ 'is-on': inspectorTab === 'evidence' }" @click="toggleInspector('evidence')" title="Evidence">
-          <span aria-hidden="true">◎</span>
-          <span class="chat__topbtn-label">Evidence</span>
-          <span class="chat__topbtn-badge">{{ evidenceRuns.length }}</span>
-        </button>
-        <button class="chat__topbtn chat__topbtn--tools" :class="{ 'is-on': inspectorTab === 'tools' }" @click="toggleInspector('tools')" title="Built-in tools">
-          <span class="chat__tool-grid" aria-hidden="true"><i></i><i></i><i></i><i></i></span>
-          <span class="chat__topbtn-label">Tools</span>
-          <span class="chat__topbtn-badge chat__topbtn-badge--yellow">{{ toolCatalog.length }}</span>
-        </button>
-        <button class="chat__topbtn" :class="{ 'is-on': inspectorTab === 'terminal' }" @click="toggleInspector('terminal')" title="Terminal">
-          <span aria-hidden="true">&gt;_</span>
-          <span class="chat__topbtn-label">Terminal</span>
-        </button>
-        <button class="chat__topbtn" :class="{ 'is-on': inspectorTab === 'mcp' }" @click="toggleInspector('mcp')" title="MCP">
-          <span aria-hidden="true">M</span>
-          <span class="chat__topbtn-label">MCP</span>
-          <span class="chat__topbtn-badge">{{ mcpServers.length }}</span>
-        </button>
-        <button class="chat__topbtn" :class="{ 'is-on': inspectorTab === 'subagents' }" @click="toggleInspector('subagents')" title="Subagents">
-          <span aria-hidden="true">@</span>
-          <span class="chat__topbtn-label">Agents</span>
-          <span class="chat__topbtn-badge">{{ visibleSubagents.length }}</span>
-        </button>
-        <button class="chat__topbtn" :class="{ 'is-on': inspectorTab === 'tasks' }" @click="toggleInspector('tasks')" title="Tasks">
-          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"/></svg>
-          <span class="chat__topbtn-label">Tasks</span>
-          <span class="chat__topbtn-badge">{{ todos.filter(t => !t.done).length }}</span>
-        </button>
-      </div>
     </div>
 
-    <div class="chat__body" :class="{ 'chat__body--has-panel': inspectorTab }" :style="{ '--inspector-width': `${inspectorWidth}px` }">
+    <div class="chat__body" :class="{ 'chat__body--has-panel': inspectorOpen }" :style="{ '--inspector-width': `${inspectorWidth}px` }">
+      <InspectorRail
+        ref="inspectorRail"
+        :tabs="inspectorTabs"
+        :active-tab="inspectorTab"
+        @select="toggleInspector"
+      />
 
       <!-- ============= message area ============= -->
       <div class="chat__main">
@@ -825,9 +925,9 @@ watch(() => props.activeWorkspace?.id, () => {
       </div>
 
       <!-- ============= todo panel ============= -->
-      <Transition name="panel">
+      <Transition :css="false" @enter="panelEnter" @leave="panelLeave" @after-leave="panelAfterLeave">
         <InspectorPanel
-          v-if="inspectorTab"
+          v-if="inspectorOpen"
           :tab="inspectorTab"
           :run="evidenceRun"
           :runs="evidenceRuns"
@@ -838,9 +938,10 @@ watch(() => props.activeWorkspace?.id, () => {
           :mcp-servers="mcpServers"
           :subagents="visibleSubagents"
           :width="inspectorWidth"
+          :tabs="inspectorTabs"
           @resize="inspectorWidth = $event"
           @toggle-todo="toggleTodo"
-          @close="inspectorTab = null"
+          @close="closeInspector"
         />
       </Transition>
 
@@ -1152,11 +1253,6 @@ watch(() => props.activeWorkspace?.id, () => {
 .chat__todo.is-done .chat__todo-check { border-color: var(--ok-border); background: var(--ok-bg); }
 .chat__todo-text { font-size: 12px; color: var(--text-h); line-height: 1.4; }
 
-.panel-enter-active,
-.panel-leave-active { transition: opacity 220ms ease, transform 260ms cubic-bezier(0.16, 1, 0.3, 1); }
-.panel-enter-from,
-.panel-leave-to { opacity: 0; transform: translateX(28px) scale(0.985); }
-
 /* ---- file context ---- */
 .chat__files { display: flex; align-items: center; gap: 6px; padding: 6px 32px; flex-wrap: wrap; flex-shrink: 0; }
 .chat__files-label { font-size: 10px; font-weight: 600; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.05em; margin-right: 2px; }
@@ -1313,6 +1409,7 @@ watch(() => props.activeWorkspace?.id, () => {
   z-index: 2;
   min-height: 0;
   overflow: visible;
+  --inspector-rail-width: 58px;
 }
 
 .chat__main {
@@ -1324,7 +1421,7 @@ watch(() => props.activeWorkspace?.id, () => {
 
 @media (min-width: 981px) {
   .chat__body--has-panel .chat__main {
-    margin-right: min(var(--inspector-width, 392px), calc(100% - 20px));
+    margin-right: calc(min(var(--inspector-width, 392px), calc(100% - 20px)) + var(--inspector-rail-width));
   }
 }
 
@@ -2192,17 +2289,6 @@ watch(() => props.activeWorkspace?.id, () => {
   background: var(--yellow-bg);
   font-size: 9.5px;
   line-height: 1.4;
-}
-
-.panel-enter-active,
-.panel-leave-active {
-  transition: opacity 220ms ease, transform 260ms cubic-bezier(0.16, 1, 0.3, 1);
-}
-
-.panel-enter-from,
-.panel-leave-to {
-  opacity: 0;
-  transform: translateX(28px) scale(0.985);
 }
 
 @media (max-width: 780px) {
