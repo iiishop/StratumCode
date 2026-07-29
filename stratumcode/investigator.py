@@ -38,24 +38,6 @@ INVESTIGATION_CAPABILITY = "investigation"
 PROJECT_EVIDENCE_CAPABILITY = "investigation.project_evidence"
 MAX_REPEATED_TOOL_ERRORS = 3
 READ_ONLY_SUMMARY_MIN_RESOLUTION_RATIO = 0.35
-DEBT_REPORT_TERMS = (
-    "技术债", "技術債", "死代码", "死碼", "technical debt", "dead code",
-)
-ENTRYPOINT_TERMS = ("main.py", "entrypoint", "entry point", "入口")
-PACKAGE_SHAPE_TERMS = (
-    "used_in_project: false", "无入口", "沒有入口", "没有 cli", "沒有 cli",
-    "no cli", "no script", "没有脚本", "沒有腳本", "pyproject.toml",
-    "setup.py", "__init__.py",
-)
-ENTRYPOINT_OVERCLAIM_TERMS = (
-    "项目不能运行", "项目无法运行", "不能运行", "无法运行",
-    "project cannot run", "cannot run the project",
-)
-ENTRYPOINT_OVERCLAIM_PATTERN = re.compile(
-    r"(?:项目)?(?:不能|无法|無法|不可).{0,12}运行"
-    r"|(?:the\s+)?project cannot run|cannot run the project",
-    re.IGNORECASE,
-)
 MAX_REPEATED_RECORD_NO_PROGRESS = 3
 MAX_DUPLICATE_NO_PROGRESS = 2
 REQUIRED_FINDING_SLOT_ATTEMPTS = 2
@@ -3546,7 +3528,6 @@ def _finish_payload(
         "readiness": readiness,
         "protocol_repairs": repairs,
     }
-    final["summary"] = _downgrade_unproven_entrypoint_overclaims(final["summary"], analysis)
     final["project_facts"] = _investigation_project_facts(
         beliefs,
         resolutions,
@@ -3555,52 +3536,6 @@ def _finish_payload(
     if repair_request:
         final["resolution_repair"] = repair_request
     return final
-
-
-def _downgrade_unproven_entrypoint_overclaims(summary: str, analysis: dict | None) -> str:
-    if not summary or not _analysis_is_read_only(analysis) or not _is_debt_report_request(analysis):
-        return summary
-    return re.sub(
-        r"(?ms)(^#{2,4}[^\n]*(?:High|高严重度|高嚴重度)[^\n]*\n.*?)(?=^#{2,4}\s|\Z)",
-        lambda match: _downgrade_entrypoint_overclaim_block(match.group(1)),
-        summary,
-    )
-
-
-def _downgrade_entrypoint_overclaim_block(block: str) -> str:
-    if not _is_entrypoint_overclaim(block):
-        return block
-    downgraded = re.sub(r"^##\s+High\b", "## Medium", block)
-    downgraded = downgraded.replace("高严重度", "中严重度").replace("高嚴重度", "中嚴重度")
-    downgraded = ENTRYPOINT_OVERCLAIM_PATTERN.sub(
-        "入口/包形态不明确，不能仅凭入口缺失证明项目不能运行",
-        downgraded,
-    )
-    return downgraded
-
-
-def _is_debt_report_request(analysis: dict | None) -> bool:
-    texts = [
-        str((analysis or {}).get("summary") or ""),
-        *[
-            str(item.get("text") or "")
-            for item in (analysis or {}).get("requirements", [])
-            if isinstance(item, dict)
-        ],
-    ]
-    joined = " ".join(texts).casefold()
-    return any(term in joined for term in DEBT_REPORT_TERMS)
-
-
-def _is_entrypoint_overclaim(value: str) -> bool:
-    lowered = value.casefold()
-    return (
-        any(term in lowered for term in ENTRYPOINT_TERMS + PACKAGE_SHAPE_TERMS)
-        and (
-            any(term in lowered for term in ENTRYPOINT_OVERCLAIM_TERMS)
-            or bool(ENTRYPOINT_OVERCLAIM_PATTERN.search(value))
-        )
-    )
 
 
 def _investigation_project_facts(
