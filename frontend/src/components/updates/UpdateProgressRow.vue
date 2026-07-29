@@ -33,11 +33,18 @@ const progressStyle = computed(() => ({ '--progress': `${Math.min(100, Math.max(
 
     <div class="update-row__stage">
       <div class="update-row__version">
+        <span class="update-row__track" aria-hidden="true">
+          <span class="update-row__track-target">{{ targetLabel }}</span>
+        </span>
+        <span v-if="done" class="update-row__shine" aria-hidden="true"></span>
+        <span v-if="done" class="update-row__particles" aria-hidden="true">
+          <span v-for="index in 10" :key="index" :style="{ '--i': index }"></span>
+        </span>
+        <span class="update-row__current">{{ currentLabel }}</span>
         <button
-          v-if="!done"
           class="update-row__arrow"
           type="button"
-          :disabled="!available || disabled || running"
+          :disabled="!available || disabled || running || done"
           aria-label="Start update"
           @click="emit('start')"
         >
@@ -45,13 +52,6 @@ const progressStyle = computed(() => ({ '--progress': `${Math.min(100, Math.max(
             <path d="M12 19V5M5 12l7-7 7 7" />
           </svg>
         </button>
-        <span class="update-row__current">{{ currentLabel }}</span>
-        <span class="update-row__target">{{ targetLabel }}</span>
-        <span v-if="running || done" class="update-row__track" aria-hidden="true"></span>
-        <span v-if="done" class="update-row__shine" aria-hidden="true"></span>
-        <span v-if="done" class="update-row__particles" aria-hidden="true">
-          <span v-for="index in 10" :key="index" :style="{ '--i': index }"></span>
-        </span>
       </div>
       <button v-if="done" class="update-row__restart" type="button" @click="emit('restart')">Restart</button>
     </div>
@@ -110,10 +110,9 @@ const progressStyle = computed(() => ({ '--progress': `${Math.min(100, Math.max(
   padding: 0 4px;
 }
 
-.update-row__current,
-.update-row__target {
+.update-row__current {
   position: relative;
-  z-index: 2;
+  z-index: 3;
   font: 12px/1 var(--mono);
   transition: opacity 180ms ease, transform 180ms ease;
   white-space: nowrap;
@@ -123,13 +122,6 @@ const progressStyle = computed(() => ({ '--progress': `${Math.min(100, Math.max(
   color: var(--text-h);
 }
 
-.update-row__target {
-  max-width: var(--progress);
-  overflow: hidden;
-  color: #ffffff;
-  opacity: 0;
-}
-
 .update-row__arrow,
 .update-row__restart {
   flex: 0 0 auto;
@@ -137,6 +129,7 @@ const progressStyle = computed(() => ({ '--progress': `${Math.min(100, Math.max(
 }
 
 .update-row__arrow {
+  position: relative;
   z-index: 4;
   display: grid;
   width: 27px;
@@ -148,7 +141,10 @@ const progressStyle = computed(() => ({ '--progress': `${Math.min(100, Math.max(
   color: #ffffff;
   background: var(--accent);
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.2);
-  transition: transform 220ms cubic-bezier(0.16, 1, 0.3, 1), opacity 220ms ease;
+  transition:
+    left 260ms cubic-bezier(0.16, 1, 0.3, 1),
+    transform 260ms cubic-bezier(0.16, 1, 0.3, 1),
+    opacity 220ms ease;
 }
 
 .update-row__arrow:disabled {
@@ -158,20 +154,36 @@ const progressStyle = computed(() => ({ '--progress': `${Math.min(100, Math.max(
 
 .update-row__track {
   position: absolute;
-  inset: 3px 0;
+  top: 50%;
+  left: 0;
   z-index: 1;
   width: var(--progress);
+  height: 1.1em;
+  overflow: hidden;
   border: 1px solid rgba(23, 86, 209, 0.34);
   border-radius: 999px;
   background:
     linear-gradient(90deg, rgba(255, 255, 255, 0.28), transparent 28%),
     var(--accent);
   box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.12);
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(-50%);
   transition: width 260ms cubic-bezier(0.16, 1, 0.3, 1);
 }
 
+.update-row__track-target {
+  display: flex;
+  height: 100%;
+  align-items: center;
+  padding-left: 40px;
+  color: #ffffff;
+  font: 12px/1 var(--mono);
+  white-space: nowrap;
+}
+
 .update-row.is-running .update-row__version {
-  padding-left: 34px;
+  padding-left: 4px;
 }
 
 .update-row.is-running .update-row__current {
@@ -179,13 +191,14 @@ const progressStyle = computed(() => ({ '--progress': `${Math.min(100, Math.max(
   transform: scale(0.96);
 }
 
-.update-row.is-running .update-row__target {
+.update-row.is-running .update-row__track,
+.update-row.is-done .update-row__track {
   opacity: 1;
 }
 
 .update-row.is-running .update-row__arrow {
   position: absolute;
-  left: calc(var(--progress) - 27px);
+  left: clamp(0px, calc(var(--progress) - 14px), calc(100% - 27px));
   transform: rotate(90deg) scale(0.86);
 }
 
@@ -204,24 +217,32 @@ const progressStyle = computed(() => ({ '--progress': `${Math.min(100, Math.max(
   display: none;
 }
 
-.update-row.is-done .update-row__target {
-  max-width: 100%;
-  color: var(--accent-text);
-  opacity: 1;
+.update-row.is-done .update-row__track-target {
   animation: update-label-flash 520ms ease both;
 }
 
 .update-row.is-done .update-row__track {
   width: 100%;
-  background: rgba(23, 86, 209, 0.1);
+  background: var(--accent);
+}
+
+.update-row.is-done .update-row__arrow {
+  position: absolute;
+  left: calc(100% - 27px);
+  opacity: 1;
+  animation: update-knob-finish 300ms cubic-bezier(0.55, 0, 1, 0.45) both;
 }
 
 .update-row__shine {
   position: absolute;
-  inset: 3px 0;
+  top: 50%;
+  left: 0;
   z-index: 3;
+  width: 100%;
+  height: 1.1em;
   border-radius: 999px;
   pointer-events: none;
+  transform: translateY(-50%);
 }
 
 .update-row__shine::before {
@@ -286,6 +307,12 @@ const progressStyle = computed(() => ({ '--progress': `${Math.min(100, Math.max(
   45% { opacity: 0.42; }
 }
 
+@keyframes update-knob-finish {
+  0% { opacity: 0.72; transform: rotate(90deg) scale(0.86); }
+  34% { opacity: 0.84; transform: rotate(450deg) scale(1.12); }
+  100% { opacity: 0; transform: rotate(1890deg) scale(2); }
+}
+
 @keyframes update-edge-shine {
   0% { left: 0; top: 0; transform: rotate(0deg); }
   25% { left: calc(100% - 26px); top: 0; transform: rotate(0deg); }
@@ -302,7 +329,6 @@ const progressStyle = computed(() => ({ '--progress': `${Math.min(100, Math.max(
 @media (prefers-reduced-motion: reduce) {
   .update-row__arrow,
   .update-row__current,
-  .update-row__target,
   .update-row__track,
   .update-row__shine::before,
   .update-row__particles span {

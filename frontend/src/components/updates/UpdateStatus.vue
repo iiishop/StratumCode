@@ -10,6 +10,7 @@ let timer = 0
 const releaseSuffix = computed(() => status.value.stable_available ? `(${status.value.latest_version})` : '')
 const devSuffix = computed(() => status.value.dev_available ? `(+${status.value.commits_behind})` : '')
 const commitLabel = computed(() => status.value.short_commit || 'unknown')
+const hasUpdate = computed(() => status.value.stable_available || status.value.dev_available)
 
 onMounted(() => {
   refresh()
@@ -21,7 +22,7 @@ onUnmounted(() => window.clearInterval(timer))
 
 <template>
   <div class="update-status">
-    <button class="update-status__button" type="button" @click="open = true">
+    <button class="update-status__button" :class="{ 'has-update': hasUpdate }" type="button" @click="open = true">
       <span class="update-status__version">
         v{{ status.current_version }}<span v-if="releaseSuffix" class="update-status__new">{{ releaseSuffix }}</span>
       </span>
@@ -66,10 +67,27 @@ onUnmounted(() => window.clearInterval(timer))
   transition: border-color var(--transition-fast), background var(--transition-fast), color var(--transition-fast);
 }
 
+.update-status__button.has-update {
+  border-color: rgba(245, 200, 66, 0.95);
+  color: #ffffff;
+  background:
+    linear-gradient(135deg, rgba(245, 200, 66, 0.26), transparent 46%),
+    var(--text-h);
+  box-shadow: 0 0 0 3px rgba(245, 200, 66, 0.16);
+}
+
 .update-status__button:hover {
   border-color: var(--accent-border);
   color: var(--text-h);
   background: var(--accent-bg);
+}
+
+.update-status__button.has-update:hover {
+  border-color: var(--yellow);
+  color: #ffffff;
+  background:
+    linear-gradient(135deg, rgba(245, 200, 66, 0.34), transparent 46%),
+    #0d347e;
 }
 
 .update-status__version,
@@ -80,8 +98,12 @@ onUnmounted(() => window.clearInterval(timer))
 }
 
 .update-status__new {
-  margin-left: 3px;
-  color: var(--accent-text);
+  margin-left: 4px;
+  padding: 2px 5px;
+  border-radius: 999px;
+  color: #0d347e;
+  background: var(--yellow);
+  font-weight: 700;
 }
 
 .update-status__loading,
