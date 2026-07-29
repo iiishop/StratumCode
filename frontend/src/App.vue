@@ -9,6 +9,7 @@ import McpPage from './components/mcp/McpPage.vue'
 import LspPage from './components/lsp/LspPage.vue'
 import SkillsPage from './components/skills/SkillsPage.vue'
 import SettingsPage from './components/settings/SettingsPage.vue'
+import BottomBar from './components/BottomBar.vue'
 import { useMcp } from './composables/useMcp'
 import { useLsp } from './composables/useLsp'
 import { useSessions } from './composables/useSessions'
@@ -797,6 +798,7 @@ watch(currentView, (v) => {
         @save="saveSetting"
       />
       </main>
+      <BottomBar />
     </section>
   </div>
 </template>
