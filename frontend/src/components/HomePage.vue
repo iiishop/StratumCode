@@ -1,7 +1,7 @@
 <script setup>
 import { ref, reactive, computed, provide, onMounted, onUnmounted, nextTick, watch } from 'vue'
 import { gsap } from 'gsap'
-import ChatEvent from './chat/ChatEvent.vue'
+import ChatTimeline from './chat/ChatTimeline.vue'
 import { useChatStream } from '../composables/useChatStream'
 import FileReference from './FileReference.vue'
 import FileMentionDropdown from './FileMentionDropdown.vue'
@@ -815,15 +815,12 @@ watch(() => props.activeWorkspace?.id, () => {
                   <span v-else>{{ part.text }}</span>
                 </template>
               </div>
-              <TransitionGroup v-else name="timeline-event" tag="div" class="chat__timeline">
-                <ChatEvent
-                  v-for="event in m.events"
-                  :key="event.id"
-                  :event="event"
-                  :events="m.events"
-                  @answer="answerQuestion"
-                />
-              </TransitionGroup>
+              <ChatTimeline
+                v-else
+                :events="m.events"
+                :running="isStreaming && m === messages[messages.length - 1]"
+                @answer="answerQuestion"
+              />
             </div>
           </div>
         </div>
@@ -946,32 +943,6 @@ watch(() => props.activeWorkspace?.id, () => {
 </template>
 
 <style scoped>
-.chat__timeline {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-
-.timeline-event-enter-active {
-  transition: opacity .26s ease, transform .26s cubic-bezier(.22, 1, .36, 1);
-}
-
-.timeline-event-enter-from {
-  opacity: 0;
-  transform: translateY(10px) scale(.985);
-}
-
-.timeline-event-move {
-  transition: transform .26s cubic-bezier(.22, 1, .36, 1);
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .timeline-event-enter-active,
-  .timeline-event-move {
-    transition-duration: .01ms;
-  }
-}
-
 .chat {
   display: flex; flex-direction: column;
   height: 100svh; overflow: hidden;

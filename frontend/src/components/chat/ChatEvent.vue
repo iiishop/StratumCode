@@ -22,6 +22,7 @@ import VerdictEvent from './VerdictEvent.vue'
 import StepResultEvent from './StepResultEvent.vue'
 import SafetyStopEvent from './SafetyStopEvent.vue'
 import UserQuestionEvent from './UserQuestionEvent.vue'
+import UsageEvent from './UsageEvent.vue'
 
 const props = defineProps({
   event: { type: Object, required: true },
@@ -54,6 +55,7 @@ const eventComponents = {
   step_result: StepResultEvent,
   safety_stop: SafetyStopEvent,
   user_question: UserQuestionEvent,
+  usage: UsageEvent,
 }
 </script>
 
