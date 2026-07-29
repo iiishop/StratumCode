@@ -1,8 +1,20 @@
-# StratumCode
+<p align="center">
+  <img src="docs/assets/stratumcode-logo.png" alt="StratumCode" width="120" />
+</p>
 
-**证据驱动，契约先行。**
+<p align="center">
+  <img src="docs/assets/stratumcode-wordmark.png" alt="StratumCode" width="640" />
+</p>
 
-一个本地优先的软件工程 Agent。不会直接从你的指令跳到改代码——而是走完任务分析、代码调查、设计决策、可执行施工计划、事务式修改和独立验证这一整套流程。每一步都可追踪、可审计、可回退。
+<p align="center">
+  <strong>证据驱动，契约先行。</strong>
+</p>
+
+<p align="center">
+  一个本地优先的软件工程 Agent。不会直接从你的指令跳到改代码——<br/>
+  而是走完任务分析、代码调查、设计决策、可执行施工计划、事务式修改和独立验证一整套流程。<br/>
+  每一步都可追踪、可审计、可回退。
+</p>
 
 <p align="center">
   <img alt="Status: Alpha" src="https://img.shields.io/badge/status-alpha-f4b942" />
