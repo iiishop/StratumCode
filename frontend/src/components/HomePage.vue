@@ -1319,6 +1319,7 @@ watch(() => props.activeWorkspace?.id, () => {
   max-width: none;
   margin: 0;
   padding: 0;
+  transition: margin-right 260ms cubic-bezier(0.16, 1, 0.3, 1);
 }
 
 @media (min-width: 981px) {
