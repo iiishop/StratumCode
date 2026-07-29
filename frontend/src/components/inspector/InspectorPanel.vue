@@ -14,16 +14,18 @@ const props = defineProps({
   tools: { type: Array, required: true },
   mcpServers: { type: Array, default: () => [] },
   subagents: { type: Array, default: () => [] },
+  width: { type: Number, default: 392 },
 })
 const emit = defineEmits([
-  'update:tab',
   'close',
+  'resize',
 ])
 
 const root = ref(null)
 const confidenceBar = ref(null)
 const copyTaskStatus = ref('')
 let copyTaskTimer
+let stopPanelResize
 const percent = computed(() => Math.round((props.run.confidence ?? .5) * 100))
 const supportCount = computed(() => props.run.evidence.filter(item => item.stance === 'support').length)
 const opposeCount = computed(() => props.run.evidence.filter(item => item.stance === 'oppose').length)
@@ -34,7 +36,14 @@ const phases = [
   ['audit', 'Audit'],
   ['evaluate', 'Evaluate'],
 ]
-const tabs = ['evidence', 'terminal', 'mcp', 'subagents', 'tasks', 'tools']
+const tabs = [
+  { id: 'evidence', label: 'Evidence', icon: '◎' },
+  { id: 'terminal', label: 'Terminal', icon: '>_' },
+  { id: 'mcp', label: 'MCP', icon: 'M' },
+  { id: 'subagents', label: 'Agents', icon: '@' },
+  { id: 'tasks', label: 'Tasks', icon: 'T' },
+  { id: 'tools', label: 'Tools', icon: '#' },
+]
 const taskGroupKinds = ['goal', 'work', 'acceptance', 'behavior', 'boundary', 'constraint', 'hypothesis', 'unknown']
 const taskKindLabels = {
   goal: 'Goals',
@@ -50,6 +59,9 @@ const activeTaskAnalysis = computed(() => {
   const arr = props.taskAnalyses || []
   return arr.length ? arr[arr.length - 1] : null
 })
+const activeTab = computed(() => tabs.find(item => item.id === props.tab) || tabs[0])
+const openUnknownCount = computed(() => activeTaskAnalysis.value ? remainingTaskCountFor(activeTaskAnalysis.value) : 0)
+const panelStyle = computed(() => ({ '--inspector-width': `${props.width}px` }))
 
 function analysisRowsFor(analysis) {
   if (!analysis) return []
@@ -214,7 +226,32 @@ onMounted(() => {
     gsap.fromTo(root.value, { x: 24, autoAlpha: 0 }, { x: 0, autoAlpha: 1, duration: .42, ease: 'power3.out' })
   }
 })
-onUnmounted(() => clearTimeout(copyTaskTimer))
+function clampPanelWidth(value) {
+  const max = Math.min(640, window.innerWidth - 40)
+  return Math.min(max, Math.max(320, value))
+}
+
+function startResize(event) {
+  event.preventDefault()
+  const move = (moveEvent) => {
+    emit('resize', clampPanelWidth(window.innerWidth - moveEvent.clientX))
+  }
+  const up = () => {
+    stopPanelResize?.()
+    stopPanelResize = null
+  }
+  window.addEventListener('pointermove', move)
+  window.addEventListener('pointerup', up, { once: true })
+  stopPanelResize = () => {
+    window.removeEventListener('pointermove', move)
+    window.removeEventListener('pointerup', up)
+  }
+}
+
+onUnmounted(() => {
+  clearTimeout(copyTaskTimer)
+  stopPanelResize?.()
+})
 
 watch(percent, (value, previous = 50) => {
   if (!confidenceBar.value) return
@@ -363,20 +400,18 @@ function onRowLeave(el) {
 </script>
 
 <template>
-  <aside ref="root" class="inspector">
+  <aside ref="root" class="inspector" :style="panelStyle">
+    <button class="inspector__resize" type="button" aria-label="Resize inspector" @pointerdown="startResize"></button>
     <header class="inspector__head">
-      <div>
-        <strong>Run details</strong>
-        <small>{{ runs.length }} evidence runs · {{ mcpServers.length }} MCP servers</small>
+      <div class="inspector__title">
+        <span class="inspector__mark">{{ activeTab.icon }}</span>
+        <div>
+          <strong>{{ activeTab.label }}</strong>
+          <small>{{ runs.length }} runs / {{ openUnknownCount }} open unknowns / {{ mcpServers.length }} MCP</small>
+        </div>
       </div>
-      <button type="button" aria-label="Close inspector" @click="emit('close')">×</button>
+      <button class="inspector__close" type="button" aria-label="Close inspector" @click="emit('close')">×</button>
     </header>
-
-    <nav class="inspector__tabs">
-      <button v-for="name in tabs" :key="name" :class="{ active: tab === name }" @click="emit('update:tab', name)">
-        {{ name }}
-      </button>
-    </nav>
 
     <div class="inspector__content">
       <template v-if="tab === 'evidence'">
@@ -612,18 +647,15 @@ function onRowLeave(el) {
         </article>
       </template>
 
-
     </div>
   </aside>
 </template>
 
 <style scoped>
-.inspector { position: absolute; z-index: 20; inset: 0 0 0 auto; width: min(360px, calc(100% - 24px)); min-width: 0; overflow: hidden; border-left: 1px solid #cbd9ec; color: #233d5b; background: rgba(247, 250, 255, .96); box-shadow: -16px 0 42px rgba(31, 67, 119, .08); will-change: transform, opacity; }
+.inspector { position: absolute; z-index: 20; inset: 0 0 0 auto; width: min(var(--inspector-width, 392px), calc(100% - 20px)); min-width: 0; overflow: hidden; border-left: 1px solid #cbd9ec; color: #233d5b; background: rgba(247, 250, 255, .96); box-shadow: -16px 0 42px rgba(31, 67, 119, .08); will-change: transform, opacity; }
 .inspector__head { display: flex; height: 58px; align-items: center; justify-content: space-between; padding: 0 14px 0 17px; border-bottom: 1px solid #d8e3f1; }
 .inspector__head div { display: grid; gap: 2px; }.inspector__head strong { font-size: 12px; }.inspector__head small { max-width: 240px; overflow: hidden; color: #8192a8; font: 9.5px/1.2 var(--mono); text-overflow: ellipsis; white-space: nowrap; }
 .inspector__head button { width: 27px; height: 27px; border: 0; border-radius: 7px; color: #6d829d; background: transparent; font-size: 18px; cursor: pointer; }.inspector__head button:hover { background: #e6eef9; }
-.inspector__tabs { display: grid; grid-template-columns: repeat(auto-fit, minmax(58px, 1fr)); gap: 3px; padding: 7px; border-bottom: 1px solid #dbe5f2; }
-.inspector__tabs button { padding: 7px 2px; border: 0; border-radius: 6px; color: #71859f; background: transparent; font: 700 9px/1 var(--mono); text-transform: uppercase; cursor: pointer; }.inspector__tabs button.active { color: #fff; background: #1756d1; box-shadow: 0 4px 12px rgba(23, 86, 209, .22); }
 .inspector__content { height: calc(100% - 138px); overflow-y: auto; padding: 12px 10px 12px 12px; }
 .usage-card,.hypothesis-row { margin-bottom: 10px; border: 1px solid #d8e2ef; border-radius: 10px; background: #fff; }
 .hypothesis-row { overflow: hidden; border-left: 3px solid #d8e2ef; }
@@ -1073,6 +1105,219 @@ function onRowLeave(el) {
 .mcp-row:hover .mcp-row__tools { display: flex; }
 .workspace-note { margin: 12px 0 0; padding: 14px 12px; border: 1px dashed #cbd9ec; border-radius: 9px; color: #7188a3; background: #f8faff; font: 10px/1.45 var(--mono); text-align: center; }.mcp-row__tools span { padding: 4px 5px; border: 1px solid #d8e2ef; border-radius: 6px; color: #1756d1; background: #eef4ff; font: 8.5px/1 var(--mono); }
 .evidence-list-enter-active,.evidence-list-leave-active { transition: opacity .25s, transform .3s cubic-bezier(.22,1,.36,1); }.evidence-list-enter-from,.evidence-list-leave-to { opacity: 0; transform: translateY(10px) scale(.98); }
+
+/* visual refresh */
+.inspector {
+  width: min(var(--inspector-width, 392px), calc(100% - 20px));
+  border-left-color: rgba(16, 42, 92, 0.16);
+  color: var(--text);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.98), rgba(246, 250, 255, 0.98)),
+    var(--bg-raised);
+  box-shadow: -18px 0 52px rgba(23, 72, 150, 0.14);
+}
+
+.inspector__resize {
+  position: absolute;
+  inset: 0 auto 0 -5px;
+  z-index: 4;
+  width: 10px;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  cursor: col-resize;
+  touch-action: none;
+}
+
+.inspector__resize::after {
+  content: "";
+  position: absolute;
+  top: 12px;
+  bottom: 12px;
+  left: 4px;
+  width: 2px;
+  border-radius: 999px;
+  background: transparent;
+  transition: background var(--transition-fast), box-shadow var(--transition-fast);
+}
+
+.inspector__resize:hover::after,
+.inspector__resize:focus-visible::after {
+  background: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-bg);
+}
+
+.inspector__head {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  height: 68px;
+  padding: 0 14px 0 16px;
+  border-bottom-color: var(--border);
+  background: rgba(255, 255, 255, 0.94);
+  backdrop-filter: blur(16px);
+}
+
+.inspector__title {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 10px;
+}
+
+.inspector__mark {
+  display: grid;
+  width: 34px;
+  height: 34px;
+  flex: 0 0 34px;
+  place-items: center;
+  border: 1px solid var(--accent-border);
+  border-radius: var(--radius-sm);
+  color: #ffffff;
+  background: var(--accent);
+  font: 700 11px/1 var(--mono);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.18);
+}
+
+.inspector__title > div {
+  min-width: 0;
+}
+
+.inspector__head strong {
+  color: var(--text-h);
+  font: 570 15px/1.15 var(--heading);
+  letter-spacing: -0.015em;
+}
+
+.inspector__head small {
+  max-width: 280px;
+  color: var(--text-muted);
+  font: 9.5px/1.3 var(--mono);
+}
+
+.inspector__close {
+  width: 31px;
+  height: 31px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  color: var(--text-muted);
+}
+
+.inspector__close:hover {
+  border-color: var(--border);
+  color: var(--text-h);
+  background: var(--code-bg-hover);
+}
+
+.inspector__content {
+  height: calc(100% - 68px);
+  padding: 14px;
+  background:
+    linear-gradient(rgba(23, 86, 209, 0.035) 1px, transparent 1px),
+    transparent;
+  background-size: 100% 48px;
+}
+
+.usage-card,
+.confidence-card,
+.hypothesis-row,
+.evidence-card,
+.relation-list,
+.verdict-card,
+.mcp-row,
+.subagent-row,
+.task-block,
+.inspector-tool,
+.terminal-card {
+  border-color: var(--border);
+  border-radius: var(--radius);
+  background: rgba(255, 255, 255, 0.9);
+  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.78), 0 10px 28px rgba(23, 72, 150, 0.07);
+}
+
+.usage-card {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 5px 10px;
+  padding: 13px;
+}
+
+.usage-card span {
+  grid-column: 1 / 2;
+}
+
+.usage-card strong {
+  grid-column: 2 / 3;
+  margin: 0;
+  align-self: center;
+  color: var(--text-h);
+}
+
+.usage-card p {
+  grid-column: 1 / -1;
+}
+
+.confidence-card,
+.hypothesis-row,
+.task-block {
+  border-left-width: 1px;
+}
+
+.confidence-card__top {
+  color: var(--text-muted);
+  letter-spacing: 0;
+  text-transform: none;
+}
+
+.confidence-card__track,
+.tk-progress-bar {
+  height: 6px;
+  background: var(--code-bg-hover);
+}
+
+.inspector__section-head {
+  margin: 0 2px 11px;
+  padding: 0 1px;
+}
+
+.inspector__section-head strong {
+  color: var(--text-h);
+  font: 570 14px/1.2 var(--heading);
+}
+
+.inspector__section-head span,
+.task-block__meta small,
+.mcp-row__main small,
+.subagent-row small,
+.inspector-tool small {
+  color: var(--text-muted);
+}
+
+.hypothesis-row__summary,
+.task-block__summary,
+.terminal-card__summary {
+  min-height: 44px;
+}
+
+.evidence-card,
+.tk-item,
+.inspector-tool,
+.mcp-row,
+.subagent-row {
+  transition: border-color var(--transition-fast), background var(--transition-fast), transform var(--transition-fast);
+}
+
+.evidence-card:hover,
+.tk-item:hover,
+.inspector-tool:hover,
+.mcp-row:hover,
+.subagent-row:hover {
+  border-color: var(--accent-border);
+  background: #ffffff;
+  transform: translateY(-1px);
+}
+
 @media (max-width: 980px) { .inspector { height: 100%; } }
 @media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }
 </style>

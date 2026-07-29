@@ -22,6 +22,7 @@ const emit = defineEmits([
 
 /* ── todos ── */
 const inspectorTab = ref(null)
+const inspectorWidth = ref(392)
 const todos = reactive([
   { id: 1, content: 'Implement agent chat backend', done: false },
   { id: 2, content: 'Add provider connection testing', done: true },
@@ -747,14 +748,10 @@ watch(() => props.activeWorkspace?.id, () => {
           <span class="chat__topbtn-label">Tasks</span>
           <span class="chat__topbtn-badge">{{ todos.filter(t => !t.done).length }}</span>
         </button>
-        <button class="chat__topbtn" :class="{ 'is-on': inspectorTab === 'workspace' }" @click="toggleInspector('workspace')" title="Workspace">
-          <span aria-hidden="true">⌂</span>
-          <span class="chat__topbtn-label">Workspace</span>
-        </button>
       </div>
     </div>
 
-    <div class="chat__body" :class="{ 'chat__body--has-panel': inspectorTab }">
+    <div class="chat__body" :class="{ 'chat__body--has-panel': inspectorTab }" :style="{ '--inspector-width': `${inspectorWidth}px` }">
 
       <!-- ============= message area ============= -->
       <div class="chat__main">
@@ -840,7 +837,8 @@ watch(() => props.activeWorkspace?.id, () => {
           :tools="toolCatalog"
           :mcp-servers="mcpServers"
           :subagents="visibleSubagents"
-          @update:tab="inspectorTab = $event"
+          :width="inspectorWidth"
+          @resize="inspectorWidth = $event"
           @toggle-todo="toggleTodo"
           @close="inspectorTab = null"
         />
@@ -967,7 +965,6 @@ watch(() => props.activeWorkspace?.id, () => {
 }
 .chat__topbtn:hover { border-color: var(--accent-border); color: var(--text-h); }
 .chat__topbtn.is-on { border-color: var(--accent-border); background: var(--accent-bg); color: var(--accent-text); }
-.chat__topbtn[title="Workspace"] { display: none; }
 .chat__topbtn-badge {
   position: absolute; top: -4px; right: -4px;
   min-width: 14px; height: 14px; padding: 0 3px;
@@ -1326,7 +1323,7 @@ watch(() => props.activeWorkspace?.id, () => {
 
 @media (min-width: 981px) {
   .chat__body--has-panel .chat__main {
-    margin-right: min(360px, calc(100% - 24px));
+    margin-right: min(var(--inspector-width, 392px), calc(100% - 20px));
   }
 }
 
