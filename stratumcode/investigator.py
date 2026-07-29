@@ -338,6 +338,18 @@ def investigation_stream(
                         "target_unknown_ids": [verification_request["unknown_id"]],
                         "reason": verification_request.get("reason")
                         or "Independently verify the material investigation inference.",
+                        "hypothesis": verification_request["hypothesis"],
+                        "expected_observation": (
+                            "The verifier returns a supported, opposed, or inconclusive "
+                            "verdict with evidence for the atomic hypothesis."
+                        ),
+                        "decision_impact": (
+                            "The target resolution can be accepted, rejected, or kept "
+                            "partial without repeating the same investigation."
+                        ),
+                        "stop_condition": (
+                            "Stop after one independent verdict for this atomic hypothesis."
+                        ),
                     }
                 failed_key = _tool_cache_key(name, arguments)
                 if failed_key in failed_tool_cache:
@@ -541,7 +553,7 @@ def investigation_stream(
                             output = json.dumps({
                                 "recorded": False,
                                 "code": "nothing_to_record",
-                                "next_action": "continue_discovery",
+                                "next_action": "finish_investigation",
                                 "message": "No pending observations or unresolved evidence-backed resolutions are available to record.",
                             }, ensure_ascii=False)
                             yield start_event(call_id, "tool", {
@@ -1126,7 +1138,7 @@ def _tool_cache_key(name: str, arguments: dict) -> str:
     ignored = (
         set()
         if name in {"record_investigation_findings", "resolve_unknowns", "finish_investigation"}
-        else {"reason", *DISCOVERY_CONTRACT_FIELDS}
+        else {"reason", "investigation_contract", "discovery_contract", *DISCOVERY_CONTRACT_FIELDS}
     )
     comparable = {
         key: value
@@ -3032,10 +3044,7 @@ def _run_tool_stream(name: str, call_id: str, arguments: dict, workspace_dir: st
     target_unknown_ids = _target_unknown_ids(arguments)
     reason = str(arguments.pop("reason", "") or "").strip()
     orientation = bool(arguments.pop("orientation", False))
-    discovery_contract = {
-        field: str(arguments.pop(field, "") or "").strip()
-        for field in DISCOVERY_CONTRACT_FIELDS
-    }
+    discovery_contract = _extract_discovery_contract(arguments)
     arguments.pop("target_unknown_ids", None)
     _validate_tool_contract(
         name,
@@ -3111,6 +3120,18 @@ def _run_tool_stream(name: str, call_id: str, arguments: dict, workspace_dir: st
             "investigation_contract": discovery_contract,
         },
     }, ensure_ascii=False)
+
+
+def _extract_discovery_contract(arguments: dict) -> dict[str, str]:
+    nested = arguments.pop("investigation_contract", None)
+    if not isinstance(nested, dict):
+        nested = arguments.pop("discovery_contract", None)
+    if not isinstance(nested, dict):
+        nested = {}
+    return {
+        field: str(arguments.pop(field, "") or nested.get(field) or "").strip()
+        for field in DISCOVERY_CONTRACT_FIELDS
+    }
 
 
 def _validate_tool_contract(
@@ -4870,10 +4891,15 @@ def _step_result(final: dict, *, implementation_intent: bool = True) -> dict:
     investigate = [item for item in blockers if item.get("resolution_strategy") == "investigate_project"]
     clearify = [item for item in blockers if item.get("resolution_strategy") == "clearify"]
     unresolved_ids = [item["id"] for item in blockers if item.get("id")]
-    if final.get("runtime_failure") and not blockers:
+    if final.get("runtime_failure") and (not blockers or _runtime_failure_blocks_continue(final)):
+        failure_reason = (
+            final.get("recovery_reason")
+            or final.get("summary")
+            or "Investigation failed before producing a valid final result."
+        )
         return {
             "next_step": "failed",
-            "continue_reason": final.get("summary") or "Investigation failed before producing a valid final result.",
+            "continue_reason": failure_reason,
             "target_unknown_ids": unresolved_ids,
             "unresolved_unknown_ids": unresolved_ids,
             "summary": "",
@@ -4985,6 +5011,14 @@ def _step_result(final: dict, *, implementation_intent: bool = True) -> dict:
         "resolutions": final.get("resolutions", []),
         "unknowns": final.get("unknowns", []),
     }
+
+
+def _runtime_failure_blocks_continue(final: dict) -> bool:
+    reason = str(final.get("recovery_reason") or final.get("summary") or "")
+    return (
+        "repeated tool argument errors" in reason
+        or "identical failed tool call loop" in reason
+    )
 
 
 def _unknowns(value) -> list[dict]:
