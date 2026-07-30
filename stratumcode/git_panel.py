@@ -116,13 +116,17 @@ def _commit(root: Path, title: str, description: str, paths: list[str]) -> dict:
     description = description.strip()
     if not title:
         return {"ok": False, "error": "Commit title is required.", "snapshot": snapshot(str(root))}
-    if not paths and not _status(root)["dirty"]:
+    status = _status(root)
+    if not paths and not status["dirty"]:
         return {"ok": False, "error": "No changes to commit.", "snapshot": snapshot(str(root))}
     args = ["commit", "-m", title]
     if description:
         args.extend(["-m", description])
-    add_args = ("add", "-A", "--", *paths) if paths else ("add", "-A")
-    return _run_chain(root, "commit", [add_args, tuple(args)])
+    if paths:
+        return _run_chain(root, "commit", [("add", "-A", "--", *paths), tuple(args)])
+    if status["counts"]["staged"]:
+        return _action_result(root, "commit", [_run(root, *args)])
+    return _run_chain(root, "commit", [("add", "-A"), tuple(args)])
 
 
 def _stage(root: Path, paths: list[str]) -> dict:
