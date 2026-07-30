@@ -344,10 +344,33 @@ onUnmounted(() => {
             <span>{{ branchName(branch.name) }}</span>
             <small>{{ branch.upstream || branch.hash }}</small>
             <b v-if="branch.track">{{ branch.track }}</b>
+            <button
+              v-if="!branch.current"
+              class="git-branch__switch"
+              type="button"
+              :disabled="!!actionLoading"
+              title="Switch to this branch"
+              @click="runGitAction('checkout', { branch: branch.name })"
+            >
+              <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                <polyline points="17 1 21 5 17 9"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/><polyline points="7 23 3 19 7 15"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/>
+              </svg>
+            </button>
           </article>
           <article v-for="branch in remoteBranches.slice(0, 8)" :key="branch.name" class="git-branch is-remote">
             <span>{{ branchName(branch.name) }}</span>
             <small>{{ branch.hash }}</small>
+            <button
+              class="git-branch__switch"
+              type="button"
+              :disabled="!!actionLoading"
+              title="Checkout remote branch"
+              @click="runGitAction('checkout', { branch: branch.name })"
+            >
+              <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                <polyline points="17 1 21 5 17 9"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/><polyline points="7 23 3 19 7 15"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/>
+              </svg>
+            </button>
           </article>
         </div>
       </section>
@@ -971,9 +994,15 @@ onUnmounted(() => {
 }
 
 .git-branch {
+  display: grid;
+  position: relative;
   grid-template-columns: minmax(0, 1fr) auto;
   gap: 3px 8px;
-  padding: 8px 11px;
+  padding: 8px 34px 8px 11px;
+}
+
+.git-branch.is-current {
+  padding-right: 11px;
 }
 
 .git-branch span {
@@ -1006,6 +1035,39 @@ onUnmounted(() => {
 
 .git-branch.is-remote span {
   color: #8f45d8;
+}
+
+.git-branch__switch {
+  position: absolute;
+  right: 6px;
+  top: 50%;
+  transform: translateY(-50%);
+  display: grid;
+  width: 22px;
+  height: 22px;
+  place-items: center;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text-muted);
+  background: var(--bg-raised);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 120ms, color 120ms, border-color 120ms;
+}
+
+.git-branch:hover .git-branch__switch,
+.git-branch:focus-within .git-branch__switch {
+  opacity: 1;
+}
+
+.git-branch__switch:hover:not(:disabled) {
+  color: var(--accent);
+  border-color: var(--accent-border);
+}
+
+.git-branch__switch:disabled {
+  cursor: default;
+  opacity: 0;
 }
 
 .git-remote {

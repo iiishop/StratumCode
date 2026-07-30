@@ -68,6 +68,11 @@ def run_action(workspace_dir: str, action: str, payload: dict | None = None) -> 
     if action == "generate_commit":
         paths = _payload_paths(root, payload)
         return _generate_commit(root, paths)
+    if action == "checkout":
+        branch = str(payload.get("branch") or "")
+        if not branch:
+            return {"ok": False, "error": "Branch name is required."}
+        return _action_result(root, action, [_run(root, "checkout", branch)])
     return {"ok": False, "error": "Unsupported Git action."}
 
 
