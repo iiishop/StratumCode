@@ -597,6 +597,7 @@ async function send(answer = null) {
   Object.assign(agentStatus, { state: 'running', phase: 'starting', contextUsed: 0 })
   openInspector('evidence')
   nextTick(() => { scrollBottom(); animateLast() })
+  let completedNormally = false
   try {
     const request = {
       message: text,
@@ -604,6 +605,7 @@ async function send(answer = null) {
       session_id: props.session?.id,
     }
     await chatStream(message, request)
+    completedNormally = true
   } catch (error) {
     if (error.name !== 'AbortError') {
       message.events.push({
@@ -616,7 +618,27 @@ async function send(answer = null) {
     isStreaming.value = false
     agentStatus.state = 'idle'
     scheduleSave()
+    if (completedNormally && props.session?.id) {
+      void generateSessionTitle(props.session.id, text, message)
+    }
     nextTick(scrollBottom)
+  }
+}
+
+async function generateSessionTitle(sessionId, userText, assistantMsg) {
+  try {
+    const output = assistantMsg.events
+      .filter(e => e.type === 'output')
+      .map(e => e.data?.content || '')
+      .join('\\n')
+    if (!output) return
+    await fetch('/api/sessions/generate-title', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id: sessionId, user_message: userText, ai_response: output }),
+    })
+  } catch {
+    // Title generation is non-critical
   }
 }
 

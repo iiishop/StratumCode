@@ -162,6 +162,7 @@ def investigation_stream(
     pending_observation_ids: list[str] = []
     repeated_tool_error_name = ""
     repeated_tool_error_count = 0
+    already_resolved_error_count = 0
     failed_tool_cache: dict[str, str] = {}
     stop_investigation = False
     verification_queue: list[dict] = []
@@ -405,7 +406,7 @@ def investigation_stream(
                         break
                     continue
                 if name not in allowed_tool_names:
-                    if _recorded_resolves_initial_unknowns(recorded_findings, analysis):
+                    if _recorded_resolves_initial_unknowns(recorded_findings, analysis) and name != "finish_investigation":
                         output = json.dumps({
                             "error": "investigation_already_resolved",
                             "retryable": True,
@@ -428,6 +429,10 @@ def investigation_stream(
                             "tool_call_id": call_id,
                             "content": output,
                         })
+                        already_resolved_error_count += 1
+                        if already_resolved_error_count >= 2:
+                            # Hard-lock: force the model to call finish_investigation
+                            current_tool_choice = {"type": "function", "function": {"name": "finish_investigation"}}
                         continue
                     if resolution_required_ids:
                         output = json.dumps({
@@ -453,6 +458,10 @@ def investigation_stream(
                             "tool_call_id": call_id,
                             "content": output,
                         })
+                        already_resolved_error_count += 1
+                        if already_resolved_error_count >= 2:
+                            # Hard-lock: force the model to call finish_investigation
+                            current_tool_choice = {"type": "function", "function": {"name": "finish_investigation"}}
                         continue
                     output = _tool_blocked_error_json(
                         name,
@@ -567,6 +576,10 @@ def investigation_stream(
                             "tool_call_id": call_id,
                             "content": output,
                         })
+                        already_resolved_error_count += 1
+                        if already_resolved_error_count >= 2:
+                            # Hard-lock: force the model to call finish_investigation
+                            current_tool_choice = {"type": "function", "function": {"name": "finish_investigation"}}
                         continue
                     if (
                         pending_observation_ids
@@ -592,6 +605,10 @@ def investigation_stream(
                             "tool_call_id": call_id,
                             "content": output,
                         })
+                        already_resolved_error_count += 1
+                        if already_resolved_error_count >= 2:
+                            # Hard-lock: force the model to call finish_investigation
+                            current_tool_choice = {"type": "function", "function": {"name": "finish_investigation"}}
                         continue
                     if (
                         not _has_finding_fields(arguments)
@@ -639,6 +656,10 @@ def investigation_stream(
                             "tool_call_id": call_id,
                             "content": output,
                         })
+                        already_resolved_error_count += 1
+                        if already_resolved_error_count >= 2:
+                            # Hard-lock: force the model to call finish_investigation
+                            current_tool_choice = {"type": "function", "function": {"name": "finish_investigation"}}
                         continue
                     _require_finding_fields(arguments)
                     recorded_findings = _merge_recorded_findings(recorded_findings, arguments)
@@ -838,6 +859,10 @@ def investigation_stream(
                             "tool_call_id": call_id,
                             "content": output,
                         })
+                        already_resolved_error_count += 1
+                        if already_resolved_error_count >= 2:
+                            # Hard-lock: force the model to call finish_investigation
+                            current_tool_choice = {"type": "function", "function": {"name": "finish_investigation"}}
                         continue
                     _validate_tool_contract(
                         name,
@@ -873,6 +898,10 @@ def investigation_stream(
                             "tool_call_id": call_id,
                             "content": output,
                         })
+                        already_resolved_error_count += 1
+                        if already_resolved_error_count >= 2:
+                            # Hard-lock: force the model to call finish_investigation
+                            current_tool_choice = {"type": "function", "function": {"name": "finish_investigation"}}
                         continue
                     question_id = clearify_runtime.create_pending()
                     yield start_event(question_id, "user_question", _clearify_question(
@@ -2731,6 +2760,7 @@ def _finalize_investigation(
     attempts = app_settings.get_round_limit("investigation_finalization_attempts")
     repeated_tool_error_name = ""
     repeated_tool_error_count = 0
+    already_resolved_error_count = 0
     repeated_finalization_error_key = ""
     repeated_finalization_error_count = 0
     stop_finalization = False
@@ -3972,6 +4002,12 @@ def _apply_investigation_audit(
                 if strict_grounding
                 else []
             )
+            # Derived inferences may reference runtime paths and identifiers
+            # that cannot appear as literals in source code (e.g. .venv/Scripts/stratumcode,
+            # python.exe). Skip unsupported-literal check for derived inferences — they are
+            # by definition the model's synthesis, not direct source quotes.
+            if unsupported and str(resolution.get("kind") or "") == "derived_inference":
+                unsupported = []
             supporting_ids = _supporting_observation_ids(unsupported, observations or [])
             if supporting_ids:
                 resolution["evidence"] = _dedupe_strings([

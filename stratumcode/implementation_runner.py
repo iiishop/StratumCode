@@ -846,6 +846,7 @@ def _validation_stream(
     workspace_dir: str,
     changed_files: list[str],
     patch_records: list[dict],
+    validation_hint: str = "",
 ) -> Iterator[dict]:
     setting = model_settings.resolve(model_settings.DEFAULT_STAGE)
     if setting is None:
@@ -884,6 +885,7 @@ def _validation_stream(
             "changed_files": sorted(set(changed_files)),
             "patch_records": patch_records,
             "workspace_dir": workspace_dir,
+            "validation_hint": validation_hint or None,
         }, ensure_ascii=False)},
     ]
     tools = _validation_tools()

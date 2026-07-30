@@ -30,6 +30,7 @@ _CHAT_TRANSITIONS = {
     ChatState.PATCH_PLANNING: {
         ChatState.ANALYZING,
         ChatState.INVESTIGATING,
+        ChatState.PATCH_PLANNING,
         ChatState.IMPLEMENTING,
         ChatState.SAVING_SESSION,
         ChatState.COMPLETED,
@@ -62,7 +63,9 @@ class ChatRun:
     last_investigation: dict | None = None
     design_plan: dict | None = None
     design_revision_mode: str = ""
+    patch_retries: int = 0
     bugfix_readiness: dict | None = None
+    continuation_context: list[str] = field(default_factory=list)
     validation_inconclusive_count: int = 0
     patch_plan: dict | None = None
     implementation_result: dict | None = None

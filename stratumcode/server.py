@@ -162,6 +162,7 @@ _POST_SESSIONS = {
     "create":     lambda h, b: h._json({"session": sessions.create(int(b["workspace_id"]))}),
     "get":        lambda h, b: h._json({"session": sessions.get(int(b["id"]))}),
     "rename":     lambda h, b: (sessions.rename(int(b["id"]), b["name"]), h._json({"ok": True})),
+    "generate-title": lambda h, b: h._json({"title": sessions.generate_title(int(b["id"]), b["user_message"], b["ai_response"])}),
     "save-state": lambda h, b: (sessions.save_state(int(b["id"]), b.get("state", {})), h._json({"ok": True})),
     "delete":     lambda h, b: (sessions.delete(int(b["id"])), h._json({"ok": True})),
 }

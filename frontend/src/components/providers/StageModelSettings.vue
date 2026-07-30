@@ -3,16 +3,18 @@ import { computed, onMounted, reactive, ref } from 'vue'
 import { animate } from 'animejs'
 
 const props = defineProps({ providers: { type: Array, required: true } })
-const stageOrder = ['default', 'evidence', 'git_commit']
+const stageOrder = ['default', 'evidence', 'git_commit', 'title']
 const stageMeta = {
   default: { index: '00', title: 'Global default', detail: 'Fallback for every stage', empty: 'Select provider' },
   evidence: { index: '01', title: 'Gather evidence', detail: 'Hypothesis verification loop', empty: 'Use global default' },
   git_commit: { index: '02', title: 'Git commit message', detail: 'Generate commit title and description', empty: 'Use global default' },
+  title: { index: '03', title: 'Session title', detail: 'Generate session title from conversation', empty: 'Use global default' },
 }
 const rows = reactive({
   default: { provider_id: '', model_id: '', models: [], loading: false, saved: false },
   evidence: { provider_id: '', model_id: '', models: [], loading: false, saved: false },
   git_commit: { provider_id: '', model_id: '', models: [], loading: false, saved: false },
+  title: { provider_id: '', model_id: '', models: [], loading: false, saved: false },
 })
 const error = ref('')
 

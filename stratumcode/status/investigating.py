@@ -253,8 +253,17 @@ def handle(run):
         run.findings = _merge_findings(run.findings, _investigation_continuation_findings(run.last_investigation))
         run.transition(chat.ChatState.INVESTIGATING, "Investigation still has unresolved blocking unknowns.")
     elif next_step == "failed":
-        run.transition(chat.ChatState.FAILED, "Investigation failed.")
-    elif next_step == "continue_investigation" or has_unknown_task or has_blocked_task:
+        # If recorded findings already cover initial unknowns, the investigation
+        # facts are complete -- a transient finish_investigation error should not
+        # kill the whole run. Retry in investigating instead.
+        if (
+            run.last_investigation
+            and _recorded_covers_unknowns(run.last_investigation, run.analysis)
+        ):
+            run.transition(chat.ChatState.INVESTIGATING, "Investigation facts are complete; retrying finish.")
+        else:
+            run.transition(chat.ChatState.FAILED, "Investigation failed.")
+    elif next_step == "continue_investigation" or has_blocked_task:
         run.findings = _merge_findings(run.findings, _investigation_continuation_findings(run.last_investigation))
         run.transition(chat.ChatState.INVESTIGATING, "Investigation requested another pass.")
     else:
@@ -267,7 +276,7 @@ def handle(run):
 def _investigation_allows_patch(investigation: dict) -> bool:
     if _has_task_status(investigation, "blocked"):
         return False
-    if _has_task_status(investigation, "unknown"):
+    if _has_blocking_unknown(investigation):
         return False
     raw_step = investigation.get("step_result")
     step: dict = raw_step if isinstance(raw_step, dict) else {}
@@ -289,6 +298,42 @@ def _has_task_status(investigation: dict | None, status: str) -> bool:
         if item.get("status") == status:
             return True
     return False
+
+
+def _has_blocking_unknown(investigation: dict | None) -> bool:
+    """Return True if any unknown task is still blocking (status=unknown, blocking=True)."""
+    if not investigation:
+        return False
+    tasks = investigation.get("task_updates", [])
+    if not isinstance(tasks, list):
+        return False
+    for item in tasks:
+        if not isinstance(item, dict):
+            continue
+        if item.get("kind") == "hypothesis":
+            continue
+        if item.get("status") == "unknown" and item.get("blocking"):
+            return True
+    return False
+
+
+def _recorded_covers_unknowns(investigation: dict | None, analysis: dict | None) -> bool:
+    """Return True if all blocking unknowns in the analysis have recorded resolutions."""
+    if not investigation or not analysis:
+        return False
+    recorded_unknown_ids = {
+        str(r.get("unknown_id") or "")
+        for r in investigation.get("resolutions", [])
+        if isinstance(r, dict)
+        and str(r.get("status") or "") in ("resolved", "partially_resolved", "deferred")
+    }
+    unknown_ids = {
+        str(u.get("id") or "")
+        for u in analysis.get("unknowns", [])
+        if isinstance(u, dict)
+        and u.get("blocking")
+    }
+    return bool(unknown_ids and unknown_ids <= recorded_unknown_ids)
 
 
 def _blocking_unknown_ids(investigation: dict | None) -> list[str]:

@@ -8,6 +8,9 @@ from .task_contract import run_request
 def handle(run):
     from .. import chat
 
+    if run.patch_plan is None:
+        run.transition(chat.ChatState.INVESTIGATING, "Patch plan missing; re-investigate.")
+        return
     failed = False
     for event in implementation_runner.implementation_stream(
         message=run_request(run),

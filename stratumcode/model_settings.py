@@ -4,7 +4,8 @@ from .db import db_session
 DEFAULT_STAGE = "default"
 EVIDENCE_STAGE = "evidence"
 GIT_COMMIT_STAGE = "git_commit"
-VALID_STAGES = {DEFAULT_STAGE, EVIDENCE_STAGE, GIT_COMMIT_STAGE}
+TITLE_STAGE = "title"
+VALID_STAGES = {DEFAULT_STAGE, EVIDENCE_STAGE, GIT_COMMIT_STAGE, TITLE_STAGE}
 
 
 def _ensure_table() -> None:

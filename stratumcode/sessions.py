@@ -97,6 +97,7 @@ def _migrate_legacy_sessions(db) -> None:
 
 def _default_state() -> dict:
     return {
+        "title": "",
         "messages": [],
         "evidenceRuns": [],
         "activeRunId": "",
@@ -292,3 +293,36 @@ def _cap_observations(observations: list[dict], knowledge: list[dict]) -> list[d
     tail_ids = {item.get("id") for item in tail}
     extras = [item for item in observations if item.get("id") in pinned and item.get("id") not in tail_ids]
     return extras + tail
+
+def generate_title(session_id: int, user_message: str, ai_response: str) -> str:
+    """Generate a short title (≤10 characters) for a session using the title model."""
+    from . import agent_runtime, model_settings
+
+    setting = model_settings.resolve(model_settings.TITLE_STAGE)
+    if setting is None:
+        raise RuntimeError("title model is not configured")
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "Generate a concise title summarizing the conversation topic. "
+                "The title must be 10 characters or fewer. "
+                "Reply with only the title text, no quotes, no punctuation, no explanation."
+            ),
+        },
+        {"role": "user", "content": user_message},
+        {"role": "assistant", "content": ai_response},
+    ]
+    assistant = agent_runtime.call_model(
+        setting["provider"],
+        setting["model_id"],
+        messages,
+        use_skills=False,
+    )
+    title = (assistant.get("content") or "").strip()
+    # Enforce 10-character limit
+    if len(title) > 10:
+        title = title[:10]
+    if title:
+        rename(session_id, title)
+    return title

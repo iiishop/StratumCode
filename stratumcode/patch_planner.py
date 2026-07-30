@@ -464,11 +464,31 @@ def patch_planning_stream(
         return
     issues = validate_patch_plan(plan, analysis, design_plan, workspace_dir, investigation)
     if issues:
-        yield start_event(f"{run_id}-output", "output", {
-            "content": "Patch plan rejected by runtime validator:\n" + "\n".join(f"- {item}" for item in issues),
+        fatal = any(
+            "runtime_revision_decision_ids" in item
+            or "decision has no evidence" in item
+            for item in issues
+        )
+        if fatal:
+            yield start_event(f"{run_id}-output", "output", {
+                "content": "Patch plan rejected by runtime validator:\n" + "\n".join(f"- {item}" for item in issues),
+                "streaming": False,
+            })
+            yield {"op": "update", "id": stage_id, "patch": {"state": "error", "phase": "patch_validation_failed"}}
+            return
+        yield start_event(f"{run_id}-repair-hint", "output", {
+            "content": (
+                "Patch plan needs minor fixes:\n"
+                + "\n".join(f"- {item}" for item in issues)
+            ),
             "streaming": False,
         })
-        yield {"op": "update", "id": stage_id, "patch": {"state": "error", "phase": "patch_validation_failed"}}
+        yield {"op": "update", "id": stage_id, "patch": {"state": "running", "phase": "repairing"}}
+        plan["_repair_issues"] = issues
+        plan["execution_authorization"] = patch_authorization.create_authorization(plan, workspace_dir)
+        yield start_event(f"{run_id}-plan", "patch_plan", plan)
+        yield {"op": "update", "id": stage_id, "patch": {"state": "done", "phase": "needs_repair"}}
+        yield {"op": "done", "patch_plan": plan, "repair_needed": True}
         return
     plan["execution_authorization"] = patch_authorization.create_authorization(plan, workspace_dir)
     yield start_event(f"{run_id}-plan", "patch_plan", plan)
@@ -593,14 +613,15 @@ def validate_patch_plan(plan: dict, analysis: dict, design_plan: dict, workspace
     })
     if missing_ac:
         issues.append("acceptance criteria missing acceptance_mapping: " + ", ".join(missing_ac))
+    available_step_ids = ", ".join(sorted(step_ids)[:10]) or "(none)"
     for item in plan.get("acceptance_mapping", []):
         if item.get("acceptance_id") not in criteria_ids:
             issues.append(f"acceptance_mapping references unknown acceptance id: {item.get('acceptance_id')}")
         if not item.get("covered_by") and not no_patch_plan:
-            issues.append(f"acceptance_mapping {item.get('acceptance_id') or '?'} has no covered_by steps")
+            issues.append(f"acceptance_mapping {item.get('acceptance_id') or '?'} has no covered_by steps (available step IDs: {available_step_ids})")
         missing_steps = [step for step in item.get("covered_by", []) if step not in step_ids]
         if missing_steps:
-            issues.append("acceptance_mapping references unknown steps: " + ", ".join(missing_steps))
+            issues.append(f"acceptance_mapping {item.get('acceptance_id') or '?'} references unknown steps: {', '.join(missing_steps)}. Available step IDs: {available_step_ids}")
         if not item.get("verification"):
             issues.append(f"acceptance_mapping {item.get('acceptance_id') or '?'} has no verification")
     workspace = Path(workspace_dir or ".").resolve()
