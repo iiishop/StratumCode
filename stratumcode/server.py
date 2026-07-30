@@ -5,7 +5,7 @@ from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-from . import app_settings, chat, clearify_runtime, lsp, mcp, model_settings, providers, sessions, skill_runtime, skills, subagents, terminal_manager, updates, workspaces
+from . import app_settings, chat, clearify_runtime, git_panel, lsp, mcp, model_settings, providers, sessions, skill_runtime, skills, subagents, terminal_manager, updates, workspaces
 from .tools import registry
 
 
@@ -78,6 +78,7 @@ _ROUTES: dict[tuple[str, str], object] = {
     ("GET", "/api/tools"):           lambda h, b: (mcp.load_enabled(), h._json([t.to_json() for t in registry.list_all()])),
     ("GET", "/api/terminal/processes"): lambda h, b: h._json({"items": terminal_manager.list_sessions(background_only=True)}),
     ("GET", "/api/updates/status"): lambda h, b: h._json(updates.status()),
+    ("GET", "/api/git/status"): lambda h, b: h._json(git_panel.snapshot(h._workspace_path())),
 
     # POST — 独立路由（不在前缀组里的）
     ("POST", "/api/model-settings/save"):   lambda h, b: (model_settings.save(b["stage"], int(b["provider_id"]), b["model_id"]), h._json({"ok": True})),
@@ -91,6 +92,7 @@ _ROUTES: dict[tuple[str, str], object] = {
     ("POST", "/api/terminal/kill"):         lambda h, b: h._json(terminal_manager.terminate(str(b.get("session_id") or ""), reason="user")),
     ("POST", "/api/updates/restart"):       lambda h, b: h._json(updates.restart()),
     ("POST", "/api/updates/apply"):         lambda h, b: h._handle_update_apply(b),
+    ("POST", "/api/git/action"):            lambda h, b: h._json(git_panel.run_action(h._workspace_path(), str(b.get("action") or ""), b)),
     ("POST", "/api/chat"):                  lambda h, b: h._handle_chat(b),
     ("POST", "/api/chat/answer"):           lambda h, b: h._handle_chat_answer(b),
     ("POST", "/api/subagents/mcp-install"): lambda h, b: h._handle_mcp_install(b),

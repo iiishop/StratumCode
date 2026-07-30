@@ -209,6 +209,14 @@ const inspectorTabs = computed(() => [
     description: 'Background commands launched by the workspace.',
   },
   {
+    id: 'git',
+    label: 'Git',
+    icon: 'G',
+    color: '#2f6edb',
+    soft: '#e8f0ff',
+    description: 'Local changes, remote refs, and commit graph.',
+  },
+  {
     id: 'mcp',
     label: 'MCP',
     icon: 'M',
@@ -353,6 +361,12 @@ function panelLeave(el, done) {
   timeline.to(el, { x: travel, autoAlpha: 0 }, 0)
   if (rail) timeline.to(rail, { x: 0 }, 0)
 }
+
+watch(inspectorWidth, (width) => {
+  if (!inspectorOpen.value) return
+  const rail = railElement()
+  if (rail) gsap.set(rail, { x: railDockX(width) })
+})
 
 function currentEvidenceRun() {
   return evidenceRuns.find(run => run.id === activeRunId.value)

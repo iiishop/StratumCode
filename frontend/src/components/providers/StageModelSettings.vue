@@ -3,9 +3,16 @@ import { computed, onMounted, reactive, ref } from 'vue'
 import { animate } from 'animejs'
 
 const props = defineProps({ providers: { type: Array, required: true } })
+const stageOrder = ['default', 'evidence', 'git_commit']
+const stageMeta = {
+  default: { index: '00', title: 'Global default', detail: 'Fallback for every stage', empty: 'Select provider' },
+  evidence: { index: '01', title: 'Gather evidence', detail: 'Hypothesis verification loop', empty: 'Use global default' },
+  git_commit: { index: '02', title: 'Git commit message', detail: 'Generate commit title and description', empty: 'Use global default' },
+}
 const rows = reactive({
   default: { provider_id: '', model_id: '', models: [], loading: false, saved: false },
   evidence: { provider_id: '', model_id: '', models: [], loading: false, saved: false },
+  git_commit: { provider_id: '', model_id: '', models: [], loading: false, saved: false },
 })
 const error = ref('')
 
@@ -74,10 +81,10 @@ async function save(stage, event) {
   }
 }
 
-async function clearEvidence() {
+async function clearStage(stage) {
   try {
-    await request('/model-settings/delete', { stage: 'evidence' })
-    Object.assign(rows.evidence, { provider_id: '', model_id: '', models: [], saved: false })
+    await request('/model-settings/delete', { stage })
+    Object.assign(rows[stage], { provider_id: '', model_id: '', models: [], saved: false })
   } catch (reason) {
     error.value = reason.message
   }
@@ -99,20 +106,20 @@ onMounted(load)
 
     <p v-if="error" class="stage-models__error">{{ error }}</p>
 
-    <div v-for="stage in ['default', 'evidence']" :key="stage" class="stage-row">
+    <div v-for="stage in stageOrder" :key="stage" class="stage-row" :class="`is-${stage}`">
       <div class="stage-row__identity">
-        <span>{{ stage === 'default' ? '00' : '01' }}</span>
+        <span>{{ stageMeta[stage].index }}</span>
         <div>
-          <strong>{{ stage === 'default' ? 'Global default' : 'Gather evidence' }}</strong>
-          <small v-if="stage === 'evidence' && !rows.evidence.provider_id">Inherits {{ defaultLabel }}</small>
-          <small v-else>{{ stage === 'default' ? 'Fallback for every stage' : 'Hypothesis verification loop' }}</small>
+          <strong>{{ stageMeta[stage].title }}</strong>
+          <small v-if="stage !== 'default' && !rows[stage].provider_id">Inherits {{ defaultLabel }}</small>
+          <small v-else>{{ stageMeta[stage].detail }}</small>
         </div>
       </div>
 
       <label>
         <span>Provider</span>
         <select v-model="rows[stage].provider_id" @change="loadModels(stage)">
-          <option value="">{{ stage === 'evidence' ? 'Use global default' : 'Select provider' }}</option>
+          <option value="">{{ stageMeta[stage].empty }}</option>
           <option v-for="provider in providers" :key="provider.id" :value="String(provider.id)">{{ provider.name }}</option>
         </select>
       </label>
@@ -134,7 +141,7 @@ onMounted(load)
         <button type="button" :disabled="!rows[stage].provider_id || !rows[stage].model_id" @click="save(stage, $event)">
           {{ rows[stage].saved ? 'Saved' : 'Save' }}
         </button>
-        <button v-if="stage === 'evidence' && rows.evidence.provider_id" type="button" class="stage-row__clear" @click="clearEvidence">Inherit</button>
+        <button v-if="stage !== 'default' && rows[stage].provider_id" type="button" class="stage-row__clear" @click="clearStage(stage)">Inherit</button>
       </div>
     </div>
   </section>
@@ -147,7 +154,7 @@ onMounted(load)
 .stage-models__default { max-width: 280px; overflow: hidden; padding: 6px 9px; border: 1px solid #c6d9f5; border-radius: 6px; color: #1756d1; background: #edf4ff; font: 8.5px/1 var(--mono); text-overflow: ellipsis; white-space: nowrap; }
 .stage-models__error { margin: 0; padding: 8px 18px; color: #a43d3d; background: #fff0ef; font-size: 10px; }
 .stage-row { display: grid; grid-template-columns: 1.2fr 1fr 1.4fr auto; align-items: end; gap: 10px; padding: 13px 16px; border-bottom: 1px solid #e0e8f3; }.stage-row:last-child { border: 0; }
-.stage-row__identity { display: flex; min-width: 0; align-items: center; gap: 9px; }.stage-row__identity > span { display: grid; width: 28px; height: 28px; place-items: center; border-radius: 8px; color: #fff; background: #1756d1; font: 800 9px/1 var(--mono); }.stage-row:nth-of-type(3) .stage-row__identity > span { color: #654d00; background: #f5c642; }.stage-row__identity div { display: grid; min-width: 0; gap: 3px; }.stage-row__identity strong { color: #29435f; font-size: 10.5px; }.stage-row__identity small { overflow: hidden; color: #7e91a8; font-size: 8.5px; text-overflow: ellipsis; white-space: nowrap; }
+.stage-row__identity { display: flex; min-width: 0; align-items: center; gap: 9px; }.stage-row__identity > span { display: grid; width: 28px; height: 28px; place-items: center; border-radius: 8px; color: #fff; background: #1756d1; font: 800 9px/1 var(--mono); }.stage-row.is-evidence .stage-row__identity > span { color: #654d00; background: #f5c642; }.stage-row.is-git_commit .stage-row__identity > span { background: #12846f; }.stage-row__identity div { display: grid; min-width: 0; gap: 3px; }.stage-row__identity strong { color: #29435f; font-size: 10.5px; }.stage-row__identity small { overflow: hidden; color: #7e91a8; font-size: 8.5px; text-overflow: ellipsis; white-space: nowrap; }
 .stage-row label { display: grid; gap: 4px; }.stage-row label > span { color: #788ba3; font: 700 8px/1 var(--mono); text-transform: uppercase; }.stage-row select,.stage-row input { min-width: 0; height: 31px; padding: 0 8px; border: 1px solid #cbd8e8; border-radius: 7px; color: #29445f; background: #fff; font: 9px/1 var(--mono); outline: none; }.stage-row select:focus,.stage-row input:focus { border-color: #1756d1; box-shadow: 0 0 0 2px rgba(23,86,209,.1); }.stage-row input:disabled { opacity: .55; }
 .stage-row__actions { display: flex; gap: 4px; }.stage-row__actions button { height: 31px; padding: 0 11px; border: 0; border-radius: 7px; color: #fff; background: #1756d1; font: 700 9px/1 var(--mono); cursor: pointer; }.stage-row__actions button:disabled { opacity: .4; cursor: default; }.stage-row__actions .stage-row__clear { color: #7b6640; background: #fff1bd; }
 @media (max-width: 760px) { .stage-row { grid-template-columns: 1fr 1fr; }.stage-row__identity { grid-column: 1 / -1; } }

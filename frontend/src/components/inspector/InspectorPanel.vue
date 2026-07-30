@@ -2,6 +2,7 @@
 import { computed, nextTick, onUnmounted, ref, watch } from 'vue'
 import { gsap } from 'gsap'
 import { animate, stagger } from 'animejs'
+import GitPanel from './GitPanel.vue'
 import TerminalPanel from './TerminalPanel.vue'
 
 const props = defineProps({
@@ -520,6 +521,10 @@ function onRowLeave(el) {
 
       <template v-else-if="tab === 'terminal'">
         <TerminalPanel />
+      </template>
+
+      <template v-else-if="tab === 'git'">
+        <GitPanel />
       </template>
 
       <template v-else-if="tab === 'mcp'">
