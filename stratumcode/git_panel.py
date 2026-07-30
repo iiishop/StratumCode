@@ -334,11 +334,11 @@ def _commits(root: Path) -> list[dict]:
         "--all",
         f"--max-count={_LOG_LIMIT}",
         "--date=short",
-        "--pretty=format:%H%x1f%h%x1f%P%x1f%an%x1f%ar%x1f%ad%x1f%s%x1f%D",
+        "--pretty=format:%H%x1f%h%x1f%P%x1f%an%x1f%ae%x1f%ar%x1f%ad%x1f%s%x1f%D",
     )["stdout"]
     commits = []
     for line in output.splitlines():
-        full, short, parents, author, relative_date, date, subject, refs = (line.split("\x1f") + [""] * 8)[:8]
+        full, short, parents, author, author_email, relative_date, date, subject, refs = (line.split("\x1f") + [""] * 9)[:9]
         if not full:
             continue
         commits.append({
@@ -346,6 +346,7 @@ def _commits(root: Path) -> list[dict]:
             "short": short,
             "parents": [item for item in parents.split() if item],
             "author": author,
+            "author_email": author_email,
             "relative_date": relative_date,
             "date": date,
             "subject": subject,

@@ -104,13 +104,16 @@ def handle(run):
         run.investigation_knowledge,
     )
     request = run_request(run)
-    investigation_analysis = run.analysis
+    investigation_analysis = {
+        **run.analysis,
+        "unknowns": _open_analysis_unknowns(run.analysis, run.last_investigation),
+    }
     unresolved = (run.last_investigation or {}).get("unknowns")
     if isinstance(unresolved, list) and unresolved:
         investigation_analysis = {
-            **run.analysis,
+            **investigation_analysis,
             "unknowns": _merge_items_by_id(
-                run.analysis.get("unknowns", []),
+                investigation_analysis.get("unknowns", []),
                 unresolved,
             ),
         }
@@ -226,7 +229,16 @@ def handle(run):
     blocking_unknown_ids = _blocking_unknown_ids(run.last_investigation)
     has_blocked_task = _has_task_status(run.last_investigation, "blocked")
     has_unknown_task = _has_task_status(run.last_investigation, "unknown")
-    if next_step == "done":
+    if (
+        run.last_investigation
+        and _investigation_allows_patch(run.last_investigation)
+        and _analysis_requests_implementation(run.analysis)
+    ):
+        run.transition(chat.ChatState.DESIGNING, "Investigation is ready for implementation planning.")
+    elif next_step == "done":
+        if _analysis_requests_implementation(run.analysis):
+            run.transition(chat.ChatState.FAILED, "Investigation ended without an implementation path.")
+            return
         run.transition(chat._chat_finish_state(run), "Investigation ended without an implementation path.")
     elif next_step == "failed" and blocking_unknown_ids:
         step = (run.last_investigation or {}).setdefault("step_result", {})
@@ -237,16 +249,13 @@ def handle(run):
         run.transition(chat.ChatState.INVESTIGATING, "Investigation still has unresolved blocking unknowns.")
     elif next_step == "failed":
         run.transition(chat.ChatState.FAILED, "Investigation failed.")
-    elif (
-        run.last_investigation
-        and _investigation_allows_patch(run.last_investigation)
-        and _analysis_requests_implementation(run.analysis)
-    ):
-        run.transition(chat.ChatState.DESIGNING, "Investigation is ready for implementation planning.")
     elif next_step == "continue_investigation" or has_unknown_task or has_blocked_task:
         run.findings = _merge_findings(run.findings, _investigation_continuation_findings(run.last_investigation))
         run.transition(chat.ChatState.INVESTIGATING, "Investigation requested another pass.")
     else:
+        if _analysis_requests_implementation(run.analysis):
+            run.transition(chat.ChatState.FAILED, "Investigation ended without an implementation path.")
+            return
         run.transition(chat._chat_finish_state(run), "Investigation ended without an implementation path.")
 
 
@@ -287,6 +296,31 @@ def _blocking_unknown_ids(investigation: dict | None) -> list[str]:
         and item.get("blocking")
         and str(item.get("id") or "").strip()
     ]
+
+
+def _open_analysis_unknowns(analysis: dict, investigation: dict | None) -> list[dict]:
+    resolved = {
+        str(item.get("unknown_id") or "").strip()
+        for item in (investigation or {}).get("resolutions", [])
+        if isinstance(item, dict)
+        and str(item.get("status") or "") in {"resolved", "deferred"}
+        and str(item.get("unknown_id") or "").strip()
+    }
+    if not resolved:
+        return analysis.get("unknowns", [])
+    return [
+        item for item in analysis.get("unknowns", [])
+        if isinstance(item, dict)
+        and not any(_same_unknown_id(item.get("id"), known_id) for known_id in resolved)
+    ]
+
+
+def _same_unknown_id(left: str | None, right: str | None) -> bool:
+    left_text = str(left or "").strip()
+    right_text = str(right or "").strip()
+    if not left_text or not right_text:
+        return False
+    return left_text == right_text or left_text.rsplit(":", 1)[-1] == right_text.rsplit(":", 1)[-1]
 
 
 def _fallback_question(run, request: str) -> dict:

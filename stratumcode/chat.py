@@ -26,7 +26,7 @@ _CHAT_TRANSITIONS = {
     ChatState.INITIALIZING: {ChatState.ANALYZING, ChatState.INVESTIGATING, ChatState.FAILED},
     ChatState.ANALYZING: {ChatState.INVESTIGATING, ChatState.FAILED},
     ChatState.INVESTIGATING: {ChatState.INVESTIGATING, ChatState.DESIGNING, ChatState.SAVING_SESSION, ChatState.COMPLETED, ChatState.FAILED},
-    ChatState.DESIGNING: {ChatState.INVESTIGATING, ChatState.PATCH_PLANNING, ChatState.SAVING_SESSION, ChatState.COMPLETED},
+    ChatState.DESIGNING: {ChatState.INVESTIGATING, ChatState.PATCH_PLANNING, ChatState.SAVING_SESSION, ChatState.COMPLETED, ChatState.FAILED},
     ChatState.PATCH_PLANNING: {
         ChatState.ANALYZING,
         ChatState.INVESTIGATING,
@@ -69,6 +69,7 @@ class ChatRun:
     answered_task: dict | None = None
     error: str = ""
     transition_events: list[dict] = field(default_factory=list)
+    design_gap_attempts: dict[str, int] = field(default_factory=dict)
 
     def transition(self, next_state: ChatState, reason: str = "") -> None:
         if next_state not in _CHAT_TRANSITIONS.get(self.state, set()):
@@ -110,10 +111,13 @@ def _chat_events(run: ChatRun) -> Iterator[dict]:
     from .status import handlers
 
     state_handlers = handlers()
+    _last_skill_state: ChatState | None = None
     while run.state not in _TERMINAL_CHAT_STATES:
         try:
             with skill_runtime.target_scope(f"state:{run.state.value}"):
-                yield from _select_initial_skills(run)
+                if run.state != _last_skill_state:
+                    yield from _select_initial_skills(run)
+                    _last_skill_state = run.state
                 yield from skill_runtime.pop_events()
                 events = state_handlers[run.state](run)
                 if events is not None:

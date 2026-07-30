@@ -38,7 +38,10 @@ CLUE_METADATA_FIELDS = {"note", "source_ref", "source_refs", "source_excerpt"}
 
 
 def _analysis_requests_implementation(analysis: dict | None) -> bool:
-    return str((analysis or {}).get("execution_mode") or "").strip().casefold() == "implement"
+    mode = str((analysis or {}).get("execution_mode") or "").strip().casefold()
+    if mode:
+        return mode == "implement"
+    return str(((analysis or {}).get("intent") or {}).get("type") or "").strip() in IMPLEMENT_INTENT_TYPES
 
 
 def analyze_task_stream(

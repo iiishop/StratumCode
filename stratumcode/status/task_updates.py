@@ -299,7 +299,7 @@ def _status_rank(status: str | None) -> int:
 def _task_id_scope(value: str | None) -> str:
     value = str(value or "")
     prefix = value.split(":", 1)[0] if ":" in value else ""
-    return prefix if prefix.startswith("task-") else ""
+    return prefix
 
 
 def _task_id_tail(value: str | None) -> str:

@@ -632,7 +632,12 @@ def validate_patch_plan(plan: dict, analysis: dict, design_plan: dict, workspace
             step_id,
             issues,
         )
-        unlisted_files = sorted(mentioned_files - {structured_file, *reference_files})
+        boundary_files = _decision_boundary_files(
+            step,
+            design_plan,
+            workspace_files,
+        )
+        unlisted_files = sorted(mentioned_files - {structured_file, *reference_files, *boundary_files})
         if unlisted_files:
             issues.append(
                 f"step {step_id} references files outside its structured file: "
@@ -1607,13 +1612,38 @@ def _derived_reference_files(
     return result
 
 
+def _decision_boundary_files(step: dict, design_plan: dict, workspace_files: set[str]) -> set[str]:
+    decision_ids = set(_strings(step.get("decision_ids")))
+    if not decision_ids:
+        return set()
+    text_parts = []
+    for decision in design_plan.get("design_decisions") or []:
+        if not isinstance(decision, dict) or str(decision.get("id") or "") not in decision_ids:
+            continue
+        boundary = decision.get("data_boundary")
+        if not isinstance(boundary, dict):
+            continue
+        text_parts.extend([
+            str(boundary.get("owner") or ""),
+            str(boundary.get("contract") or ""),
+            " ".join(_strings(boundary.get("producers"))),
+            " ".join(_strings(boundary.get("consumers"))),
+        ])
+    return _mentioned_files_in_text(" ".join(text_parts), workspace_files)
+
+
 def _mentioned_workspace_files(step: dict, workspace_files: set[str]) -> set[str]:
     text = " ".join([
         str(step.get("target") or ""),
         str(step.get("action") or ""),
         str(step.get("required_behavior_if_removed") or ""),
         " ".join(step.get("completion_conditions") or []),
-    ]).replace("\\", "/").casefold()
+    ])
+    return _mentioned_files_in_text(text, workspace_files)
+
+
+def _mentioned_files_in_text(text: str, workspace_files: set[str]) -> set[str]:
+    lowered = str(text or "").replace("\\", "/").casefold()
     basename_counts = {}
     for file in workspace_files:
         basename = Path(file).name.casefold()
@@ -1622,7 +1652,7 @@ def _mentioned_workspace_files(step: dict, workspace_files: set[str]) -> set[str
     for file in workspace_files:
         relative = file.casefold()
         basename = Path(file).name.casefold()
-        if relative in text or (basename_counts.get(basename) == 1 and basename in text):
+        if relative in lowered or (basename_counts.get(basename) == 1 and basename in lowered):
             result.add(file)
     return result
 

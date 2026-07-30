@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from .. import design_planner
-from .clearifying import queue_clearify
+from .clearifying import queue_clearify, queue_investigation_unknown
 from .task_contract import run_request
 
 
@@ -30,11 +30,30 @@ def handle(run):
         return
     gap = design_planner.blocking_gap(run.design_plan)
     if gap:
+        signature = design_planner.gap_signature(gap)
+        run.design_gap_attempts[signature] = run.design_gap_attempts.get(signature, 0) + 1
+        if run.design_gap_attempts[signature] > 1:
+            run.transition(chat.ChatState.FAILED, "Design gap repeated without new progress.")
+            return
+        question = gap.get("question") or gap.get("why") or str(gap.get("id") or "")
+        reason = gap.get("why") or "Design planning requires more information."
+        unknown_id = design_planner.gap_unknown_id(gap)
+        if gap.get("type") == "code_fact" or gap.get("resolution_strategy") == "investigate_project":
+            queue_investigation_unknown(
+                run,
+                question,
+                reason=reason,
+                unknown_id=unknown_id,
+            )
+            run.design_revision_mode = "gap_resolution"
+            run.transition(chat.ChatState.INVESTIGATING, "Design planning queued project investigation.")
+            return
         queue_clearify(
             run,
-            gap.get("question") or gap.get("why") or str(gap.get("id") or ""),
-            reason=gap.get("why") or "Design planning requires a product decision.",
-            unknown_id=str(gap.get("id") or ""),
+            question,
+            reason=reason,
+            unknown_id=unknown_id,
+            unknown_type=str(gap.get("type") or "product_decision"),
         )
         run.transition(chat.ChatState.INVESTIGATING, "Design planning queued a clearify decision.")
         return

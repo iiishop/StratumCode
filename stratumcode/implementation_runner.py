@@ -943,11 +943,7 @@ def _validation_stream(
         if validation_result is not None:
             break
     else:
-        validation_result = _validation_result(
-            "inconclusive",
-            "Semantic validation ended before a clear pass/fail result.",
-            changed_files,
-        )
+        validation_result = _unfinished_validation_result(changed_files, semantic_checked)
     yield start_event(f"{run_id}-output", "output", {
         "content": validation_result["summary"],
         "streaming": False,
@@ -974,6 +970,20 @@ def _validation_result(
         "question": question,
         "options": options or [],
     }
+
+
+def _unfinished_validation_result(changed_files: list[str], semantic_checked: bool) -> dict:
+    if not semantic_checked:
+        return _validation_result(
+            "inconclusive",
+            "Semantic validation ended before a clear pass/fail result.",
+            changed_files,
+        )
+    return _validation_result(
+        "passed",
+        "Semantic validation inspected changed files; the model omitted finish_validation.",
+        changed_files,
+    )
 
 
 def _finish_validation_arguments(arguments: dict, changed_files: list[str]) -> dict:

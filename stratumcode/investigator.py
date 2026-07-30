@@ -106,6 +106,13 @@ def investigation_stream(
         if max_rounds is None
         else int(max_rounds or 0)
     )
+    if max_rounds:
+        _investigable_count = sum(
+            1 for item in _initial_unknowns(analysis)
+            if item.get("resolution_strategy") == "investigate_project" and item.get("blocking")
+        )
+        _min_for_unknowns = _investigable_count * 2 + 2
+        max_rounds = max(max_rounds, _min_for_unknowns)
     run_id = uuid4().hex[:10]
     stage_id = f"{run_id}-stage"
     yield start_event(stage_id, "stage", {
@@ -359,8 +366,11 @@ def investigation_stream(
                     }
                 failed_key = _tool_cache_key(name, arguments)
                 if failed_key in failed_tool_cache:
-                    repeated_tool_error_name = name or "invalid"
-                    repeated_tool_error_count += 1
+                    error_name = name or "invalid"
+                    if error_name not in round_error_names:
+                        repeated_tool_error_name = error_name
+                        repeated_tool_error_count += 1
+                        round_error_names.add(error_name)
                     output = json.dumps({
                         "error": {
                             "code": "duplicate_failed_tool_call",
@@ -1348,6 +1358,14 @@ def _has_finding_fields(arguments: dict) -> bool:
     return any(isinstance(arguments.get(field), list) and arguments.get(field) for field in FINDING_FIELDS)
 
 
+def _nothing_to_record_result(next_action: str = "finish_investigation") -> dict:
+    return {
+        "recorded": False,
+        "code": "nothing_to_record",
+        "next_action": next_action,
+    }
+
+
 def _record_consumes_observations(arguments: dict, observation_ids: list[str]) -> bool:
     pending = {str(item).strip() for item in observation_ids if str(item).strip()}
     if not pending:
@@ -1477,6 +1495,13 @@ def _pending_clearify_unknown(
         for item in recorded.get("resolutions", [])
         if isinstance(item, dict) and str(item.get("status") or "") in {"resolved", "deferred"}
     }
+    delegated = {
+        str(item.get("unknown_id") or "").strip()
+        for item in recorded.get("resolutions", [])
+        if isinstance(item, dict)
+        and str(item.get("status") or "") == "partially_resolved"
+        and item.get("reason") == CLEARIFY_UNRESOLVED_REASON
+    }
     needs_clearify = {
         str(item.get("unknown_id") or "").strip()
         for item in recorded.get("resolutions", [])
@@ -1491,6 +1516,7 @@ def _pending_clearify_unknown(
             item.get("blocking")
             and item.get("type") == "product_decision"
             and not any(_same_unknown_id(item["id"], completed_id) for completed_id in completed)
+            and not any(_same_unknown_id(item["id"], delegated_id) for delegated_id in delegated)
             and (
                 item.get("resolution_strategy") == "clearify"
                 or any(_same_unknown_id(item["id"], pending_id) for pending_id in needs_clearify)
@@ -2788,11 +2814,7 @@ def _finalize_investigation(
                     messages.append({
                         "role": "tool",
                         "tool_call_id": call_id,
-                        "content": json.dumps({
-                            "recorded": False,
-                            "code": "nothing_to_record",
-                            "next_action": "finish_investigation",
-                        }, ensure_ascii=False),
+                        "content": json.dumps(_nothing_to_record_result(), ensure_ascii=False),
                     })
                     continue
                 if record_name != "resolve_unknowns" and not _has_finding_fields(record_arguments):
@@ -2810,6 +2832,13 @@ def _finalize_investigation(
                         pending_observation_ids=[],
                         required_resolution_ids=required_resolution_ids,
                     )
+                    if not _has_finding_fields(record_arguments):
+                        messages.append({
+                            "role": "tool",
+                            "tool_call_id": call_id,
+                            "content": json.dumps(_nothing_to_record_result(), ensure_ascii=False),
+                        })
+                        continue
                 _require_finding_fields(record_arguments)
                 recorded_findings = _merge_recorded_findings(
                     recorded_findings or _empty_recorded_findings(),
@@ -2891,6 +2920,7 @@ def _finalize_investigation(
                     ),
                     analysis=analysis,
                     observations=observations or [],
+                    repair_conflicts=True,
                 )
             except Exception as exc:
                 last_error = f"finish_investigation arguments were invalid: {exc}"
@@ -3715,8 +3745,8 @@ def _finish_payload(
                 "Which project evidence confirms the observed failure or boundary, root cause, "
                 "patch target, expected behavior change, and validation scenario for this bugfix?"
             ),
-            "blocking": True,
-            "resolution_strategy": "investigate_project",
+            "blocking": False,
+            "resolution_strategy": "deferred",
         }])
     ready = readiness["ready"]
     hard_readiness_reasons = [
@@ -3724,7 +3754,6 @@ def _finish_payload(
         if (
             reason.endswith(":not_resolved")
             or reason.endswith(":missing_evidence")
-            or reason.startswith("bugfix_readiness:")
         )
     ]
     if not ready and model_ready and patch_context and not any(
@@ -4132,13 +4161,21 @@ def _semantic_repair_payload(recorded: dict, unknown_ids: set[str]) -> dict:
         for missing_item in _semantic_missing_items(resolution.get("semantic_missing"))
     ]
     if not missing:
-        missing = [
-            {
+        missing = []
+        for resolution in resolutions:
+            _reason = str(resolution.get("reason") or "").strip()
+            if _reason.startswith(GROUNDING_LITERAL_REASON_PREFIX):
+                _literal = _reason[len(GROUNDING_LITERAL_REASON_PREFIX):].strip()
+                _reason = f"Find and cite the exact code observation that contains: {_literal}" if _literal else "Cite the exact code observation that contains the claimed code literal."
+            elif _reason.startswith(STATE_WRITE_REASON_PREFIX):
+                _writes = _reason[len(STATE_WRITE_REASON_PREFIX):].strip()
+                _reason = f"Account for the following observed state writes in the resolution: {_writes}" if _writes else "Account for observed state writes in the resolution."
+            if not _reason:
+                _reason = "Add the missing semantic support."
+            missing.append({
                 "acceptance_id": "",
-                "requirement": str(resolution.get("reason") or "Add the missing semantic support.").strip(),
-            }
-            for resolution in resolutions
-        ]
+                "requirement": _reason,
+            })
     return {
         "accepted": False,
         "recorded_ids": recorded_ids,
@@ -4676,6 +4713,26 @@ def _resolutions(value) -> list[dict]:
     return items
 
 
+def _canonical_evidence_id(evidence_id: str, known_ids: set[str]) -> str:
+    if evidence_id in known_ids:
+        return evidence_id
+    matches = [item for item in known_ids if item.endswith(f":{evidence_id}")]
+    return matches[0] if len(matches) == 1 else ""
+
+
+def _normalize_evidence_refs(item: dict, known_ids: set[str]) -> list[str]:
+    normalized = []
+    missing = []
+    for evidence_id in item.get("evidence", []):
+        canonical = _canonical_evidence_id(evidence_id, known_ids)
+        if canonical:
+            normalized.append(canonical)
+        else:
+            missing.append(evidence_id)
+    item["evidence"] = normalized
+    return missing
+
+
 def _validate_resolution_refs(resolutions: list[dict], beliefs: list[dict], observations: list[dict]) -> None:
     evidence_ids = {
         str(item.get("id") or "").strip()
@@ -4689,7 +4746,7 @@ def _validate_resolution_refs(resolutions: list[dict], beliefs: list[dict], obse
     }
     usable_belief_status = {"plausible", "supported", "strongly_supported", "runtime_confirmed"}
     for resolution in resolutions:
-        missing_evidence = [item for item in resolution.get("evidence", []) if item not in evidence_ids]
+        missing_evidence = _normalize_evidence_refs(resolution, evidence_ids)
         if missing_evidence:
             raise ValueError(
                 f"resolution {resolution['unknown_id']} references unknown evidence ids: "
@@ -4719,7 +4776,7 @@ def _validate_belief_refs(beliefs: list[dict], observations: list[dict]) -> None
         if isinstance(item, dict) and str(item.get("id") or "").strip()
     }
     for belief in beliefs:
-        missing = [item for item in belief.get("evidence", []) if item not in evidence_ids]
+        missing = _normalize_evidence_refs(belief, evidence_ids)
         if missing:
             raise ValueError(
                 f"belief {belief['id']} references unknown evidence ids: "
@@ -4739,10 +4796,11 @@ def _drop_invalid_belief_refs(
     }
     changed = False
     for belief in beliefs:
-        evidence = [item for item in belief.get("evidence", []) if item in evidence_ids]
-        if evidence != belief.get("evidence", []):
+        original = belief.get("evidence", [])
+        _normalize_evidence_refs(belief, evidence_ids)
+        evidence = belief.get("evidence", [])
+        if evidence != original:
             changed = True
-            belief["evidence"] = evidence
             if not evidence:
                 belief["status"] = "unverified"
     if changed:
@@ -4770,9 +4828,11 @@ def _drop_invalid_resolution_refs(
     }
     changed = False
     for resolution in resolutions:
-        evidence = [item for item in resolution.get("evidence", []) if item in evidence_ids]
+        original_evidence = resolution.get("evidence", [])
+        _normalize_evidence_refs(resolution, evidence_ids)
+        evidence = resolution.get("evidence", [])
         beliefs = [item for item in resolution.get("belief_ids", []) if item in usable_beliefs]
-        changed = changed or evidence != resolution.get("evidence", []) or beliefs != resolution.get("belief_ids", [])
+        changed = changed or evidence != original_evidence or beliefs != resolution.get("belief_ids", [])
         resolution["evidence"] = evidence
         resolution["belief_ids"] = beliefs
     if changed:
@@ -4956,11 +5016,15 @@ def _unresolved_from_resolutions(resolutions: list[dict], initial_unknowns: list
             strategy = "clearify"
         elif resolution["status"] == "deferred":
             strategy = "deferred"
+        unknown_type = source.get("type") or "code_fact"
+        if resolution.get("reason") == CLEARIFY_UNRESOLVED_REASON:
+            unknown_type = "code_fact"
         question = source.get("question") or _question_from_resolution(resolution)
         unresolved.append({
             "id": resolution["unknown_id"],
             "question": question,
             "blocking": resolution["status"] in {"partially_resolved", "needs_clearify"} and bool(source.get("blocking", True)),
+            "type": unknown_type,
             "resolution_strategy": strategy,
         })
     return unresolved

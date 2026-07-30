@@ -4,6 +4,7 @@ import json
 import re
 from collections.abc import Iterator
 from copy import deepcopy
+from hashlib import sha1
 from itertools import count
 from uuid import uuid4
 
@@ -30,6 +31,31 @@ from .agent_runtime import (
 from .planning_facts import normalize_project_facts as _project_facts
 
 DEFAULT_DESIGN_JSON_ATTEMPTS = 3
+IDENTIFIER_PATTERN = re.compile(r"\b[A-Za-z_$][A-Za-z0-9_$]*\b")
+TOP_LEVEL_FIELD_PATTERN = re.compile(
+    r"(?:top-level|顶层)\s+(?P<owner>[A-Za-z_$][A-Za-z0-9_$]*)[^.。;；\n]*(?:contains|has|包含|包括)[^.。;；\n]*",
+    re.IGNORECASE,
+)
+CODE_FACT_GAP_PATTERN = re.compile(
+    r"(?:which|what|where|how).{0,80}(?:file|path|api|endpoint|store|module|function|schema|implementation|current|existing|persist|save|load)"
+    r"|(?:具体实现|当前实现|已有实现|哪个.*(?:store|文件|路径|接口|API)|保存.*路径|恢复.*路径|持久化.*(?:路径|方式|实现))",
+    re.IGNORECASE,
+)
+DOTTED_CONTAINER_PATTERN = re.compile(r"\b[A-Za-z_$][A-Za-z0-9_$]*(?:\.[A-Za-z_$][A-Za-z0-9_$]*)+\b")
+NON_FIELD_WORDS = {
+    "object",
+    "top",
+    "level",
+    "contains",
+    "has",
+    "date",
+    "now",
+    "string",
+    "number",
+    "in",
+    "from",
+    "field",
+}
 
 
 def design_planning_stream(
@@ -310,6 +336,14 @@ def blocking_gap(plan: dict) -> dict | None:
     return next((gap for gap in plan.get("decision_gaps", []) if gap.get("blocks_implementation")), None)
 
 
+def gap_unknown_id(gap: dict) -> str:
+    return str(gap.get("unknown_id") or gap.get("id") or "").strip()
+
+
+def gap_signature(gap: dict) -> str:
+    return str(gap.get("fingerprint") or _gap_fingerprint(gap)).strip()
+
+
 def normalize_design_plan(plan: dict, analysis: dict, investigation: dict) -> dict:
     """Apply deterministic design-plan fixes that should not be delegated to the model."""
     plan = {
@@ -339,6 +373,7 @@ def normalize_design_plan(plan: dict, analysis: dict, investigation: dict) -> di
         plan["runtime_warnings"].append("Runtime filled the empty design summary from the canonical task contract.")
     _fill_empty_project_alignments(plan, investigation)
     _correct_contradictory_alignments(plan, investigation)
+    _normalize_design_gaps(plan, investigation)
     if not _analysis_authorizes_behavior_preserving_refactor(analysis):
         return plan
     allowed_refactor_symbols = set(_structured_refactor_symbols(investigation))
@@ -398,6 +433,62 @@ def normalize_design_plan(plan: dict, analysis: dict, investigation: dict) -> di
     return plan
 
 
+def _normalize_design_gaps(plan: dict, investigation: dict) -> None:
+    resolved = _resolved_gap_ids(investigation)
+    gaps = []
+    for gap in plan["decision_gaps"]:
+        fingerprint = _gap_fingerprint(gap)
+        gap["fingerprint"] = fingerprint
+        gap_type = _gap_type(gap)
+        gap["type"] = gap_type
+        gap["resolution_strategy"] = "clearify" if gap_type == "product_decision" else "investigate_project"
+        if gap_type != "product_decision":
+            gap["id"] = f"EG-{fingerprint[:10]}"
+        gap["unknown_id"] = str(gap.get("id") or "").strip()
+        if any(item in resolved for item in {gap["unknown_id"], fingerprint}):
+            plan["runtime_warnings"].append(
+                f"Runtime removed resolved design gap {gap.get('id') or '?'}."
+            )
+            continue
+        gaps.append(gap)
+    plan["decision_gaps"] = gaps
+
+
+def _gap_type(gap: dict) -> str:
+    raw_type = str(gap.get("type") or "").strip()
+    if raw_type in {"product_decision", "code_fact"}:
+        return raw_type
+    strategy = str(gap.get("resolution_strategy") or "").strip()
+    if strategy == "investigate_project":
+        return "code_fact"
+    if strategy == "clearify":
+        return "product_decision"
+    text = " ".join(str(gap.get(field) or "") for field in ("question", "why", "recommended_answer"))
+    return "code_fact" if CODE_FACT_GAP_PATTERN.search(text) else "product_decision"
+
+
+def _gap_fingerprint(gap: dict) -> str:
+    text = " ".join(
+        " ".join(str(gap.get(field) or "").casefold().split())
+        for field in ("question", "why", "type", "resolution_strategy")
+    )
+    return sha1(text.encode("utf-8")).hexdigest()[:12]
+
+
+def _resolved_gap_ids(investigation: dict) -> set[str]:
+    result = set()
+    for item in investigation.get("resolutions", []) if isinstance(investigation, dict) else []:
+        if not isinstance(item, dict) or item.get("status") not in {"resolved", "deferred"}:
+            continue
+        unknown_id = str(item.get("unknown_id") or "").strip()
+        fingerprint = str(item.get("gap_fingerprint") or "").strip()
+        if unknown_id:
+            result.add(unknown_id)
+        if fingerprint:
+            result.add(fingerprint)
+    return result
+
+
 def _attempt_indexes(limit: int, start: int = 1):
     limit = int(limit or 0)
     return count(start) if limit <= 0 else range(start, start + limit)
@@ -417,8 +508,11 @@ def validate_design_plan(plan: dict, analysis: dict, investigation: dict) -> lis
     ]
     reference_ids = {str(item["id"]) for item in reference_baselines}
     aligned_ids = {item.get("requirement_id") for item in alignments if item.get("requirement_id")}
+    intent_type = str((analysis.get("intent") or {}).get("type") or "").strip()
     if criteria and len(requirements) < len(criteria):
         issues.append("not every acceptance criterion is represented in requirement_model")
+    if criteria and not decisions and not blocking_gaps and intent_type in {"feature", "bugfix"}:
+        issues.append("feature/bugfix design plan requires at least one design decision")
     missing_alignment = sorted(item for item in requirement_ids if item not in aligned_ids)
     if missing_alignment:
         issues.append("requirements missing project_alignment: " + ", ".join(missing_alignment))
@@ -470,6 +564,7 @@ def validate_design_plan(plan: dict, analysis: dict, investigation: dict) -> lis
                     f"design decision {item.get('id') or '?'} has incomplete data boundary: "
                     + ", ".join(missing_boundary)
                 )
+        issues.extend(_field_owner_conflict_issues(item, investigation))
     covered_requirements = {
         requirement_id
         for item in decisions
@@ -520,6 +615,59 @@ def validate_design_plan(plan: dict, analysis: dict, investigation: dict) -> lis
     if not (investigation.get("patch_planning_facts") or investigation.get("patch_planning_context")):
         issues.append("design plan has no grounded investigation facts to rely on")
     return issues
+
+
+def _field_owner_conflict_issues(decision: dict, investigation: dict) -> list[str]:
+    top_level_fields = _top_level_fields(investigation)
+    if not top_level_fields:
+        return []
+    text = " ".join([
+        str(decision.get("decision") or ""),
+        " ".join(str(item) for item in decision.get("because", []) if item),
+    ])
+    issues = []
+    for container, field in _nested_field_claims(text):
+        owner = container.split(".", 1)[0]
+        if "." not in container or field == container.rsplit(".", 1)[-1]:
+            continue
+        if field in top_level_fields.get(owner, set()):
+            issues.append(
+                f"design decision {decision.get('id') or '?'} places top-level field {owner}.{field} under {container}"
+            )
+    return issues
+
+
+def _nested_field_claims(text: str) -> list[tuple[str, str]]:
+    claims = []
+    for match in DOTTED_CONTAINER_PATTERN.finditer(text):
+        suffix = text[match.end():match.end() + 48]
+        field = next(
+            (
+                name
+                for name in IDENTIFIER_PATTERN.findall(suffix)
+                if name.casefold() not in NON_FIELD_WORDS
+            ),
+            "",
+        )
+        if field:
+            claims.append((match.group(0), field))
+    return claims
+
+
+def _top_level_fields(investigation: dict) -> dict[str, set[str]]:
+    fields: dict[str, set[str]] = {}
+    for fact in _project_facts(investigation):
+        text = str(fact.get("text") or "")
+        for match in TOP_LEVEL_FIELD_PATTERN.finditer(text):
+            owner = match.group("owner")
+            names = {
+                name
+                for name in IDENTIFIER_PATTERN.findall(match.group(0))
+                if name != owner and name.casefold() not in NON_FIELD_WORDS
+            }
+            if names:
+                fields.setdefault(owner, set()).update(names)
+    return fields
 
 
 def _analysis_authorizes_behavior_preserving_refactor(analysis: dict) -> bool:
@@ -953,6 +1101,8 @@ def _design_from_slots(
             "recommended_answer": str(item.get("recommended_answer") or "").strip(),
             "blocks_implementation": bool(item.get("blocks_implementation")),
             "why": str(item.get("why") or "").strip(),
+            "type": str(item.get("type") or "").strip(),
+            "resolution_strategy": str(item.get("resolution_strategy") or "").strip(),
         }
         for index, item in enumerate((data.get("gap_content") or [])[:1], start=1)
         if isinstance(item, dict) and (item.get("question") or item.get("why"))
@@ -991,6 +1141,15 @@ def _decision_item(data: dict | None) -> dict | None:
 
 def _missing_decision_slots(plan: dict, analysis: dict) -> tuple[list[int], list[int]]:
     decisions = [item for item in plan.get("design_decisions", []) if isinstance(item, dict)]
+    if not decisions and plan.get("requirement_model"):
+        baselines = [
+            item for item in analysis.get("reference_baselines", [])
+            if isinstance(item, dict)
+        ]
+        return (
+            list(range(1, len(plan.get("requirement_model", [])) + 1)),
+            list(range(1, len(baselines) + 1)),
+        )
     covered_requirements = {
         item
         for decision in decisions
@@ -1060,7 +1219,7 @@ def _data_boundary(value) -> dict:
 
 
 def _merge_design_revision(plan: dict, previous_plan: dict | None, revision_mode: str) -> dict:
-    if not previous_plan or revision_mode != "validation":
+    if not previous_plan or revision_mode not in {"validation", "gap_resolution"}:
         return plan
     previous = [
         dict(item)
@@ -1074,9 +1233,15 @@ def _merge_design_revision(plan: dict, previous_plan: dict | None, revision_mode
     }
     next_index = len(previous) + 1
     revision_ids = []
+    fallback_revision_ids = []
     for candidate in plan.get("design_decisions", []):
+        candidate_id = str(candidate.get("id") or "").strip()
         candidate_text = " ".join(str(candidate.get("decision") or "").casefold().split())
         if candidate_text in existing_text:
+            if candidate_id in merged and candidate_id not in fallback_revision_ids:
+                candidate.pop("replaces_decision_ids", None)
+                merged[candidate_id] = candidate
+                fallback_revision_ids.append(candidate_id)
             continue
         replacements = [
             item_id
@@ -1093,6 +1258,8 @@ def _merge_design_revision(plan: dict, previous_plan: dict | None, revision_mode
                     next_index += 1
                 candidate["id"] = f"DD{next_index}"
                 next_index += 1
+        elif candidate_id in merged:
+            candidate["id"] = candidate_id
         else:
             while f"DD{next_index}" in merged:
                 next_index += 1
@@ -1102,10 +1269,12 @@ def _merge_design_revision(plan: dict, previous_plan: dict | None, revision_mode
         merged[str(candidate["id"])] = candidate
         revision_ids.append(str(candidate["id"]))
         existing_text.add(candidate_text)
+    if not revision_ids:
+        revision_ids = fallback_revision_ids
     plan["design_decisions"] = list(merged.values())
     plan["runtime_revision_decision_ids"] = revision_ids
     plan.setdefault("runtime_warnings", []).append(
-        "Runtime preserved prior design decisions unless the validation revision explicitly replaced their ids."
+        "Runtime preserved prior design decisions unless the revision explicitly replaced their ids."
     )
     return plan
 
