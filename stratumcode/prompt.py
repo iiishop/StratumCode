@@ -502,6 +502,10 @@ already contain a substantive answer:
     "unknown_id": "exact contract unknown id",
     "status": "grounded|verify|clearify|investigate",
     "reason": "specific semantic reason",
+    "missing": [
+      {{"acceptance_id": "AC id when known", "requirement": "one missing semantic requirement"}}
+    ],
+    "repair_mode": "append_missing_only only when existing recorded beliefs are valid, the missing requirement can be satisfied from already available observations, and no more project discovery is needed",
     "hypothesis": "one atomic claim, required only for verify",
     "question": "one neutral requester question, required only for clearify"
   }}

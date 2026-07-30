@@ -1,5 +1,5 @@
 <script setup>
-import { computed } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import HighlightedText from './HighlightedText.vue'
 
 const props = defineProps({
@@ -11,10 +11,67 @@ const props = defineProps({
   state: { type: String, default: '' },
   open: { type: Boolean, default: false },
   collapsible: { type: Boolean, default: false },
+  createdAt: { type: Number, default: undefined },
 })
 
 const emit = defineEmits(['toggle'])
 const expanded = computed(() => props.collapsible ? props.open : true)
+
+// ── duration ───────────────────────────────
+
+const elapsedSeconds = ref(0)
+let _durationTimer = null
+
+function formatElapsed(totalSeconds) {
+  const s = Math.max(0, Math.floor(totalSeconds))
+  const minutes = Math.floor(s / 60)
+  const seconds = s % 60
+  if (minutes > 0) return `${minutes}分${seconds}秒`
+  return `${seconds}秒`
+}
+
+const formattedDuration = computed(() => {
+  if (props.status === 'running') {
+    return formatElapsed(elapsedSeconds.value)
+  }
+  if (props.createdAt == null) return ''
+  const now = Date.now()
+  const totalSeconds = (now - props.createdAt) / 1000
+  return formatElapsed(totalSeconds)
+})
+
+function _startTimer() {
+  _stopTimer()
+  if (props.status === 'running') {
+    elapsedSeconds.value = props.createdAt != null
+      ? Math.max(0, Math.floor((Date.now() - props.createdAt) / 1000))
+      : 0
+    _durationTimer = setInterval(() => {
+      elapsedSeconds.value++
+    }, 1000)
+  }
+}
+
+function _stopTimer() {
+  if (_durationTimer != null) {
+    clearInterval(_durationTimer)
+    _durationTimer = null
+  }
+}
+
+onMounted(() => {
+  _startTimer()
+})
+
+onUnmounted(() => {
+  _stopTimer()
+})
+
+watch(() => props.status, (newStatus, oldStatus) => {
+  if (oldStatus === 'running' && newStatus !== 'running') {
+    _stopTimer()
+  }
+})
 </script>
 
 <template>
@@ -35,6 +92,7 @@ const expanded = computed(() => props.collapsible ? props.open : true)
           <small v-if="detail"><HighlightedText :text="detail" /></small>
         </span>
         <span v-if="status" class="event-frame__status" :class="{ 'is-running': status === 'running' }">{{ status }}</span>
+        <span v-if="createdAt != null || status === 'running'" class="event-frame__duration">{{ formattedDuration }}</span>
         <span v-if="collapsible" class="event-frame__chevron" :class="{ 'is-open': open }">⌄</span>
       </button>
       <Transition name="event-frame-expand">

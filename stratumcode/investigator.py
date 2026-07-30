@@ -40,6 +40,7 @@ MAX_REPEATED_TOOL_ERRORS = 3
 READ_ONLY_SUMMARY_MIN_RESOLUTION_RATIO = 0.35
 MAX_REPEATED_RECORD_NO_PROGRESS = 3
 MAX_DUPLICATE_NO_PROGRESS = 2
+MAX_PENDING_DISCOVERY_OBSERVATIONS = 8
 REQUIRED_FINDING_SLOT_ATTEMPTS = 2
 REQUIRED_AUDIT_ATTEMPTS = 2
 OBSERVATION_EVIDENCE_CHARS = 8000
@@ -169,6 +170,7 @@ def investigation_stream(
     repeated_record_no_progress = 0
     duplicate_no_progress_signature = ""
     duplicate_no_progress_count = 0
+    duplicate_no_progress_total = 0
     force_synthesis_reason = ""
 
     for round_index in _round_indexes(max_rounds, start=0):
@@ -186,6 +188,16 @@ def investigation_stream(
         resolution_required_ids = _dedupe_strings([
             *resolution_required_ids,
             *sorted(semantic_repair_required_ids),
+            *(
+                _pending_observation_unknown_ids(
+                    observations,
+                    pending_observation_ids,
+                    analysis,
+                    recorded_findings,
+                )
+                if len(pending_observation_ids) >= MAX_PENDING_DISCOVERY_OBSERVATIONS
+                else []
+            ),
         ])
         if clearify_unknown:
             messages.append({"role": "user", "content": _clearify_required_prompt(clearify_unknown)})
@@ -207,22 +219,20 @@ def investigation_stream(
             ]
             current_tool_choice = {"type": "function", "function": {"name": "subagent"}}
         elif semantic_repair_required_ids:
-            reasons = {
-                str(item.get("unknown_id") or ""): str(item.get("reason") or "")
-                for item in recorded_findings.get("resolutions", [])
-                if isinstance(item, dict)
-                and str(item.get("unknown_id") or "") in semantic_repair_required_ids
-            }
+            repair = _semantic_repair_payload(recorded_findings, semantic_repair_required_ids)
             messages.append({"role": "user", "content": (
-                "The semantic quality gate rejected these recorded resolutions. "
-                "Call resolve_unknowns now to replace only these resolutions "
-                "with claims supported by the observations; finish_investigation is not "
-                f"allowed until they pass: {json.dumps(reasons, ensure_ascii=False)}"
+                "The semantic quality gate accepted the existing recorded findings except "
+                "for the listed missing requirements. Do not regenerate, restate, or replace "
+                "already recorded ids. Call record_investigation_findings now to append only "
+                "the missing belief(s), then add a minimal resolution patch with "
+                "repair_mode=append_missing_only and only the new belief_ids/evidence. "
+                "finish_investigation is not allowed until the missing list passes: "
+                f"{json.dumps(repair, ensure_ascii=False)}"
             )})
-            current_tools = [_resolve_unknowns_tool_schema()]
+            current_tools = [_record_findings_tool_schema()]
             current_tool_choice = {
                 "type": "function",
-                "function": {"name": "resolve_unknowns"},
+                "function": {"name": "record_investigation_findings"},
             }
         elif _recorded_resolves_initial_unknowns(recorded_findings, analysis):
             current_tools = [_finish_tool_schema()]
@@ -484,6 +494,10 @@ def investigation_stream(
                             for evidence_id in resolution.get("evidence", [])
                         }
                     ]
+                    duplicate_no_progress_signature = ""
+                    duplicate_no_progress_count = 0
+                    duplicate_no_progress_total = 0
+                    force_synthesis_reason = ""
                     semantic_repair_required_ids = _semantic_repair_resolution_ids(
                         recorded_findings,
                     )
@@ -520,6 +534,31 @@ def investigation_stream(
                 if name == "record_investigation_findings":
                     _require_control_reason(arguments, name)
                     if (
+                        not pending_observation_ids
+                        and not resolution_required_ids
+                        and not _has_finding_fields(arguments)
+                    ):
+                        output = json.dumps({
+                            "recorded": False,
+                            "code": "nothing_to_record",
+                            "next_action": "finish_investigation",
+                            "message": "No pending observations or unresolved evidence-backed resolutions are available to record.",
+                        }, ensure_ascii=False)
+                        yield start_event(call_id, "tool", {
+                            "name": name,
+                            "description": "Record investigation findings",
+                            "status": "done",
+                            "open": False,
+                            "input": json.dumps(arguments, ensure_ascii=False, indent=2),
+                            "output": output,
+                        })
+                        messages.append({
+                            "role": "tool",
+                            "tool_call_id": call_id,
+                            "content": output,
+                        })
+                        continue
+                    if (
                         pending_observation_ids
                         and not resolution_required_ids
                         and not _has_finding_fields(arguments)
@@ -544,28 +583,14 @@ def investigation_stream(
                             "content": output,
                         })
                         continue
-                    if analysis.get("_canonicalized") or not _has_finding_fields(arguments):
-                        if not pending_observation_ids and not resolution_required_ids:
-                            output = json.dumps({
-                                "recorded": False,
-                                "code": "nothing_to_record",
-                                "next_action": "finish_investigation",
-                                "message": "No pending observations or unresolved evidence-backed resolutions are available to record.",
-                            }, ensure_ascii=False)
-                            yield start_event(call_id, "tool", {
-                                "name": name,
-                                "description": "Record investigation findings",
-                                "status": "done",
-                                "open": False,
-                                "input": json.dumps(arguments, ensure_ascii=False, indent=2),
-                                "output": output,
-                            })
-                            messages.append({
-                                "role": "tool",
-                                "tool_call_id": call_id,
-                                "content": output,
-                            })
-                            continue
+                    if (
+                        not _has_finding_fields(arguments)
+                        or (
+                            analysis.get("_canonicalized")
+                            and pending_observation_ids
+                            and not _record_consumes_observations(arguments, pending_observation_ids)
+                        )
+                    ):
                         arguments = yield from _record_findings_by_slots(
                             provider=provider,
                             model=model,
@@ -617,6 +642,10 @@ def investigation_stream(
                         repeated_record_no_progress += 1
                     else:
                         repeated_record_no_progress = 0
+                        duplicate_no_progress_signature = ""
+                        duplicate_no_progress_count = 0
+                        duplicate_no_progress_total = 0
+                        force_synthesis_reason = ""
                     last_record_signature = record_signature
                     if repeated_record_no_progress >= MAX_REPEATED_RECORD_NO_PROGRESS:
                         finalization_reason = (
@@ -728,10 +757,14 @@ def investigation_stream(
                         or clearify_questions
                         or pending_resolution_statuses & {"partially_resolved", "needs_clearify"}
                     ):
+                        repair_payload = _semantic_repair_payload(
+                            recorded_findings,
+                            _semantic_repair_resolution_ids(recorded_findings),
+                        )
                         output = json.dumps({
                             "finished": False,
                             "reason": "semantic_quality_gate",
-                            "audit": last_quality_audit,
+                            "repair": repair_payload,
                             "next_action": (
                                 "clearify"
                                 if "needs_clearify" in pending_resolution_statuses or clearify_questions
@@ -878,6 +911,7 @@ def investigation_stream(
                 cache_key = _tool_cache_key(name, arguments)
                 if cache_key in tool_cache:
                     cached_observation_id = tool_cache_observation_ids.get(cache_key, "")
+                    duplicate_no_progress_total += 1
                     if duplicate_no_progress_signature == cache_key:
                         duplicate_no_progress_count += 1
                     else:
@@ -890,11 +924,11 @@ def investigation_stream(
                     )
                     output = _duplicate_no_progress_json(
                         name,
-                        duplicate_count=duplicate_no_progress_count,
+                        duplicate_count=duplicate_no_progress_total,
                         cached_observation_id=cached_observation_id,
                         required_next_action=next_action,
                     )
-                    if duplicate_no_progress_count >= MAX_DUPLICATE_NO_PROGRESS:
+                    if duplicate_no_progress_total >= MAX_DUPLICATE_NO_PROGRESS:
                         force_synthesis_reason = _duplicate_no_progress_prompt(
                             name,
                             cached_observation_id,
@@ -915,7 +949,7 @@ def investigation_stream(
                         "tool_call_id": call_id,
                         "content": output,
                     })
-                    if duplicate_no_progress_count >= MAX_REPEATED_TOOL_ERRORS:
+                    if duplicate_no_progress_total >= MAX_REPEATED_TOOL_ERRORS:
                         finalization_reason = (
                             "Runtime stopped after repeated duplicate no-progress tool calls: "
                             f"{name or 'invalid'}."
@@ -948,6 +982,7 @@ def investigation_stream(
                 pending_observation_ids.append(call_id)
                 duplicate_no_progress_signature = ""
                 duplicate_no_progress_count = 0
+                duplicate_no_progress_total = 0
                 force_synthesis_reason = ""
                 if verification_request and _is_hypothesis_verifier_call(name, arguments):
                     attempted_verifications.add((
@@ -1176,8 +1211,8 @@ def _duplicate_no_progress_prompt(
 ) -> str:
     ids = _dedupe_strings([cached_observation_id, *pending_observation_ids])
     return (
-        "The investigation repeated the same successful discovery tool call without "
-        f"new progress: {tool_name or 'invalid'}. Do not call that discovery action again. "
+        "The investigation repeated already-observed discovery tool calls without "
+        f"new progress: {tool_name or 'invalid'}. Do not call those discovery actions again. "
         "Use resolve_unknowns if the cached observation answers a blocking unknown, "
         "record_investigation_findings if it contains material findings, or "
         "finish_investigation if investigation is already sufficient. "
@@ -1311,6 +1346,17 @@ def _skip_ws(text: str, index: int) -> int:
 
 def _has_finding_fields(arguments: dict) -> bool:
     return any(isinstance(arguments.get(field), list) and arguments.get(field) for field in FINDING_FIELDS)
+
+
+def _record_consumes_observations(arguments: dict, observation_ids: list[str]) -> bool:
+    pending = {str(item).strip() for item in observation_ids if str(item).strip()}
+    if not pending:
+        return False
+    for field in ("beliefs", "resolutions"):
+        for item in arguments.get(field, []):
+            if isinstance(item, dict) and pending.intersection(_reference_list(item.get("evidence"))):
+                return True
+    return False
 
 
 def _require_finding_fields(arguments: dict) -> None:
@@ -1517,6 +1563,45 @@ def _unknowns_needing_resolution(recorded: dict, observations: list[dict], analy
         for item in initial
         if not any(_same_unknown_id(item["id"], known_id) for known_id in accounted)
         and any(_same_unknown_id(item["id"], supported_id) for supported_id in supported)
+    ]
+
+
+def _pending_observation_unknown_ids(
+    observations: list[dict],
+    pending_observation_ids: list[str],
+    analysis: dict | None,
+    recorded: dict,
+) -> list[str]:
+    pending = {str(item).strip() for item in pending_observation_ids if str(item).strip()}
+    if not pending:
+        return []
+    candidates = [
+        item for item in (analysis or {}).get("unknowns", [])
+        if isinstance(item, dict)
+        and item.get("blocking")
+        and item.get("resolution_strategy") == "investigate_project"
+        and str(item.get("id") or "").strip()
+    ]
+    completed = {
+        str(item.get("unknown_id") or "").strip()
+        for item in recorded.get("resolutions", [])
+        if isinstance(item, dict)
+        and str(item.get("status") or "") in {"resolved", "deferred"}
+        and str(item.get("unknown_id") or "").strip()
+    }
+    target_ids = {
+        _normalize_unknown_id(target)
+        for observation in observations
+        if isinstance(observation, dict)
+        and str(observation.get("id") or "").strip() in pending
+        and _positive_project_observation(observation)
+        for target in observation.get("target_unknown_ids", [])
+    }
+    return [
+        str(item["id"])
+        for item in candidates
+        if any(_same_unknown_id(item["id"], target_id) for target_id in target_ids)
+        and not any(_same_unknown_id(item["id"], done_id) for done_id in completed)
     ]
 
 
@@ -1763,7 +1848,10 @@ def _record_findings_by_slots(
     required_resolution_ids: list[str] | None = None,
 ) -> Iterator[dict]:
     required_resolution_ids = required_resolution_ids or []
-    belief_observation_ids = list(pending_observation_ids)
+    belief_observation_ids = _dedupe_strings([
+        *pending_observation_ids,
+        *_semantic_repair_observation_ids(recorded_findings, required_resolution_ids),
+    ])
     resolution_slot_ids = _record_resolution_slot_ids(
         analysis,
         observations,
@@ -1782,6 +1870,7 @@ def _record_findings_by_slots(
             recorded_findings,
             pending_observation_ids,
             required_resolution_ids,
+            belief_observation_ids,
             resolution_slot_ids,
         )},
     ]
@@ -1793,7 +1882,7 @@ def _record_findings_by_slots(
             resolution_slot_ids,
             required_resolution_ids,
         )
-        slot_messages.append({"role": "user", "content": _record_slot_prompt(
+        slot_prompt = _record_slot_prompt(
             path,
             prompt_text,
             required=required,
@@ -1803,7 +1892,7 @@ def _record_findings_by_slots(
                 recorded_findings,
                 observations,
             ),
-        )})
+        )
         raw = ""
         attempts = (
             REQUIRED_FINDING_SLOT_ATTEMPTS
@@ -1815,11 +1904,12 @@ def _record_findings_by_slots(
             if path == "new_unknowns"
             else "one JSON object" + ("." if required else " or null.")
         )
+        attempt_messages = [*slot_messages, {"role": "user", "content": slot_prompt}]
         for attempt in range(attempts):
             assistant = _call_model(
                 provider,
                 model,
-                slot_messages,
+                attempt_messages,
                 tools=[],
                 use_skills=False,
             )
@@ -1834,13 +1924,17 @@ def _record_findings_by_slots(
                 _content_text(assistant.get("content")),
                 path,
             )
-            slot_messages.append({"role": "assistant", "content": raw})
             if _valid_record_slot_value(raw, path, required=required):
                 break
             if attempt + 1 < attempts:
-                slot_messages.append({"role": "user", "content": (
-                    f"The {path} slot has the wrong shape. Return {expected}"
-                )})
+                attempt_messages = [
+                    *slot_messages,
+                    {"role": "user", "content": slot_prompt},
+                    {"role": "assistant", "content": raw},
+                    {"role": "user", "content": (
+                        f"The {path} slot has the wrong shape. Return {expected}"
+                    )},
+                ]
         if not _valid_record_slot_value(raw, path, required=required):
             if not required:
                 return [] if path == "new_unknowns" else None
@@ -1879,6 +1973,21 @@ def _record_findings_by_slots(
         ),
     }
     return result
+
+
+def _semantic_repair_observation_ids(
+    recorded_findings: dict,
+    required_resolution_ids: list[str],
+) -> list[str]:
+    required = {_normalize_unknown_id(item) for item in required_resolution_ids}
+    return _dedupe_strings([
+        evidence_id
+        for resolution in recorded_findings.get("resolutions", [])
+        if isinstance(resolution, dict)
+        and resolution.get("repair_mode") == "append_missing_only"
+        and _normalize_unknown_id(str(resolution.get("unknown_id") or "")) in required
+        for evidence_id in _reference_list(resolution.get("evidence"))
+    ])
 
 
 def _empty_discovery_recording(
@@ -2073,6 +2182,12 @@ def _normalize_investigation_audit(value, resolved_ids: list[str]) -> dict:
             "unknown_id": matched_id,
             "status": status,
             "reason": str(item.get("reason") or "").strip(),
+            "missing": _semantic_missing_items(item.get("missing")),
+            "repair_mode": (
+                "append_missing_only"
+                if str(item.get("repair_mode") or "").strip() == "append_missing_only"
+                else ""
+            ),
             "hypothesis": str(item.get("hypothesis") or "").strip(),
             "question": str(item.get("question") or "").strip(),
         }
@@ -2086,6 +2201,23 @@ def _normalize_investigation_audit(value, resolved_ids: list[str]) -> dict:
         })
         for unknown_id in resolved_ids
     ]}
+
+
+def _semantic_missing_items(value) -> list[dict]:
+    if not isinstance(value, list):
+        return []
+    items = []
+    for raw in value:
+        if not isinstance(raw, dict):
+            continue
+        requirement = str(raw.get("requirement") or raw.get("text") or "").strip()
+        if not requirement:
+            continue
+        items.append({
+            "acceptance_id": str(raw.get("acceptance_id") or "").strip(),
+            "requirement": requirement,
+        })
+    return items
 
 
 def _record_slot_template(
@@ -2106,6 +2238,7 @@ def _record_slot_context(
     recorded_findings: dict,
     pending_observation_ids: list[str],
     required_resolution_ids: list[str],
+    belief_observation_ids: list[str] | None = None,
     resolution_slot_ids: list[str] | None = None,
 ) -> str:
     payload = {
@@ -2119,28 +2252,20 @@ def _record_slot_context(
         },
         "pending_observation_ids": list(pending_observation_ids),
         "required_resolution_ids": list(required_resolution_ids),
-        "observations": [
-            {
-                "id": item.get("id", ""),
-                "tool": item.get("tool", ""),
-                "title": item.get("title", ""),
-                "summary": item.get("summary", ""),
-                "evidence_excerpt": item.get("evidence_excerpt", ""),
-                "verification": item.get("verification", {}),
-                "target_unknown_ids": item.get("target_unknown_ids", []),
-                "reason": item.get("reason", ""),
-                "path": item.get("path", ""),
-            }
-            for item in observations[-12:]
-        ],
-        "already_recorded": {
-            field: recorded_findings.get(field, [])
-            for field in FINDING_FIELDS
-        },
+        "observations": _record_slot_relevant_observations(
+            observations,
+            required_resolution_ids,
+            belief_observation_ids or pending_observation_ids,
+        ),
+        "already_recorded": _record_slot_relevant_findings(
+            recorded_findings,
+            required_resolution_ids,
+            belief_observation_ids or pending_observation_ids,
+        ),
         "runtime_slot_bindings": {
             "beliefs": [
                 {"index": index, "observation_id": observation_id}
-                for index, observation_id in enumerate(pending_observation_ids)
+                for index, observation_id in enumerate(belief_observation_ids or pending_observation_ids)
             ],
             "resolutions": [
                 {"index": index, "unknown_id": unknown_id}
@@ -2149,6 +2274,83 @@ def _record_slot_context(
         },
     }
     return json.dumps(payload, ensure_ascii=False, sort_keys=True)
+
+
+def _record_slot_relevant_findings(
+    recorded_findings: dict,
+    required_resolution_ids: list[str],
+    observation_ids: list[str],
+) -> dict:
+    required = {_normalize_unknown_id(item) for item in required_resolution_ids}
+    evidence = {str(item).strip() for item in observation_ids if str(item).strip()}
+    resolutions = [
+        item for item in recorded_findings.get("resolutions", [])
+        if isinstance(item, dict)
+        and (
+            not required
+            or _normalize_unknown_id(str(item.get("unknown_id") or "")) in required
+        )
+    ]
+    belief_ids = {
+        belief_id
+        for resolution in resolutions
+        for belief_id in _reference_list(resolution.get("belief_ids"))
+    }
+    beliefs = [
+        item for item in recorded_findings.get("beliefs", [])
+        if isinstance(item, dict)
+        and (
+            str(item.get("id") or "").strip() in belief_ids
+            or bool(evidence.intersection(_reference_list(item.get("evidence"))))
+        )
+    ]
+    return {
+        **_empty_recorded_findings(),
+        "beliefs": beliefs,
+        "resolutions": resolutions,
+        "new_unknowns": [
+            item for item in recorded_findings.get("new_unknowns", [])
+            if isinstance(item, dict)
+            and (
+                not required
+                or _normalize_unknown_id(str(item.get("id") or "")) in required
+            )
+        ],
+    }
+
+
+def _record_slot_relevant_observations(
+    observations: list[dict],
+    required_resolution_ids: list[str],
+    observation_ids: list[str],
+) -> list[dict]:
+    required = {_normalize_unknown_id(item) for item in required_resolution_ids}
+    selected_ids = {str(item).strip() for item in observation_ids if str(item).strip()}
+    selected = [
+        item for item in observations
+        if isinstance(item, dict)
+        and (
+            str(item.get("id") or "").strip() in selected_ids
+            or bool(required.intersection(
+                _normalize_unknown_id(value)
+                for value in item.get("target_unknown_ids", [])
+            ))
+        )
+    ]
+    return [
+        {
+            "id": item.get("id", ""),
+            "tool": item.get("tool", ""),
+            "title": item.get("title", ""),
+            "summary": item.get("summary", ""),
+            "evidence_excerpt": item.get("evidence_excerpt", ""),
+            "verification": item.get("verification", {}),
+            "target_unknown_ids": item.get("target_unknown_ids", []),
+            "reason": item.get("reason", ""),
+            "path": item.get("path", ""),
+        }
+        for item in selected[-12:]
+    ]
 
 
 def _record_slot_prompt(
@@ -2178,7 +2380,8 @@ def _record_slot_contract(path: str) -> str:
         return (
             "Return null when the bound unknown is not reduced by available evidence. Otherwise "
             "return one JSON object with status, answer, and reason. Runtime supplies unknown_id, "
-            "evidence, and belief_ids. status is resolved, partially_resolved, needs_clearify, or deferred."
+            "evidence, and belief_ids. status is resolved, partially_resolved, needs_clearify, or deferred. "
+            "For append-only semantic repairs, include repair_mode=append_missing_only."
         )
     contracts = {
         "beliefs": (
@@ -2572,7 +2775,27 @@ def _finalize_investigation(
                 else:
                     record_arguments = _record_arguments(record_arguments)
                     _require_control_reason(record_arguments, "record_investigation_findings")
-                if record_name != "resolve_unknowns" and ((analysis or {}).get("_canonicalized") or not _has_finding_fields(record_arguments)):
+                required_resolution_ids = _unknowns_needing_resolution(
+                    recorded_findings or _empty_recorded_findings(),
+                    observations or [],
+                    analysis,
+                )
+                if (
+                    record_name != "resolve_unknowns"
+                    and not required_resolution_ids
+                    and not _has_finding_fields(record_arguments)
+                ):
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": call_id,
+                        "content": json.dumps({
+                            "recorded": False,
+                            "code": "nothing_to_record",
+                            "next_action": "finish_investigation",
+                        }, ensure_ascii=False),
+                    })
+                    continue
+                if record_name != "resolve_unknowns" and not _has_finding_fields(record_arguments):
                     record_arguments = yield from _record_findings_by_slots(
                         provider=provider,
                         model=model,
@@ -2585,11 +2808,7 @@ def _finalize_investigation(
                         observations=observations or [],
                         recorded_findings=recorded_findings or _empty_recorded_findings(),
                         pending_observation_ids=[],
-                        required_resolution_ids=_unknowns_needing_resolution(
-                            recorded_findings or _empty_recorded_findings(),
-                            observations or [],
-                            analysis,
-                        ),
+                        required_resolution_ids=required_resolution_ids,
                     )
                 _require_finding_fields(record_arguments)
                 recorded_findings = _merge_recorded_findings(
@@ -3743,6 +3962,8 @@ def _apply_investigation_audit(
             )
             if not unsupported and not missing_state_writes:
                 resolution["status"] = "resolved"
+                resolution.pop("repair_mode", None)
+                resolution.pop("semantic_missing", None)
                 if reason:
                     resolution["reason"] = reason
                 continue
@@ -3756,6 +3977,8 @@ def _apply_investigation_audit(
             if hypothesis and allow_verification:
                 resolution["status"] = "partially_resolved"
                 resolution["reason"] = reason
+                resolution.pop("repair_mode", None)
+                resolution.pop("semantic_missing", None)
                 verification_requests.append({
                     "unknown_id": unknown_id,
                     "hypothesis": hypothesis,
@@ -3768,13 +3991,36 @@ def _apply_investigation_audit(
             if question:
                 resolution["status"] = "needs_clearify"
                 resolution["reason"] = reason
+                resolution.pop("repair_mode", None)
+                resolution.pop("semantic_missing", None)
                 clearify_questions[unknown_id] = question
                 continue
             status = "investigate"
+        missing = _semantic_missing_items(verdict.get("missing"))
+        append_only = str(verdict.get("repair_mode") or "").strip() == "append_missing_only"
+        if missing and append_only:
+            resolution["semantic_missing"] = missing
+            resolution["repair_mode"] = "append_missing_only"
+        else:
+            resolution.pop("repair_mode", None)
+            resolution.pop("semantic_missing", None)
         resolution["status"] = "partially_resolved"
-        resolution["reason"] = reason or "The semantic audit found insufficient evidence."
+        resolution["reason"] = (
+            reason
+            or _semantic_missing_reason(missing)
+            or "The semantic audit found insufficient evidence."
+        )
     result["resolutions"] = resolutions
     return result, verification_requests, clearify_questions
+
+
+def _semantic_missing_reason(missing: list[dict]) -> str:
+    requirements = [
+        str(item.get("requirement") or "").strip()
+        for item in missing
+        if isinstance(item, dict) and str(item.get("requirement") or "").strip()
+    ]
+    return "Missing semantic requirements: " + "; ".join(requirements) if requirements else ""
 
 
 def _resolution_requires_semantic_audit(resolution: dict, initial_unknowns: list[dict]) -> bool:
@@ -3853,11 +4099,51 @@ def _semantic_repair_resolution_ids(recorded: dict) -> set[str]:
         for item in recorded.get("resolutions", [])
         if isinstance(item, dict)
         and item.get("status") == "partially_resolved"
-        and str(item.get("reason") or "").startswith((
-            GROUNDING_LITERAL_REASON_PREFIX,
-            STATE_WRITE_REASON_PREFIX,
-        ))
+        and (
+            item.get("repair_mode") == "append_missing_only"
+            or str(item.get("reason") or "").startswith((
+                GROUNDING_LITERAL_REASON_PREFIX,
+                STATE_WRITE_REASON_PREFIX,
+            ))
+        )
         and str(item.get("unknown_id") or "")
+    }
+
+
+def _semantic_repair_payload(recorded: dict, unknown_ids: set[str]) -> dict:
+    target_ids = {
+        _normalize_unknown_id(item)
+        for item in unknown_ids
+        if str(item).strip()
+    }
+    resolutions = [
+        item for item in recorded.get("resolutions", [])
+        if isinstance(item, dict)
+        and _normalize_unknown_id(str(item.get("unknown_id") or "")) in target_ids
+    ]
+    recorded_ids = _dedupe_strings([
+        belief_id
+        for resolution in resolutions
+        for belief_id in _reference_list(resolution.get("belief_ids"))
+    ])
+    missing = [
+        missing_item
+        for resolution in resolutions
+        for missing_item in _semantic_missing_items(resolution.get("semantic_missing"))
+    ]
+    if not missing:
+        missing = [
+            {
+                "acceptance_id": "",
+                "requirement": str(resolution.get("reason") or "Add the missing semantic support.").strip(),
+            }
+            for resolution in resolutions
+        ]
+    return {
+        "accepted": False,
+        "recorded_ids": recorded_ids,
+        "missing": missing,
+        "repair_mode": "append_missing_only",
     }
 
 
@@ -3998,10 +4284,37 @@ def _assigned_state_ids(value: str) -> list[str]:
 
 
 def _recorded_findings_signature(recorded: dict) -> str:
+    beliefs = [
+        {
+            "key": _belief_identity_key(item),
+            "evidence": sorted(_reference_list(item.get("evidence"))),
+            "status": str(item.get("status") or "").strip(),
+        }
+        for item in _beliefs(recorded.get("beliefs"))
+    ]
+    resolutions = [
+        {
+            "unknown_id": _normalize_unknown_id(item.get("unknown_id")),
+            "status": str(item.get("status") or "").strip(),
+            "evidence": sorted(_reference_list(item.get("evidence"))),
+            "belief_ids": sorted(_reference_list(item.get("belief_ids"))),
+        }
+        for item in _resolutions(recorded.get("resolutions"))
+    ]
+    unknowns = [
+        {
+            "id": _normalize_unknown_id(item.get("id")),
+            "status": str(item.get("status") or "").strip(),
+            "strategy": str(item.get("resolution_strategy") or "").strip(),
+        }
+        for item in _unknowns(recorded.get("unknowns")) + _unknowns(recorded.get("new_unknowns"))
+    ]
     return json.dumps(
         {
-            field: recorded.get(field, [])
-            for field in FINDING_FIELDS
+            "beliefs": sorted(beliefs, key=lambda item: item["key"]),
+            "resolutions": sorted(resolutions, key=lambda item: item["unknown_id"]),
+            "unknowns": sorted(unknowns, key=lambda item: item["id"]),
+            "decisions": sorted(_string_list(recorded.get("user_decisions_required"))),
         },
         ensure_ascii=False,
         sort_keys=True,
@@ -4061,11 +4374,72 @@ def _audit_covers_resolutions(
 
 def _merge_recorded_findings(current: dict, update: dict) -> dict:
     merged = {field: list(current.get(field, [])) for field in FINDING_FIELDS}
+    belief_aliases: dict[str, str] = {}
+    if isinstance(update.get("beliefs"), list):
+        merged["beliefs"], belief_aliases = _merge_beliefs_by_identity(
+            merged["beliefs"],
+            update["beliefs"],
+        )
     for field in FINDING_FIELDS:
+        if field == "beliefs":
+            continue
         value = update.get(field)
         if isinstance(value, list):
+            if field == "resolutions" and belief_aliases:
+                value = [_remap_resolution_belief_ids(item, belief_aliases) for item in value]
             merged[field] = _merge_list_by_identity(merged[field], value)
     return merged
+
+
+def _merge_beliefs_by_identity(left: list, right: list) -> tuple[list, dict[str, str]]:
+    result = list(left)
+    aliases: dict[str, str] = {}
+    positions: dict[str, int] = {}
+    for index, item in enumerate(result):
+        key = _belief_identity_key(item)
+        if key:
+            positions[key] = index
+    for item in right:
+        key = _belief_identity_key(item)
+        if key and key in positions:
+            existing = result[positions[key]]
+            if isinstance(existing, dict) and isinstance(item, dict):
+                result[positions[key]] = _merge_belief(existing, item)
+                old_id = str(existing.get("id") or "").strip()
+                new_id = str(item.get("id") or "").strip()
+                if old_id and new_id and old_id != new_id:
+                    aliases[new_id] = old_id
+            else:
+                result[positions[key]] = item
+        else:
+            if key:
+                positions[key] = len(result)
+            result.append(item)
+    return result, aliases
+
+
+def _merge_belief(existing: dict, item: dict) -> dict:
+    merged = {**existing, **item}
+    if existing.get("id"):
+        merged["id"] = existing["id"]
+    merged["evidence"] = _dedupe_strings([
+        *_reference_list(existing.get("evidence")),
+        *_reference_list(item.get("evidence")),
+    ])
+    return merged
+
+
+def _remap_resolution_belief_ids(item: object, aliases: dict[str, str]) -> object:
+    if not isinstance(item, dict) or not aliases:
+        return item
+    return {
+        **item,
+        "belief_ids": [
+            aliases.get(str(raw).strip(), str(raw).strip())
+            for raw in item.get("belief_ids", [])
+            if str(raw).strip()
+        ],
+    }
 
 
 def _merge_list_by_identity(left: list, right: list) -> list:
@@ -4080,7 +4454,9 @@ def _merge_list_by_identity(left: list, right: list) -> list:
         if key and key in positions:
             existing = result[positions[key]]
             if isinstance(existing, dict) and isinstance(item, dict):
-                if existing.get("reason") == CLEARIFY_RESOLUTION_REASON:
+                if item.get("repair_mode") == "append_missing_only" and item.get("unknown_id"):
+                    result[positions[key]] = _append_resolution_repair(existing, item)
+                elif existing.get("reason") == CLEARIFY_RESOLUTION_REASON:
                     result[positions[key]] = {**item, **existing}
                 else:
                     result[positions[key]] = {**existing, **item}
@@ -4093,6 +4469,27 @@ def _merge_list_by_identity(left: list, right: list) -> list:
     return result
 
 
+def _append_resolution_repair(existing: dict, repair: dict) -> dict:
+    merged = dict(existing)
+    new_refs = False
+    for field in ("evidence", "belief_ids"):
+        old_values = _reference_list(existing.get(field))
+        new_values = _reference_list(repair.get(field))
+        if any(value not in old_values for value in new_values):
+            new_refs = True
+        merged[field] = _dedupe_strings([
+            *old_values,
+            *new_values,
+        ])
+    for field in ("status", "reason"):
+        if str(repair.get(field) or "").strip():
+            merged[field] = repair[field]
+    if merged.get("status") == "resolved" or new_refs:
+        merged.pop("repair_mode", None)
+        merged.pop("semantic_missing", None)
+    return merged
+
+
 def _identity_key(item) -> str:
     if not isinstance(item, dict):
         return str(item)
@@ -4103,6 +4500,23 @@ def _identity_key(item) -> str:
         if value:
             return f"{field}:{value}"
     return ""
+
+
+def _belief_identity_key(item) -> str:
+    if not isinstance(item, dict):
+        return str(item)
+    key = str(item.get("key") or item.get("fact_key") or "").strip()
+    if key:
+        return f"fact:{key.casefold()}"
+    statement = _normalize_statement(_belief_text(item))
+    if statement:
+        return f"statement:{statement}"
+    item_id = str(item.get("id") or "").strip()
+    return f"id:{item_id}" if item_id else ""
+
+
+def _normalize_statement(value: str) -> str:
+    return " ".join(str(value or "").split()).casefold()
 
 
 def _record_task_updates(arguments: dict) -> list[dict]:
@@ -4245,7 +4659,7 @@ def _resolutions(value) -> list[dict]:
             continue
         if not unknown_id:
             continue
-        items.append({
+        item = {
             "unknown_id": unknown_id,
             "status": status,
             "kind": _resolution_kind(raw, status),
@@ -4253,7 +4667,12 @@ def _resolutions(value) -> list[dict]:
             "evidence": _string_list(raw.get("evidence")),
             "belief_ids": _string_list(raw.get("belief_ids")),
             "reason": str(raw.get("reason") or "").strip(),
-        })
+        }
+        if str(raw.get("repair_mode") or "").strip() == "append_missing_only":
+            item["repair_mode"] = "append_missing_only"
+        if isinstance(raw.get("semantic_missing"), list):
+            item["semantic_missing"] = _semantic_missing_items(raw.get("semantic_missing"))
+        items.append(item)
     return items
 
 
