@@ -717,7 +717,7 @@ onUnmounted(() => {
   line-height: 1;
 }
 
-.git-actions__primary {
+.git-actions button.git-actions__primary {
   position: relative;
   isolation: isolate;
   min-height: 38px;
@@ -729,7 +729,7 @@ onUnmounted(() => {
   transform: none;
 }
 
-.git-actions__primary::before {
+.git-actions button.git-actions__primary::before {
   content: "";
   position: absolute;
   inset: 1px;
@@ -743,13 +743,13 @@ onUnmounted(() => {
   pointer-events: none;
 }
 
-.git-actions__primary i,
-.git-actions__primary span {
+.git-actions button.git-actions__primary i,
+.git-actions button.git-actions__primary span {
   position: relative;
   z-index: 1;
 }
 
-.git-actions__primary:hover:not(:disabled) {
+.git-actions button.git-actions__primary:hover:not(:disabled) {
   color: #ffffff;
   background:
     radial-gradient(circle at 18% 20%, rgba(255, 255, 255, .34), transparent 30%),
@@ -760,39 +760,39 @@ onUnmounted(() => {
   transform: translateY(-1px);
 }
 
-.git-actions__primary:hover:not(:disabled)::before {
+.git-actions button.git-actions__primary:hover:not(:disabled)::before {
   opacity: 1;
   transform: translateX(45%);
 }
 
-.git-actions__primary i {
+.git-actions button.git-actions__primary i {
   color: var(--primary-a, #2f6edb);
   background: rgba(255, 255, 255, .9);
   box-shadow: 0 0 0 1px rgba(255, 255, 255, .32);
 }
 
-.git-actions__primary.is-commit {
+.git-actions button.git-actions__primary.is-commit {
   --primary-a: #12846f;
   --primary-b: #0d6354;
   --primary-hover-a: #18a386;
   --primary-hover-b: #0f715f;
 }
 
-.git-actions__primary.is-pull {
+.git-actions button.git-actions__primary.is-pull {
   --primary-a: #8f45d8;
   --primary-b: #6534a3;
   --primary-hover-a: #a45cf0;
   --primary-hover-b: #7441ba;
 }
 
-.git-actions__primary.is-push {
+.git-actions button.git-actions__primary.is-push {
   --primary-a: #c57716;
   --primary-b: #91530e;
   --primary-hover-a: #dc8a22;
   --primary-hover-b: #a86414;
 }
 
-.git-actions__primary.is-clean {
+.git-actions button.git-actions__primary.is-clean {
   --primary-a: #12846f;
   --primary-b: #e8f7f2;
   color: #126b5d;
@@ -800,12 +800,12 @@ onUnmounted(() => {
   box-shadow: none;
 }
 
-.git-actions__primary.is-clean i {
+.git-actions button.git-actions__primary.is-clean i {
   color: #ffffff;
   background: #12846f;
 }
 
-.git-actions__primary.is-clean:hover:not(:disabled) {
+.git-actions button.git-actions__primary.is-clean:hover:not(:disabled) {
   color: #126b5d;
   background: #e8f7f2;
   box-shadow: none;
