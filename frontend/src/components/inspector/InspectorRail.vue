@@ -32,87 +32,110 @@ const emit = defineEmits(['select'])
   inset: 0 0 0 auto;
   z-index: 31;
   display: flex;
-  width: 48px;
+  width: 52px;
   flex-direction: column;
   align-items: flex-end;
+  gap: 2px;
   padding: 0;
-  border-left: 1px solid rgba(129, 151, 184, 0.24);
+  border-left: 1px solid rgba(129, 151, 184, 0.18);
   background: transparent;
-  box-shadow: -10px 0 30px rgba(31, 67, 119, 0.09);
+  box-shadow: -8px 0 24px rgba(22, 53, 98, 0.06);
 }
 
 .inspector-rail__item {
   position: relative;
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 34px;
+  grid-template-columns: minmax(0, 1fr) 36px;
   align-items: center;
   justify-content: end;
-  gap: 8px;
-  width: 48px;
+  gap: 10px;
+  width: 52px;
   flex: 1 1 0;
-  min-height: 58px;
+  min-height: 54px;
   overflow: hidden;
   align-self: flex-end;
-  padding: 0 7px 0 15px;
+  padding: 0 8px 0 16px;
   border: 0;
-  border-left: 4px solid var(--tab-color);
-  border-right: 0;
-  border-radius: 13px 0 0 13px;
-  color: #253d5d;
+  border-radius: 14px 0 0 14px;
+  color: #1e3a5f;
   background:
-    linear-gradient(90deg, color-mix(in srgb, var(--tab-color) 16%, transparent) 0, rgba(255, 255, 255, 0.52) 58%);
-  backdrop-filter: blur(14px);
+    linear-gradient(90deg, color-mix(in srgb, var(--tab-color) 10%, transparent) 0, rgba(255, 255, 255, 0.38) 64%);
+  backdrop-filter: blur(18px) saturate(1.05);
+  -webkit-backdrop-filter: blur(18px) saturate(1.05);
   cursor: pointer;
   transform-origin: right center;
   transition:
-    width 240ms cubic-bezier(0.34, 1.56, 0.64, 1),
-    background 160ms ease,
-    box-shadow 160ms ease,
-    filter 160ms ease;
-}
-
-.inspector-rail__item + .inspector-rail__item {
-  margin-top: 1px;
+    width 260ms cubic-bezier(0.28, 1.4, 0.55, 1),
+    background 200ms ease,
+    box-shadow 200ms ease,
+    filter 200ms ease,
+    border-radius 200ms ease;
 }
 
 .inspector-rail__item::before {
   content: "";
   position: absolute;
-  inset: 0 auto 0 0;
-  width: 20px;
+  inset: 4px 1px 4px 2px;
+  border-radius: 11px 0 0 11px;
   background:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.36), transparent 42%),
-    var(--tab-color);
-  opacity: 0.9;
+    linear-gradient(180deg, rgba(255, 255, 255, 0.42), transparent 46%),
+    linear-gradient(270deg, transparent 30%, var(--tab-soft) 100%);
+  opacity: 0.78;
+  transition: opacity 200ms ease;
 }
 
 .inspector-rail__item::after {
   content: "";
   position: absolute;
-  inset: 10px 0 10px auto;
-  width: 1px;
-  background: rgba(255, 255, 255, 0.9);
-  box-shadow: -1px 0 0 rgba(39, 66, 95, 0.08);
+  inset: 12px 1px 12px auto;
+  width: 1.5px;
+  border-radius: 1px;
+  background: linear-gradient(180deg, transparent, rgba(255, 255, 255, 0.72) 30%, rgba(255, 255, 255, 0.72) 70%, transparent);
+  transition: opacity 200ms ease;
 }
 
 .inspector-rail__item:hover,
 .inspector-rail__item:focus-visible {
-  width: 154px;
+  width: 162px;
+  border-radius: 14px 0 0 14px;
   background:
-    linear-gradient(90deg, color-mix(in srgb, var(--tab-color) 20%, #ffffff) 0, var(--tab-soft) 62%);
+    linear-gradient(90deg, color-mix(in srgb, var(--tab-color) 16%, #ffffff) 0, var(--tab-soft) 58%);
   box-shadow:
-    -14px 0 30px rgba(31, 67, 119, 0.13),
-    inset 0 0 0 1px color-mix(in srgb, var(--tab-color) 22%, transparent);
-  filter: saturate(1.08);
+    -16px 0 36px rgba(22, 53, 98, 0.1),
+    inset 0 0 0 1px color-mix(in srgb, var(--tab-color) 16%, transparent);
+  filter: saturate(1.06);
+}
+
+.inspector-rail__item:hover::before,
+.inspector-rail__item:focus-visible::before {
+  opacity: 1;
+}
+
+.inspector-rail__item:active {
+  transform: scale(0.98);
+  transition: transform 80ms ease;
+}
+
+.inspector-rail__item:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--tab-color) 60%, transparent);
+  outline-offset: -2px;
 }
 
 .inspector-rail__item.is-active {
-  color: #10233f;
+  color: #0d2340;
   background:
-    linear-gradient(90deg, color-mix(in srgb, var(--tab-color) 22%, #ffffff) 0, var(--tab-soft) 64%);
+    linear-gradient(90deg, color-mix(in srgb, var(--tab-color) 20%, #ffffff) 0, var(--tab-soft) 62%);
   box-shadow:
-    inset 0 0 0 1px color-mix(in srgb, var(--tab-color) 28%, transparent),
-    -8px 0 20px rgba(31, 67, 119, 0.1);
+    inset 0 0 0 1px color-mix(in srgb, var(--tab-color) 24%, transparent),
+    -10px 0 24px rgba(22, 53, 98, 0.08);
+}
+
+.inspector-rail__item.is-active::before {
+  opacity: 1;
+}
+
+.inspector-rail__item.is-active::after {
+  background: linear-gradient(180deg, transparent, color-mix(in srgb, var(--tab-color) 55%, transparent) 30%, color-mix(in srgb, var(--tab-color) 55%, transparent) 70%, transparent);
 }
 
 .inspector-rail__icon {
@@ -120,18 +143,37 @@ const emit = defineEmits(['select'])
   position: relative;
   z-index: 1;
   grid-column: 2;
-  width: 34px;
-  height: 34px;
+  width: 36px;
+  height: 36px;
   place-items: center;
   color: #ffffff;
-  border-radius: 11px;
+  border-radius: 12px;
   background:
-    linear-gradient(135deg, rgba(255, 255, 255, 0.22), transparent 45%),
+    linear-gradient(145deg, rgba(255, 255, 255, 0.26), transparent 50%),
     var(--tab-color);
-  font: 800 10px/1 var(--mono);
+  font: 800 10.5px/1 var(--mono);
+  letter-spacing: 0.02em;
   box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.28),
-    0 8px 18px color-mix(in srgb, var(--tab-color) 24%, transparent);
+    inset 0 1px 0 rgba(255, 255, 255, 0.32),
+    0 6px 16px color-mix(in srgb, var(--tab-color) 28%, transparent);
+  transition:
+    transform 220ms cubic-bezier(0.28, 1.4, 0.55, 1),
+    box-shadow 200ms ease;
+}
+
+.inspector-rail__item:hover .inspector-rail__icon,
+.inspector-rail__item:focus-visible .inspector-rail__icon {
+  transform: scale(1.06);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.36),
+    0 10px 24px color-mix(in srgb, var(--tab-color) 34%, transparent);
+}
+
+.inspector-rail__item.is-active .inspector-rail__icon {
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.4),
+    0 8px 22px color-mix(in srgb, var(--tab-color) 38%, transparent),
+    0 0 0 3px color-mix(in srgb, var(--tab-color) 14%, transparent);
 }
 
 .inspector-rail__label {
@@ -141,35 +183,44 @@ const emit = defineEmits(['select'])
   grid-row: 1;
   justify-self: end;
   white-space: nowrap;
-  color: #203956;
-  font: 760 10px/1 var(--mono);
+  color: #1a3252;
+  font: 650 10.5px/1 var(--mono);
+  letter-spacing: 0.03em;
   opacity: 0;
-  transform: translateX(10px);
-  transition: opacity 150ms ease, transform 180ms ease;
+  transform: translateX(14px);
+  transition:
+    opacity 180ms ease 40ms,
+    transform 220ms cubic-bezier(0.16, 1, 0.3, 1) 40ms;
 }
 
 .inspector-rail__item:hover .inspector-rail__label,
 .inspector-rail__item:focus-visible .inspector-rail__label {
   opacity: 1;
   transform: translateX(0);
+  transition:
+    opacity 160ms ease 60ms,
+    transform 200ms cubic-bezier(0.16, 1, 0.3, 1) 60ms;
 }
 
 .inspector-rail__count {
   position: absolute;
-  z-index: 2;
-  top: calc(50% - 24px);
-  right: 5px;
-  min-width: 15px;
-  height: 15px;
-  padding: 0 4px;
+  z-index: 3;
+  top: 6px;
+  right: 10px;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 5px;
   border-radius: 999px;
   color: #ffffff;
   background: var(--tab-color);
-  font: 800 8px/15px var(--mono);
+  font: 700 9px/16px var(--mono);
   text-align: center;
+  box-shadow: 0 2px 8px color-mix(in srgb, var(--tab-color) 36%, transparent);
   opacity: 0;
-  transform: scale(0.82);
-  transition: opacity 150ms ease, transform 180ms ease;
+  transform: scale(0.75);
+  transition:
+    opacity 160ms ease,
+    transform 200ms cubic-bezier(0.28, 1.4, 0.55, 1);
 }
 
 .inspector-rail__item:hover .inspector-rail__count,
@@ -181,8 +232,13 @@ const emit = defineEmits(['select'])
 @media (prefers-reduced-motion: reduce) {
   .inspector-rail__item,
   .inspector-rail__label,
-  .inspector-rail__count {
-    transition: none;
+  .inspector-rail__count,
+  .inspector-rail__icon {
+    transition-duration: 0.01ms !important;
+  }
+
+  .inspector-rail__item:active {
+    transform: none;
   }
 }
 </style>
