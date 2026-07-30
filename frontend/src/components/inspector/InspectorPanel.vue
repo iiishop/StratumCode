@@ -17,6 +17,7 @@ const props = defineProps({
   subagents: { type: Array, default: () => [] },
   width: { type: Number, default: 392 },
   tabs: { type: Array, default: () => [] },
+  workspaceKey: { type: [String, Number], default: '' },
 })
 const emit = defineEmits([
   'close',
@@ -524,7 +525,7 @@ function onRowLeave(el) {
       </template>
 
       <template v-else-if="tab === 'git'">
-        <GitPanel />
+        <GitPanel :workspace-key="workspaceKey" />
       </template>
 
       <template v-else-if="tab === 'mcp'">

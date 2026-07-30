@@ -267,21 +267,22 @@ def _branches(root: Path) -> list[dict]:
     output = _git(
         root,
         "branch",
-        "--format=%(refname:short)%00%(objectname:short)%00%(upstream:short)%00%(upstream:trackshort)%00%(HEAD)",
+        "--format=%(refname)%00%(refname:short)%00%(objectname:short)%00%(upstream:short)%00%(upstream:trackshort)%00%(HEAD)",
         "--all",
     )["stdout"]
     branches = []
     for line in output.splitlines():
-        name, short, upstream, track, head = (line.split("\0") + ["", "", "", "", ""])[:5]
-        if not name or name.endswith("/HEAD"):
+        refname, name, short, upstream, track, head = (line.split("\0") + ["", "", "", "", "", ""])[:6]
+        if not refname or refname.endswith("/HEAD"):
             continue
+        remote = refname.startswith("refs/remotes/")
         branches.append({
             "name": name,
             "hash": short,
             "upstream": upstream,
             "track": track,
             "current": head == "*",
-            "remote": name.startswith("remotes/"),
+            "remote": remote,
         })
     return branches
 

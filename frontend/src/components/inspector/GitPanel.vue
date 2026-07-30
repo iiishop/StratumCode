@@ -1,8 +1,11 @@
 <script setup>
-import { computed, onMounted, onUnmounted, ref } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 
 const GRAPH_ROW_HEIGHT = 58
 const GRAPH_ROW_CENTER = GRAPH_ROW_HEIGHT / 2
+const props = defineProps({
+  workspaceKey: { type: [String, Number], default: '' },
+})
 
 const loading = ref(false)
 const actionLoading = ref('')
@@ -136,7 +139,9 @@ function buildGraphRows(commits) {
     for (const parent of visibleParents.slice(1)) {
       if (!active.includes(parent)) active.push(parent)
     }
-    rows.push({ ...commit, lane, kind: commitKind(commit.subject) })
+    const kind = commitKind(commit.subject)
+    const refInfo = commitRefInfo(commit)
+    rows.push({ ...commit, lane, kind, refInfo })
   }
   const laneByHash = new Map(rows.map(row => [row.hash, row.lane]))
   const edges = []
@@ -152,6 +157,7 @@ function buildGraphRows(commits) {
         y2: yFor(parentIndex),
         lane: row.lane,
         kind: row.kind,
+        refClass: row.refInfo.className,
       })
     }
   })
@@ -184,12 +190,28 @@ function commitKind(subject) {
   return commitMeta[kind] ? kind : 'commit'
 }
 
+function commitRefInfo(commit) {
+  const refs = commit.refs || []
+  if (refs.some(ref => ref === git.value?.head?.branch)) return { className: 'ref-head', color: '#12846f' }
+  if (refs.some(ref => ref.startsWith('origin/') || ref.startsWith('remotes/'))) return { className: 'ref-remote', color: '#8f45d8' }
+  if (refs.some(ref => ref.startsWith('tag:') || ref.includes('/tags/'))) return { className: 'ref-tag', color: '#c57716' }
+  if (refs.length) return { className: 'ref-local', color: '#2f6edb' }
+  return { className: '', color: '' }
+}
+
 function commitStyle(commit) {
   const meta = commitMeta[commit.kind] || commitMeta.commit
   return {
-    '--commit-color': meta.color,
+    '--commit-color': commit.refInfo?.color || meta.color,
     '--commit-soft': meta.soft,
   }
+}
+
+function refClass(refName) {
+  if (refName === git.value?.head?.branch) return 'is-head'
+  if (refName.startsWith('origin/') || refName.startsWith('remotes/')) return 'is-remote'
+  if (refName.startsWith('tag:') || refName.includes('/tags/')) return 'is-tag'
+  return 'is-local'
 }
 
 function actionLabel(action) {
@@ -207,6 +229,17 @@ function actionLabel(action) {
   }[action] || 'Working'
 }
 
+function branchTone(branch) {
+  if (branch.current) return '#12846f'
+  return branch.remote ? '#8f45d8' : '#2f6edb'
+}
+
+function branchTrack(branch) {
+  const value = String(branch.track || '').trim()
+  if (!value) return ''
+  return value.replace('>', '↑').replace('<', '↓')
+}
+
 function branchName(name) {
   return String(name || '').replace(/^remotes\//, '')
 }
@@ -220,6 +253,10 @@ onMounted(() => {
 
 onUnmounted(() => {
   window.clearInterval(fetchTimer)
+})
+
+watch(() => props.workspaceKey, () => {
+  loadGit()
 })
 </script>
 
@@ -348,10 +385,12 @@ onUnmounted(() => {
           <span>{{ localBranches.length }} local / {{ remoteBranches.length }} remote</span>
         </div>
         <div class="git-branches">
-          <article v-for="branch in localBranches.slice(0, 8)" :key="branch.name" class="git-branch" :class="{ 'is-current': branch.current }">
-            <span>{{ branchName(branch.name) }}</span>
-            <small>{{ branch.upstream || branch.hash }}</small>
-            <b v-if="branch.track">{{ branch.track }}</b>
+          <article v-for="branch in localBranches.slice(0, 8)" :key="branch.name" class="git-branch" :class="{ 'is-current': branch.current }" :style="{ '--branch-color': branchTone(branch) }">
+            <i class="git-branch__node"></i>
+            <span class="git-branch__name">{{ branchName(branch.name) }}</span>
+            <small class="git-branch__meta">{{ branch.upstream || 'local only' }}</small>
+            <b class="git-branch__hash">{{ branch.hash }}</b>
+            <em v-if="branchTrack(branch)" class="git-branch__track">{{ branchTrack(branch) }}</em>
             <button
               v-if="!branch.current"
               class="git-branch__switch"
@@ -365,9 +404,11 @@ onUnmounted(() => {
               </svg>
             </button>
           </article>
-          <article v-for="branch in remoteBranches.slice(0, 8)" :key="branch.name" class="git-branch is-remote">
-            <span>{{ branchName(branch.name) }}</span>
-            <small>{{ branch.hash }}</small>
+          <article v-for="branch in remoteBranches.slice(0, 8)" :key="branch.name" class="git-branch is-remote" :style="{ '--branch-color': branchTone(branch) }">
+            <i class="git-branch__node"></i>
+            <span class="git-branch__name">{{ branchName(branch.name) }}</span>
+            <small class="git-branch__meta">remote ref</small>
+            <b class="git-branch__hash">{{ branch.hash }}</b>
             <button
               class="git-branch__switch"
               type="button"
@@ -398,7 +439,12 @@ onUnmounted(() => {
       <section class="git-section git-section--graph">
         <div class="git-section__head">
           <strong>Graph</strong>
-          <span>{{ graphRows.rows.length }} commits</span>
+          <span class="git-graph__legend">
+            <i class="is-head"></i>HEAD
+            <i class="is-local"></i>local
+            <i class="is-remote"></i>remote
+            <i class="is-tag"></i>tag
+          </span>
         </div>
         <div class="git-graph" :style="{ '--graph-width': `${graphWidth}px` }">
           <svg class="git-graph__canvas" :width="graphWidth" :height="graphHeight" aria-hidden="true">
@@ -406,7 +452,7 @@ onUnmounted(() => {
               v-for="edge in graphRows.edges"
               :key="edge.id"
               :d="`M ${edge.x1} ${edge.y1} C ${edge.x1} ${(edge.y1 + edge.y2) / 2}, ${edge.x2} ${(edge.y1 + edge.y2) / 2}, ${edge.x2} ${edge.y2}`"
-              :class="[`lane-${edge.lane % 6}`, `is-${edge.kind}`]"
+              :class="[`lane-${edge.lane % 6}`, `is-${edge.kind}`, edge.refClass]"
             />
             <circle
               v-for="(row, index) in graphRows.rows"
@@ -414,7 +460,7 @@ onUnmounted(() => {
               :cx="xFor(row.lane)"
               :cy="yFor(index)"
               r="5.5"
-              :class="[`lane-${row.lane % 6}`, `is-${row.kind}`]"
+              :class="[`lane-${row.lane % 6}`, `is-${row.kind}`, row.refInfo.className]"
             />
           </svg>
           <div class="git-graph__rows">
@@ -425,7 +471,7 @@ onUnmounted(() => {
                 <small>{{ commitMeta[commit.kind].label }} · {{ commit.author }} · {{ commit.relative_date }} · {{ commit.short }}</small>
               </div>
               <div v-if="commit.refs.length" class="git-commit__refs">
-                <span v-for="refName in commit.refs.slice(0, 3)" :key="refName">{{ branchName(refName) }}</span>
+                <span v-for="refName in commit.refs.slice(0, 3)" :key="refName" :class="refClass(refName)">{{ branchName(refName) }}</span>
               </div>
             </article>
           </div>
@@ -1068,21 +1114,62 @@ onUnmounted(() => {
 
 .git-branches {
   display: grid;
+  background:
+    linear-gradient(90deg, rgba(47, 110, 219, .05), transparent 42%),
+    linear-gradient(180deg, #ffffff, #fbfdff);
 }
 
 .git-branch {
   display: grid;
   position: relative;
-  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-columns: 18px minmax(0, 1fr) auto;
   gap: 3px 8px;
+  align-items: center;
+  min-height: 42px;
   padding: 8px 34px 8px 11px;
+  border-left: 3px solid transparent;
+  background:
+    linear-gradient(90deg, color-mix(in srgb, var(--branch-color) 8%, transparent), transparent 58%);
+  transition: background .16s ease, border-color .16s ease;
 }
 
 .git-branch.is-current {
   padding-right: 11px;
 }
 
-.git-branch span {
+.git-branch:hover,
+.git-branch:focus-within {
+  border-left-color: var(--branch-color);
+  background:
+    linear-gradient(90deg, color-mix(in srgb, var(--branch-color) 15%, transparent), #ffffff 68%);
+}
+
+.git-branch__node {
+  position: relative;
+  grid-row: 1 / span 2;
+  width: 10px;
+  height: 10px;
+  border-radius: 999px;
+  background: var(--branch-color);
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--branch-color) 14%, transparent);
+}
+
+.git-branch__node::after {
+  content: "";
+  position: absolute;
+  left: 4px;
+  top: 11px;
+  width: 2px;
+  height: 20px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--branch-color) 22%, transparent);
+}
+
+.git-branch:last-child .git-branch__node::after {
+  display: none;
+}
+
+.git-branch__name {
   min-width: 0;
   overflow: hidden;
   color: var(--text-h);
@@ -1092,8 +1179,8 @@ onUnmounted(() => {
   white-space: nowrap;
 }
 
-.git-branch small {
-  grid-column: 1 / -1;
+.git-branch__meta {
+  grid-column: 2;
   overflow: hidden;
   color: var(--text-muted);
   font: 9px/1.2 var(--mono);
@@ -1101,16 +1188,41 @@ onUnmounted(() => {
   white-space: nowrap;
 }
 
-.git-branch b {
-  color: #2f6edb;
+.git-branch__hash,
+.git-branch__track {
+  justify-self: end;
+  padding: 3px 5px;
+  border-radius: 5px;
+  color: var(--branch-color);
+  background: color-mix(in srgb, var(--branch-color) 10%, #ffffff);
   font: 800 9px/1 var(--mono);
 }
 
-.git-branch.is-current {
-  background: #e8f0ff;
+.git-branch__track {
+  grid-column: 3;
+  grid-row: 2;
+  min-width: 24px;
+  text-align: center;
+  font-style: normal;
 }
 
-.git-branch.is-remote span {
+.git-branch.is-current {
+  border-left-color: #12846f;
+  background: linear-gradient(90deg, #e8f7f2, #ffffff 70%);
+}
+
+.git-branch.is-current .git-branch__name::after {
+  content: " current";
+  margin-left: 6px;
+  padding: 2px 5px;
+  border-radius: 999px;
+  color: #126b5d;
+  background: #d8f0e9;
+  font: 800 8px/1 var(--mono);
+  text-transform: uppercase;
+}
+
+.git-branch.is-remote .git-branch__name {
   color: #8f45d8;
 }
 
@@ -1187,6 +1299,24 @@ onUnmounted(() => {
   stroke-width: 2.4;
 }
 
+.git-graph__legend {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  text-transform: none;
+}
+
+.git-graph__legend i {
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+}
+
+.git-graph__legend .is-head { background: #12846f; }
+.git-graph__legend .is-local { background: #2f6edb; }
+.git-graph__legend .is-remote { background: #8f45d8; }
+.git-graph__legend .is-tag { background: #c57716; }
+
 .lane-0 { stroke: #2f6edb; fill: #2f6edb; }
 .lane-1 { stroke: #12846f; fill: #12846f; }
 .lane-2 { stroke: #c57716; fill: #c57716; }
@@ -1205,6 +1335,27 @@ onUnmounted(() => {
 .git-graph__canvas .is-ci { stroke: #0d7e9a; fill: #0d7e9a; }
 .git-graph__canvas .is-style { stroke: #cf4d78; fill: #cf4d78; }
 .git-graph__canvas .is-revert { stroke: #9a5c20; fill: #9a5c20; }
+.git-graph__canvas .ref-head {
+  stroke: #12846f;
+  fill: #12846f;
+  stroke-width: 3;
+  filter: drop-shadow(0 0 5px rgba(18, 132, 111, .35));
+}
+.git-graph__canvas .ref-local {
+  stroke: #2f6edb;
+  fill: #2f6edb;
+  stroke-width: 2.6;
+}
+.git-graph__canvas .ref-remote {
+  stroke: #8f45d8;
+  fill: #8f45d8;
+  stroke-width: 2.6;
+}
+.git-graph__canvas .ref-tag {
+  stroke: #c57716;
+  fill: #c57716;
+  stroke-width: 2.6;
+}
 
 .git-graph__rows {
   grid-column: 2;
@@ -1295,6 +1446,26 @@ onUnmounted(() => {
   font: 800 8.5px/1 var(--mono);
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.git-commit__refs span.is-head {
+  color: #126b5d;
+  background: #d8f0e9;
+}
+
+.git-commit__refs span.is-local {
+  color: #174ea6;
+  background: #e8f0ff;
+}
+
+.git-commit__refs span.is-remote {
+  color: #6534a3;
+  background: #f0e7fb;
+}
+
+.git-commit__refs span.is-tag {
+  color: #91530e;
+  background: #fff0d9;
 }
 
 @keyframes sync-dot {

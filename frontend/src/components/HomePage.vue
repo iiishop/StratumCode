@@ -953,6 +953,7 @@ watch(() => props.activeWorkspace?.id, () => {
           :subagents="visibleSubagents"
           :width="inspectorWidth"
           :tabs="inspectorTabs"
+          :workspace-key="activeWorkspace?.id || activeWorkspace?.path || ''"
           @resize="inspectorWidth = $event"
           @toggle-todo="toggleTodo"
           @close="closeInspector"
