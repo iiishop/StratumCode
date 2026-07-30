@@ -1,5 +1,6 @@
 <script setup>
-import { computed, ref } from 'vue'
+import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
+import gsap from 'gsap'
 import { parseBlock } from '../../lib/markdown'
 
 const props = defineProps({
@@ -24,9 +25,9 @@ const emit = defineEmits(['start', 'restart'])
 const running = computed(() => props.state === 'running')
 const done = computed(() => props.state === 'done')
 const failed = computed(() => props.state === 'error')
-const progressStyle = computed(() => ({ '--progress': `${Math.min(100, Math.max(0, props.progress))}%` }))
 const notesExpanded = ref(false)
 const parsedNotes = computed(() => props.releaseBody ? parseBlock(props.releaseBody) : '')
+const accentTrack = computed(() => props.title.toLowerCase().includes('dev') ? 'dev' : 'stable')
 
 const relativeTime = computed(() => {
   if (!props.releaseDate) return ''
@@ -43,19 +44,192 @@ const relativeTime = computed(() => {
 })
 
 const statusText = computed(() => {
-  if (done) return 'Updated'
-  if (running) return 'Updating…'
+  if (done.value) return 'Updated'
+  if (running.value) return 'Updating\u2026'
   return props.available ? 'Update available' : 'Current'
 })
 
-const accentTrack = computed(() => props.title.toLowerCase().includes('dev') ? 'dev' : 'stable')
+// -- animation refs --------------------------------------------------
+const rowEl = ref(null)
+const arrowBtn = ref(null)
+const progressBar = ref(null)
+const versionCurrent = ref(null)
+const versionTarget = ref(null)
+const fireworkContainer = ref(null)
+const edgeShine = ref(null)
+const restartBtn = ref(null)
+
+let progressTl = null
+let spinOutTl = null
+let prevProgress = 0
+
+// -- progress indicator position (CSS custom property) ---------------
+const barStyle = computed(() => {
+  const pct = Math.min(100, Math.max(0, props.progress))
+  return { '--bar-pct': `${pct}%` }
+})
+
+// -- start animation when state becomes running ----------------------
+watch(() => props.state, async (s) => {
+  if (s !== 'running') return
+  await nextTick()
+  if (!arrowBtn.value || !versionCurrent.value || !progressBar.value) return
+
+  // Kill any stale animation
+  progressTl?.kill()
+  spinOutTl?.kill()
+
+  const arrow = arrowBtn.value
+  const curLabel = versionCurrent.value
+  const bar = progressBar.value
+  const labelHeight = curLabel.offsetHeight
+
+  // Phase 1: arrow shrink + text fade + move left + rotate 90°
+  const arrowRect = arrow.getBoundingClientRect()
+  const labelRect = curLabel.getBoundingClientRect()
+  const moveX = labelRect.left - arrowRect.left + labelRect.width + 8
+
+  progressTl = gsap.timeline({ defaults: { ease: 'power2.inOut' } })
+
+  progressTl
+    .to(curLabel, { opacity: 0.8, scale: 0.96, duration: 0.26 }, 0)
+    .to(arrow, {
+      scale: 0.86,
+      x: moveX,
+      rotate: 90,
+      duration: 0.26,
+      ease: 'power3.inOut',
+    }, 0)
+    .set(bar, {
+      height: `${labelHeight * 1.1}px`,
+      width: '100%',
+    }, 0.1)
+    .to(bar, { opacity: 1, duration: 0.18 }, 0.18)
+    .set(arrow, { position: 'absolute' }, 0)
+
+  // Start tracking progress
+  prevProgress = 0
+  requestAnimationFrame(trackProgress)
+})
+
+// -- track progress updates ------------------------------------------
+function trackProgress() {
+  if (props.state !== 'running') return
+  const pct = Math.min(100, Math.max(0, props.progress))
+  if (pct !== prevProgress) {
+    prevProgress = pct
+    // Arrow follows progress
+    if (arrowBtn.value && progressBar.value) {
+      const barWidth = progressBar.value.offsetWidth
+      const arrowW = arrowBtn.value.offsetWidth
+      const left = (barWidth * pct) / 100 - arrowW / 2
+      gsap.to(arrowBtn.value, { left, duration: 0.26, ease: 'power2.out' })
+    }
+  }
+  if (pct < 100) {
+    requestAnimationFrame(trackProgress)
+  } else {
+    // Progress complete → spin-out + firework
+    onProgressComplete()
+  }
+}
+
+// -- completion animation --------------------------------------------
+async function onProgressComplete() {
+  await nextTick()
+  if (!arrowBtn.value || !fireworkContainer.value || !edgeShine.value || !versionTarget.value || !restartBtn.value) return
+
+  const arrow = arrowBtn.value
+  const fireworks = fireworkContainer.value
+  const shine = edgeShine.value
+  const newLabel = versionTarget.value
+  const restart = restartBtn.value
+
+  spinOutTl = gsap.timeline()
+
+  // Spin out: 0.1s = 1 rotation, 0.3s = 5 rotations total, size to 200%, opacity to 0
+  spinOutTl
+    .to(arrow, {
+      rotate: 360 * 5 + 90,
+      scale: 2,
+      opacity: 0,
+      duration: 0.3,
+      ease: 'power4.in',
+      onComplete: () => {
+        // Firework burst at arrow position
+        spawnFireworks(fireworks)
+        arrow.style.display = 'none'
+      },
+    }, 0)
+    // Edge shine slides around progress bar
+    .fromTo(shine, { opacity: 1, left: 0, top: 0 }, {
+      duration: 0.6,
+      ease: 'none',
+      keyframes: {
+        '0%': { left: 0, top: 0 },
+        '25%': { left: 'calc(100% - 8px)', top: 0 },
+        '50%': { left: 'calc(100% - 8px)', top: 'calc(100% - 2px)' },
+        '75%': { left: 0, top: 'calc(100% - 2px)' },
+        '100%': { left: 0, top: 0 },
+      },
+    }, 0.3)
+    .to(shine, { opacity: 0, duration: 0.15 }, 0.9)
+    // New version flash
+    .fromTo(newLabel, { opacity: 0.5 }, {
+      opacity: 1,
+      duration: 0.22,
+      repeat: 1,
+      yoyo: true,
+      ease: 'power1.inOut',
+    }, 0.5)
+    // Fade to restart button
+    .fromTo(versionCurrent.value, { display: 'block' }, { display: 'none', duration: 0 }, 0.8)
+    .fromTo(newLabel, { opacity: 1 }, {
+      opacity: 0,
+      scale: 0.96,
+      duration: 0.2,
+      ease: 'power2.in',
+    }, 0.82)
+    .fromTo(restart, { opacity: 0, scale: 0.92 }, {
+      opacity: 1,
+      scale: 1,
+      duration: 0.22,
+      ease: 'back.out(1.4)',
+    }, 0.9)
+}
+
+// -- firework particles ----------------------------------------------
+function spawnFireworks(container) {
+  const count = 16
+  const colors = ['#3b82f6', '#ef4444', '#f59e0b', '#10b981', '#ffffff', '#93c5fd']
+  for (let i = 0; i < count; i++) {
+    const particle = document.createElement('span')
+    const angle = (i / count) * Math.PI * 2 + (Math.random() - 0.5) * 0.6
+    const distance = 24 + Math.random() * 32
+    const color = colors[Math.floor(Math.random() * colors.length)]
+    particle.style.setProperty('--angle', `${angle}rad`)
+    particle.style.setProperty('--dist', `${distance}px`)
+    particle.style.setProperty('--color', color)
+    particle.style.setProperty('--delay', `${Math.random() * 0.08}s`)
+    particle.className = 'firework-particle'
+    container.appendChild(particle)
+    // Auto-remove after animation
+    setTimeout(() => particle.remove(), 600)
+  }
+}
+
+// -- cleanup ---------------------------------------------------------
+onBeforeUnmount(() => {
+  progressTl?.kill()
+  spinOutTl?.kill()
+})
 </script>
 
 <template>
   <article
+    ref="rowEl"
     class="update-row"
     :class="[`track--${accentTrack}`, { 'is-running': running, 'is-done': done, 'is-error': failed, 'is-disabled': disabled }]"
-    :style="progressStyle"
   >
     <div class="update-row__header">
       <div class="update-row__channel">
@@ -85,16 +259,31 @@ const accentTrack = computed(() => props.title.toLowerCase().includes('dev') ? '
     </div>
 
     <div class="update-row__stage">
-      <div class="update-row__version">
-        <span class="update-row__track" aria-hidden="true">
-          <span class="update-row__track-target">{{ targetLabel }}</span>
-        </span>
-        <span v-if="done" class="update-row__shine" aria-hidden="true"></span>
-        <span v-if="done" class="update-row__particles" aria-hidden="true">
-          <span v-for="index in 10" :key="index" :style="{ '--i': index }"></span>
-        </span>
-        <span class="update-row__current">{{ currentLabel }}</span>
+      <!-- Progress bar background -->
+      <div
+        ref="progressBar"
+        class="update-row__progress-bar"
+        :class="{ 'is-visible': running || done }"
+        :style="barStyle"
+      >
+        <!-- Edge shine element -->
+        <span ref="edgeShine" class="update-row__edge-shine"></span>
+        <!-- Firework container (aligned with arrow end position) -->
+        <span ref="fireworkContainer" class="update-row__fireworks"></span>
+      </div>
+
+      <!-- Version display area -->
+      <div class="update-row__version-row">
+        <span ref="versionCurrent" class="update-row__current-ver">{{ currentLabel }}</span>
+        <span
+          ref="versionTarget"
+          class="update-row__target-ver"
+          :style="{ '--reveal': `${Math.min(100, Math.max(0, props.progress))}%` }"
+        >{{ targetLabel }}</span>
+
+        <!-- Arrow button -->
         <button
+          ref="arrowBtn"
           class="update-row__arrow"
           type="button"
           :disabled="!available || disabled || running || done"
@@ -105,8 +294,16 @@ const accentTrack = computed(() => props.title.toLowerCase().includes('dev') ? '
             <path d="M12 19V5M5 12l7-7 7 7" />
           </svg>
         </button>
+
+        <!-- Restart button (revealed after done) -->
+        <button
+          v-if="done"
+          ref="restartBtn"
+          class="update-row__restart"
+          type="button"
+          @click="emit('restart')"
+        >Restart</button>
       </div>
-      <button v-if="done" class="update-row__restart" type="button" @click="emit('restart')">Restart</button>
     </div>
 
     <p class="update-row__detail">{{ message || detail }}</p>
@@ -124,6 +321,7 @@ const accentTrack = computed(() => props.title.toLowerCase().includes('dev') ? '
 </template>
 
 <style scoped>
+/* --- row base --- */
 .update-row {
   position: relative;
   padding: 16px;
@@ -144,13 +342,14 @@ const accentTrack = computed(() => props.title.toLowerCase().includes('dev') ? '
   background: var(--border-strong);
 }
 
-.track--stable::before { background: var(--accent); }
+.track--stable::before { background: #3b82f6; }
 .track--dev::before { background: #10b981; }
 
-.update-row.is-disabled {
-  opacity: 0.5;
-}
+.update-row.is-disabled { opacity: 0.5; }
+.update-row.is-error { border-color: var(--err-border); }
+.update-row.is-error .update-row__detail { color: var(--err); }
 
+/* --- header --- */
 .update-row__header {
   display: flex;
   align-items: center;
@@ -207,11 +406,12 @@ const accentTrack = computed(() => props.title.toLowerCase().includes('dev') ? '
 }
 
 .update-row__gh-link:hover {
-  color: var(--accent);
-  border-color: var(--accent-border);
-  background: var(--accent-bg);
+  color: #3b82f6;
+  border-color: rgba(59, 130, 246, 0.3);
+  background: rgba(59, 130, 246, 0.06);
 }
 
+/* --- release meta --- */
 .update-row__release-meta {
   display: flex;
   align-items: center;
@@ -220,11 +420,7 @@ const accentTrack = computed(() => props.title.toLowerCase().includes('dev') ? '
   margin-bottom: 10px;
 }
 
-.update-row__release-name {
-  font: 500 12px/1.3 var(--heading);
-  color: var(--text-h);
-}
-
+.update-row__release-name { font: 500 12px/1.3 var(--heading); color: var(--text-h); }
 .update-row__release-date {
   padding: 1px 6px;
   border-radius: 999px;
@@ -233,45 +429,114 @@ const accentTrack = computed(() => props.title.toLowerCase().includes('dev') ? '
   background: var(--code-bg);
   border: 1px solid var(--border);
 }
+.update-row__behind { font: 10px/1 var(--mono); color: var(--text-muted); }
 
-.update-row__behind {
-  font: 10px/1 var(--mono);
-  color: var(--text-muted);
-}
-
+/* --- stage --- */
 .update-row__stage {
-  display: flex;
-  align-items: center;
-  gap: 10px;
+  position: relative;
+  min-height: 34px;
 }
 
-.update-row__version {
+/* --- progress bar --- */
+.update-row__progress-bar {
+  position: absolute;
+  left: 0;
+  top: 50%;
+  transform: translateY(-50%);
+  z-index: 1;
+  height: 0;
+  pointer-events: none;
+  opacity: 0;
+  border: 1px solid rgba(59, 130, 246, 0.34);
+  border-radius: 999px;
+  background: linear-gradient(90deg, rgba(59, 130, 246, 0.13), rgba(59, 130, 246, 0.06) 70%);
+  overflow: hidden;
+  transition: opacity 0.18s ease;
+}
+
+.track--dev .update-row__progress-bar {
+  border-color: rgba(16, 185, 129, 0.34);
+  background: linear-gradient(90deg, rgba(16, 185, 129, 0.13), rgba(16, 185, 129, 0.06) 70%);
+}
+
+.update-row__progress-bar::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: var(--bar-pct, 0%);
+  border-radius: 999px;
+  background: linear-gradient(90deg,
+    rgba(59, 130, 246, 0.28),
+    rgba(59, 130, 246, 0.18) 60%,
+    rgba(255, 255, 255, 0.24) 100%
+  );
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.14);
+  transition: width 0.26s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.track--dev .update-row__progress-bar::after {
+  background: linear-gradient(90deg,
+    rgba(16, 185, 129, 0.28),
+    rgba(16, 185, 129, 0.18) 60%,
+    rgba(255, 255, 255, 0.24) 100%
+  );
+}
+
+/* --- edge shine --- */
+.update-row__edge-shine {
+  position: absolute;
+  z-index: 3;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  background: rgba(255, 255, 255, 0.96);
+  box-shadow: 0 0 8px 2px rgba(255, 255, 255, 0.7);
+  opacity: 0;
+  pointer-events: none;
+}
+
+/* --- version row --- */
+.update-row__version-row {
   position: relative;
+  z-index: 2;
   display: flex;
-  min-width: 0;
-  min-height: 34px;
-  flex: 1;
   align-items: center;
   gap: 8px;
-  overflow: hidden;
+  min-height: 34px;
   padding: 0 4px;
 }
 
-.update-row__current {
-  position: relative;
-  z-index: 3;
+.update-row__current-ver {
   font: 12px/1 var(--mono);
-  transition: opacity 180ms ease, transform 180ms ease;
-  white-space: nowrap;
   color: var(--text-h);
+  white-space: nowrap;
+  transition: opacity 0.26s ease, transform 0.26s ease;
 }
 
-.update-row__arrow,
-.update-row__restart {
-  flex: 0 0 auto;
-  cursor: pointer;
+.update-row__target-ver {
+  position: absolute;
+  left: 4px;
+  top: 50%;
+  transform: translateY(-50%);
+  font: 12px/1 var(--mono);
+  color: #ffffff;
+  white-space: nowrap;
+  opacity: 0;
+  pointer-events: none;
+  clip-path: inset(0 calc(100% - var(--reveal, 0%)) 0 0);
+  transition: clip-path 0.26s cubic-bezier(0.16, 1, 0.3, 1);
 }
 
+.update-row.is-running .update-row__target-ver,
+.update-row.is-done .update-row__target-ver {
+  opacity: 1;
+}
+
+/* --- arrow button --- */
 .update-row__arrow {
   position: relative;
   z-index: 4;
@@ -280,17 +545,20 @@ const accentTrack = computed(() => props.title.toLowerCase().includes('dev') ? '
   height: 27px;
   padding: 0;
   place-items: center;
-  border: 1px solid var(--accent-border);
+  border: 1px solid rgba(59, 130, 246, 0.5);
   border-radius: 50%;
   color: #ffffff;
-  background: var(--accent);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.2);
-  transition: left 260ms cubic-bezier(0.16, 1, 0.3, 1), transform 260ms cubic-bezier(0.16, 1, 0.3, 1), opacity 220ms ease;
+  background: #3b82f6;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.2), 0 2px 8px rgba(59, 130, 246, 0.25);
+  cursor: pointer;
+  flex-shrink: 0;
+  margin-left: auto;
 }
 
 .track--dev .update-row__arrow {
   background: #10b981;
   border-color: rgba(16, 185, 129, 0.5);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.2), 0 2px 8px rgba(16, 185, 129, 0.25);
 }
 
 .update-row__arrow:disabled {
@@ -298,156 +566,78 @@ const accentTrack = computed(() => props.title.toLowerCase().includes('dev') ? '
   opacity: 0.38;
 }
 
-.update-row__track {
-  position: absolute;
-  top: 50%;
-  left: 0;
-  z-index: 1;
-  width: var(--progress);
-  height: 1.1em;
-  overflow: hidden;
-  border: 1px solid rgba(23, 86, 209, 0.34);
-  border-radius: 999px;
-  background: linear-gradient(90deg, rgba(255, 255, 255, 0.28), transparent 28%), var(--accent);
-  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.12);
-  opacity: 0;
-  pointer-events: none;
-  transform: translateY(-50%);
-  transition: width 260ms cubic-bezier(0.16, 1, 0.3, 1);
-}
-
-.track--dev .update-row__track {
-  background: linear-gradient(90deg, rgba(255, 255, 255, 0.28), transparent 28%), #10b981;
-  border-color: rgba(16, 185, 129, 0.34);
-}
-
-.update-row__track-target {
-  display: flex;
-  height: 100%;
-  align-items: center;
-  padding-left: 40px;
-  color: #ffffff;
-  font: 12px/1 var(--mono);
-  white-space: nowrap;
-}
-
-/* --- running / done states (kept from original) --- */
-
-.update-row.is-running .update-row__version {
-  padding-left: 4px;
-}
-
-.update-row.is-running .update-row__current {
-  opacity: 0.8;
-  transform: scale(0.96);
-}
-
-.update-row.is-running .update-row__track,
-.update-row.is-done .update-row__track {
-  opacity: 1;
-}
-
-.update-row.is-running .update-row__arrow {
-  position: absolute;
-  left: clamp(0px, calc(var(--progress) - 14px), calc(100% - 27px));
-  transform: rotate(90deg) scale(0.86);
-}
-
-.update-row.is-running .update-row__arrow::before {
+/* --- indicator glow (trail left of arrow during progress) --- */
+.is-running .update-row__arrow::after {
   content: "";
   position: absolute;
-  right: 24px;
-  width: 48px;
-  height: 12px;
-  border-radius: 999px;
-  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.58));
-  filter: blur(5px);
-}
-
-.update-row.is-done .update-row__current {
-  display: none;
-}
-
-.update-row.is-done .update-row__track-target {
-  animation: update-label-flash 520ms ease both;
-}
-
-.update-row.is-done .update-row__track {
-  width: 100%;
-  background: var(--accent);
-}
-
-.track--dev.is-done .update-row__track {
-  background: #10b981;
-}
-
-.update-row.is-done .update-row__arrow {
-  position: absolute;
-  left: calc(100% - 27px);
-  opacity: 1;
-  animation: update-knob-finish 300ms cubic-bezier(0.55, 0, 1, 0.45) both;
-}
-
-/* --- shine / particles --- */
-
-.update-row__shine {
-  position: absolute;
+  right: 100%;
   top: 50%;
-  left: 0;
-  z-index: 3;
-  width: 100%;
-  height: 1.1em;
-  border-radius: 999px;
-  pointer-events: none;
   transform: translateY(-50%);
-}
-
-.update-row__shine::before {
-  content: "";
-  position: absolute;
-  width: 26px;
-  height: 2px;
+  width: 40px;
+  height: 10px;
   border-radius: 999px;
-  background: rgba(255, 255, 255, 0.96);
-  animation: update-edge-shine 900ms ease both;
+  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.45));
+  filter: blur(4px);
+  pointer-events: none;
 }
 
-.update-row__particles {
+/* --- firework particles --- */
+.update-row__fireworks {
   position: absolute;
-  left: calc(100% - 16px);
+  right: 0;
   top: 50%;
   z-index: 5;
+  pointer-events: none;
 }
 
-.update-row__particles span {
+:global(.firework-particle) {
   position: absolute;
-  width: 4px;
-  height: 4px;
+  width: 3px;
+  height: 3px;
   border-radius: 50%;
-  background: var(--accent);
-  transform: rotate(calc(var(--i) * 36deg)) translateX(0);
-  animation: update-particle 480ms ease-out both;
+  background: var(--color);
+  left: 0;
+  top: 0;
+  animation: firework-burst 0.5s cubic-bezier(0.25, 0.46, 0.45, 0.94) both;
+  animation-delay: var(--delay);
 }
 
-/* --- restart --- */
+@keyframes firework-burst {
+  0% {
+    opacity: 1;
+    transform: translate(0, 0) scale(1);
+  }
+  100% {
+    opacity: 0;
+    transform: translate(
+      calc(cos(var(--angle)) * var(--dist)),
+      calc(sin(var(--angle)) * var(--dist))
+    ) scale(0.2);
+  }
+}
 
+/* --- restart button --- */
 .update-row__restart {
   height: 30px;
-  padding: 0 12px;
-  border: 1px solid var(--accent);
+  padding: 0 14px;
+  border: 1px solid #3b82f6;
   border-radius: var(--radius-sm);
   color: #ffffff;
-  background: var(--accent);
+  background: #3b82f6;
   font: 11px/1 var(--mono);
+  cursor: pointer;
+  flex-shrink: 0;
+  margin-left: auto;
+  box-shadow: 0 1px 4px rgba(59, 130, 246, 0.25);
 }
 
 .track--dev .update-row__restart {
   border-color: #10b981;
   background: #10b981;
+  box-shadow: 0 1px 4px rgba(16, 185, 129, 0.25);
 }
 
 /* --- detail --- */
-
 .update-row__detail {
   margin: 10px 0 0;
   color: var(--text-muted);
@@ -456,19 +646,8 @@ const accentTrack = computed(() => props.title.toLowerCase().includes('dev') ? '
   min-height: 18px;
 }
 
-.update-row.is-error {
-  border-color: var(--err-border);
-}
-
-.update-row.is-error .update-row__detail {
-  color: var(--err);
-}
-
 /* --- release notes --- */
-
-.update-row__notes {
-  margin-top: 10px;
-}
+.update-row__notes { margin-top: 10px; }
 
 .update-row__notes-toggle {
   display: inline-flex;
@@ -489,13 +668,8 @@ const accentTrack = computed(() => props.title.toLowerCase().includes('dev') ? '
   border-color: var(--accent-border);
 }
 
-.update-row__notes-toggle svg {
-  transition: transform 180ms;
-}
-
-.update-row__notes-toggle svg.is-open {
-  transform: rotate(180deg);
-}
+.update-row__notes-toggle svg { transition: transform 180ms; }
+.update-row__notes-toggle svg.is-open { transform: rotate(180deg); }
 
 .update-row__notes-body {
   margin-top: 8px;
@@ -518,13 +692,9 @@ const accentTrack = computed(() => props.title.toLowerCase().includes('dev') ? '
 }
 
 .update-row__notes-body :deep(h2):first-child,
-.update-row__notes-body :deep(h3):first-child {
-  margin-top: 0;
-}
+.update-row__notes-body :deep(h3):first-child { margin-top: 0; }
 
-.update-row__notes-body :deep(p) {
-  margin: 4px 0;
-}
+.update-row__notes-body :deep(p) { margin: 4px 0; }
 
 .update-row__notes-body :deep(ul),
 .update-row__notes-body :deep(ol) {
@@ -532,9 +702,7 @@ const accentTrack = computed(() => props.title.toLowerCase().includes('dev') ? '
   padding-left: 18px;
 }
 
-.update-row__notes-body :deep(li) {
-  margin: 2px 0;
-}
+.update-row__notes-body :deep(li) { margin: 2px 0; }
 
 .update-row__notes-body :deep(code) {
   padding: 1px 4px;
@@ -543,9 +711,7 @@ const accentTrack = computed(() => props.title.toLowerCase().includes('dev') ? '
   font-size: 10px;
 }
 
-.update-row__notes-body :deep(a) {
-  color: var(--accent);
-}
+.update-row__notes-body :deep(a) { color: #3b82f6; }
 
 .update-row__notes-body :deep(blockquote) {
   margin: 6px 0;
@@ -554,55 +720,33 @@ const accentTrack = computed(() => props.title.toLowerCase().includes('dev') ? '
   color: var(--text-muted);
 }
 
-.update-row__notes-body :deep(strong) {
-  color: var(--text-h);
+.update-row__notes-body :deep(strong) { color: var(--text-h); }
+
+/* --- running/done states --- */
+.is-running .update-row__progress-bar.is-visible { opacity: 1; }
+.is-done .update-row__progress-bar.is-visible {
+  opacity: 1;
+  position: relative;
+  height: 0;
+  margin-bottom: 0;
 }
 
-/* --- keyframes --- */
-
-@keyframes update-label-flash {
-  0%, 100% { opacity: 1; }
-  45% { opacity: 0.42; }
-}
-
-@keyframes update-knob-finish {
-  0% { opacity: 0.72; transform: rotate(90deg) scale(0.86); }
-  34% { opacity: 0.84; transform: rotate(450deg) scale(1.12); }
-  100% { opacity: 0; transform: rotate(1890deg) scale(2); }
-}
-
-@keyframes update-edge-shine {
-  0% { left: 0; top: 0; transform: rotate(0deg); }
-  25% { left: calc(100% - 26px); top: 0; transform: rotate(0deg); }
-  50% { left: calc(100% - 26px); top: calc(100% - 2px); transform: rotate(90deg); }
-  75% { left: 0; top: calc(100% - 2px); transform: rotate(180deg); }
-  100% { left: 0; top: 0; transform: rotate(270deg); }
-}
-
-@keyframes update-particle {
-  0% { opacity: 1; transform: rotate(calc(var(--i) * 36deg)) translateX(0) scale(1); }
-  100% { opacity: 0; transform: rotate(calc(var(--i) * 36deg)) translateX(34px) scale(0.3); }
-}
-
+/* --- reduced motion --- */
 @media (prefers-reduced-motion: reduce) {
   .update-row__arrow,
-  .update-row__current,
-  .update-row__track,
-  .update-row__shine::before,
-  .update-row__particles span {
-    animation: none;
-    transition: none;
+  .update-row__current-ver,
+  .update-row__target-ver,
+  .update-row__progress-bar::after,
+  .update-row__edge-shine,
+  .update-row__restart {
+    animation: none !important;
+    transition: none !important;
   }
 }
 
+/* --- responsive --- */
 @media (max-width: 620px) {
-  .update-row__stage {
-    align-items: stretch;
-    flex-direction: column;
-  }
-
-  .update-row__restart {
-    width: 100%;
-  }
+  .update-row__stage { min-height: auto; }
+  .update-row__restart { width: 100%; }
 }
 </style>
