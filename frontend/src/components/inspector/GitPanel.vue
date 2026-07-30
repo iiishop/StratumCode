@@ -147,7 +147,7 @@ function buildGraphRows(commits) {
     }
     const kind = commitKind(commit.subject)
     const refInfo = commitRefInfo(commit)
-    rows.push({ ...commit, lane, kind, refInfo })
+    rows.push({ ...commit, lane, graphIndex: rows.length, kind, refInfo, avatarUrl: commitAvatarUrl(commit) })
   }
   const laneByHash = new Map(rows.map(row => [row.hash, row.lane]))
   const edges = []
@@ -203,6 +203,61 @@ function commitRefInfo(commit) {
   if (refs.some(ref => ref.startsWith('tag:') || ref.includes('/tags/'))) return { className: 'ref-tag', color: '#c57716' }
   if (refs.length) return { className: 'ref-local', color: '#2f6edb' }
   return { className: '', color: '' }
+}
+
+function md5(s) {
+  var hc = '0123456789abcdef'
+  function rh(n) { var j, o = ''; for (j = 0; j <= 3; j++) o += hc.charAt((n >> (j * 8 + 4)) & 0x0F) + hc.charAt((n >> (j * 8)) & 0x0F); return o }
+  function ad(x, y) { var lsw = (x & 0xFFFF) + (y & 0xFFFF); var msw = (x >> 16) + (y >> 16) + (lsw >> 16); return (msw << 16) | (lsw & 0xFFFF) }
+  function rl(n, c) { return (n << c) | (n >>> (32 - c)) }
+  function cm(q, a, b, x, t, s) { return ad(rl(ad(ad(a, q), ad(x, t)), s), b) }
+  function ff(a, b, c, d, x, s, t) { return cm((b & c) | ((~b) & d), a, b, x, t, s) }
+  function gg(a, b, c, d, x, s, t) { return cm((b & d) | (c & (~d)), a, b, x, t, s) }
+  function hh(a, b, c, d, x, s, t) { return cm(b ^ c ^ d, a, b, x, t, s) }
+  function ii(a, b, c, d, x, s, t) { return cm(c ^ (b | (~d)), a, b, x, t, s) }
+  function sb(x) {
+    var i, nblk = ((x.length + 8) >> 6) + 1, blks = new Array(nblk * 16)
+    for (i = 0; i < nblk * 16; i++) blks[i] = 0
+    for (i = 0; i < x.length; i++) blks[i >> 2] |= x.charCodeAt(i) << ((i % 4) * 8)
+    blks[i >> 2] |= 0x80 << ((i % 4) * 8); blks[nblk * 16 - 2] = x.length * 8
+    return blks
+  }
+  var x = sb(s), a = 1732584193, b = -271733879, c = -1732584194, d = 271733878, olda, oldb, oldc, oldd
+  for (var i = 0; i < x.length; i += 16) {
+    olda = a; oldb = b; oldc = c; oldd = d
+    a = ff(a, b, c, d, x[i + 0], 7, -680876936); d = ff(d, a, b, c, x[i + 1], 12, -389564586); c = ff(c, d, a, b, x[i + 2], 17, 606105819); b = ff(b, c, d, a, x[i + 3], 22, -1044525330)
+    a = ff(a, b, c, d, x[i + 4], 7, -176418897); d = ff(d, a, b, c, x[i + 5], 12, 1200080426); c = ff(c, d, a, b, x[i + 6], 17, -1473231341); b = ff(b, c, d, a, x[i + 7], 22, -45705983)
+    a = ff(a, b, c, d, x[i + 8], 7, 1770035416); d = ff(d, a, b, c, x[i + 9], 12, -1958414417); c = ff(c, d, a, b, x[i + 10], 17, -42063); b = ff(b, c, d, a, x[i + 11], 22, -1990404162)
+    a = ff(a, b, c, d, x[i + 12], 7, 1804603682); d = ff(d, a, b, c, x[i + 13], 12, -40341101); c = ff(c, d, a, b, x[i + 14], 17, -1502002290); b = ff(b, c, d, a, x[i + 15], 22, 1236535329)
+    a = gg(a, b, c, d, x[i + 1], 5, -165796510); d = gg(d, a, b, c, x[i + 6], 9, -1069501632); c = gg(c, d, a, b, x[i + 11], 14, 643717713); b = gg(b, c, d, a, x[i + 0], 20, -373897302)
+    a = gg(a, b, c, d, x[i + 5], 5, -701558691); d = gg(d, a, b, c, x[i + 10], 9, 38016083); c = gg(c, d, a, b, x[i + 15], 14, -660478335); b = gg(b, c, d, a, x[i + 2], 20, -405537848)
+    a = gg(a, b, c, d, x[i + 7], 5, 568446438); d = gg(d, a, b, c, x[i + 12], 9, -1019803690); c = gg(c, d, a, b, x[i + 13], 14, -187363961); b = gg(b, c, d, a, x[i + 8], 20, 1163531501)
+    a = gg(a, b, c, d, x[i + 3], 5, -1444681467); d = gg(d, a, b, c, x[i + 0], 9, -51403784); c = gg(c, d, a, b, x[i + 6], 14, 1735328473); b = gg(b, c, d, a, x[i + 9], 20, -1926607734)
+    a = hh(a, b, c, d, x[i + 5], 4, -378558); d = hh(d, a, b, c, x[i + 8], 11, -2022574463); c = hh(c, d, a, b, x[i + 11], 16, 1839030562); b = hh(b, c, d, a, x[i + 14], 23, -35309556)
+    a = hh(a, b, c, d, x[i + 1], 4, -1530992060); d = hh(d, a, b, c, x[i + 4], 11, 1272893353); c = hh(c, d, a, b, x[i + 7], 16, -155497632); b = hh(b, c, d, a, x[i + 10], 23, -1094730640)
+    a = hh(a, b, c, d, x[i + 13], 4, 681279174); d = hh(d, a, b, c, x[i + 0], 11, -358537222); c = hh(c, d, a, b, x[i + 3], 16, -722521979); b = hh(b, c, d, a, x[i + 6], 23, 76029189)
+    a = hh(a, b, c, d, x[i + 9], 4, -640364487); d = hh(d, a, b, c, x[i + 12], 11, -421815835); c = hh(c, d, a, b, x[i + 15], 16, 530742520); b = hh(b, c, d, a, x[i + 2], 23, -995338651)
+    a = ii(a, b, c, d, x[i + 0], 6, -198630844); d = ii(d, a, b, c, x[i + 7], 10, 1126891415); c = ii(c, d, a, b, x[i + 14], 15, -1416354905); b = ii(b, c, d, a, x[i + 5], 21, -57434055)
+    a = ii(a, b, c, d, x[i + 12], 6, 1700485571); d = ii(d, a, b, c, x[i + 3], 10, -1894986606); c = ii(c, d, a, b, x[i + 10], 15, -1051523); b = ii(b, c, d, a, x[i + 1], 21, -2054922799)
+    a = ii(a, b, c, d, x[i + 8], 6, 1873313359); d = ii(d, a, b, c, x[i + 15], 10, -30611744); c = ii(c, d, a, b, x[i + 6], 15, -1560198380); b = ii(b, c, d, a, x[i + 13], 21, 1309151649)
+    a = ii(a, b, c, d, x[i + 4], 6, -145523070); d = ii(d, a, b, c, x[i + 11], 10, -1120210379); c = ii(c, d, a, b, x[i + 2], 15, 718787259); b = ii(b, c, d, a, x[i + 9], 21, -343485551)
+    a = ad(a, olda); b = ad(b, oldb); c = ad(c, oldc); d = ad(d, oldd)
+  }
+  return rh(a) + rh(b) + rh(c) + rh(d)
+}
+
+function commitAvatarUrl(commit) {
+  const email = String(commit.author_email || '').trim().toLowerCase()
+  if (!email) return ''
+  const modern = email.match(/^\d+\+([^@]+)@users\.noreply\.github\.com$/i)
+  if (modern) return `https://avatars.githubusercontent.com/${encodeURIComponent(modern[1])}?s=40`
+  const legacy = email.match(/^([^@]+)@users\.noreply\.github\.com$/i)
+  if (legacy && !/^\d+$/.test(legacy[1])) return `https://avatars.githubusercontent.com/${encodeURIComponent(legacy[1])}?s=40`
+  return `https://www.gravatar.com/avatar/${md5(email)}?s=40&d=identicon`
+}
+
+function avatarClipId(index) {
+  return `git-avatar-${index}`
 }
 
 function commitStyle(commit) {
@@ -460,6 +515,11 @@ watch(() => props.workspaceKey, () => {
         </div>
         <div class="git-graph" :style="{ '--graph-width': `${graphWidth}px` }">
           <svg class="git-graph__canvas" :width="graphWidth" :height="graphHeight" aria-hidden="true">
+            <defs>
+              <clipPath v-for="(row, index) in graphRows.rows" :id="avatarClipId(index)" :key="`clip-${row.hash}`">
+                <circle :cx="xFor(row.lane)" :cy="yFor(index)" r="8" />
+              </clipPath>
+            </defs>
             <path
               v-for="edge in graphRows.edges"
               :key="edge.id"
@@ -467,13 +527,25 @@ watch(() => props.workspaceKey, () => {
               :class="[`lane-${edge.lane % 6}`, `is-${edge.kind}`, edge.refClass]"
             />
             <circle
-              v-for="(row, index) in graphRows.rows"
+              v-for="row in graphRows.rows.filter(item => !item.avatarUrl)"
               :key="row.hash"
               :cx="xFor(row.lane)"
-              :cy="yFor(index)"
+              :cy="yFor(row.graphIndex)"
               r="5.5"
               :class="[`lane-${row.lane % 6}`, `is-${row.kind}`, row.refInfo.className]"
             />
+            <g v-for="row in graphRows.rows.filter(item => item.avatarUrl)" :key="`avatar-${row.hash}`" class="git-graph__avatar">
+              <circle :cx="xFor(row.lane)" :cy="yFor(row.graphIndex)" r="9" :class="[row.refInfo.className || `lane-${row.lane % 6}`]" />
+              <image
+                :href="row.avatarUrl"
+                :x="xFor(row.lane) - 8"
+                :y="yFor(row.graphIndex) - 8"
+                width="16"
+                height="16"
+                preserveAspectRatio="xMidYMid slice"
+                :clip-path="`url(#${avatarClipId(row.graphIndex)})`"
+              />
+            </g>
           </svg>
           <div class="git-graph__rows">
             <article v-for="commit in graphRows.rows" :key="commit.hash" class="git-commit" :class="`is-${commit.kind}`" :style="commitStyle(commit)">
@@ -1366,6 +1438,16 @@ watch(() => props.workspaceKey, () => {
 .git-graph__canvas circle {
   stroke: #ffffff;
   stroke-width: 2.4;
+}
+
+.git-graph__avatar circle {
+  stroke: #ffffff;
+  stroke-width: 2.6;
+  filter: drop-shadow(0 2px 5px rgba(15, 23, 42, .2));
+}
+
+.git-graph__avatar image {
+  pointer-events: none;
 }
 
 .git-graph__legend {
