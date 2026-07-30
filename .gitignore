@@ -17,3 +17,4 @@ paper/
 reports/
 .tmp_provider_probe/
 doc/
+.hermes/
