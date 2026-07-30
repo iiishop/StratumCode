@@ -718,29 +718,98 @@ onUnmounted(() => {
 }
 
 .git-actions__primary {
+  position: relative;
+  isolation: isolate;
+  min-height: 38px;
   color: #ffffff;
-  background: linear-gradient(180deg, #2f6edb, #174ea6);
+  background:
+    radial-gradient(circle at 18% 20%, rgba(255, 255, 255, .28), transparent 28%),
+    linear-gradient(135deg, var(--primary-a, #2f6edb), var(--primary-b, #174ea6));
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .28);
+  transform: none;
+}
+
+.git-actions__primary::before {
+  content: "";
+  position: absolute;
+  inset: 1px;
+  z-index: 0;
+  border-radius: 0;
+  background:
+    linear-gradient(90deg, transparent, rgba(255, 255, 255, .2), transparent);
+  opacity: 0;
+  transform: translateX(-45%);
+  transition: opacity .18s ease, transform .34s ease;
+  pointer-events: none;
+}
+
+.git-actions__primary i,
+.git-actions__primary span {
+  position: relative;
+  z-index: 1;
+}
+
+.git-actions__primary:hover:not(:disabled) {
+  color: #ffffff;
+  background:
+    radial-gradient(circle at 18% 20%, rgba(255, 255, 255, .34), transparent 30%),
+    linear-gradient(135deg, var(--primary-hover-a, var(--primary-a, #2f6edb)), var(--primary-hover-b, var(--primary-b, #174ea6)));
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, .36),
+    0 6px 16px color-mix(in srgb, var(--primary-a, #2f6edb) 28%, transparent);
+  transform: translateY(-1px);
+}
+
+.git-actions__primary:hover:not(:disabled)::before {
+  opacity: 1;
+  transform: translateX(45%);
 }
 
 .git-actions__primary i {
-  background: rgba(255, 255, 255, .22);
+  color: var(--primary-a, #2f6edb);
+  background: rgba(255, 255, 255, .9);
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, .32);
 }
 
 .git-actions__primary.is-commit {
-  background: linear-gradient(180deg, #12846f, #0d6354);
+  --primary-a: #12846f;
+  --primary-b: #0d6354;
+  --primary-hover-a: #18a386;
+  --primary-hover-b: #0f715f;
 }
 
 .git-actions__primary.is-pull {
-  background: linear-gradient(180deg, #8f45d8, #6534a3);
+  --primary-a: #8f45d8;
+  --primary-b: #6534a3;
+  --primary-hover-a: #a45cf0;
+  --primary-hover-b: #7441ba;
 }
 
 .git-actions__primary.is-push {
-  background: linear-gradient(180deg, #c57716, #91530e);
+  --primary-a: #c57716;
+  --primary-b: #91530e;
+  --primary-hover-a: #dc8a22;
+  --primary-hover-b: #a86414;
 }
 
 .git-actions__primary.is-clean {
+  --primary-a: #12846f;
+  --primary-b: #e8f7f2;
   color: #126b5d;
   background: #e8f7f2;
+  box-shadow: none;
+}
+
+.git-actions__primary.is-clean i {
+  color: #ffffff;
+  background: #12846f;
+}
+
+.git-actions__primary.is-clean:hover:not(:disabled) {
+  color: #126b5d;
+  background: #e8f7f2;
+  box-shadow: none;
+  transform: none;
 }
 
 .git-actions__stash i {
