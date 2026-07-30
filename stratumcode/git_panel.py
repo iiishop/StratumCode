@@ -66,8 +66,18 @@ def run_action(workspace_dir: str, action: str, payload: dict | None = None) -> 
     if action == "stash":
         paths = _payload_paths(root, payload)
         return _stash(root, paths)
-    if action == "unstash":
-        return _action_result(root, action, [_run(root, "stash", "pop")])
+    if action in {"stash_apply", "unstash"}:
+        ref = _payload_stash_ref(root, payload)
+        if not ref and action == "unstash":
+            ref = next((item["ref"] for item in _stashes(root)), "")
+        if not ref:
+            return {"ok": False, "error": "Stash ref is required.", "snapshot": snapshot(str(root))}
+        return _action_result(root, action, [_run(root, "stash", "apply", ref)])
+    if action == "stash_drop":
+        ref = _payload_stash_ref(root, payload)
+        if not ref:
+            return {"ok": False, "error": "Stash ref is required.", "snapshot": snapshot(str(root))}
+        return _action_result(root, action, [_run(root, "stash", "drop", ref)])
     if action == "discard":
         paths = _payload_paths(root, payload)
         return _discard(root, paths)
@@ -131,7 +141,9 @@ def _commit(root: Path, title: str, description: str, paths: list[str]) -> dict:
 
 def _stage(root: Path, paths: list[str]) -> dict:
     if not paths:
-        return {"ok": False, "error": "No changes selected.", "snapshot": snapshot(str(root))}
+        if not _status(root)["dirty"]:
+            return {"ok": False, "error": "No changes to stage.", "snapshot": snapshot(str(root))}
+        return _action_result(root, "stage", [_run(root, "add", "-A")])
     return _action_result(root, "stage", [_run(root, "add", "--", *paths)])
 
 
@@ -241,6 +253,12 @@ def _payload_paths(root: Path, payload: dict) -> list[str]:
         if path in allowed and path not in paths:
             paths.append(path)
     return paths
+
+
+def _payload_stash_ref(root: Path, payload: dict) -> str:
+    ref = str(payload.get("ref") or "").strip()
+    allowed = {item["ref"] for item in _stashes(root)}
+    return ref if ref in allowed else ""
 
 
 def _status_file_by_path(root: Path) -> dict[str, dict]:

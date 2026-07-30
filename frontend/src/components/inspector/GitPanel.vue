@@ -95,6 +95,7 @@ async function runGitAction(action, options = {}) {
         title: commitTitle.value,
         description: commitDescription.value,
         paths: options.paths || [],
+        ref: options.ref || '',
       }),
     })
     const data = await response.json().catch(() => ({}))
@@ -118,6 +119,11 @@ async function runGitAction(action, options = {}) {
 function discardFile(file) {
   if (!window.confirm(`Discard changes in ${file.path}?`)) return
   runGitAction('discard', { paths: [file.path] })
+}
+
+function discardAll() {
+  if (!window.confirm('Discard all local changes?')) return
+  runGitAction('discard')
 }
 
 function toggleStage(file) {
@@ -223,7 +229,8 @@ function actionLabel(action) {
     stage: 'Staging',
     unstage: 'Unstaging',
     stash: 'Stashing',
-    unstash: 'Applying stash',
+    stash_apply: 'Applying stash',
+    stash_drop: 'Dropping stash',
     discard: 'Discarding',
     generate_commit: 'Generating',
   }[action] || 'Working'
@@ -322,9 +329,6 @@ watch(() => props.workspaceKey, () => {
         >
           <i>{{ primaryAction.icon }}</i><span>{{ primaryAction.label }}</span>
         </button>
-        <button type="button" class="git-actions__stash" :disabled="!!actionLoading || !hasStash" @click="runGitAction('unstash')">
-          <i>◰</i><span>Apply</span>
-        </button>
       </div>
       <p v-if="actionResult" class="git-action-result" :class="{ 'is-ok': actionResult.ok }">
         <b>{{ actionResult.command }}</b>
@@ -336,6 +340,10 @@ watch(() => props.workspaceKey, () => {
           <b>{{ stash.ref }}</b>
           <span>{{ stash.subject }}</span>
           <small>{{ stash.relative_date }}</small>
+          <div class="git-stashes__actions">
+            <button type="button" :disabled="!!actionLoading" @click="runGitAction('stash_apply', { ref: stash.ref })">Apply</button>
+            <button type="button" :disabled="!!actionLoading" @click="runGitAction('stash_drop', { ref: stash.ref })">Drop</button>
+          </div>
         </article>
       </div>
 
@@ -355,7 +363,11 @@ watch(() => props.workspaceKey, () => {
       <section class="git-section">
         <div class="git-section__head">
           <strong>Changes</strong>
-          <span>{{ files.length }} files</span>
+          <div class="git-section__actions">
+            <span>{{ files.length }} files</span>
+            <button type="button" :disabled="!!actionLoading || !files.length" title="Stage all changes" @click="runGitAction('stage')">+</button>
+            <button type="button" :disabled="!!actionLoading || !files.length" title="Discard all changes" @click="discardAll">×</button>
+          </div>
         </div>
         <div v-if="changeSummary.length" class="git-change-summary">
           <span
@@ -712,12 +724,12 @@ watch(() => props.workspaceKey, () => {
 
 .git-actions {
   display: grid;
-  grid-template-columns: .72fr 1.28fr .72fr;
+  grid-template-columns: 1fr 3fr;
   overflow: hidden;
   border: 1px solid var(--border);
   border-radius: var(--radius);
   background:
-    linear-gradient(90deg, #e8f0ff, #e8f7f2 50%, #fff7e8);
+    linear-gradient(90deg, #fff7e8 0 25%, #e8f7f2 25% 100%);
   box-shadow: var(--shadow-sm);
 }
 
@@ -858,10 +870,6 @@ watch(() => props.workspaceKey, () => {
   transform: none;
 }
 
-.git-actions__stash i {
-  background: #12846f;
-}
-
 .git-actions__danger {
   color: #9b2f2f;
 }
@@ -919,7 +927,7 @@ watch(() => props.workspaceKey, () => {
 
 .git-stashes article {
   display: grid;
-  grid-template-columns: 58px minmax(0, 1fr) auto;
+  grid-template-columns: 58px minmax(0, 1fr) auto auto;
   gap: 7px;
   align-items: center;
   padding: 8px 10px;
@@ -942,6 +950,32 @@ watch(() => props.workspaceKey, () => {
   font-size: 10px;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.git-stashes__actions {
+  display: inline-flex;
+  gap: 4px;
+}
+
+.git-stashes__actions button {
+  height: 24px;
+  padding: 0 7px;
+  border: 1px solid rgba(143, 69, 216, .18);
+  border-radius: 6px;
+  color: #6534a3;
+  background: #ffffff;
+  font: 800 8px/1 var(--mono);
+  cursor: pointer;
+}
+
+.git-stashes__actions button:hover:not(:disabled) {
+  border-color: rgba(143, 69, 216, .38);
+  background: #f4ecff;
+}
+
+.git-stashes__actions button:disabled {
+  cursor: wait;
+  opacity: .5;
 }
 
 .git-change-strip {
@@ -1000,6 +1034,41 @@ watch(() => props.workspaceKey, () => {
 .git-section__head strong {
   color: var(--text-h);
   font-size: 11px;
+}
+
+.git-section__actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.git-section__actions span {
+  color: var(--text-muted);
+  font: 800 9px/1 var(--mono);
+}
+
+.git-section__actions button {
+  display: grid;
+  width: 21px;
+  height: 21px;
+  place-items: center;
+  border: 1px solid #d7e3f2;
+  border-radius: 6px;
+  color: #53627b;
+  background: #ffffff;
+  font: 900 12px/1 var(--mono);
+  cursor: pointer;
+}
+
+.git-section__actions button:hover:not(:disabled) {
+  border-color: #b7cbe7;
+  color: #1756d1;
+  background: #f2f6ff;
+}
+
+.git-section__actions button:disabled {
+  cursor: default;
+  opacity: .42;
 }
 
 .git-file,
