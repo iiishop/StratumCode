@@ -117,6 +117,10 @@ function discardFile(file) {
   runGitAction('discard', { paths: [file.path] })
 }
 
+function toggleStage(file) {
+  runGitAction(file.staged ? 'unstage' : 'stage', { paths: [file.path] })
+}
+
 function buildGraphRows(commits) {
   const rowByHash = new Map(commits.map((commit, index) => [commit.hash, index]))
   const active = []
@@ -194,6 +198,8 @@ function actionLabel(action) {
     pull: 'Pulling',
     push: 'Pushing',
     commit: 'Committing',
+    stage: 'Staging',
+    unstage: 'Unstaging',
     stash: 'Stashing',
     unstash: 'Applying stash',
     discard: 'Discarding',
@@ -327,7 +333,9 @@ onUnmounted(() => {
           <b :style="{ '--status-color': fileStatusInfo(file).color }">{{ fileStatusInfo(file).icon }}</b>
           <span>{{ file.path }}</span>
           <div class="git-file__actions">
-            <button type="button" :disabled="!!actionLoading" title="Stash this change" @click="runGitAction('stash', { paths: [file.path] })">◱</button>
+            <button type="button" :disabled="!!actionLoading || file.conflicted" :title="file.staged ? 'Unstage this change' : 'Stage this change'" @click="toggleStage(file)">
+              {{ file.staged ? '−' : '+' }}
+            </button>
             <button type="button" :disabled="!!actionLoading" title="Discard this change" @click="discardFile(file)">×</button>
           </div>
         </article>

@@ -57,6 +57,12 @@ def run_action(workspace_dir: str, action: str, payload: dict | None = None) -> 
     if action == "commit":
         paths = _payload_paths(root, payload)
         return _commit(root, str(payload.get("title") or ""), str(payload.get("description") or ""), paths)
+    if action == "stage":
+        paths = _payload_paths(root, payload)
+        return _stage(root, paths)
+    if action == "unstage":
+        paths = _payload_paths(root, payload)
+        return _unstage(root, paths)
     if action == "stash":
         paths = _payload_paths(root, payload)
         return _stash(root, paths)
@@ -117,6 +123,18 @@ def _commit(root: Path, title: str, description: str, paths: list[str]) -> dict:
         args.extend(["-m", description])
     add_args = ("add", "-A", "--", *paths) if paths else ("add", "-A")
     return _run_chain(root, "commit", [add_args, tuple(args)])
+
+
+def _stage(root: Path, paths: list[str]) -> dict:
+    if not paths:
+        return {"ok": False, "error": "No changes selected.", "snapshot": snapshot(str(root))}
+    return _action_result(root, "stage", [_run(root, "add", "--", *paths)])
+
+
+def _unstage(root: Path, paths: list[str]) -> dict:
+    if not paths:
+        return {"ok": False, "error": "No changes selected.", "snapshot": snapshot(str(root))}
+    return _action_result(root, "unstage", [_run(root, "restore", "--staged", "--", *paths)])
 
 
 def _stash(root: Path, paths: list[str]) -> dict:
