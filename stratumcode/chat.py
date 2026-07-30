@@ -62,6 +62,8 @@ class ChatRun:
     last_investigation: dict | None = None
     design_plan: dict | None = None
     design_revision_mode: str = ""
+    bugfix_readiness: dict | None = None
+    validation_inconclusive_count: int = 0
     patch_plan: dict | None = None
     implementation_result: dict | None = None
     changed_files: list[str] = field(default_factory=list)

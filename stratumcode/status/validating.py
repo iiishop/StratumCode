@@ -13,7 +13,51 @@ def handle(run):
     else:
         changed_files = []
     patch_records = (run.implementation_result or {}).get("patch_records") or []
+    # Hard gate: py_compile every changed Python file before semantic validation
+    py_issues = _check_python_syntax(changed_files, run.workspace_dir)
+    if py_issues:
+        run.validation_result = implementation_runner._validation_result(
+            "local_repair",
+            "Python syntax check failed. The patch introduced invalid syntax.",
+            changed_files,
+            issues=py_issues,
+        )
+        yield from _emit_validation_done(run)
+        # Manually run state transition since we bypass the normal loop
+        next_state = _state_after_validation(run)
+        if next_state == "clearify":
+            _add_validation_context(run)
+            result = run.validation_result or {}
+            queue_clearify(
+                run,
+                result.get("question") or result.get("summary") or "Which validated behavior should be accepted?",
+                reason=result.get("summary") or "Validation requires a product decision.",
+            )
+            run.transition(chat.ChatState.INVESTIGATING, "Validation queued a clearify decision.")
+        elif next_state in {chat.ChatState.DESIGNING, chat.ChatState.INVESTIGATING}:
+            _add_validation_context(run)
+            if next_state == chat.ChatState.DESIGNING:
+                run.design_revision_mode = "validation"
+            run.transition(next_state, "Python syntax check failed; returning for repair.")
+        else:
+            run.transition(next_state, "Python syntax check failed.")
+        return
     run.validation_result = None
+    # Build validation hint for retry after inconclusive
+    validation_hint = ""
+    if run.validation_inconclusive_count == 1:
+        validation_hint = (
+            "Last validation was inconclusive — finish_validation was not called. "
+            "You MUST call finish_validation with a definitive verdict this round."
+        )
+    elif run.validation_inconclusive_count >= 2:
+        validation_hint = (
+            f"STOPPING IS NOT AN OPTION. The last {run.validation_inconclusive_count} "
+            "validation rounds were inconclusive because you did not call finish_validation. "
+            "You MUST call finish_validation this round with verdict passed, local_repair, or redesign. "
+            "If you inspected the code and found issues, report them and use local_repair. "
+            "If the code is correct, use passed. Do not leave without a verdict."
+        )
     for event in implementation_runner.validation_stream(
         message=run_request(run),
         analysis=run.analysis,
@@ -21,6 +65,7 @@ def handle(run):
         workspace_dir=run.workspace_dir,
         changed_files=changed_files,
         patch_records=patch_records,
+        validation_hint=validation_hint,
     ):
         if event.get("op") == "start" and event.get("event") == "user_question":
             data = event.get("data") or {}
@@ -62,6 +107,9 @@ def _state_after_validation(run):
     if verdict == "passed":
         return chat._chat_finish_state(run)
     if verdict in {"local_repair", "redesign"}:
+        return chat.ChatState.DESIGNING
+    if verdict == "inconclusive":
+        run.validation_inconclusive_count += 1
         return chat.ChatState.DESIGNING
     if verdict == "missing_evidence":
         return chat.ChatState.INVESTIGATING
@@ -156,3 +204,62 @@ def _validation_repair_candidates(result: dict) -> list[dict]:
             "reason": issue.get("summary") or "",
         })
     return candidates
+
+
+def _check_python_syntax(changed_files: list[str], workspace_dir: str) -> list[dict]:
+    """Run py_compile on every changed Python file. Return issues for any syntax error."""
+    import subprocess
+    from pathlib import Path
+
+    issues = []
+    root = Path(workspace_dir or ".").resolve()
+    for file_path in changed_files:
+        if not file_path.endswith(".py"):
+            continue
+        full = root / file_path
+        if not full.is_file():
+            continue
+        try:
+            result = subprocess.run(
+                ["python", "-m", "py_compile", str(full)],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            if result.returncode != 0:
+                stderr = result.stderr.strip() or result.stdout.strip()
+                # Extract line number if present
+                line = 0
+                for part in stderr.split():
+                    if "line" in part.lower():
+                        try:
+                            line = int("".join(c for c in part if c.isdigit()))
+                        except ValueError:
+                            pass
+                        break
+                issues.append({
+                    "id": f"SYNTAX-{len(issues)+1}",
+                    "severity": "high",
+                    "summary": f"Python syntax error in {file_path}: {stderr[:200]}",
+                    "file": file_path,
+                    "line": line,
+                    "category": "code_defect",
+                    "direction": "diverges",
+                    "evidence": [stderr[:300]],
+                })
+        except Exception as exc:
+            issues.append({
+                "id": f"SYNTAX-{len(issues)+1}",
+                "severity": "high",
+                "summary": f"Could not compile {file_path}: {exc}",
+                "file": file_path,
+                "category": "code_defect",
+                "direction": "diverges",
+            })
+    return issues
+
+
+def _emit_validation_done(run):
+    """Emit validation events matching the normal flow so UI renders correctly."""
+    result = run.validation_result or {}
+    yield {"op": "done", "validation_result": result}

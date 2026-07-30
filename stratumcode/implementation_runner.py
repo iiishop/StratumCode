@@ -308,6 +308,7 @@ def validation_stream(
     workspace_dir: str,
     changed_files: list[str],
     patch_records: list[dict] | None = None,
+    validation_hint: str = "",
 ) -> Iterator[dict]:
     result = yield from _validation_stream(
         message=message,
@@ -316,6 +317,7 @@ def validation_stream(
         workspace_dir=workspace_dir,
         changed_files=changed_files,
         patch_records=patch_records or [],
+        validation_hint=validation_hint,
     )
     if result:
         yield {"op": "done", "validation_result": result}
@@ -329,6 +331,7 @@ def resume_validation_stream(
     workspace_dir: str,
     changed_files: list[str],
     patch_records: list[dict] | None = None,
+    validation_hint: str = "",
 ) -> Iterator[dict]:
     result = yield from _validation_stream(
         message=message,
@@ -337,6 +340,7 @@ def resume_validation_stream(
         workspace_dir=workspace_dir,
         changed_files=changed_files,
         patch_records=patch_records or [],
+        validation_hint=validation_hint,
     )
     if result:
         yield {"op": "done", "validation_result": result}
@@ -523,6 +527,23 @@ def _means_literal_present(text: str) -> bool:
 def _round_indexes(limit: int, start: int = 1):
     limit = int(limit or 0)
     return count(start) if limit <= 0 else range(start, start + limit)
+
+
+def _verification_checklist(patch_plan: dict) -> list[dict]:
+    """Extract per-step completion conditions as validation checklist items."""
+    items = []
+    for step in patch_plan.get("implementation_steps") or []:
+        if not isinstance(step, dict):
+            continue
+        step_id = str(step.get("id") or "")
+        conditions = step.get("completion_conditions") or []
+        if isinstance(conditions, str):
+            conditions = [conditions]
+        for check in conditions:
+            text = str(check).strip()
+            if text:
+                items.append({"step_id": step_id, "check": text})
+    return items
 
 
 def _assistant_replay(content: str, tool_calls: list[dict]) -> dict:
@@ -845,11 +866,20 @@ def _validation_stream(
         "provider": provider["name"],
         "inherited": setting["inherited"],
     })
+    # Emit verification checklist for frontend display
+    checklist = _verification_checklist(patch_plan)
+    if checklist:
+        yield start_event(f"{run_id}-checklist", "verification_checklist", {
+            "items": checklist,
+            "total": len(checklist),
+            "stage_id": stage_id,
+        })
     messages = [
         {"role": "system", "content": prompt.build_validation_runner_system(app_settings.get_output_language())},
         {"role": "user", "content": json.dumps({
             "user_request": message,
             "acceptance_criteria": analysis.get("acceptance_criteria", []),
+            "verification_checklist": _verification_checklist(patch_plan),
             "patch_plan": patch_plan,
             "changed_files": sorted(set(changed_files)),
             "patch_records": patch_records,
@@ -944,11 +974,53 @@ def _validation_stream(
             break
     else:
         validation_result = _unfinished_validation_result(changed_files, semantic_checked)
+    # If model inspected code but didn't call finish_validation, force one retry
+    if semantic_checked and validation_result.get("verdict") == "inconclusive":
+        force_tools = _validation_tools()
+        finish_only = [t for t in force_tools if t.get("function", {}).get("name") == "finish_validation"]
+        if finish_only:
+            messages.append({"role": "user", "content": (
+                "You inspected code but did not call finish_validation. "
+                "You MUST call finish_validation now with a definitive verdict. "
+                "If the code is correct: passed. If you found issues: local_repair with details."
+            )})
+            assistant = _call_model(provider, model, messages, tools=finish_only, tool_choice="required")
+            if usage := _usage_delta(pricing_rules, assistant.pop("_usage", {})):
+                _add_usage(usage_total, usage)
+            tool_calls = assistant.get("tool_calls") or []
+            if tool_calls:
+                for call in tool_calls:
+                    function = call.get("function") or {}
+                    name = function.get("name") or ""
+                    call_id = call.get("id") or f"{run_id}-force"
+                    try:
+                        arguments = _tool_arguments(function.get("arguments"))
+                        if name == "finish_validation":
+                            validation_result = _finish_validation_arguments(arguments, changed_files)
+                            yield start_event(call_id, "tool", {
+                                "name": name,
+                                "description": "Finish semantic validation",
+                                "status": "done",
+                                "open": False,
+                                "input": json.dumps(arguments, ensure_ascii=False, indent=2),
+                                "output": json.dumps(validation_result, ensure_ascii=False),
+                            })
+                    except Exception:
+                        pass
+    if validation_result is None:
+        validation_result = _unfinished_validation_result(changed_files, semantic_checked)
     yield start_event(f"{run_id}-output", "output", {
         "content": validation_result["summary"],
         "streaming": False,
     })
-    yield {"op": "update", "id": stage_id, "patch": {"state": "done", "phase": "validation_done"}}
+    # Emit validation result for frontend display
+    yield start_event(f"{run_id}-result", "validation_result", {
+        "verdict": validation_result.get("verdict"),
+        "summary": validation_result.get("summary"),
+        "issues": validation_result.get("issues", []),
+        "stage_id": stage_id,
+    })
+    yield {"op": "update", "id": stage_id, "patch": {"state": "done", "phase": "validation_done", "verdict": validation_result.get("verdict"), "issues_count": len(validation_result.get("issues", []))}}
     return validation_result
 
 
@@ -980,8 +1052,9 @@ def _unfinished_validation_result(changed_files: list[str], semantic_checked: bo
             changed_files,
         )
     return _validation_result(
-        "passed",
-        "Semantic validation inspected changed files; the model omitted finish_validation.",
+        "inconclusive",
+        "Semantic validation inspected changed files but did not call finish_validation. "
+        "The implementation cannot be accepted without an explicit validation verdict.",
         changed_files,
     )
 

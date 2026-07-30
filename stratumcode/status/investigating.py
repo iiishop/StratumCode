@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 from uuid import uuid4
 
 from .. import investigator
@@ -83,7 +84,7 @@ def prepare_investigation(run):
         run.analysis.get("task_updates", []) + seeded_tasks,
         run.session_context.get("tasks", []),
     )
-    yield start_event(f"task-analysis-{uuid4().hex[:8]}", "task_analysis", run.analysis)
+    yield start_event(f"task-analysis-{uuid4().hex[:8]}", "task_analysis", deepcopy(run.analysis))
 
 
 def handle(run):
@@ -193,10 +194,10 @@ def handle(run):
                 _beliefs_as_knowledge(run.analysis["id"], last_investigation.get("beliefs", [])),
             )
             run.analysis["task_updates"] = last_investigation["task_updates"]
-            data = {
+            data = deepcopy({
                 "analysis_id": run.analysis["id"],
                 "items": run.analysis["task_updates"],
-            }
+            })
             if applied["changes"]:
                 data["changes"] = applied["changes"]
             yield start_event(f"{run.analysis['id']}-task-final", "task_update", data)
@@ -215,6 +216,10 @@ def handle(run):
                 return
         yield event
     run.last_investigation = last_investigation
+    # Extract bugfix_readiness from investigation result to separate gate state
+    br_state = last_investigation.get("bugfix_readiness_state")
+    if br_state:
+        run.bugfix_readiness = br_state
     if pending_question:
         data = pending_question.get("data") or {}
         queue_clearify(

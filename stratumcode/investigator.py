@@ -3738,16 +3738,18 @@ def _finish_payload(
         for reason in readiness.get("reasons", [])
         if str(reason).startswith("bugfix_readiness:")
     ]
-    if bugfix_reasons and not unknowns:
-        unknowns = _merge_unknowns([{
-            "id": "bugfix_readiness",
-            "question": (
-                "Which project evidence confirms the observed failure or boundary, root cause, "
-                "patch target, expected behavior change, and validation scenario for this bugfix?"
-            ),
-            "blocking": False,
-            "resolution_strategy": "deferred",
-        }])
+    bugfix_readiness_state = None
+    if bugfix_reasons:
+        checks = {}
+        for reason in bugfix_reasons:
+            field = str(reason).replace("bugfix_readiness:", "").strip()
+            checks[field] = False
+        bugfix_readiness_state = {
+            "gate": "bugfix_readiness",
+            "status": "not_ready",
+            "checks": checks,
+            "reasons": bugfix_reasons,
+        }
     ready = readiness["ready"]
     hard_readiness_reasons = [
         reason for reason in readiness.get("reasons", [])
@@ -3783,6 +3785,7 @@ def _finish_payload(
         "new_unknowns": new_unknowns,
         "user_decisions_required": user_decisions,
         "unknowns": unknowns,
+        "bugfix_readiness_state": bugfix_readiness_state,
         "task_updates": _investigation_task_updates(
             arguments.get("task_updates"),
             initial_unknowns + unknowns,

@@ -16,6 +16,14 @@ const current = computed(() => (
   [...progress.value].reverse().find(item => item.state === 'running')
   || progress.value.at(-1)
 ))
+const validationVerdict = computed(() => {
+  const phase = props.event.phase || ''
+  if (phase !== 'validation_done') return null
+  return {
+    verdict: props.event.verdict || 'inconclusive',
+    issues: props.event.issues_count ?? 0,
+  }
+})
 const effortBits = computed(() => [
   props.event.effort,
   props.event.risk ? `${props.event.risk} risk` : '',
@@ -50,6 +58,13 @@ const open = computed(() => props.event.open ?? progress.value.length > 0)
     :collapsible="progress.length > 0"
     @toggle="event.open = !open"
   >
+    <div v-if="validationVerdict" class="stage-validation" :class="`is-${validationVerdict.verdict}`">
+      <span class="stage-validation__dot"></span>
+      <span class="stage-validation__label">
+        {{ validationVerdict.verdict === 'passed' ? 'Passed' : validationVerdict.verdict === 'inconclusive' ? 'Incomplete' : 'Issues' }}
+      </span>
+      <span v-if="validationVerdict.issues" class="stage-validation__count">{{ validationVerdict.issues }} issue{{ validationVerdict.issues > 1 ? 's' : '' }}</span>
+    </div>
     <ol v-if="progress.length" class="stage-progress" aria-live="polite">
       <li
         v-for="item in progress"
@@ -71,6 +86,67 @@ const open = computed(() => props.event.open ?? progress.value.length > 0)
 </template>
 
 <style scoped>
+/* --- validation verdict indicator --- */
+.stage-validation {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  margin-bottom: 6px;
+  border-radius: 6px;
+  font-size: 11px;
+  line-height: 1;
+}
+
+.stage-validation.is-passed {
+  background: rgba(16, 185, 129, 0.08);
+  border: 1px solid rgba(16, 185, 129, 0.2);
+}
+
+.stage-validation.is-inconclusive {
+  background: rgba(245, 200, 66, 0.08);
+  border: 1px solid rgba(245, 200, 66, 0.3);
+}
+
+.stage-validation.is-failed,
+.stage-validation.is-local_repair,
+.stage-validation.is-redesign {
+  background: rgba(196, 71, 71, 0.06);
+  border: 1px solid rgba(196, 71, 71, 0.2);
+}
+
+.stage-validation__dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.is-passed .stage-validation__dot { background: #10b981; }
+.is-inconclusive .stage-validation__dot { background: #f59e0b; animation: dot-pulse 1.2s ease-in-out infinite; }
+.is-failed .stage-validation__dot,
+.is-local_repair .stage-validation__dot,
+.is-redesign .stage-validation__dot { background: #ef4444; }
+
+.stage-validation__label {
+  font-weight: 600;
+  color: var(--text-h, #102a5c);
+}
+
+.stage-validation__count {
+  margin-left: auto;
+  padding: 1px 6px;
+  border-radius: 4px;
+  font: 9.5px/1 var(--mono, monospace);
+  color: #8a6d14;
+  background: rgba(245, 200, 66, 0.2);
+}
+
+@keyframes dot-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
+}
+
 .stage-progress {
   display: grid;
   gap: 0;

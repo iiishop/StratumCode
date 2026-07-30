@@ -3,7 +3,7 @@ import os
 import re
 import subprocess
 import sys
-import threading
+import threadingimport shutil
 from pathlib import Path
 from urllib.request import Request, urlopen
 
@@ -58,7 +58,8 @@ def apply_events(channel: str):
 
 def restart() -> dict:
     """Restart the current StratumCode process after the HTTP response returns."""
-    command = [sys.executable, *sys.argv]
+    executable = _resolve_executable()
+    command = [executable, *sys.argv]
 
     def relaunch() -> None:
         subprocess.Popen(command, cwd=str(ROOT), close_fds=True)
@@ -66,6 +67,38 @@ def restart() -> dict:
 
     threading.Timer(0.25, relaunch).start()
     return {"ok": True}
+
+
+def _resolve_executable() -> str:
+    """Return a usable Python executable path for restart.
+
+    After an update, ``sys.executable`` may point to a removed temporary
+    directory (e.g. a onefile-packaged app).  Try the most reliable paths
+    first and fall back to less specific ones.
+    """
+    candidates: list[str] = []
+
+    # 1. sys.executable – the canonical path for the running interpreter.
+    if os.path.isfile(sys.executable) and os.access(sys.executable, os.X_OK):
+        return sys.executable
+    candidates.append(sys.executable)
+
+    # 2. shutil.which – locate 'stratumcode' on PATH.
+    which_result = shutil.which("stratumcode")
+    if which_result:
+        return which_result
+    candidates.append("stratumcode (not found on PATH)")
+
+    # 3. sys.argv[0] resolved to an absolute path.
+    argv0 = os.path.abspath(sys.argv[0])
+    if os.path.isfile(argv0) and os.access(argv0, os.X_OK):
+        return argv0
+    candidates.append(argv0)
+
+    raise RuntimeError(
+        "Cannot find a usable executable to restart StratumCode. "
+        f"Tried: {', '.join(c for c in candidates if c)}"
+    )
 
 
 def _apply_stable():

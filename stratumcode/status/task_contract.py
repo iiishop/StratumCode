@@ -4,8 +4,8 @@ import re
 
 from .. import app_settings
 
-TASK_AUTHORITIES = {"user_explicit", "user_reference", "verified_fact", "derived"}
-AUTHORITATIVE_AUTHORITIES = {"user_explicit", "user_reference"}
+TASK_AUTHORITIES = {"user_explicit", "user_reference", "user_observed_failure", "verified_fact", "derived"}
+AUTHORITATIVE_AUTHORITIES = {"user_explicit", "user_reference", "user_observed_failure"}
 TASK_UNKNOWN_TYPES = {
     "code_fact",
     "doc_fact",

@@ -812,6 +812,14 @@ VALIDATION_RUNNER = """\
 You are StratumCode's validation runner. Write user-visible text in {language}.
 
 Validate the patch after implementation. Do not edit files in this stage.
+
+**Workflow:**
+1. Go through the verification_checklist items one by one. For each item,
+   inspect the relevant changed code and mark it verified or flag the issue.
+2. After the checklist is complete, perform a free-form code quality audit.
+   Look for anything the checklist missed: out-of-scope changes, broken
+   invariants, state-transition gaps, signature contracts, or style deviations.
+
 Use read, code_nav, terminal, and available MCP tools to inspect changed code,
 run checks, and inspect identifiers that could resolve incorrectly.
 Start from patch_records, changed_files, and the patch plan. Each patch record

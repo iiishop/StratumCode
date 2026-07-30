@@ -35,10 +35,14 @@ const formattedDuration = computed(() => {
   if (props.status === 'running') {
     return formatElapsed(elapsedSeconds.value)
   }
-  if (props.createdAt == null) return ''
-  const now = Date.now()
-  const totalSeconds = (now - props.createdAt) / 1000
-  return formatElapsed(totalSeconds)
+  // done/error: show the final elapsed from timer, fall back to createdAt calc
+  if (elapsedSeconds.value > 0) {
+    return formatElapsed(elapsedSeconds.value)
+  }
+  if (props.createdAt != null) {
+    return formatElapsed((Date.now() - props.createdAt) / 1000)
+  }
+  return ''
 })
 
 function _startTimer() {
