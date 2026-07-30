@@ -861,7 +861,12 @@ def _validation_stream(
     validation_result = None
     mcp_round_limit = app_settings.get_round_limit("validation_mcp_rounds")
     mcp_rounds = 0
-    for round_index in _round_indexes(app_settings.get_round_limit("validation_rounds")):
+    validation_rounds = (
+        app_settings.get_effort_profile(analysis.get("effort"))["validation_rounds"]
+        if analysis.get("effort")
+        else app_settings.get_round_limit("validation_rounds")
+    )
+    for round_index in _round_indexes(validation_rounds):
         assistant = _call_model(provider, model, messages, tools=tools)
         if usage := _usage_delta(pricing_rules, assistant.pop("_usage", {})):
             _add_usage(usage_total, usage)

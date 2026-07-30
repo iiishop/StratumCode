@@ -16,13 +16,24 @@ const current = computed(() => (
   [...progress.value].reverse().find(item => item.state === 'running')
   || progress.value.at(-1)
 ))
+const effortBits = computed(() => [
+  props.event.effort,
+  props.event.risk ? `${props.event.risk} risk` : '',
+  props.event.quality_gate,
+].filter(Boolean))
 const detail = computed(() => {
   if (!progress.value.length) {
-    return `${labels[props.event.phase] || props.event.phase || 'starting'} · ${props.event.provider || ''} · ${props.event.model || ''}`
+    return [
+      labels[props.event.phase] || props.event.phase || 'starting',
+      props.event.provider,
+      props.event.model,
+      ...effortBits.value,
+    ].filter(Boolean).join(' · ')
   }
   const completed = progress.value.filter(item => item.state === 'done').length
   const suffix = current.value?.detail ? ` · ${current.value.detail}` : ''
-  return `${completed}/${progress.value.length} · ${current.value?.label || 'Preparing'}${suffix}`
+  const effort = effortBits.value.length ? ` · ${effortBits.value.join(' · ')}` : ''
+  return `${completed}/${progress.value.length} · ${current.value?.label || 'Preparing'}${suffix}${effort}`
 })
 const open = computed(() => props.event.open ?? progress.value.length > 0)
 </script>

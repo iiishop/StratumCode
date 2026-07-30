@@ -19,6 +19,9 @@ TASK_UNKNOWN_TYPE_ALIASES = {
     "user_decision": "product_decision",
 }
 TASK_UNKNOWN_STRATEGIES = {"investigate_project", "clearify", "deferred"}
+TASK_EFFORTS = {"fast", "standard", "deep"}
+TASK_RISKS = {"low", "medium", "high"}
+TASK_QUALITY_GATES = {"basic", "semantic", "strict"}
 DELIVERY_FACT_UNKNOWN_TYPES = {"code_fact", "doc_fact", "runtime_fact"}
 LEGACY_ASK_USER_STRATEGY = "ask_user"
 LEGACY_NEEDS_USER_STATUS = "needs_user"
@@ -83,7 +86,7 @@ def _string_list(value, field: str) -> list[str]:
     return result
 
 
-def _acceptance_criteria(value) -> list[dict]:
+def _acceptance_criteria(value, effort: str | None = "standard") -> list[dict]:
     """把原始验收标准规范化为 id/text 对象。
 
     Args:
@@ -114,7 +117,8 @@ def _acceptance_criteria(value) -> list[dict]:
                     if field in raw:
                         item[field] = raw[field]
             items.append(item)
-    return items
+    limit = app_settings.get_effort_profile(effort)["acceptance_limit"] if effort else 0
+    return items[:limit] if limit else items
 
 
 def _behavior_contract(value) -> dict:
@@ -165,7 +169,7 @@ def _scope(value) -> dict:
     }
 
 
-def _limited_unknowns(value, criteria=None) -> list[dict]:
+def _limited_unknowns(value, criteria=None, effort: str | None = "standard") -> list[dict]:
     """规范化 unknowns，并执行 task contract 的数量上限。
 
     Args:
@@ -179,7 +183,11 @@ def _limited_unknowns(value, criteria=None) -> list[dict]:
         ValueError: unknowns 形状非法或超过数量上限时抛出。
     """
     unknowns = _unknowns(value, criteria)
-    limit = app_settings.get_task_limit("task_unknowns")
+    limit = (
+        app_settings.get_effort_profile(effort)["unknown_limit"]
+        if effort
+        else app_settings.get_task_limit("task_unknowns")
+    )
     if limit and len(unknowns) > limit:
         raise ValueError(f"unknowns must contain at most {limit} items")
     return unknowns
@@ -298,10 +306,26 @@ def _ensure_task_contract(analysis: dict) -> dict:
     analysis.setdefault("acceptance_criteria", [])
     analysis.setdefault("behavior_contract", {})
     analysis.setdefault("scope", {"in": [], "out": [], "undecided": []})
-    analysis["acceptance_criteria"] = _acceptance_criteria(analysis.get("acceptance_criteria"))
+    raw_effort = analysis.get("effort")
+    effort = str(raw_effort or "standard").strip().casefold()
+    analysis["effort"] = effort if effort in TASK_EFFORTS else "standard"
+    risk = str(analysis.get("risk") or "medium").strip().casefold()
+    analysis["risk"] = risk if risk in TASK_RISKS else "medium"
+    quality_gate = str(analysis.get("quality_gate") or "").strip().casefold()
+    if quality_gate not in TASK_QUALITY_GATES:
+        quality_gate = app_settings.get_effort_profile(analysis["effort"])["quality_gate"]
+    analysis["quality_gate"] = quality_gate
+    analysis["acceptance_criteria"] = _acceptance_criteria(
+        analysis.get("acceptance_criteria"),
+        analysis["effort"] if raw_effort else None,
+    )
     analysis["behavior_contract"] = _behavior_contract(analysis.get("behavior_contract"))
     analysis["scope"] = _scope(analysis.get("scope"))
-    analysis["unknowns"] = _limited_unknowns(analysis.get("unknowns"), analysis.get("acceptance_criteria"))
+    analysis["unknowns"] = _limited_unknowns(
+        analysis.get("unknowns"),
+        analysis.get("acceptance_criteria"),
+        analysis["effort"] if raw_effort else None,
+    )
     if analysis.get("execution_mode") == "read_only":
         for unknown in analysis["unknowns"]:
             if (

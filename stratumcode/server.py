@@ -56,6 +56,11 @@ def _post_app_settings_save(handler, body):
     for key in app_settings.OUTPUT_LIMITS:
         if key in body:
             app_settings.save_output_limit(key, body.get(key))
+    for profile, meta in app_settings.EFFORT_PROFILES.items():
+        for key in meta["limits"]:
+            setting_key = f"effort.{profile}.{key}"
+            if setting_key in body:
+                app_settings.save_effort_profile_limit(profile, key, body.get(setting_key))
     handler._json(app_settings.to_json())
 
 

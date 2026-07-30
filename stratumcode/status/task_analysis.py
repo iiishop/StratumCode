@@ -26,6 +26,9 @@ LOGGER = logging.getLogger(__name__)
 
 TASK_INTENT_TYPES = {"feature", "bugfix", "refactor", "question", "investigation", "other"}
 TASK_EXECUTION_MODES = {"implement", "read_only"}
+TASK_EFFORTS = {"fast", "standard", "deep"}
+TASK_RISKS = {"low", "medium", "high"}
+TASK_QUALITY_GATES = {"basic", "semantic", "strict"}
 TASK_CERTAINTIES = {"certain", "uncertain", "guess"}
 TASK_CLUE_KINDS = {"file", "line", "symbol", "route", "other"}
 DEFAULT_TASK_SLOT_ATTEMPTS = 2
@@ -87,24 +90,79 @@ def analyze_task_stream(
             "Task intent and scope",
             description=message,
         )
-    intent_slot, errors = _task_slot_json(
+    compact_analysis, intent_slot, errors = _compact_contract_or_intent_slot(
         provider,
         model,
         tracked_call_model,
         content_text,
         [
             system,
-            {"role": "user", "content": prompt.build_task_intent_slot_user(
+            {"role": "user", "content": prompt.build_task_compact_contract_user(
                 message=message,
                 directory=workspace_dir,
                 context=slot_context,
                 source_catalog=source_catalog,
             )},
         ],
-        "intent_scope",
-        required=_intent_summary_present,
+        message=message,
+        context=selected_context,
+        source_catalog=source_catalog,
     )
     analyzer_errors.extend(errors)
+    if compact_analysis is not None:
+        analysis = compact_analysis
+        _sanitize_optional_contract(analysis)
+        analysis["model"] = model
+        analysis["provider"] = provider["name"]
+        analysis["analyzer_attempts"] = analyzer_attempts
+        analysis["evidence_hypothesis"] = _analysis_hypothesis(message, analysis)
+        if progress_event_id:
+            yield stage_progress(
+                progress_event_id,
+                progress,
+                "intent_scope",
+                "Task intent and scope",
+                description=message,
+                state="done",
+            )
+            yield stage_progress(
+                progress_event_id,
+                progress,
+                "acceptance_contract",
+                "Acceptance contract",
+                description=str(analysis.get("intent", {}).get("summary") or message),
+                detail=f"{len(analysis.get('acceptance_criteria', []))} acceptance criteria",
+                state="done",
+            )
+            yield stage_progress(
+                progress_event_id,
+                progress,
+                "unknowns",
+                "Investigation unknowns",
+                description="Identify facts and decisions that still require verification.",
+                detail=f"{len(analysis.get('unknowns', []))} unknowns",
+                state="done",
+            )
+        return analysis
+    if intent_slot is None:
+        intent_slot, errors = _task_slot_json(
+            provider,
+            model,
+            tracked_call_model,
+            content_text,
+            [
+                system,
+                {"role": "user", "content": prompt.build_task_intent_slot_user(
+                    message=message,
+                    directory=workspace_dir,
+                    context=slot_context,
+                    source_catalog=source_catalog,
+                )},
+            ],
+            "intent_scope",
+            required=_intent_summary_present,
+        )
+        analyzer_errors.extend(errors)
     canonical_intent = _canonical_analysis(
         message, selected_context, source_catalog, intent_slot or {}, {}, {}
     )
@@ -275,6 +333,48 @@ def analyze_task(
             return stopped.value
 
 
+def _compact_contract_or_intent_slot(
+    provider: dict,
+    model: str,
+    call_model,
+    content_text,
+    messages: list[dict],
+    *,
+    message: str,
+    context: list[str],
+    source_catalog: list[dict],
+) -> tuple[dict | None, dict | None, list[str]]:
+    assistant = call_model(provider, model, messages, tools=[])
+    raw = content_text(assistant.get("content"))
+    try:
+        if assistant.get("tool_calls"):
+            raise ValueError("tool calls are not allowed")
+        data = _json_object(raw)
+    except ValueError as exc:
+        return None, None, [f"compact_contract: {exc}"]
+    try:
+        analysis = _validate_task_analysis({
+            "origin_message": message,
+            "source_catalog": source_catalog,
+            **data,
+        })
+        if _compact_contract_ready(analysis):
+            analysis["compact_analyzer"] = True
+            return analysis, None, []
+    except ValueError as exc:
+        return None, data if _intent_summary_present(data) else None, [f"compact_contract: {exc}"]
+    return None, data if _intent_summary_present(data) else None, []
+
+
+def _compact_contract_ready(analysis: dict) -> bool:
+    if analysis.get("effort") == "deep":
+        return False
+    return bool(
+        analysis.get("intent", {}).get("summary")
+        and analysis.get("acceptance_criteria")
+    )
+
+
 def _task_slot_json(
     provider: dict,
     model: str,
@@ -377,6 +477,9 @@ def _intent_slot_payload(analysis: dict) -> dict:
     return {
         "intent": analysis.get("intent", {}),
         "execution_mode": analysis.get("execution_mode", "read_only"),
+        "effort": analysis.get("effort", "standard"),
+        "risk": analysis.get("risk", "medium"),
+        "quality_gate": analysis.get("quality_gate", app_settings.get_effort_profile(analysis.get("effort"))["quality_gate"]),
         "requirements": analysis.get("requirements", []),
         "constraints": analysis.get("constraint_statements", []),
         "hypotheses": [
@@ -472,12 +575,28 @@ def _analysis_from_slots(message: str, context: list[str], intent_slot: dict, ac
     execution_mode_recovered = execution_mode not in TASK_EXECUTION_MODES
     if execution_mode_recovered:
         execution_mode = "read_only"
+    effort = str(intent_data.get("effort") or intent_meta.get("effort") or "standard").strip().casefold()
+    if effort not in TASK_EFFORTS:
+        effort = "standard"
+    risk = str(intent_data.get("risk") or intent_meta.get("risk") or "medium").strip().casefold()
+    if risk not in TASK_RISKS:
+        risk = "medium"
+    quality_gate = str(
+        intent_data.get("quality_gate")
+        or intent_meta.get("quality_gate")
+        or app_settings.get_effort_profile(effort)["quality_gate"]
+    ).strip().casefold()
+    if quality_gate not in TASK_QUALITY_GATES:
+        quality_gate = app_settings.get_effort_profile(effort)["quality_gate"]
     summary = str(intent_data.get("summary") or fallback["intent"]["summary"]).strip()
     acceptance = _runtime_acceptance_slots(acceptance_data, message, context)
-    unknowns = _runtime_unknowns(unknown_data, acceptance, fallback)
+    unknowns = _runtime_unknowns(unknown_data, acceptance, fallback, effort=effort)
     data = {
         "intent": {"type": intent_type, "summary": summary},
         "execution_mode": execution_mode,
+        "effort": effort,
+        "risk": risk,
+        "quality_gate": quality_gate,
         "requirements": intent_meta.get("requirements", []),
         "acceptance_criteria": acceptance,
         "behavior_contract": _slot_behavior_contract(acceptance_data, fallback),
@@ -773,7 +892,13 @@ def _task_contract_audit(
     return equivalent is True, issues, ""
 
 
-def _runtime_unknowns(data: dict, acceptance: list[dict], fallback: dict) -> list[dict]:
+def _runtime_unknowns(
+    data: dict,
+    acceptance: list[dict],
+    fallback: dict,
+    *,
+    effort: str = "standard",
+) -> list[dict]:
     raw = data.get("unknown_content")
     if raw is None:
         raw = data.get("unknowns")
@@ -814,7 +939,7 @@ def _runtime_unknowns(data: dict, acceptance: list[dict], fallback: dict) -> lis
             if question:
                 items.append(question)
     try:
-        return _limited_unknowns(items, acceptance)
+        return _limited_unknowns(items, acceptance, effort)
     except ValueError:
         return fallback["unknowns"]
 

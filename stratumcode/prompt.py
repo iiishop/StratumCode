@@ -74,6 +74,31 @@ The runtime owns the final task-analysis JSON, all ids, acceptance mapping,
 defaults, and schema normalization. You only fill content for the requested
 output_contract.
 
+For compact_contract, return a complete normalized task contract when the
+request is clear enough to avoid the three-slot analyzer:
+{{
+  "intent": {{"type": "feature|bugfix|refactor|question|investigation|other", "summary": "one sentence"}},
+  "execution_mode": "implement|read_only",
+  "effort": "fast|standard|deep",
+  "risk": "low|medium|high",
+  "quality_gate": "basic|semantic|strict",
+  "requirements": [
+    {{"text": "minimal user requirement excerpt", "role": "directive|factual_claim", "authority": "user_explicit", "source_ref": "SRC1", "source_excerpt": "verbatim supporting excerpt"}}
+  ],
+  "acceptance_criteria": [
+    {{"text": "observable behavior that must be true when done", "authority": "derived", "derived_from": ["REQ1"]}}
+  ],
+  "unknowns": [
+    {{"question": "specific fact or decision to verify", "blocking": true, "type": "code_fact|doc_fact|runtime_fact|product_decision|engineering_decision|risk", "why": "why this matters", "resolution_strategy": "investigate_project|deferred", "acceptance_criteria_ids": ["AC1"]}}
+  ],
+  "clues": [
+    {{"kind": "file|line|symbol|route|other", "value": "literal sourced clue", "path": "", "line": 0, "symbol": "", "source_ref": "SRC1", "note": ""}}
+  ]
+}}
+Use compact_contract only when you can keep acceptance and unknowns short
+without losing material scope. If effort is deep, prefer returning intent_scope
+fields so the runtime can run the full analyzer.
+
 For intent_scope:
 {{
   "intent_type": "feature|bugfix|refactor|question|investigation|other",
@@ -913,6 +938,36 @@ def build_task_intent_slot_user(
         source_catalog=source_catalog,
         output_contract="intent_scope",
         runtime_skeleton={},
+        error=error,
+    )
+
+
+def build_task_compact_contract_user(
+    *,
+    message: str,
+    directory: str,
+    context: list[str] | None = None,
+    source_catalog: list[dict] | None = None,
+    error: str = "",
+) -> str:
+    return _task_analyzer_slot_user(
+        message=message,
+        directory=directory,
+        context=context,
+        source_catalog=source_catalog,
+        output_contract="compact_contract",
+        runtime_skeleton={
+            "effort_values": ["fast", "standard", "deep"],
+            "risk_values": ["low", "medium", "high"],
+            "quality_gate_values": ["basic", "semantic", "strict"],
+            "instructions": [
+                "Return a complete task contract when the request is clear enough.",
+                "Use fast for clear low-risk read-only or small single-focus edits.",
+                "Use standard for ordinary bounded implementation or investigation work.",
+                "Use deep for high-risk, broad, ambiguous, or core state-machine work.",
+                "If the complete contract would be unsafe to compact, return intent_scope fields only.",
+            ],
+        },
         error=error,
     )
 

@@ -7,6 +7,9 @@ const props = defineProps({ event: { type: Object, required: true } })
 const rootRef = ref(null)
 const summary = computed(() => props.event.intent?.summary || 'Task analyzed')
 const intentType = computed(() => props.event.intent?.type || 'other')
+const effort = computed(() => props.event.effort || 'standard')
+const risk = computed(() => props.event.risk || 'medium')
+const qualityGate = computed(() => props.event.quality_gate || 'semantic')
 const constraints = computed(() => props.event.constraints || [])
 const acceptance = computed(() => props.event.acceptance_criteria || [])
 const hypotheses = computed(() => props.event.hypotheses || [])
@@ -80,6 +83,9 @@ function onExpandLeave(el, done) {
       <div class="ta__card ta__card--intent">
         <div class="ta__card-head">
           <span class="ta__badge ta__badge--intent">{{ intentType }}</span>
+          <span class="ta__badge" :class="`ta__badge--effort-${effort}`">{{ effort }}</span>
+          <span class="ta__badge ta__badge--risk">{{ risk }} risk</span>
+          <span class="ta__badge ta__badge--gate">{{ qualityGate }}</span>
         </div>
         <strong>{{ summary }}</strong>
         <div class="ta__meta" v-if="event.provider && event.model">
@@ -242,6 +248,31 @@ function onExpandLeave(el, done) {
 .ta__badge--intent {
   color: #fff;
   background: var(--event, #6658c7);
+}
+
+.ta__badge--effort-fast {
+  color: #0c6f5d;
+  background: rgba(17, 134, 111, .11);
+}
+
+.ta__badge--effort-standard {
+  color: #174ea6;
+  background: rgba(23, 86, 209, .1);
+}
+
+.ta__badge--effort-deep {
+  color: #7b2d8e;
+  background: rgba(123, 45, 142, .1);
+}
+
+.ta__badge--risk {
+  color: #8a5c00;
+  background: rgba(196, 139, 0, .11);
+}
+
+.ta__badge--gate {
+  color: #53627b;
+  background: rgba(83, 98, 123, .09);
 }
 
 .ta__chip {

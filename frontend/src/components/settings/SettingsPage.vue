@@ -18,6 +18,10 @@ function setLimit(key, value) {
   emit('save', key, Number.isFinite(parsed) ? Math.max(0, parsed) : 0)
 }
 
+function setProfileLimit(profile, key, value) {
+  setLimit(`effort.${profile}.${key}`, value)
+}
+
 const scaleSteps = [0.8, 0.85, 0.9, 0.95, 1.0, 1.05, 1.1, 1.15, 1.2, 1.3]
 function scaleLabel(v) {
   return `${Math.round(v * 100)}%`
@@ -159,6 +163,44 @@ function roundLabel(value) {
           </label>
         </div>
       </div>
+
+      <div class="settings-row settings-row--stack">
+        <div>
+          <strong>Effort profiles</strong>
+          <span>Per-task budgets. Deep defaults to unlimited; 0 keeps a limit unlimited.</span>
+        </div>
+        <div class="profile-grid">
+          <article
+            v-for="profile in settings.effort_profiles || []"
+            :key="profile.key"
+            class="effort-profile"
+          >
+            <header>
+              <strong>{{ profile.label }}</strong>
+              <span>{{ profile.analyzer_mode }} · {{ profile.quality_gate }}</span>
+            </header>
+            <label
+              v-for="item in profile.limits || []"
+              :key="item.key"
+              class="round-limit"
+            >
+              <span>
+                <strong>{{ item.label }}</strong>
+                <em>{{ item.description }}</em>
+              </span>
+              <input
+                type="number"
+                min="0"
+                step="1"
+                :value="item.value || 0"
+                :disabled="saving"
+                @change="setProfileLimit(profile.key, item.key, $event.target.value)"
+              />
+              <b>{{ roundLabel(item.value) }}</b>
+            </label>
+          </article>
+        </div>
+      </div>
     </section>
   </main>
 </template>
@@ -260,6 +302,28 @@ function roundLabel(value) {
 .round-grid {
   display: grid;
   gap: 8px;
+}
+.profile-grid {
+  display: grid;
+  gap: 12px;
+}
+.effort-profile {
+  padding: 12px;
+  border: 1px solid #e2eaf4;
+  border-radius: 8px;
+  background: linear-gradient(180deg, #ffffff, #fbfdff);
+}
+.effort-profile header {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding-bottom: 8px;
+}
+.effort-profile header span {
+  margin: 0;
+  color: #7b8da3;
+  font: 700 9px/1 var(--mono);
+  text-transform: uppercase;
 }
 .round-limit {
   display: grid;

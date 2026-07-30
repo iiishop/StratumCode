@@ -38,6 +38,9 @@ def handle(run):
     yield {"op": "update", "id": analyze_stage, "patch": {
         "model": run.analysis.get("model", ""),
         "provider": run.analysis.get("provider", ""),
+        "effort": run.analysis.get("effort", ""),
+        "risk": run.analysis.get("risk", ""),
+        "quality_gate": run.analysis.get("quality_gate", ""),
         "state": "done",
         "phase": "analyzed",
     }}

@@ -78,6 +78,92 @@ TASK_LIMITS = {
         "default": 5,
     },
 }
+EFFORT_PROFILES = {
+    "fast": {
+        "label": "Fast",
+        "analyzer_mode": "compact",
+        "quality_gate": "basic",
+        "subagent_enabled": False,
+        "limits": {
+            "acceptance_limit": {
+                "label": "Acceptance criteria",
+                "description": "Maximum acceptance criteria for fast tasks. 0 means unlimited.",
+                "default": 2,
+            },
+            "unknown_limit": {
+                "label": "Unknowns",
+                "description": "Maximum investigation unknowns for fast tasks. 0 means unlimited.",
+                "default": 2,
+            },
+            "investigation_rounds": {
+                "label": "Investigation rounds",
+                "description": "Model/tool rounds for fast investigation. 0 means unlimited.",
+                "default": 2,
+            },
+            "validation_rounds": {
+                "label": "Validation rounds",
+                "description": "Model/tool rounds for fast validation. 0 means unlimited.",
+                "default": 1,
+            },
+        },
+    },
+    "standard": {
+        "label": "Standard",
+        "analyzer_mode": "compact_then_full",
+        "quality_gate": "semantic",
+        "subagent_enabled": True,
+        "limits": {
+            "acceptance_limit": {
+                "label": "Acceptance criteria",
+                "description": "Maximum acceptance criteria for standard tasks. 0 means unlimited.",
+                "default": 5,
+            },
+            "unknown_limit": {
+                "label": "Unknowns",
+                "description": "Maximum investigation unknowns for standard tasks. 0 means unlimited.",
+                "default": 5,
+            },
+            "investigation_rounds": {
+                "label": "Investigation rounds",
+                "description": "Model/tool rounds for standard investigation. 0 means unlimited.",
+                "default": 6,
+            },
+            "validation_rounds": {
+                "label": "Validation rounds",
+                "description": "Model/tool rounds for standard validation. 0 means unlimited.",
+                "default": 3,
+            },
+        },
+    },
+    "deep": {
+        "label": "Deep",
+        "analyzer_mode": "full",
+        "quality_gate": "strict",
+        "subagent_enabled": True,
+        "limits": {
+            "acceptance_limit": {
+                "label": "Acceptance criteria",
+                "description": "Maximum acceptance criteria for deep tasks. 0 means unlimited.",
+                "default": 0,
+            },
+            "unknown_limit": {
+                "label": "Unknowns",
+                "description": "Maximum investigation unknowns for deep tasks. 0 means unlimited.",
+                "default": 0,
+            },
+            "investigation_rounds": {
+                "label": "Investigation rounds",
+                "description": "Model/tool rounds for deep investigation. 0 means unlimited.",
+                "default": 0,
+            },
+            "validation_rounds": {
+                "label": "Validation rounds",
+                "description": "Model/tool rounds for deep validation. 0 means unlimited.",
+                "default": 0,
+            },
+        },
+    },
+}
 DEFAULT_LLM_OUTPUT_TOKENS = 32000
 OUTPUT_LIMITS = {
     "llm_output_tokens": {
@@ -281,6 +367,47 @@ def save_task_limit(key: str, value) -> int:
     return limit
 
 
+def get_effort_profile(effort: str | None) -> dict:
+    key = _effort_key(effort)
+    meta = EFFORT_PROFILES[key]
+    limits = {
+        limit_key: get_effort_profile_limit(key, limit_key)
+        for limit_key in meta["limits"]
+    }
+    return {
+        "key": key,
+        "label": meta["label"],
+        "analyzer_mode": meta["analyzer_mode"],
+        "quality_gate": meta["quality_gate"],
+        "subagent_enabled": meta["subagent_enabled"],
+        **limits,
+    }
+
+
+def get_effort_profile_limit(profile: str, key: str) -> int:
+    profile_key = _effort_key(profile)
+    limits = EFFORT_PROFILES[profile_key]["limits"]
+    if key not in limits:
+        raise ValueError(f"unknown effort profile setting: {profile_key}.{key}")
+    default = str(limits[key]["default"])
+    try:
+        return max(0, int(_get(_effort_setting_key(profile_key, key), default)))
+    except (TypeError, ValueError):
+        return int(default)
+
+
+def save_effort_profile_limit(profile: str, key: str, value) -> int:
+    profile_key = _effort_key(profile)
+    if key not in EFFORT_PROFILES[profile_key]["limits"]:
+        raise ValueError(f"unknown effort profile setting: {profile_key}.{key}")
+    try:
+        limit = max(0, int(value))
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{profile_key}.{key} must be a non-negative integer") from exc
+    _save(_effort_setting_key(profile_key, key), str(limit))
+    return limit
+
+
 def get_output_limit(key: str) -> int:
     if key not in OUTPUT_LIMITS:
         raise ValueError(f"unknown output limit setting: {key}")
@@ -329,6 +456,25 @@ def to_json() -> dict:
             }
             for key, meta in TASK_LIMITS.items()
         ],
+        "effort_profiles": [
+            {
+                "key": profile_key,
+                "label": meta["label"],
+                "analyzer_mode": meta["analyzer_mode"],
+                "quality_gate": meta["quality_gate"],
+                "subagent_enabled": meta["subagent_enabled"],
+                "limits": [
+                    {
+                        "key": limit_key,
+                        "label": limit_meta["label"],
+                        "description": limit_meta["description"],
+                        "value": get_effort_profile_limit(profile_key, limit_key),
+                    }
+                    for limit_key, limit_meta in meta["limits"].items()
+                ],
+            }
+            for profile_key, meta in EFFORT_PROFILES.items()
+        ],
         "output_limits": [
             {
                 "key": key,
@@ -355,6 +501,15 @@ def _get(key: str, default: str) -> str:
             (key,),
         ).fetchone()
     return row["value"] if row else default
+
+
+def _effort_key(value: str | None) -> str:
+    key = str(value or "standard").strip().casefold()
+    return key if key in EFFORT_PROFILES else "standard"
+
+
+def _effort_setting_key(profile: str, key: str) -> str:
+    return f"effort.{profile}.{key}"
 
 
 def _save(key: str, value: str) -> None:

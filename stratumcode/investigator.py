@@ -94,7 +94,17 @@ def investigation_stream(
     model = setting["model_id"]
     pricing_rules = providers.get_model_pricing(provider["id"], model)
     usage_total = _empty_usage(pricing_rules)
-    max_rounds = app_settings.get_round_limit("investigation_rounds") if max_rounds is None else int(max_rounds or 0)
+    effort_profile = app_settings.get_effort_profile(analysis.get("effort"))
+    quality_gate = str(analysis.get("quality_gate") or effort_profile["quality_gate"]).strip().casefold()
+    semantic_gate_enabled = quality_gate != "basic"
+    subagent_enabled = bool(effort_profile["subagent_enabled"])
+    max_rounds = (
+        effort_profile["investigation_rounds"]
+        if max_rounds is None and analysis.get("effort")
+        else app_settings.get_round_limit("investigation_rounds")
+        if max_rounds is None
+        else int(max_rounds or 0)
+    )
     run_id = uuid4().hex[:10]
     stage_id = f"{run_id}-stage"
     yield start_event(stage_id, "stage", {
@@ -149,7 +159,11 @@ def investigation_stream(
     verification_queue: list[dict] = []
     attempted_verifications: set[tuple[str, str]] = set()
     clearify_questions: dict[str, str] = {}
-    semantic_repair_required_ids = _semantic_repair_resolution_ids(recorded_findings)
+    semantic_repair_required_ids = (
+        _semantic_repair_resolution_ids(recorded_findings)
+        if semantic_gate_enabled
+        else set()
+    )
     last_quality_audit: dict = {}
     last_record_signature = _recorded_findings_signature(recorded_findings)
     repeated_record_no_progress = 0
@@ -647,12 +661,16 @@ def investigation_stream(
                     recorded_findings = _apply_direct_resolution_gate(
                         recorded_findings,
                         observations,
-                        strict_grounding=_analysis_requests_implementation(analysis),
+                        strict_grounding=semantic_gate_enabled and _analysis_requests_implementation(analysis),
                     )
-                    semantic_repair_required_ids = _semantic_repair_resolution_ids(
-                        recorded_findings,
+                    semantic_repair_required_ids = (
+                        _semantic_repair_resolution_ids(recorded_findings)
+                        if semantic_gate_enabled
+                        else set()
                     )
                     if (
+                        semantic_gate_enabled
+                        and
                         analysis.get("_canonicalized")
                         and not _audit_covers_resolutions(
                             last_quality_audit,
@@ -680,7 +698,7 @@ def investigation_stream(
                             last_quality_audit,
                             observations=observations,
                             strict_grounding=_analysis_requests_implementation(analysis),
-                            allow_verification=_analysis_requests_implementation(analysis),
+                            allow_verification=subagent_enabled and _analysis_requests_implementation(analysis),
                         )
                         semantic_repair_required_ids = _semantic_repair_resolution_ids(
                             recorded_findings,
