@@ -24,10 +24,11 @@ let _durationTimer = null
 
 function formatElapsed(totalSeconds) {
   const s = Math.max(0, Math.floor(totalSeconds))
-  const minutes = Math.floor(s / 60)
+  const hours = Math.floor(s / 3600)
+  const minutes = Math.floor((s % 3600) / 60)
   const seconds = s % 60
-  if (minutes > 0) return `${minutes}分${seconds}秒`
-  return `${seconds}秒`
+  const pad = (n) => String(n).padStart(2, '0')
+  return `${pad(hours)}:${pad(minutes)}:${pad(seconds)}`
 }
 
 const formattedDuration = computed(() => {
