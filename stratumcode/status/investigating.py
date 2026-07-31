@@ -280,7 +280,13 @@ def handle(run):
         else:
             run.transition(chat._chat_finish_state(run), "Investigation ended without an implementation path.")
     if pending_output and run.state != chat.ChatState.INVESTIGATING:
-        pending_output["data"]["content"] = _merged_investigation_summary(run)
+        facts = _merged_investigation_summary(run)
+        yield start_event(
+            f"{run.analysis.get('id', 'run')}-investigation-facts",
+            "investigation_facts",
+            {"content": facts},
+        )
+        pending_output["data"]["content"] = _final_summary_text(run)
         yield pending_output
 
 
@@ -304,6 +310,57 @@ def _merged_investigation_summary(run) -> str:
     if final.get("summary"):
         return str(final["summary"]).strip()
     return "Investigation complete."
+
+
+def _final_summary_text(run) -> str:
+    """Ask the model to write a user-facing summary over ALL investigation rounds.
+
+    Falls back to the facts list when the summary stage is unconfigured or the
+    model call fails, so the user always gets a response.
+    """
+    from .. import agent_runtime, model_settings
+
+    facts = _merged_investigation_summary(run)
+    setting = model_settings.resolve(model_settings.SUMMARY_STAGE)
+    if setting is None:
+        return facts
+    criteria_lines = [
+        f"- {ac.get('text') or ac.get('id') or ''}"
+        for ac in (run.analysis or {}).get("acceptance_criteria", [])
+        if isinstance(ac, dict)
+    ]
+    criteria_text = "\n".join(criteria_lines) or "(none)"
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "You are the final summarizer for a completed code investigation. "
+                "Write a clear, user-facing answer to the original question using ONLY "
+                "the verified facts below. Satisfy every acceptance criterion. "
+                "Do not invent new facts, do not mention the investigation process or "
+                "the tooling used. Write in the same language as the original question."
+            ),
+        },
+        {
+            "role": "user",
+            "content": (
+                f"Original question:\n{run.message}\n\n"
+                f"Acceptance criteria:\n{criteria_text}\n\n"
+                f"Verified facts from the investigation:\n{facts}"
+            ),
+        },
+    ]
+    try:
+        assistant = agent_runtime.call_model(
+            setting["provider"],
+            setting["model_id"],
+            messages,
+            use_skills=False,
+        )
+    except Exception:
+        return facts
+    text = (assistant.get("content") or "").strip()
+    return text or facts
 
 
 def _investigation_allows_patch(investigation: dict) -> bool:

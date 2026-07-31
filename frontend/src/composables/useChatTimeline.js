@@ -37,6 +37,7 @@ export function useChatTimeline(onAppend) {
     showVerdict: (message, payload) => appendEvent(message, 'verdict', payload),
     showStepResult: (message, payload) => appendEvent(message, 'step_result', payload),
     showSafetyStop: (message, payload) => appendEvent(message, 'safety_stop', payload),
+    showInvestigationFacts: (message, payload) => appendEvent(message, 'investigation_facts', payload),
     showUserQuestion: (message, payload) => appendEvent(message, 'user_question', payload),
     showUsage: (message, payload) => appendEvent(message, 'usage', payload),
   }

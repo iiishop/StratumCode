@@ -21,6 +21,7 @@ import EvidenceRelationEvent from './EvidenceRelationEvent.vue'
 import VerdictEvent from './VerdictEvent.vue'
 import StepResultEvent from './StepResultEvent.vue'
 import SafetyStopEvent from './SafetyStopEvent.vue'
+import InvestigationFactsEvent from './InvestigationFactsEvent.vue'
 import UserQuestionEvent from './UserQuestionEvent.vue'
 import UsageEvent from './UsageEvent.vue'
 import ValidationChecklistEvent from './ValidationChecklistEvent.vue'
@@ -56,6 +57,7 @@ const eventComponents = {
   verdict: VerdictEvent,
   step_result: StepResultEvent,
   safety_stop: SafetyStopEvent,
+  investigation_facts: InvestigationFactsEvent,
   user_question: UserQuestionEvent,
   usage: UsageEvent,
   verification_checklist: ValidationChecklistEvent,
