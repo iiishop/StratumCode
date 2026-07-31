@@ -1059,12 +1059,7 @@ def investigation_stream(
                     "input": raw_arguments,
                     "output": output,
                 })
-                MAX_TOOL_ARG_RETRIES = 2
-                if repeated_tool_error_count >= MAX_TOOL_ARG_RETRIES:
-                    output = _tool_repair_error_json(
-                        exc, name, raw_arguments, partial_arguments,
-                        attempt=repeated_tool_error_count,
-                    )
+                if repeated_tool_error_count >= MAX_REPEATED_TOOL_ERRORS:
                     finalization_reason = (
                         "Runtime recovered after repeated tool argument errors: "
                         f"{name or 'invalid'} failed with {exc}."
