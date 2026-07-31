@@ -421,8 +421,11 @@ resolve_unknowns. If broader findings still need slot recording, call
 record_investigation_findings with only a reason. The runtime derives task_updates
 and carries unresolved contract unknowns.
 
-Then call finish_investigation with reason, summary, recommended_next_step, and
-patch_planning_facts when code work should continue.
+Then call finish_investigation with reason, recommended_next_step, and
+patch_planning_facts when code work should continue. The summary field is
+optional for intermediate rounds: when recommended_next_step is not "done",
+omit it or write a single short sentence. Write the full summary only when
+the investigation is actually complete.
 
 For implement bugfix work, finish_investigation must include bugfix_readiness.
 Set every readiness flag true only when existing evidence identifies the observed

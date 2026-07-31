@@ -93,6 +93,7 @@ def handle(run):
     session_lines = _session_context_lines(run.selected_session_context)
     last_investigation = None
     pending_question = None
+    pending_output = None
     previous_observations = _merge_items_by_id(
         _merge_items_by_id(
             run.selected_session_context.get("observations", []),
@@ -148,6 +149,13 @@ def handle(run):
             continue
         if event.get("op") == "start" and event.get("event") == "user_question":
             pending_question = event
+            continue
+        if (
+            event.get("op") == "start"
+            and event.get("event") == "output"
+            and str(event.get("id") or "").endswith("-output")
+        ):
+            pending_output = event
             continue
         if event.get("op") == "done" and isinstance(event.get("investigation"), dict):
             last_investigation = event["investigation"]
@@ -243,8 +251,8 @@ def handle(run):
     elif next_step == "done":
         if _analysis_requests_implementation(run.analysis):
             run.transition(chat.ChatState.FAILED, "Investigation ended without an implementation path.")
-            return
-        run.transition(chat._chat_finish_state(run), "Investigation ended without an implementation path.")
+        else:
+            run.transition(chat._chat_finish_state(run), "Investigation ended without an implementation path.")
     elif next_step == "failed" and blocking_unknown_ids:
         step = (run.last_investigation or {}).setdefault("step_result", {})
         step["next_step"] = "continue_investigation"
@@ -269,8 +277,33 @@ def handle(run):
     else:
         if _analysis_requests_implementation(run.analysis):
             run.transition(chat.ChatState.FAILED, "Investigation ended without an implementation path.")
-            return
-        run.transition(chat._chat_finish_state(run), "Investigation ended without an implementation path.")
+        else:
+            run.transition(chat._chat_finish_state(run), "Investigation ended without an implementation path.")
+    if pending_output and run.state != chat.ChatState.INVESTIGATING:
+        pending_output["data"]["content"] = _merged_investigation_summary(run)
+        yield pending_output
+
+
+def _merged_investigation_summary(run) -> str:
+    """Rebuild the final investigation summary from accumulated state.
+
+    Prioritizes the audited resolved answers (which span every investigation
+    round because findings are merged), falls back to the model's written
+    summary, then to a placeholder.
+    """
+    final = run.last_investigation or {}
+    answers = [
+        str(item.get("answer") or "").strip()
+        for item in final.get("resolutions", [])
+        if isinstance(item, dict)
+        and item.get("status") == "resolved"
+        and str(item.get("answer") or "").strip()
+    ]
+    if answers:
+        return "\n\n".join(answers)
+    if final.get("summary"):
+        return str(final["summary"]).strip()
+    return "Investigation complete."
 
 
 def _investigation_allows_patch(investigation: dict) -> bool:

@@ -2736,7 +2736,7 @@ def _finish_tool_schema() -> dict:
                     },
                 },
             },
-            "required": ["reason", "summary", "recommended_next_step"],
+            "required": ["reason", "recommended_next_step"],
         },
     )
 
@@ -4637,6 +4637,8 @@ def _finish_arguments(
         if prefer_finish_summary and finish_summary
         else resolution_summary or finish_summary
     )
+    if not summary:
+        summary = "Investigation complete."
     combined: dict = {
         field: list(recorded.get(field, []))
         for field in FINDING_FIELDS
