@@ -43,6 +43,15 @@ MAX_DUPLICATE_NO_PROGRESS = 2
 MAX_PENDING_DISCOVERY_OBSERVATIONS = 8
 REQUIRED_FINDING_SLOT_ATTEMPTS = 2
 REQUIRED_AUDIT_ATTEMPTS = 2
+# During semantic repair the model may still gather missing evidence, but
+# must not finish or resolve until the audit passes.
+_REPAIR_ALLOWED_TOOL_NAMES = frozenset({
+    "read",
+    "grep",
+    "glob",
+    "code_nav",
+    "record_investigation_findings",
+})
 OBSERVATION_EVIDENCE_CHARS = 8000
 DISCOVERY_CONTRACT_FIELDS = (
     "hypothesis",
@@ -175,6 +184,7 @@ def investigation_stream(
     duplicate_no_progress_count = 0
     duplicate_no_progress_total = 0
     force_synthesis_reason = ""
+    finish_evidence_blocked = False
 
     for round_index in _round_indexes(max_rounds, start=0):
         thinking_id = f"{run_id}-thinking-{round_index}"
@@ -231,20 +241,35 @@ def investigation_stream(
             messages.append({"role": "user", "content": (
                 "The semantic quality gate accepted the existing recorded findings except "
                 "for the listed missing requirements. Do not regenerate, restate, or replace "
-                "already recorded ids. Call record_investigation_findings now to append only "
-                "the missing belief(s), then add a minimal resolution patch with "
+                "already recorded ids. If you need more evidence, use read/grep/glob/code_nav "
+                "first to obtain the missing observations, then call record_investigation_findings "
+                "to append only the missing belief(s), then add a minimal resolution patch with "
                 "repair_mode=append_missing_only and only the new belief_ids/evidence. "
                 "finish_investigation is not allowed until the missing list passes: "
                 f"{json.dumps(repair, ensure_ascii=False)}"
             )})
-            current_tools = [_record_findings_tool_schema()]
+            current_tools = [
+                tool for tool in tools
+                if ((tool.get("function") or {}).get("name") or "") in _REPAIR_ALLOWED_TOOL_NAMES
+            ]
             current_tool_choice = {
                 "type": "function",
                 "function": {"name": "record_investigation_findings"},
             }
         elif _recorded_resolves_initial_unknowns(recorded_findings, analysis):
-            current_tools = [_finish_tool_schema()]
-            current_tool_choice = {"type": "function", "function": {"name": "finish_investigation"}}
+            if finish_evidence_blocked:
+                current_tools = [
+                    tool for tool in tools
+                    if ((tool.get("function") or {}).get("name") or "") in (_REPAIR_ALLOWED_TOOL_NAMES | {"finish_investigation"})
+                ]
+                messages.append({"role": "user", "content": (
+                    "The previous finish attempt was rejected because a resolution "
+                    "references a file that was never read. Use read/grep/glob/code_nav "
+                    "to obtain the missing observations, then call finish_investigation again."
+                )})
+            else:
+                current_tools = [_finish_tool_schema()]
+                current_tool_choice = {"type": "function", "function": {"name": "finish_investigation"}}
         elif force_synthesis_reason:
             messages.append({"role": "user", "content": force_synthesis_reason})
             current_tools = [_resolve_unknowns_tool_schema(), _record_findings_tool_schema(), _finish_tool_schema()]
@@ -435,10 +460,17 @@ def investigation_stream(
                             current_tool_choice = {"type": "function", "function": {"name": "finish_investigation"}}
                         continue
                     if resolution_required_ids:
+                        required_tool = (
+                            "resolve_unknowns"
+                            if "resolve_unknowns" in allowed_tool_names
+                            else "record_investigation_findings"
+                            if "record_investigation_findings" in allowed_tool_names
+                            else ""
+                        )
                         output = json.dumps({
                             "error": "resolution_required",
                             "retryable": True,
-                            "required_tool": "resolve_unknowns",
+                            **({"required_tool": required_tool} if required_tool else {}),
                             "target_unknown_ids": resolution_required_ids,
                             "message": (
                                 "Existing project evidence is already recorded for these unknowns. "
@@ -552,6 +584,8 @@ def investigation_stream(
                     continue
                 if name == "record_investigation_findings":
                     _require_control_reason(arguments, name)
+                    if semantic_repair_required_ids and isinstance(arguments.get("resolutions"), list) and arguments["resolutions"]:
+                        _require_repair_resolutions(arguments, semantic_repair_required_ids)
                     if (
                         not pending_observation_ids
                         and not resolution_required_ids
@@ -662,6 +696,7 @@ def investigation_stream(
                             current_tool_choice = {"type": "function", "function": {"name": "finish_investigation"}}
                         continue
                     _require_finding_fields(arguments)
+                    _reject_empty_repair(arguments, recorded_findings)
                     recorded_findings = _merge_recorded_findings(recorded_findings, arguments)
                     recorded_findings = _bind_grounding_evidence(
                         recorded_findings,
@@ -1031,6 +1066,12 @@ def investigation_stream(
                     ))
                     verification_queue.pop(0)
             except Exception as exc:
+                if (
+                    name == "finish_investigation"
+                    and isinstance(exc, ValueError)
+                    and ("references file" in str(exc) or "claims behavior" in str(exc))
+                ):
+                    finish_evidence_blocked = True
                 raw_arguments = function.get("arguments") or "{}"
                 partial_arguments = _partial_tool_arguments(raw_arguments)
                 if name == "record_investigation_findings":
@@ -2876,6 +2917,7 @@ def _finalize_investigation(
                         })
                         continue
                 _require_finding_fields(record_arguments)
+                _reject_empty_repair(record_arguments, recorded_findings or _empty_recorded_findings())
                 recorded_findings = _merge_recorded_findings(
                     recorded_findings or _empty_recorded_findings(),
                     record_arguments,
@@ -4575,6 +4617,69 @@ def _append_resolution_repair(existing: dict, repair: dict) -> dict:
     return merged
 
 
+def _reject_empty_repair(arguments: dict, recorded: dict) -> None:
+    """Reject append_missing_only repair resolutions that add no new evidence.
+
+    Without this guard a model caught in the semantic repair loop can resubmit
+    the same partially_resolved resolution forever (empty belief_ids/evidence),
+    keeping the unknown permanently in the repair set with zero progress.
+    """
+    if not isinstance(arguments.get("resolutions"), list):
+        return
+    for item in arguments["resolutions"]:
+        if not isinstance(item, dict):
+            continue
+        if str(item.get("repair_mode") or "").strip() != "append_missing_only":
+            continue
+        unknown_id = str(item.get("unknown_id") or "").strip()
+        if not unknown_id:
+            continue
+        existing = _find_by_unknown_id(
+            [res for res in recorded.get("resolutions", []) if isinstance(res, dict)],
+            unknown_id,
+        )
+        old_evidence = set(_reference_list((existing or {}).get("evidence")))
+        old_beliefs = set(_reference_list((existing or {}).get("belief_ids")))
+        new_evidence = set(_reference_list(item.get("evidence")))
+        new_beliefs = set(_reference_list(item.get("belief_ids")))
+        if str(item.get("status") or "") == "resolved":
+            continue
+        if new_evidence - old_evidence or new_beliefs - old_beliefs:
+            continue
+        raise ValueError(
+            f"append_missing_only repair for {unknown_id} adds no new evidence or "
+            "belief_ids; gather the missing observations first (read/grep/code_nav), "
+            "then resubmit the repair with the new references."
+        )
+
+
+def _require_repair_resolutions(arguments: dict, repair_ids: set[str]) -> None:
+    """Require a record call during active semantic repair to cover repair targets.
+
+    When the semantic quality gate is waiting on specific unknowns, a bare
+    beliefs-only record (or a record patching unrelated unknowns) makes zero
+    progress on the repair list and lets the model spin forever. Force every
+    record call to include a resolution for at least one pending repair id.
+    """
+    if not repair_ids:
+        return
+    provided = {
+        str(item.get("unknown_id") or "").strip()
+        for item in arguments.get("resolutions", [])
+        if isinstance(item, dict) and str(item.get("unknown_id") or "").strip()
+    }
+    covered = [rid for rid in repair_ids if any(_same_unknown_id(rid, pid) for pid in provided)]
+    if covered:
+        return
+    missing = sorted(repair_ids)
+    raise ValueError(
+        "semantic repair is active for unknowns: " + ", ".join(missing) +
+        "; record_investigation_findings must include a repair resolution "
+        "(repair_mode=append_missing_only with new belief_ids/evidence) for at "
+        "least one of them before finishing."
+    )
+
+
 def _identity_key(item) -> str:
     if not isinstance(item, dict):
         return str(item)
@@ -4875,16 +4980,51 @@ def _normalize_path(p: str) -> str:
     return p.lstrip("./").lower()
 
 
+def _hit_files_from_observations(observations: list[dict]) -> set[str]:
+    """Files confirmed to exist / contain a match via grep/glob observations.
+
+    A grep hit line has the form ``path:line:content`` and a glob result is a
+    bare path. A file listed there is *known to exist* (and to contain the
+    searched symbol), which is enough for existential mentions ("App.vue is
+    the root component") even though its full behavior was never read.
+    """
+    files: set[str] = set()
+    for item in observations:
+        if not isinstance(item, dict):
+            continue
+        tool = str(item.get("tool") or "")
+        if tool not in {"grep", "glob"}:
+            continue
+        evidence = item.get("_grounding_evidence") or item.get("output") or ""
+        if not isinstance(evidence, str):
+            continue
+        for line in evidence.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            if tool == "glob":
+                files.add(_normalize_path(line))
+                continue
+            # grep: "path:line:content" — path may itself contain colons (Windows)
+            head = line.split(":", 2)[0] if line.count(":") >= 2 else line
+            if head:
+                files.add(_normalize_path(head))
+    return files
+
+
 def _require_file_reads(resolutions: list[dict], observations: list[dict]) -> list[str]:
     """Return issues when a resolution claims a code file's behavior without
     ever reading it.
 
     The answer text is scanned for code-file references (sessions.py,
-    frontend/.../HomePage.vue, etc.). If the model claims such a file's
-    behavior but no ``read`` observation covers it, the claim rests on grep
-    matches or guesswork -- the 'grep found it, so I know it' failure mode.
-    Only code files (.py/.vue/.js/.ts) are checked; config/docs files are
-    skipped because mentioning them is not a behavior claim.
+    frontend/.../HomePage.vue, etc.). References that carry a symbol or a
+    behavioral claim ("sessions.py's generate_title writes the name field")
+    require a ``read`` observation of that file. A bare existential mention
+    ("App.vue is the root component") only requires the file to be known --
+    grep/glob hits are sufficient evidence the file exists and contains the
+    searched symbol. Only code files (.py/.vue/.js/.ts) are checked;
+    config/docs files are skipped because mentioning them is not a behavior
+    claim.
     """
     read_files: set[str] = set()
     for item in observations:
@@ -4895,6 +5035,7 @@ def _require_file_reads(resolutions: list[dict], observations: list[dict]) -> li
             read_files.add(path)
     if not read_files:
         return []
+    hit_files = read_files | _hit_files_from_observations(observations)
     issues: list[str] = []
     for resolution in resolutions:
         if not isinstance(resolution, dict):
@@ -4907,16 +5048,46 @@ def _require_file_reads(resolutions: list[dict], observations: list[dict]) -> li
             if not ref or ref in _FILE_REF_SKIP or ref.endswith(".pyc"):
                 continue
             basename = ref.rsplit("/", 1)[-1]
-            matched = any(
+            read_matched = any(
                 rf == ref or rf.endswith("/" + ref) or rf.endswith("/" + basename)
                 for rf in read_files
             )
-            if not matched:
-                issues.append(
-                    f"resolution {unknown_id} references file {ref_raw} "
-                    "but no read observation covers it"
-                )
+            if read_matched:
+                continue
+            if _ref_is_existential(answer, match) and any(
+                rf == ref or rf.endswith("/" + ref) or rf.endswith("/" + basename)
+                for rf in hit_files
+            ):
+                continue
+            issues.append(
+                f"resolution {unknown_id} references file {ref_raw} "
+                "but no read observation covers it"
+            )
     return issues
+
+
+def _ref_is_existential(answer: str, match) -> bool:
+    """True when a file mention is existential, not a behavioral claim.
+
+    A mention is existential when the file name is not followed by a symbol
+    or a behavior verb ("App.vue 是根组件", "the store lives in
+    useSessions.js"). A behavioral claim attaches a symbol ("sessions.py 的
+    generate_title") or a verb of effect ("HomePage.vue 调用
+    generateSessionTitle"), which needs real reading.
+    """
+    tail = answer[match.end():match.end() + 80]
+    if re.match(r"^\s*(?:的|中|里|内|文件|:)?\s*[A-Za-z_][A-Za-z0-9_]*\s*(?:\(\))?", tail):
+        return False
+    if re.search(
+        r"调用|写入|返回|更新|修改|执行|处理|定义|实现|触发|发送|接收|渲染|"
+        r"绑定|监听|创建|删除|设置|声明|初始化|导入|导出|请求|响应|加载|刷新|"
+        r"显示|切换|注册|订阅|update|set|get|call|invoke|emit|handle|apply|"
+        r"resolve|finish|render|write|return|send|receive|create|delete",
+        tail,
+        re.IGNORECASE,
+    ):
+        return False
+    return True
 
 
 _FILE_SYMBOL_RE = re.compile(

@@ -92,8 +92,9 @@ def _select_session_memory(message: str, analysis: dict | None, session_context:
         query,
         [item for item in session_context.get("observations", []) if item.get("fresh")],
         ("summary", "title", "path", "tool", "id"),
-        limit=12,
+        limit=20,
         pinned_ids=observation_ids | reuse_ids,
+        keep_zero_score=True,
     )
     investigations = _rank_memory_items(
         query,
@@ -152,6 +153,7 @@ def _rank_memory_items(
     *,
     limit: int,
     pinned_ids: set[str] | None = None,
+    keep_zero_score: bool = False,
 ) -> list[dict]:
     pinned_ids = pinned_ids or set()
     ranked = []
@@ -161,7 +163,7 @@ def _rank_memory_items(
         score = len(query & _memory_terms(text))
         if item_id in pinned_ids:
             score += 100
-        if score > 0:
+        if score > 0 or keep_zero_score:
             ranked.append((score, index, item))
     ranked.sort(key=lambda row: (-row[0], row[1]))
     return [item for _, _, item in ranked[:limit]]
