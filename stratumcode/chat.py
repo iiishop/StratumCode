@@ -144,7 +144,34 @@ def _chat_events(run: ChatRun) -> Iterator[dict]:
 
 
 def _chat_finish_state(run: ChatRun) -> ChatState:
+    _update_goal_status(run)
     return ChatState.SAVING_SESSION if run.session_id and run.last_investigation else ChatState.COMPLETED
+
+
+def _update_goal_status(run: ChatRun) -> None:
+    """Mark goal as completed when all criteria are known and blockers resolved."""
+    analysis = run.analysis or {}
+    investigation = run.last_investigation or {}
+    goal = analysis.get("goal")
+    if not isinstance(goal, dict):
+        return
+    criteria = analysis.get("acceptance_criteria", [])
+    if not criteria:
+        return
+    all_ac_known = all(
+        isinstance(ac, dict) and ac.get("status") == "known"
+        for ac in criteria
+    )
+    unknowns = investigation.get("unknowns", [])
+    blocking_unknowns = [
+        u for u in unknowns
+        if isinstance(u, dict) and u.get("blocking")
+    ]
+    all_blocking_resolved = len(blocking_unknowns) == 0
+    step = investigation.get("step_result")
+    step_done = isinstance(step, dict) and step.get("next_step") == "done"
+    if all_ac_known and all_blocking_resolved and step_done:
+        goal["status"] = "completed"
 
 
 def _select_initial_skills(run: ChatRun) -> Iterator[dict]:

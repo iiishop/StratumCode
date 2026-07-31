@@ -1059,7 +1059,12 @@ def investigation_stream(
                     "input": raw_arguments,
                     "output": output,
                 })
-                if repeated_tool_error_count >= MAX_REPEATED_TOOL_ERRORS:
+                MAX_TOOL_ARG_RETRIES = 2
+                if repeated_tool_error_count >= MAX_TOOL_ARG_RETRIES:
+                    output = _tool_repair_error_json(
+                        exc, name, raw_arguments, partial_arguments,
+                        attempt=repeated_tool_error_count,
+                    )
                     finalization_reason = (
                         "Runtime recovered after repeated tool argument errors: "
                         f"{name or 'invalid'} failed with {exc}."
@@ -1082,6 +1087,7 @@ def investigation_stream(
                     "reason": "repeated_tool_error",
                     "message": finalization_reason,
                     "tool": name or "invalid",
+                    "visibility": "diagnostic",
                 })
                 break
         if final is not None:
@@ -1138,6 +1144,7 @@ def investigation_stream(
     yield start_event(f"{run_id}-output", "output", {
         "content": _summary(final),
         "streaming": False,
+        "visibility": "diagnostic" if final.get("runtime_recovered") else "default",
     })
     yield {"op": "done", "investigation": final}
 
@@ -1277,13 +1284,14 @@ def _tool_blocked_error_json(tool_name: str, *, allowed_tools: list[str]) -> str
     }, ensure_ascii=False)
 
 
-def _tool_repair_error_json(exc: Exception, tool_name: str, raw_arguments: str, partial_arguments: dict) -> str:
+def _tool_repair_error_json(exc: Exception, tool_name: str, raw_arguments: str, partial_arguments: dict, attempt: int = 0) -> str:
     try:
         payload = json.loads(tool_error_json(exc, tool_name))
     except json.JSONDecodeError:
         payload = {"error": {"message": str(exc), "tool": tool_name or "invalid"}}
     error = payload.setdefault("error", {})
     error["partial_arguments"] = partial_arguments
+    error["attempt"] = attempt
     error["missing_fields"] = _missing_fields_from_error(
         str(exc),
         partial_arguments,
@@ -3097,7 +3105,7 @@ def _runtime_recovered_investigation(
         "summary": (
             read_only_summary
             if read_only_complete and read_only_summary
-            else "Runtime recovered from repeated invalid investigation tool arguments."
+            else "Investigation auto-recovered from tool errors; see task panel for details."
         ),
         "ready_for_patch_planning": False,
         "runtime_recovered": True,
