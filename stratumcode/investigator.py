@@ -168,11 +168,6 @@ def investigation_stream(
     verification_queue: list[dict] = []
     attempted_verifications: set[tuple[str, str]] = set()
     clearify_questions: dict[str, str] = {}
-    semantic_repair_required_ids = (
-        _semantic_repair_resolution_ids(recorded_findings)
-        if semantic_gate_enabled
-        else set()
-    )
     last_quality_audit: dict = {}
     last_record_signature = _recorded_findings_signature(recorded_findings)
     repeated_record_no_progress = 0
@@ -192,6 +187,11 @@ def investigation_stream(
             clearify_questions,
         )
         verification_request = verification_queue[0] if verification_queue else None
+        semantic_repair_required_ids = (
+            _semantic_repair_resolution_ids(recorded_findings)
+            if semantic_gate_enabled
+            else set()
+        )
         resolution_required_ids = _unknowns_needing_resolution(recorded_findings, observations, analysis)
         resolution_required_ids = _dedupe_strings([
             *resolution_required_ids,
@@ -823,6 +823,7 @@ def investigation_stream(
                         analysis=analysis,
                         observations=observations,
                         repair_conflicts=True,
+                        workspace_dir=workspace_dir,
                     )
                     messages.append({
                         "role": "tool",
@@ -1112,6 +1113,7 @@ def investigation_stream(
             recorded_findings=recorded_findings,
             audit_cache=audit_cache,
             reason=finalization_reason,
+            workspace_dir=workspace_dir,
         )
     if last_quality_audit:
         final["quality_audit"] = last_quality_audit
@@ -2754,6 +2756,7 @@ def _finalize_investigation(
     recorded_findings: dict | None = None,
     audit_cache: dict[str, dict] | None = None,
     reason: str = "Investigation needs a final structured summary.",
+    workspace_dir: str = "",
 ) -> Iterator[dict]:
     messages.append({"role": "user", "content": prompt.build_investigation_finalize(reason)})
     last_error = ""
@@ -2954,6 +2957,7 @@ def _finalize_investigation(
                     analysis=analysis,
                     observations=observations or [],
                     repair_conflicts=True,
+                    workspace_dir=workspace_dir,
                 )
             except Exception as exc:
                 last_error = f"finish_investigation arguments were invalid: {exc}"
@@ -3060,6 +3064,7 @@ def _finalize_investigation(
                 analysis=analysis,
                 observations=observations or [],
                 repair_conflicts=True,
+                workspace_dir=workspace_dir,
             )
         except Exception:
             pass
@@ -3676,6 +3681,7 @@ def _finish_payload(
     required_items: list[dict] | None = None,
     repair_conflicts: bool = False,
     strict_readiness: bool = False,
+    workspace_dir: str = "",
 ) -> dict:
     repairs: list[str] = []
     explicit_unknowns = _unknowns(arguments.get("unknowns"))
@@ -3718,7 +3724,7 @@ def _finish_payload(
     resolutions = list(explicit_resolutions)
     resolutions = _complete_resolutions(resolutions, initial_unknowns, unknowns)
     if repair_conflicts:
-        resolutions = _drop_invalid_resolution_refs(resolutions, beliefs, observations or [], repairs)
+        resolutions = _drop_invalid_resolution_refs(resolutions, beliefs, observations or [], repairs, workspace_dir=workspace_dir)
     else:
         _validate_resolution_refs(resolutions, beliefs, observations or [])
     resolutions = _enforce_resolution_evidence(resolutions, initial_unknowns, strict=not repair_conflicts)
@@ -4852,12 +4858,241 @@ def _drop_invalid_belief_refs(
     return beliefs
 
 
+_FILE_REF_RE = re.compile(
+    r"([A-Za-z0-9_./\\-]+\.(?:py|vue|js|ts))"
+)
+_FILE_REF_SKIP = frozenset({
+    "package.json", "tsconfig.json", "vite.config.ts", "pyproject.toml",
+    "requirements.txt", "README.md", "readme.md", ".gitignore", "Dockerfile",
+    "dockerfile", "Cargo.toml", "pom.xml", "build.gradle", "settings.gradle",
+    "Makefile", "makefile", "LICENSE", "license",
+})
+
+
+def _normalize_path(p: str) -> str:
+    p = str(p).replace("\\", "/").strip()
+    p = re.sub(r"^[A-Za-z]:/", "", p)
+    return p.lstrip("./").lower()
+
+
+def _require_file_reads(resolutions: list[dict], observations: list[dict]) -> list[str]:
+    """Return issues when a resolution claims a code file's behavior without
+    ever reading it.
+
+    The answer text is scanned for code-file references (sessions.py,
+    frontend/.../HomePage.vue, etc.). If the model claims such a file's
+    behavior but no ``read`` observation covers it, the claim rests on grep
+    matches or guesswork -- the 'grep found it, so I know it' failure mode.
+    Only code files (.py/.vue/.js/.ts) are checked; config/docs files are
+    skipped because mentioning them is not a behavior claim.
+    """
+    read_files: set[str] = set()
+    for item in observations:
+        if not isinstance(item, dict) or str(item.get("tool") or "") != "read":
+            continue
+        path = _normalize_path(item.get("path") or "")
+        if path:
+            read_files.add(path)
+    if not read_files:
+        return []
+    issues: list[str] = []
+    for resolution in resolutions:
+        if not isinstance(resolution, dict):
+            continue
+        unknown_id = str(resolution.get("unknown_id") or "?")
+        answer = " ".join(str(resolution.get(field) or "") for field in ("answer", "reason"))
+        for match in _FILE_REF_RE.finditer(answer):
+            ref_raw = match.group(1)
+            ref = _normalize_path(ref_raw)
+            if not ref or ref in _FILE_REF_SKIP or ref.endswith(".pyc"):
+                continue
+            basename = ref.rsplit("/", 1)[-1]
+            matched = any(
+                rf == ref or rf.endswith("/" + ref) or rf.endswith("/" + basename)
+                for rf in read_files
+            )
+            if not matched:
+                issues.append(
+                    f"resolution {unknown_id} references file {ref_raw} "
+                    "but no read observation covers it"
+                )
+    return issues
+
+
+_FILE_SYMBOL_RE = re.compile(
+    r"([A-Za-z0-9_./\\-]+\.(?:py|vue|js|ts))\s*(?:的|中|里|内|:)?\s*([A-Za-z_][A-Za-z0-9_]*)\s*(?:\(\))?"
+)
+
+# Generic language/stdlib/argument words that must never be treated as
+# project symbols by the LSP definition check. Real project function names
+# (create, rename, generate_title, ...) must NOT be listed here.
+_DEF_READ_NOISE_SYMBOLS = frozenset({
+    "def", "if", "elif", "else", "for", "while", "return", "not", "and", "or",
+    "in", "is", "with", "as", "try", "except", "finally", "raise", "yield",
+    "lambda", "pass", "break", "continue", "import", "from", "class", "assert",
+    "del", "global", "nonlocal",
+    "print", "len", "str", "int", "float", "bool", "list", "dict", "set",
+    "tuple", "type", "range", "sum", "min", "max", "sorted", "enumerate",
+    "zip", "map", "filter", "any", "all", "isinstance", "issubclass", "getattr",
+    "setattr", "hasattr", "repr", "format", "open", "id", "hash", "iter", "next",
+    "object", "property", "staticmethod", "classmethod", "super", "vars", "dir",
+    "abs", "round", "divmod", "pow", "ord", "chr", "hex", "oct", "bin", "bytes",
+    "bytearray", "memoryview", "slice", "frozenset", "complex", "input", "eval",
+    "exec", "compile", "globals", "locals", "callable", "ascii", "help", "exit",
+    "json", "re", "os", "sys", "time", "datetime", "pathlib", "Path", "shutil",
+    "subprocess", "uuid", "collections", "defaultdict", "Counter", "deque",
+    "functools", "itertools", "typing", "Optional", "Any", "List", "Dict", "Set",
+    "Tuple", "Union", "Callable", "Iterator", "Generator", "Iterable", "Mapping",
+    "startswith", "endswith", "strip", "split", "join", "replace", "lower",
+    "upper", "capitalize", "title", "find", "index", "count", "append", "extend",
+    "insert", "remove", "pop", "clear", "sort", "reverse", "copy", "setdefault",
+    "update", "keys", "values", "items", "add", "discard", "union", "intersection",
+    "difference", "issubset", "issuperset", "encode", "decode", "zfill", "ljust",
+    "rjust", "partition", "rpartition", "splitlines", "expandtabs", "maketrans",
+    "translate", "self", "data", "item", "value", "key", "text", "content",
+    "message", "event", "run", "id", "name", "title", "state", "status", "reason",
+    "answer", "summary", "output", "input", "result", "error", "exc", "request",
+    "response", "path", "file", "line", "index", "kind", "source", "target",
+    "session", "workspace", "model", "provider", "analysis", "investigation",
+    "resolution", "belief", "observation", "evidence", "unknown", "task", "goal",
+    "acceptance", "requirement", "tool", "call", "function", "fn", "args",
+    "kwargs", "prev", "current", "total", "count", "size", "length", "before",
+    "after", "start", "end", "done", "fail", "success", "ok", "true", "false",
+    "none", "null", "python", "node", "js", "ts", "vue", "css", "html", "md",
+    "txt", "log", "default", "generate", "select", "seed", "final", "finish",
+    "handle", "process", "apply", "resolve", "check", "validate", "parse",
+    "convert", "merge", "normalize", "search", "find", "read", "write", "grep",
+    "get", "set", "known", "items", "values", "keys", "status", "action",
+    "kind", "field", "fields", "record", "records", "store", "stores",
+    "explain", "describe", "show", "mention", "note", "include", "cover",
+})
+
+
+def _require_lsp_definition_reads(
+    resolutions: list[dict],
+    observations: list[dict],
+    workspace_dir: str,
+    max_queries: int = 6,
+) -> list[str]:
+    """Use LSP to resolve the true definition file of symbols the answer
+    claims, then require a read observation covering that file.
+
+    A plain file-level check (``_require_file_reads``) only catches answers
+    that name a file which was never read. It misses the more common failure:
+    the model names the file it *did* read (e.g. investigating.py) while the
+    symbol's actual definition lives elsewhere (e.g. task_updates.py). LSP
+    definition lookup follows the import and points at the real definition
+    file, so the check enforces that the model read the file where the symbol
+    is actually defined, not just where it was mentioned.
+
+    The check is best-effort: LSP is a subprocess, so every failure (server
+    not installed, timeout, unknown symbol) silently skips that symbol.
+    """
+    read_files: set[str] = set()
+    for item in observations:
+        if not isinstance(item, dict) or str(item.get("tool") or "") != "read":
+            continue
+        path = _normalize_path(item.get("path") or "")
+        if path:
+            read_files.add(path)
+    if not read_files:
+        return []
+    issues: list[str] = []
+    queried = 0
+    for resolution in resolutions:
+        if not isinstance(resolution, dict):
+            continue
+        unknown_id = str(resolution.get("unknown_id") or "?")
+        answer = " ".join(str(resolution.get(field) or "") for field in ("answer", "reason"))
+        for match in _FILE_SYMBOL_RE.finditer(answer):
+            if queried >= max_queries:
+                return issues
+            ref_raw, symbol = match.group(1), match.group(2)
+            ref = _normalize_path(ref_raw)
+            if not ref or ref.endswith(".pyc") or symbol in _DEF_READ_NOISE_SYMBOLS:
+                continue
+            definition_file = _lsp_definition_file(ref_raw, symbol, workspace_dir)
+            queried += 1
+            if not definition_file:
+                continue
+            norm_def = _normalize_path(definition_file)
+            basename = norm_def.rsplit("/", 1)[-1]
+            matched = any(
+                rf == norm_def or rf.endswith("/" + norm_def) or rf.endswith("/" + basename)
+                for rf in read_files
+            )
+            if not matched:
+                issues.append(
+                    f"resolution {unknown_id} claims behavior of {symbol}() "
+                    f"(defined in {definition_file}) but that file was never read"
+                )
+    return issues
+
+
+def _lsp_definition_file(path: str, symbol: str, workspace_dir: str) -> str | None:
+    """Resolve the file where ``symbol`` is defined via the code_nav LSP tool.
+
+    Returns the absolute definition file path, or None when LSP is unavailable
+    or the symbol cannot be resolved (best-effort).
+    """
+    try:
+        import asyncio
+
+        from .tools.builtin import code_nav
+        from .tools.spec import ToolResult
+
+        result: ToolResult = asyncio.run(
+            code_nav.code_nav_tool.execute(
+                {"operation": "definition", "path": path, "symbol": symbol},
+                {"directory": workspace_dir},
+            )
+        )
+    except Exception:
+        return None
+    if not isinstance(result, ToolResult) or result.title.startswith("[error]"):
+        return None
+    try:
+        payload = json.loads(result.output)
+    except (json.JSONDecodeError, TypeError):
+        return None
+    if not isinstance(payload, dict) or not payload.get("ok"):
+        return None
+    result_val = payload.get("result")
+    items = None
+    if isinstance(result_val, dict):
+        items = result_val.get("items")
+    elif isinstance(result_val, list):
+        items = result_val
+    if isinstance(items, list) and items:
+        loc = items[0]
+        if isinstance(loc, dict):
+            raw_path = loc.get("path") or loc.get("uri")
+            if raw_path:
+                raw = str(raw_path)
+                if raw.startswith("file://"):
+                    from urllib.parse import unquote, urlparse
+
+                    parsed = urlparse(raw)
+                    raw = unquote(parsed.path)
+                    if re.match(r"^/[A-Za-z]:", raw):
+                        raw = raw[1:]
+                return raw.replace("/", "\\") if "\\" in str(__import__("pathlib").Path.cwd()) else raw
+    return None
+
+
 def _drop_invalid_resolution_refs(
     resolutions: list[dict],
     beliefs: list[dict],
     observations: list[dict],
     repairs: list[str],
+    workspace_dir: str = "",
 ) -> list[dict]:
+    file_issues = _require_file_reads(resolutions, observations)
+    if workspace_dir:
+        lsp_issues = _require_lsp_definition_reads(resolutions, observations, workspace_dir)
+        file_issues = file_issues + lsp_issues
+    if file_issues:
+        raise ValueError("; ".join(file_issues))
     evidence_ids = {
         str(item.get("id") or "").strip()
         for item in observations

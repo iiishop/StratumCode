@@ -353,8 +353,36 @@ def _no_result_message(operation: str, position: dict | None) -> str:
 
 
 def _hints(operation: str, part: dict, symbol: str) -> list[str]:
-    if part["ok"] or part.get("kind") == "error":
+    if part["ok"]:
         return []
+    if part.get("kind") == "error":
+        message = str(part.get("message") or "").casefold()
+        lsp_unavailable = any(
+            token in message
+            for token in (
+                "lsp server not found",
+                "no lsp server",
+                "no enabled available lsp server",
+                "server not available",
+                "executable is unavailable",
+                "not installed",
+                "no server",
+                "could not start",
+                "unable to connect",
+                "not found",
+                "is not installed",
+            )
+        )
+        if lsp_unavailable:
+            return [
+                "LSP server unavailable for this file.",
+                "Use lsp_tool action=status language=<lang> to check availability, then lsp_tool action=install to install the most suitable server (skipped automatically when mason is unavailable).",
+                "Until then, fall back to read/grep for text-level investigation.",
+            ]
+        return [
+            "LSP server error is not the same as an empty result.",
+            "Use operation='inspect' with a symbol name when exact cursor coordinates are uncertain.",
+        ]
     hints = [
         "Empty LSP result is not the same as server failure.",
         "Use operation='inspect' with a symbol name when exact cursor coordinates are uncertain.",
