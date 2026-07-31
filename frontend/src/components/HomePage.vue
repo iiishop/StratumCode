@@ -708,6 +708,23 @@ async function answerQuestion(answer) {
 function userContentParts(message) {
   return message.inlineFiles?.length ? tokenizeInlineFileRefs(message.content) : [{ type: 'text', text: message.content }]
 }
+/* ── user bubble actions ── */
+const copiedMsgId = ref(null)
+let copyMsgTimer
+const userBubbleActions = [
+  { id: 'copy', label: '复制', icon: '⧉' },
+]
+
+async function copyUserMessage(m) {
+  const text = userContentParts(m)
+    .filter(part => part.type === 'text')
+    .map(part => part.text)
+    .join('')
+  await writeClipboard(text)
+  copiedMsgId.value = m.id
+  clearTimeout(copyMsgTimer)
+  copyMsgTimer = setTimeout(() => { copiedMsgId.value = null }, 2200)
+}
 
 function applyTaskUpdate(update) {
   const analysis = analysisForId(update?.analysis_id) || activeTaskAnalysis.value
@@ -849,6 +866,7 @@ onUnmounted(() => {
   // Flush pending save before unmount so answer_status='submitted' is persisted.
   flushPendingSave()
   clearTimeout(copySessionTimer)
+  clearTimeout(copyMsgTimer)
 })
 
 watch(() => props.session?.id, (id, oldId) => {
@@ -929,6 +947,20 @@ watch(() => props.activeWorkspace?.id, () => {
           >
             <div class="chat__bubble">
               <div class="chat__time">{{ m.time }}</div>
+
+              <div v-if="m.role === 'user'" class="chat__bubble-actions">
+                <button
+                  v-for="act in userBubbleActions"
+                  :key="act.id"
+                  class="chat__bubble-action"
+                  :class="{ 'is-copied': act.id === 'copy' && copiedMsgId === m.id }"
+                  :title="act.label"
+                  @click="copyUserMessage(m)"
+                >
+                  <span v-if="act.id === 'copy' && copiedMsgId === m.id">✓</span>
+                  <span v-else>{{ act.icon }}</span>
+                </button>
+              </div>
 
               <div v-if="m.role === 'user'" class="chat__content">
                 <div v-if="m.files?.length" class="chat__msg-files">
@@ -1603,6 +1635,53 @@ watch(() => props.activeWorkspace?.id, () => {
   position: relative;
   user-select: text;
   cursor: text;
+}
+.chat__msg--user .chat__bubble-actions {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  display: flex;
+  gap: 4px;
+  padding: 3px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.8);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+  box-shadow: 0 2px 8px rgba(23, 86, 209, 0.12);
+  opacity: 0;
+  visibility: hidden;
+  transition: opacity .18s ease, visibility .18s ease;
+}
+
+.chat__msg--user .chat__bubble:hover .chat__bubble-actions {
+  opacity: 1;
+  visibility: visible;
+}
+
+.chat__bubble-action {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+  transition: background .15s ease, color .15s ease;
+}
+
+.chat__bubble-action:hover {
+  background: rgba(23, 86, 209, 0.1);
+  color: var(--accent);
+}
+
+.chat__bubble-action.is-copied {
+  color: #2e9e5b;
 }
 
 .chat__msg--user .chat__time {
