@@ -1,5 +1,5 @@
 <script setup>
-import { onMounted, onUnmounted } from 'vue'
+import { onMounted, onUnmounted, ref, watch } from 'vue'
 
 const props = defineProps({
   active: { type: String, default: 'home' },
@@ -20,6 +20,10 @@ const emit = defineEmits([
   'delete-session',
   'delete-workspace',
 ])
+
+const SESSION_PAGE_SIZE = 8
+const visibleCounts = ref({})
+const collapsedWorkspaceId = ref(null)
 
 const NAV = [
   { id: 'home', label: 'All sessions', icon: 'M4 6h16v12H4z' },
@@ -56,6 +60,44 @@ function tokenLabel(session) {
   if (total >= 1_000) return `${(total / 1_000).toFixed(1)}k`
   return String(total)
 }
+
+function workspaceKey(workspace) {
+  return workspace?.id ?? workspace?.path ?? '__active__'
+}
+
+function visibleCountFor(workspace) {
+  return visibleCounts.value[workspaceKey(workspace)] ?? SESSION_PAGE_SIZE
+}
+
+function visibleSessions(workspace) {
+  return props.sessions.slice(0, visibleCountFor(workspace))
+}
+
+function hasMoreSessions(workspace) {
+  return props.sessions.length > visibleCountFor(workspace)
+}
+
+function showMoreSessions(workspace) {
+  const key = workspaceKey(workspace)
+  visibleCounts.value = {
+    ...visibleCounts.value,
+    [key]: visibleCountFor(workspace) + SESSION_PAGE_SIZE,
+  }
+}
+
+function onWorkspaceClick(workspace) {
+  if (props.activeWorkspace?.id === workspace.id) {
+    collapsedWorkspaceId.value = collapsedWorkspaceId.value === workspace.id ? null : workspace.id
+  } else {
+    emit('workspace-session', workspace)
+  }
+}
+
+watch(() => props.activeWorkspace?.id, (newId, oldId) => {
+  if (newId && newId !== oldId) {
+    collapsedWorkspaceId.value = newId
+  }
+})
 
 onMounted(() => window.addEventListener('keydown', onKeydown))
 onUnmounted(() => window.removeEventListener('keydown', onKeydown))
@@ -107,10 +149,10 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
         v-for="(workspace, index) in workspaces"
         :key="workspace.id"
         class="sb__workspace-group"
-        :class="{ 'is-open': activeWorkspace?.id === workspace.id }"
+        :class="{ 'is-open': activeWorkspace?.id === workspace.id && collapsedWorkspaceId !== workspace.id }"
       >
         <div class="sb__workspace-row" :class="{ 'is-active': activeWorkspace?.id === workspace.id }">
-          <button class="sb__workspace" type="button" :title="workspace.path" @click="emit('workspace-session', workspace)">
+          <button class="sb__workspace" type="button" :title="workspace.path" @click="onWorkspaceClick(workspace)">
             <span class="sb__avatar" :class="index % 2 ? 'is-red' : 'is-blue'">{{ initials(workspace) }}</span>
             <span class="sb__workspace-name">{{ workspaceLabel(workspace) }}</span>
             <span class="sb__state" :class="{ 'is-live': workspace.is_active }">{{ workspace.is_active ? 'open' : 'idle' }}</span>
@@ -132,10 +174,10 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
         </div>
 
         <Transition name="sb-expand">
-          <div v-if="activeWorkspace?.id === workspace.id" class="sb__children">
+          <div v-if="activeWorkspace && activeWorkspace.id === workspace.id && collapsedWorkspaceId !== workspace.id" class="sb__children">
             <TransitionGroup name="sb-session" tag="div" class="sb__session-list">
               <div
-                v-for="session in sessions"
+                v-for="session in visibleSessions(workspace)"
                 :key="session.id"
                 class="sb__session-row"
                 :class="{ 'is-active': activeSession?.id === session.id }"
@@ -166,6 +208,14 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
                 <small>Create one to start</small>
               </button>
             </TransitionGroup>
+            <button
+              v-if="hasMoreSessions(workspace)"
+              class="sb__show-more"
+              type="button"
+              @click="showMoreSessions(workspace)"
+            >
+              展示更多
+            </button>
           </div>
         </Transition>
       </section>
@@ -602,6 +652,28 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
 .sb__session-row:hover .sb__session-actions,
 .sb__session-row:focus-within .sb__session-actions {
   opacity: 1;
+}
+
+.sb__show-more {
+  display: flex;
+  width: calc(100% - 32px);
+  height: 28px;
+  align-items: center;
+  justify-content: center;
+  margin: 3px 4px 3px 28px;
+  border: 0;
+  border-radius: 5px;
+  background: rgba(37, 99, 235, .06);
+  color: var(--blue);
+  cursor: pointer;
+  font-size: 11px;
+  font-weight: 550;
+  transition: background 100ms ease, color 100ms ease;
+}
+
+.sb__show-more:hover,
+.sb__show-more:focus-visible {
+  background: rgba(37, 99, 235, .11);
 }
 
 .sb__workspace-row > .sb__row-action {
