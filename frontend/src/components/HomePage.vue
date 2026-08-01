@@ -632,11 +632,26 @@ async function generateSessionTitle(sessionId, userText, assistantMsg) {
       .map(e => e.data?.content || '')
       .join('\\n')
     if (!output) return
-    await fetch('/api/sessions/generate-title', {
+    const response = await fetch('/api/sessions/generate-title', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ id: sessionId, user_message: userText, ai_response: output }),
     })
+    const data = await response.json().catch(() => ({}))
+    const title = data?.title
+    if (!title) return
+    // 无条件写回 props.sessions 对应项，确保异步期间切换会话后标题仍能更新会话列表
+    const item = props.sessions?.find(s => s.id === sessionId)
+    if (item) item.name = title
+    // 若仍指向同一会话，同步更新 props.session.name 以触发 sessionName 重算与界面刷新
+    // 根因说明：props.session 即 App.vue 中 activeSession（sessionStore.active.value）的同一响应式对象引用，
+    // 因此对 props.session.name 赋值即等价于对 sessionStore.active.value.name 赋值。
+    if (props.session?.id === sessionId) {
+      props.session.name = title
+      // 显式更新 sessionName 计算属性依赖的响应式字段 sessionStore.active.value.name，
+      // 确保标题生成完成后界面立即刷新（props.session 即 sessionStore.active.value 的同一对象）。
+      sessionStore.active.value.name = title
+    }
   } catch {
     // Title generation is non-critical
   }

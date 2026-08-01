@@ -66,6 +66,7 @@ class ChatRun:
     patch_retries: int = 0
     bugfix_readiness: dict | None = None
     continuation_context: list[str] = field(default_factory=list)
+    investigation_passes: int = 0
     validation_inconclusive_count: int = 0
     patch_plan: dict | None = None
     implementation_result: dict | None = None

@@ -6,6 +6,7 @@ import json
 import platform
 import re
 from collections.abc import Iterator
+from enum import StrEnum
 from itertools import count
 from pathlib import Path
 from uuid import uuid4
@@ -76,6 +77,218 @@ CLEARIFY_UNRESOLVED_REASON = "User could not answer through clearify; continue p
 GROUNDING_LITERAL_REASON_PREFIX = "Cited observations do not contain the claimed code literal(s):"
 STATE_WRITE_REASON_PREFIX = "Cited observations contain state writes omitted from the resolution:"
 RECORD_RECOVERY_REASON = "Record pending observations and required resolutions."
+
+
+class InvestigationPhase(StrEnum):
+    """互斥的调查阶段：一个时刻只能处于一个 phase。
+
+    由 _investigation_directive 计算，主循环按 phase 取工具集。
+    枚举互斥保证 REPAIR 与 FINISH 不可能同时成立——
+    消除了旧 if/elif 链中 already_resolved 与 repair 列表
+    靠分支顺序"碰巧"互斥的隐式耦合（d5eef05a 根因）。
+    """
+    CLEARIFY = "clearify"
+    VERIFY = "verify"
+    REPAIR = "repair"
+    FINISH = "finish"
+    FINISH_WITH_EVIDENCE_GAP = "finish_with_evidence_gap"
+    SYNTHESIZE = "synthesize"
+    READ_ONLY_FINISH = "read_only_finish"
+    RESOLVE = "resolve"
+    DISCOVER = "discover"
+
+
+# Phase -> 工具集映射。集中定义，避免主循环内散落的 if/elif。
+def _phase_tools(
+    phase: InvestigationPhase,
+    *,
+    tools: list[dict],
+    finish_evidence_blocked: bool = False,
+) -> list[dict]:
+    def _named(*names: str) -> list[dict]:
+        return [
+            tool for tool in tools
+            if ((tool.get("function") or {}).get("name") or "") in names
+        ]
+    if phase == InvestigationPhase.CLEARIFY:
+        return _named("clearify")
+    if phase == InvestigationPhase.VERIFY:
+        return _named("subagent")
+    if phase == InvestigationPhase.REPAIR:
+        return _named(*(_REPAIR_ALLOWED_TOOL_NAMES | {"finish_investigation"}))
+    if phase == InvestigationPhase.FINISH_WITH_EVIDENCE_GAP:
+        return _named(*(_REPAIR_ALLOWED_TOOL_NAMES | {"finish_investigation"}))
+    if phase == InvestigationPhase.FINISH:
+        return [_finish_tool_schema()]
+    if phase == InvestigationPhase.SYNTHESIZE:
+        return [
+            _resolve_unknowns_tool_schema(),
+            _record_findings_tool_schema(),
+            _finish_tool_schema(),
+        ]
+    if phase == InvestigationPhase.READ_ONLY_FINISH:
+        return [_finish_tool_schema()]
+    if phase == InvestigationPhase.RESOLVE:
+        return [
+            _resolve_unknowns_tool_schema(),
+            _record_findings_tool_schema(),
+            _finish_tool_schema(),
+        ]
+    return list(tools)
+
+
+def _phase_tool_choice(phase: InvestigationPhase) -> str | dict:
+    forced = {
+        InvestigationPhase.CLEARIFY: "clearify",
+        InvestigationPhase.VERIFY: "subagent",
+        InvestigationPhase.REPAIR: "record_investigation_findings",
+        InvestigationPhase.FINISH: "finish_investigation",
+        InvestigationPhase.READ_ONLY_FINISH: "finish_investigation",
+    }
+    name = forced.get(phase)
+    if name:
+        return {"type": "function", "function": {"name": name}}
+    return "required"
+
+
+def _investigation_directive(
+    *,
+    recorded_findings: dict,
+    analysis: dict,
+    tools: list[dict],
+    observations: list[dict],
+    semantic_repair_required_ids: set[str],
+    resolution_required_ids: list[str],
+    clearify_unknown: dict | None,
+    verification_request: dict | None,
+    finish_evidence_blocked: bool,
+    force_synthesis_reason: str,
+    semantic_gate_enabled: bool,
+    read_only_no_unknowns: bool,
+) -> tuple[InvestigationPhase, list[dict], str | dict, str | None]:
+    """集中计算当前调查阶段与对应工具集（唯一决策入口）。
+
+    等价性：映射旧主循环 L192-302 的五个 if/elif 分支——
+      clearify -> CLEARIFY
+      verification -> VERIFY
+      semantic_repair_required_ids -> REPAIR
+      _recorded_resolves_initial_unknowns -> FINISH / FINISH_WITH_EVIDENCE_GAP
+      force_synthesis / read_only -> SYNTHESIZE / READ_ONLY_FINISH
+      resolution_required_ids -> RESOLVE
+      默认 -> DISCOVER
+    行为不变，仅决策集中。互斥由 InvestigationPhase 枚举结构性保证。
+    返回 (phase, current_tools, current_tool_choice, prompt)
+    """
+    prompt: str | None = None
+    if clearify_unknown:
+        prompt = _clearify_required_prompt(clearify_unknown)
+        return (
+            InvestigationPhase.CLEARIFY,
+            _phase_tools(InvestigationPhase.CLEARIFY, tools=tools),
+            _phase_tool_choice(InvestigationPhase.CLEARIFY),
+            prompt,
+        )
+    if verification_request:
+        prompt = (
+            "The semantic quality gate requires independent verification before this "
+            "resolution can reach Design. Call subagent with agent hypothesis-verifier "
+            f"for unknown {verification_request['unknown_id']} and the exact atomic "
+            f"hypothesis: {verification_request['hypothesis']}"
+        )
+        return (
+            InvestigationPhase.VERIFY,
+            _phase_tools(InvestigationPhase.VERIFY, tools=tools),
+            _phase_tool_choice(InvestigationPhase.VERIFY),
+            prompt,
+        )
+    if semantic_repair_required_ids:
+        repair = _semantic_repair_payload(recorded_findings, semantic_repair_required_ids)
+        prompt = (
+            "The semantic quality gate accepted the existing recorded findings except "
+            "for the listed missing requirements. Do not regenerate, restate, or replace "
+            "already recorded ids. If you need more evidence, use read/grep/glob/code_nav "
+            "first to obtain the missing observations, then call record_investigation_findings "
+            "to append only the missing belief(s), then add a minimal resolution patch with "
+            "repair_mode=append_missing_only and only the new belief_ids/evidence. "
+            "After the missing list is addressed, call finish_investigation to let the "
+            "quality gate re-audit the resolutions. The missing list: "
+            f"{json.dumps(repair, ensure_ascii=False)}"
+        )
+        return (
+            InvestigationPhase.REPAIR,
+            _phase_tools(InvestigationPhase.REPAIR, tools=tools),
+            _phase_tool_choice(InvestigationPhase.REPAIR),
+            prompt,
+        )
+    if _recorded_resolves_initial_unknowns(
+        recorded_findings,
+        analysis,
+        repair_ids=semantic_repair_required_ids,
+    ):
+        if finish_evidence_blocked:
+            prompt = (
+                "The previous finish attempt was rejected because a resolution "
+                "references a file that was never read. Use read/grep/glob/code_nav "
+                "to obtain the missing observations, then call finish_investigation again."
+            )
+            return (
+                InvestigationPhase.FINISH_WITH_EVIDENCE_GAP,
+                _phase_tools(
+                    InvestigationPhase.FINISH_WITH_EVIDENCE_GAP,
+                    tools=tools,
+                    finish_evidence_blocked=True,
+                ),
+                _phase_tool_choice(InvestigationPhase.FINISH_WITH_EVIDENCE_GAP),
+                prompt,
+            )
+        return (
+            InvestigationPhase.FINISH,
+            _phase_tools(InvestigationPhase.FINISH, tools=tools),
+            _phase_tool_choice(InvestigationPhase.FINISH),
+            None,
+        )
+    if force_synthesis_reason:
+        prompt = force_synthesis_reason
+        return (
+            InvestigationPhase.SYNTHESIZE,
+            _phase_tools(InvestigationPhase.SYNTHESIZE, tools=tools),
+            _phase_tool_choice(InvestigationPhase.SYNTHESIZE),
+            prompt,
+        )
+    if read_only_no_unknowns:
+        prompt = (
+            "The task contract has no project facts to investigate. Answer the user's "
+            "request directly in finish_investigation.summary. The summary must satisfy "
+            "the acceptance criteria; do not merely classify, restate, or explain why "
+            "the request does not require project inspection. Do not mention the current "
+            "workspace, speculate about its code, or offer additional project work unless "
+            "the user requested it."
+        )
+        return (
+            InvestigationPhase.READ_ONLY_FINISH,
+            _phase_tools(InvestigationPhase.READ_ONLY_FINISH, tools=tools),
+            _phase_tool_choice(InvestigationPhase.READ_ONLY_FINISH),
+            prompt,
+        )
+    if resolution_required_ids:
+        prompt = _resolution_required_prompt(
+            resolution_required_ids,
+            recorded_findings,
+            observations=observations,
+            analysis=analysis,
+        )
+        return (
+            InvestigationPhase.RESOLVE,
+            _phase_tools(InvestigationPhase.RESOLVE, tools=tools),
+            _phase_tool_choice(InvestigationPhase.RESOLVE),
+            prompt,
+        )
+    return (
+        InvestigationPhase.DISCOVER,
+        _phase_tools(InvestigationPhase.DISCOVER, tools=tools),
+        _phase_tool_choice(InvestigationPhase.DISCOVER),
+        None,
+    )
 
 
 def investigation_stream(
@@ -217,84 +430,25 @@ def investigation_stream(
                 else []
             ),
         ])
-        if clearify_unknown:
-            messages.append({"role": "user", "content": _clearify_required_prompt(clearify_unknown)})
-            current_tools = [
-                tool for tool in tools
-                if ((tool.get("function") or {}).get("name") or "") == "clearify"
-            ]
-            current_tool_choice = {"type": "function", "function": {"name": "clearify"}}
-        elif verification_request:
-            messages.append({"role": "user", "content": (
-                "The semantic quality gate requires independent verification before this "
-                "resolution can reach Design. Call subagent with agent hypothesis-verifier "
-                f"for unknown {verification_request['unknown_id']} and the exact atomic "
-                f"hypothesis: {verification_request['hypothesis']}"
-            )})
-            current_tools = [
-                tool for tool in tools
-                if ((tool.get("function") or {}).get("name") or "") == "subagent"
-            ]
-            current_tool_choice = {"type": "function", "function": {"name": "subagent"}}
-        elif semantic_repair_required_ids:
-            repair = _semantic_repair_payload(recorded_findings, semantic_repair_required_ids)
-            messages.append({"role": "user", "content": (
-                "The semantic quality gate accepted the existing recorded findings except "
-                "for the listed missing requirements. Do not regenerate, restate, or replace "
-                "already recorded ids. If you need more evidence, use read/grep/glob/code_nav "
-                "first to obtain the missing observations, then call record_investigation_findings "
-                "to append only the missing belief(s), then add a minimal resolution patch with "
-                "repair_mode=append_missing_only and only the new belief_ids/evidence. "
-                "finish_investigation is not allowed until the missing list passes: "
-                f"{json.dumps(repair, ensure_ascii=False)}"
-            )})
-            current_tools = [
-                tool for tool in tools
-                if ((tool.get("function") or {}).get("name") or "") in _REPAIR_ALLOWED_TOOL_NAMES
-            ]
-            current_tool_choice = {
-                "type": "function",
-                "function": {"name": "record_investigation_findings"},
-            }
-        elif _recorded_resolves_initial_unknowns(recorded_findings, analysis):
-            if finish_evidence_blocked:
-                current_tools = [
-                    tool for tool in tools
-                    if ((tool.get("function") or {}).get("name") or "") in (_REPAIR_ALLOWED_TOOL_NAMES | {"finish_investigation"})
-                ]
-                messages.append({"role": "user", "content": (
-                    "The previous finish attempt was rejected because a resolution "
-                    "references a file that was never read. Use read/grep/glob/code_nav "
-                    "to obtain the missing observations, then call finish_investigation again."
-                )})
-            else:
-                current_tools = [_finish_tool_schema()]
-                current_tool_choice = {"type": "function", "function": {"name": "finish_investigation"}}
-        elif force_synthesis_reason:
-            messages.append({"role": "user", "content": force_synthesis_reason})
-            current_tools = [_resolve_unknowns_tool_schema(), _record_findings_tool_schema(), _finish_tool_schema()]
-        elif (
-            analysis.get("execution_mode") == "read_only"
-            and not analysis.get("unknowns")
-        ):
-            messages.append({"role": "user", "content": (
-                "The task contract has no project facts to investigate. Answer the user's "
-                "request directly in finish_investigation.summary. The summary must satisfy "
-                "the acceptance criteria; do not merely classify, restate, or explain why "
-                "the request does not require project inspection. Do not mention the current "
-                "workspace, speculate about its code, or offer additional project work unless "
-                "the user requested it."
-            )})
-            current_tools = [_finish_tool_schema()]
-            current_tool_choice = {"type": "function", "function": {"name": "finish_investigation"}}
-        elif resolution_required_ids:
-            messages.append({"role": "user", "content": _resolution_required_prompt(
-                resolution_required_ids,
-                recorded_findings,
-                observations,
-                analysis,
-            )})
-            current_tools = [_resolve_unknowns_tool_schema(), _record_findings_tool_schema(), _finish_tool_schema()]
+        current_phase, current_tools, current_tool_choice, directive_prompt = _investigation_directive(
+            recorded_findings=recorded_findings,
+            analysis=analysis,
+            tools=tools,
+            observations=observations,
+            semantic_repair_required_ids=semantic_repair_required_ids,
+            resolution_required_ids=resolution_required_ids,
+            clearify_unknown=clearify_unknown,
+            verification_request=verification_request,
+            finish_evidence_blocked=finish_evidence_blocked,
+            force_synthesis_reason=force_synthesis_reason,
+            semantic_gate_enabled=semantic_gate_enabled,
+            read_only_no_unknowns=(
+                analysis.get("execution_mode") == "read_only"
+                and not analysis.get("unknowns")
+            ),
+        )
+        if directive_prompt:
+            messages.append({"role": "user", "content": directive_prompt})
         allowed_tool_names = {
             str(((tool.get("function") or {}).get("name")) or "")
             for tool in current_tools
@@ -431,7 +585,11 @@ def investigation_stream(
                         break
                     continue
                 if name not in allowed_tool_names:
-                    if _recorded_resolves_initial_unknowns(recorded_findings, analysis) and name != "finish_investigation":
+                    if _recorded_resolves_initial_unknowns(
+                        recorded_findings,
+                        analysis,
+                        repair_ids=semantic_repair_required_ids,
+                    ) and name != "finish_investigation":
                         output = json.dumps({
                             "error": "investigation_already_resolved",
                             "retryable": True,
@@ -1047,6 +1205,10 @@ def investigation_stream(
                         analysis,
                         recorded_findings,
                     ),
+                    relax_discovery_contract=(
+                        current_phase == InvestigationPhase.REPAIR
+                        and name in _REPAIR_ALLOWED_TOOL_NAMES - {"record_investigation_findings"}
+                    ),
                 )
                 repeated_tool_error_name = ""
                 repeated_tool_error_count = 0
@@ -1538,7 +1700,21 @@ def _analysis_is_read_only(analysis: dict | None) -> bool:
     return str((analysis or {}).get("execution_mode") or "").strip().casefold() == "read_only"
 
 
-def _recorded_resolves_initial_unknowns(recorded: dict, analysis: dict | None) -> bool:
+def _recorded_resolves_initial_unknowns(
+    recorded: dict,
+    analysis: dict | None,
+    *,
+    repair_ids: set[str] | None = None,
+) -> bool:
+    """判断 recorded resolutions 是否已覆盖全部初始 unknown。
+
+    repair_ids（语义门禁待修列表）中的 unknown 即使 resolution
+    status 被提交为 resolved，也不计入"已解决"——因为语义门禁
+    尚未接受它们。这是 d5eef05a 死锁的修复点：旧实现不知道
+    repair 存在，repair 分支与 already_resolved 分支靠 if/elif
+    顺序"碰巧"互斥；现在由调用方（_investigation_directive /
+    工具拦截）显式注入 repair_ids，两个判定结构上互斥。
+    """
     initial = [item for item in (analysis or {}).get("unknowns", []) if isinstance(item, dict) and item.get("id")]
     if not initial:
         return False
@@ -1552,6 +1728,12 @@ def _recorded_resolves_initial_unknowns(recorded: dict, analysis: dict | None) -
             )
             if item.get("blocking")
         )
+    if repair_ids:
+        # 语义门禁还有待修 unknown 时，一律不算"全部已解决"——
+        # 即使其余 unknown 的 resolution status 是 resolved。
+        # 这样工具拦截处不会在 REPAIR 阶段误报 investigation_already_resolved，
+        # 模型被引导补证据而不是错误地去 finish（d5eef05a 根因）。
+        return False
     resolved = [
         str(item.get("unknown_id") or "").strip()
         for item in recorded.get("resolutions", [])
@@ -3363,7 +3545,7 @@ def _clearify_answer_is_non_answer(text: str) -> bool:
     )
 
 
-def _run_tool_stream(name: str, call_id: str, arguments: dict, workspace_dir: str, analysis: dict | None = None) -> Iterator[dict]:
+def _run_tool_stream(name: str, call_id: str, arguments: dict, workspace_dir: str, analysis: dict | None = None, *, relax_discovery_contract: bool = False) -> Iterator[dict]:
     registered_tool = registry.get(name)
     if (
         registered_tool is None
@@ -3382,6 +3564,7 @@ def _run_tool_stream(name: str, call_id: str, arguments: dict, workspace_dir: st
         orientation=orientation,
         discovery_contract=discovery_contract,
         analysis=analysis,
+        relax_discovery_contract=relax_discovery_contract,
     )
 
     if name == "subagent" and (arguments.get("agent") or arguments.get("name")):
@@ -3471,11 +3654,12 @@ def _validate_tool_contract(
     orientation: bool,
     analysis: dict | None,
     discovery_contract: dict[str, str] | None = None,
+    relax_discovery_contract: bool = False,
 ) -> None:
     if not reason:
         raise ValueError(f"{name} requires reason")
     discovery_contract = discovery_contract or {}
-    if name != "clearify":
+    if name != "clearify" and not relax_discovery_contract:
         missing = [
             field for field in DISCOVERY_CONTRACT_FIELDS
             if not str(discovery_contract.get(field) or "").strip()
@@ -4116,8 +4300,12 @@ def _apply_investigation_audit(
                 continue
             status = "investigate"
         missing = _semantic_missing_items(verdict.get("missing"))
-        append_only = str(verdict.get("repair_mode") or "").strip() == "append_missing_only"
-        if missing and append_only:
+        # 语义门禁打回时无条件进入 append_missing_only 修复：
+        # 不依赖 verdict 是否带 repair_mode 字段（audit 模型常缺失该字段，
+        # 缺失时旧实现 pop 掉 repair_mode，导致下一轮 repair_ids 为空、
+        # 主循环误入 FINISH 分支、模型 record 被 already_resolved 拦截
+        # 的三面夹击死锁——d5eef05a）。
+        if missing:
             resolution["semantic_missing"] = missing
             resolution["repair_mode"] = "append_missing_only"
         else:
@@ -4217,13 +4405,15 @@ def _semantic_repair_resolution_ids(recorded: dict) -> set[str]:
         str(item.get("unknown_id") or "")
         for item in recorded.get("resolutions", [])
         if isinstance(item, dict)
-        and item.get("status") == "partially_resolved"
         and (
             item.get("repair_mode") == "append_missing_only"
-            or str(item.get("reason") or "").startswith((
-                GROUNDING_LITERAL_REASON_PREFIX,
-                STATE_WRITE_REASON_PREFIX,
-            ))
+            or (
+                item.get("status") == "partially_resolved"
+                and str(item.get("reason") or "").startswith((
+                    GROUNDING_LITERAL_REASON_PREFIX,
+                    STATE_WRITE_REASON_PREFIX,
+                ))
+            )
         )
         and str(item.get("unknown_id") or "")
     }
@@ -4611,9 +4801,11 @@ def _append_resolution_repair(existing: dict, repair: dict) -> dict:
     for field in ("status", "reason"):
         if str(repair.get(field) or "").strip():
             merged[field] = repair[field]
-    if merged.get("status") == "resolved" or new_refs:
-        merged.pop("repair_mode", None)
-        merged.pop("semantic_missing", None)
+    # 保留 repair_mode/semantic_missing：append-only 修复是否真正通过
+    # 只能由 audit（finish 时的语义门禁）裁决，模型提交 repair 时不能
+    # 自我宣布 resolved。旧实现在这里 pop，导致下一轮 repair_ids 为空、
+    # 主循环误入 FINISH 分支、模型 read/record 被 already_resolved 拦截
+    # 的三面夹击死锁（d5eef05a 第二形态）。
     return merged
 
 
@@ -4871,6 +5063,15 @@ def _resolutions(value) -> list[dict]:
 def _canonical_evidence_id(evidence_id: str, known_ids: set[str]) -> str:
     if evidence_id in known_ids:
         return evidence_id
+    # Cross-task prefix mapping: a resolution from an earlier analysis pass
+    # (task-2f536378:call_...) may reference an observation that this pass
+    # knows under the current task prefix (task-e092c71c:call_...). Match by
+    # the call-id tail when the mapping is unambiguous.
+    tail = evidence_id.rsplit(":", 1)[-1]
+    if tail and tail != evidence_id:
+        matches = [item for item in known_ids if item.endswith(f":{tail}")]
+        if len(matches) == 1:
+            return matches[0]
     matches = [item for item in known_ids if item.endswith(f":{evidence_id}")]
     return matches[0] if len(matches) == 1 else ""
 

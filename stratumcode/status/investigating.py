@@ -22,6 +22,11 @@ from .session_memory import _session_context_lines
 from .session_memory import _attach_session_relationship, _select_session_memory
 from .task_updates import _seed_task_updates
 
+# 无进展度量兜底：同一 ChatRun 内 INVESTIGATING -> INVESTIGATING 的
+# continue_investigation 最大轮数。超过后强制收尾，避免 REPAIR/审计
+# 打回循环无限续跑（safety_stop 后 investigating.py 无限重试）。
+_MAX_INVESTIGATION_PASSES = 3
+
 
 def _analysis_context(analysis: dict) -> list[str]:
     """把规范化后的 task analysis 渲染成 investigation 使用的上下文行。"""
@@ -272,8 +277,19 @@ def handle(run):
         else:
             run.transition(chat.ChatState.FAILED, "Investigation failed.")
     elif next_step == "continue_investigation" or has_blocked_task:
-        run.findings = _merge_findings(run.findings, _investigation_continuation_findings(run.last_investigation))
-        run.transition(chat.ChatState.INVESTIGATING, "Investigation requested another pass.")
+        run.investigation_passes += 1
+        if run.investigation_passes >= _MAX_INVESTIGATION_PASSES:
+            # 无进展度量兜底：REPAIR/审计打回循环超过上限时强制收尾，
+            # 避免 safety_stop 后 investigating.py 无限 continue_investigation
+            # （record_no_progress 死循环——d5eef05a 第二形态）。
+            run.findings = _merge_findings(run.findings, _investigation_continuation_findings(run.last_investigation))
+            if _analysis_requests_implementation(run.analysis):
+                run.transition(chat.ChatState.FAILED, "Investigation exceeded the maximum pass limit without resolving blockers.")
+            else:
+                run.transition(chat._chat_finish_state(run), "Investigation exceeded the maximum pass limit without resolving blockers.")
+        else:
+            run.findings = _merge_findings(run.findings, _investigation_continuation_findings(run.last_investigation))
+            run.transition(chat.ChatState.INVESTIGATING, "Investigation requested another pass.")
     else:
         if _analysis_requests_implementation(run.analysis):
             run.transition(chat.ChatState.FAILED, "Investigation ended without an implementation path.")
