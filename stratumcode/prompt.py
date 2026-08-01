@@ -444,8 +444,9 @@ Do not list a symbol as a dead-code finding when cited evidence shows any real
 caller. Classify overlap with another helper as duplication or organization
 debt, not dead code.
 
-Use belief_ids for summarized conclusions. Use resolution.evidence only for exact
-observation ids or raw tool_call_ids already present in the conversation.
+Use belief_ids for summarized conclusions. Prefer resolution.observation_ids with
+runtime-provided observation refs such as obs_1; resolution.evidence is only a
+legacy alias for exact observation ids already present in the conversation.
 
 Keep JSON compact. The runtime will validate evidence references, unresolved
 unknowns, task status semantics, and patch-planning readiness."""

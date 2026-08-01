@@ -264,7 +264,19 @@ def handle(run):
         step["target_unknown_ids"] = blocking_unknown_ids
         step["unresolved_unknown_ids"] = blocking_unknown_ids
         run.findings = _merge_findings(run.findings, _investigation_continuation_findings(run.last_investigation))
-        run.transition(chat.ChatState.INVESTIGATING, "Investigation still has unresolved blocking unknowns.")
+        run.investigation_passes += 1
+        if run.investigation_passes >= _MAX_INVESTIGATION_PASSES:
+            # failed+blocking 同样要受 pass 上限约束：safety_stop 后
+            # step_result 是 failed，但 blocking unknowns 还在时旧实现
+            # 把它改写成 continue_investigation 无限回跳（message.txt
+            # 里 4 次 investigating->investigating 就是走的这条分支，
+            # 绕过了 continue_investigation 分支的计数）。
+            if _analysis_requests_implementation(run.analysis):
+                run.transition(chat.ChatState.FAILED, "Investigation exceeded the maximum pass limit without resolving blockers.")
+            else:
+                run.transition(chat._chat_finish_state(run), "Investigation exceeded the maximum pass limit without resolving blockers.")
+        else:
+            run.transition(chat.ChatState.INVESTIGATING, "Investigation still has unresolved blocking unknowns.")
     elif next_step == "failed":
         # If recorded findings already cover initial unknowns, the investigation
         # facts are complete -- a transient finish_investigation error should not
@@ -273,7 +285,14 @@ def handle(run):
             run.last_investigation
             and _recorded_covers_unknowns(run.last_investigation, run.analysis)
         ):
-            run.transition(chat.ChatState.INVESTIGATING, "Investigation facts are complete; retrying finish.")
+            run.investigation_passes += 1
+            if run.investigation_passes >= _MAX_INVESTIGATION_PASSES:
+                if _analysis_requests_implementation(run.analysis):
+                    run.transition(chat.ChatState.FAILED, "Investigation exceeded the maximum pass limit without resolving blockers.")
+                else:
+                    run.transition(chat._chat_finish_state(run), "Investigation exceeded the maximum pass limit without resolving blockers.")
+            else:
+                run.transition(chat.ChatState.INVESTIGATING, "Investigation facts are complete; retrying finish.")
         else:
             run.transition(chat.ChatState.FAILED, "Investigation failed.")
     elif next_step == "continue_investigation" or has_blocked_task:
@@ -382,6 +401,8 @@ def _final_summary_text(run) -> str:
 def _investigation_allows_patch(investigation: dict) -> bool:
     if _has_task_status(investigation, "blocked"):
         return False
+    if _has_task_status(investigation, "unknown"):
+        return False
     if _has_blocking_unknown(investigation):
         return False
     raw_step = investigation.get("step_result")
@@ -478,21 +499,3 @@ def _same_unknown_id(left: str | None, right: str | None) -> bool:
         return False
     return left_text == right_text or left_text.rsplit(":", 1)[-1] == right_text.rsplit(":", 1)[-1]
 
-
-def _fallback_question(run, request: str) -> dict:
-    question = next(
-        (
-            str(item.get("text") or item.get("question") or "").strip()
-            for item in (run.last_investigation or {}).get("task_updates", [])
-            if isinstance(item, dict) and item.get("status") in {"blocked", "unknown"}
-        ),
-        "",
-    ) or "Please clarify the next decision."
-    return {
-        "id": f"question-{uuid4().hex[:8]}",
-        "analysis_id": run.analysis["id"],
-        "question": question,
-        "origin_message": request,
-        "reason": (run.last_investigation or {}).get("summary", ""),
-        "why_it_matters": "The investigation needs your answer before it can continue.",
-    }

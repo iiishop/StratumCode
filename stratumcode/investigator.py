@@ -54,6 +54,10 @@ _REPAIR_ALLOWED_TOOL_NAMES = frozenset({
     "record_investigation_findings",
 })
 OBSERVATION_EVIDENCE_CHARS = 8000
+GROUNDING_LITERAL_SPAN_CONTEXT_LINES = 2
+GROUNDING_LITERAL_SPAN_MAX_LINES = 16
+GROUNDING_LITERAL_SPAN_MAX_LINE_CHARS = 360
+GROUNDING_LITERAL_SPAN_MAX_ITEMS = 12
 DISCOVERY_CONTRACT_FIELDS = (
     "hypothesis",
     "expected_observation",
@@ -695,13 +699,14 @@ def investigation_stream(
                         recorded_findings,
                         observations,
                     )
+                    resolved_observation_ids = {
+                        evidence_id
+                        for resolution in resolutions
+                        for evidence_id in resolution.get("evidence", [])
+                    }
                     pending_observation_ids = [
                         item for item in pending_observation_ids
-                        if item not in {
-                            evidence_id
-                            for resolution in resolutions
-                            for evidence_id in resolution.get("evidence", [])
-                        }
+                        if item not in resolved_observation_ids
                     ]
                     duplicate_no_progress_signature = ""
                     duplicate_no_progress_count = 0
@@ -1216,7 +1221,7 @@ def investigation_stream(
                 observation = _tool_observation(name, call_id, output)
                 observations.append(observation)
                 tool_cache_observation_ids[cache_key] = observation["id"]
-                pending_observation_ids.append(call_id)
+                pending_observation_ids.append(observation["id"])
                 duplicate_no_progress_signature = ""
                 duplicate_no_progress_count = 0
                 duplicate_no_progress_total = 0
@@ -1238,11 +1243,32 @@ def investigation_stream(
                 partial_arguments = _partial_tool_arguments(raw_arguments)
                 if name == "record_investigation_findings":
                     partial_arguments = _record_arguments(partial_arguments)
+                if name == "resolve_unknowns":
+                    partial_arguments = _resolve_unknown_arguments(partial_arguments)
+                    salvaged_resolutions = _salvage_resolution_candidates(
+                        partial_arguments,
+                        observations,
+                    )
+                    if salvaged_resolutions:
+                        recorded_findings = _merge_recorded_findings(
+                            recorded_findings,
+                            {"resolutions": salvaged_resolutions},
+                        )
+                        recorded_findings = _bind_grounding_evidence(
+                            recorded_findings,
+                            observations,
+                        )
                 if name == "record_investigation_findings" and _has_finding_fields(partial_arguments):
                     recorded_findings = _merge_recorded_findings(recorded_findings, partial_arguments)
                     pending_observation_ids.clear()
                     last_quality_audit = {}
-                output = _tool_repair_error_json(exc, name, raw_arguments, partial_arguments)
+                output = _tool_repair_error_json(
+                    exc,
+                    name,
+                    raw_arguments,
+                    partial_arguments,
+                    observations=observations,
+                )
                 error_name = name or "invalid"
                 failed_tool_cache[_tool_cache_key(
                     error_name,
@@ -1484,7 +1510,15 @@ def _tool_blocked_error_json(tool_name: str, *, allowed_tools: list[str]) -> str
     }, ensure_ascii=False)
 
 
-def _tool_repair_error_json(exc: Exception, tool_name: str, raw_arguments: str, partial_arguments: dict, attempt: int = 0) -> str:
+def _tool_repair_error_json(
+    exc: Exception,
+    tool_name: str,
+    raw_arguments: str,
+    partial_arguments: dict,
+    attempt: int = 0,
+    *,
+    observations: list[dict] | None = None,
+) -> str:
     try:
         payload = json.loads(tool_error_json(exc, tool_name))
     except json.JSONDecodeError:
@@ -1496,6 +1530,13 @@ def _tool_repair_error_json(exc: Exception, tool_name: str, raw_arguments: str, 
         str(exc),
         partial_arguments,
     )
+    if "unknown evidence ids" in str(exc) and observations:
+        error["valid_observation_refs"] = _observation_reference_payload(observations)
+        error["repair_instruction"] = (
+            "Reuse partial_arguments. Replace invalid evidence references with "
+            "resolution.observation_ids using one of valid_observation_refs.ref; "
+            "do not repeat discovery only to repair ids."
+        )
     if tool_name == "finish_investigation" and "bugfix_readiness" in str(exc):
         error["required_argument_shape"] = {
             "bugfix_readiness": {
@@ -1966,7 +2007,7 @@ def _resolution_required_prompt(
         "Existing project evidence is sufficient to write an explicit resolution.",
         "Do not call more discovery tools for these unknowns.",
         "Call resolve_unknowns with resolutions for: " + ", ".join(unknown_ids),
-        "Each resolution must include unknown_id, status, answer, evidence or belief_ids, and reason.",
+        "Each resolution must include unknown_id, status, answer, observation_ids or belief_ids, and reason.",
         "If an unknown is still not fully resolved, record a partially_resolved resolution naming the precise missing evidence.",
         "Questions:",
         *[f"- {unknown_id}: {questions.get(unknown_id, '')}" for unknown_id in unknown_ids],
@@ -1978,10 +2019,16 @@ def _resolution_required_prompt(
 def _resolution_evidence_lines(unknown_ids: list[str], recorded: dict, observations: list[dict]) -> list[str]:
     wanted = set(unknown_ids)
     lines = []
+    ref_by_id = _observation_ref_by_id(observations)
     for observation in observations:
         targets = {_normalize_unknown_id(item) for item in observation.get("target_unknown_ids", [])}
         if targets & wanted and _positive_project_observation(observation):
-            lines.append(f"- observation {observation.get('id', '')}: {observation.get('title') or observation.get('summary')}")
+            observation_id = str(observation.get("id") or "").strip()
+            ref = ref_by_id.get(observation_id, observation_id)
+            lines.append(
+                f"- observation ref {ref} (id {observation_id}): "
+                f"{observation.get('title') or observation.get('summary')}"
+            )
     for belief in recorded.get("beliefs", []):
         if isinstance(belief, dict) and _supporting_belief(belief):
             lines.append(f"- belief: {_belief_text(belief)}")
@@ -2094,10 +2141,15 @@ def _resolve_unknowns_tool_schema() -> dict:
                                 "description": "Use direct_fact only when the cited observation directly states the answer; use derived_inference for cross-file or causal reasoning.",
                             },
                             "answer": {"type": "string"},
+                            "observation_ids": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                                "description": "Preferred. Existing observation refs such as obs_1 from the runtime prompt, or exact observation ids.",
+                            },
                             "evidence": {
                                 "type": "array",
                                 "items": {"type": "string"},
-                                "description": "Existing observation ids that support the answer.",
+                                "description": "Legacy alias for observation_ids. Prefer observation_ids for new calls.",
                             },
                             "belief_ids": {
                                 "type": "array",
@@ -2354,24 +2406,29 @@ def _audit_recorded_findings(
             for belief in target_beliefs
             for evidence_id in _reference_list(belief.get("evidence"))
         }
+        target_literals = _grounding_code_literals(" ".join([
+            str(resolution.get("answer") or ""),
+            *[
+                str(belief.get("statement") or "")
+                for belief in target_beliefs
+            ],
+        ]))
+        resolution_view = dict(resolution)
+        spans = _resolution_grounding_evidence_spans(
+            resolution_view,
+            {"beliefs": target_beliefs},
+            observations,
+        )
+        if spans:
+            resolution_view["grounding_evidence_spans"] = spans
         context = json.dumps({
             "authoritative_task_contract": contract,
             "proposed_findings": {
                 "beliefs": target_beliefs,
-                "resolutions": [resolution],
+                "resolutions": [resolution_view],
             },
             "observation_index": [
-                {
-                    "id": item.get("id", ""),
-                    "tool": item.get("tool", ""),
-                    "title": item.get("title", ""),
-                    "summary": item.get("summary", ""),
-                    "evidence_excerpt": item.get("evidence_excerpt", ""),
-                    "path": item.get("path", ""),
-                    "verification": item.get("verification", {}),
-                    "target_unknown_ids": item.get("target_unknown_ids", []),
-                    "reason": item.get("reason", ""),
-                }
+                _observation_context_view(item, target_literals)
                 for item in observations
                 if isinstance(item, dict)
                 and str(item.get("id") or "").strip() in target_observation_ids
@@ -2534,6 +2591,7 @@ def _record_slot_context(
             "acceptance_criteria": analysis.get("acceptance_criteria", []),
         },
         "pending_observation_ids": list(pending_observation_ids),
+        "observation_refs": _observation_reference_payload(observations),
         "required_resolution_ids": list(required_resolution_ids),
         "observations": _record_slot_relevant_observations(
             observations,
@@ -2620,20 +2678,7 @@ def _record_slot_relevant_observations(
             ))
         )
     ]
-    return [
-        {
-            "id": item.get("id", ""),
-            "tool": item.get("tool", ""),
-            "title": item.get("title", ""),
-            "summary": item.get("summary", ""),
-            "evidence_excerpt": item.get("evidence_excerpt", ""),
-            "verification": item.get("verification", {}),
-            "target_unknown_ids": item.get("target_unknown_ids", []),
-            "reason": item.get("reason", ""),
-            "path": item.get("path", ""),
-        }
-        for item in selected[-12:]
-    ]
+    return [_observation_context_view(item) for item in selected[-12:]]
 
 
 def _record_slot_prompt(
@@ -2663,17 +2708,17 @@ def _record_slot_contract(path: str) -> str:
         return (
             "Return null when the bound unknown is not reduced by available evidence. Otherwise "
             "return one JSON object with status, answer, and reason. Runtime supplies unknown_id, "
-            "evidence, and belief_ids. status is resolved, partially_resolved, needs_clearify, or deferred. "
+            "observation_ids, and belief_ids. status is resolved, partially_resolved, needs_clearify, or deferred. "
             "For append-only semantic repairs, include repair_mode=append_missing_only."
         )
     contracts = {
         "beliefs": (
-            "Return a JSON array of objects with statement, status, evidence. "
+            "Return a JSON array of objects with statement, status, observation_ids. "
             "status is one of unverified, plausible, supported, strongly_supported, runtime_confirmed, contradicted, invalidated. "
-            "evidence must use exact observation ids/tool_call_ids only."
+            "observation_ids must use runtime refs such as obs_1 or exact observation ids."
         ),
         "resolutions": (
-            "Return a JSON array of objects with unknown_id, status, answer, evidence, belief_ids, reason. "
+            "Return a JSON array of objects with unknown_id, status, answer, observation_ids, belief_ids, reason. "
             "status is resolved, partially_resolved, needs_clearify, or deferred."
         ),
         "new_unknowns": (
@@ -3162,6 +3207,7 @@ def _finalize_investigation(
                         record_name or "record_investigation_findings",
                         raw_arguments,
                         partial_arguments,
+                        observations=observations or [],
                     ),
                 })
                 stop_finalization = repeated_tool_error_count >= MAX_REPEATED_TOOL_ERRORS
@@ -3202,6 +3248,7 @@ def _finalize_investigation(
                         "finish_investigation",
                         raw_arguments,
                         partial_arguments,
+                        observations=observations or [],
                     ),
                 })
                 stop_finalization = repeated_tool_error_count >= MAX_REPEATED_TOOL_ERRORS
@@ -3892,7 +3939,7 @@ def _resolution_repair_prompt(repair: dict) -> str:
     lines.extend([
         "Do not call discovery tools or read more files.",
         "Call resolve_unknowns with explicit resolutions for every missing id.",
-        "Each resolution must include unknown_id, status, answer, evidence or belief_ids, and reason.",
+        "Each resolution must include unknown_id, status, answer, observation_ids or belief_ids, and reason.",
         "Then call finish_investigation again with the same final summary and next step.",
     ])
     return "\n".join(lines)
@@ -4264,6 +4311,13 @@ def _apply_investigation_audit(
                 else []
             )
             if not unsupported and not missing_state_writes:
+                spans = _resolution_grounding_evidence_spans(
+                    resolution,
+                    result,
+                    observations or [],
+                )
+                if spans:
+                    resolution["grounding_evidence_spans"] = spans
                 resolution["status"] = "resolved"
                 resolution.pop("repair_mode", None)
                 resolution.pop("semantic_missing", None)
@@ -4551,6 +4605,161 @@ def _grounding_observation_text(observation: dict) -> str:
         text for field in ("path", "_grounding_evidence", "evidence_excerpt", "summary")
         if (text := str(observation.get(field) or "").strip())
     )
+
+
+def _observation_context_view(
+    observation: dict,
+    literals: list[str] | None = None,
+) -> dict:
+    view = {
+        "id": observation.get("id", ""),
+        "tool": observation.get("tool", ""),
+        "title": observation.get("title", ""),
+        "summary": observation.get("summary", ""),
+        "evidence_excerpt": observation.get("evidence_excerpt", ""),
+        "verification": observation.get("verification", {}),
+        "target_unknown_ids": observation.get("target_unknown_ids", []),
+        "reason": observation.get("reason", ""),
+        "path": observation.get("path", ""),
+    }
+    spans = _observation_grounding_literal_spans(observation, literals or [])
+    if spans:
+        view["literal_evidence_spans"] = spans
+    return view
+
+
+def _resolution_grounding_evidence_spans(
+    resolution: dict,
+    recorded: dict,
+    observations: list[dict],
+) -> list[dict]:
+    literals = [
+        literal
+        for literal in _grounding_code_literals(str(resolution.get("answer") or ""))
+        if _is_grounding_code_literal(literal)
+    ]
+    if not literals:
+        return []
+    evidence_ids = set(_reference_list(resolution.get("evidence")))
+    belief_ids = set(_reference_list(resolution.get("belief_ids")))
+    for belief in recorded.get("beliefs", []):
+        if isinstance(belief, dict) and str(belief.get("id") or "") in belief_ids:
+            evidence_ids.update(_reference_list(belief.get("evidence")))
+    spans = [
+        span
+        for observation in observations
+        if isinstance(observation, dict)
+        and str(observation.get("id") or "") in evidence_ids
+        for span in _observation_grounding_literal_spans(observation, literals)
+    ]
+    return spans[:GROUNDING_LITERAL_SPAN_MAX_ITEMS]
+
+
+def _observation_grounding_literal_spans(
+    observation: dict,
+    literals: list[str],
+) -> list[dict]:
+    evidence = str(
+        observation.get("_grounding_evidence")
+        or observation.get("evidence_excerpt")
+        or observation.get("summary")
+        or ""
+    )
+    if not evidence or not literals:
+        return []
+    observation_id = str(observation.get("id") or "")
+    path = str(observation.get("path") or "")
+    spans = []
+    for literal, start, end in _literal_line_ranges(evidence, literals):
+        excerpt = _format_line_span_excerpt(evidence, start, end, [literal])
+        if not excerpt:
+            continue
+        span = {
+            "observation_id": observation_id,
+            "literal": literal,
+            "line_start": start,
+            "line_end": end,
+            "excerpt": excerpt,
+        }
+        if path:
+            span["path"] = path
+        spans.append(span)
+        if len(spans) >= GROUNDING_LITERAL_SPAN_MAX_ITEMS:
+            break
+    return spans
+
+
+def _literal_line_ranges(evidence: str, literals: list[str]) -> list[tuple[str, int, int]]:
+    lines = evidence.splitlines() or [evidence]
+    ranges: list[tuple[str, int, int]] = []
+    seen: set[tuple[str, int, int]] = set()
+    normalized_lines = [re.sub(r"\s+", "", line) for line in lines]
+    for literal in _dedupe_strings(literals):
+        normalized = re.sub(r"\s+", "", literal)
+        if not normalized:
+            continue
+        for index, line in enumerate(normalized_lines):
+            if normalized in line:
+                start, end = _context_line_range(index, index, len(lines))
+                key = (literal, start, end)
+                if key not in seen:
+                    ranges.append(key)
+                    seen.add(key)
+                break
+        else:
+            for index in range(len(lines)):
+                window_end = min(len(lines), index + GROUNDING_LITERAL_SPAN_MAX_LINES)
+                window = "".join(normalized_lines[index:window_end])
+                if normalized not in window:
+                    continue
+                start, end = _context_line_range(index, window_end - 1, len(lines))
+                key = (literal, start, end)
+                if key not in seen:
+                    ranges.append(key)
+                    seen.add(key)
+                break
+    return ranges
+
+
+def _context_line_range(hit_start: int, hit_end: int, total_lines: int) -> tuple[int, int]:
+    return (
+        max(1, hit_start + 1 - GROUNDING_LITERAL_SPAN_CONTEXT_LINES),
+        min(total_lines, hit_end + 1 + GROUNDING_LITERAL_SPAN_CONTEXT_LINES),
+    )
+
+
+def _format_line_span_excerpt(
+    evidence: str,
+    line_start: int,
+    line_end: int,
+    literals: list[str],
+) -> str:
+    lines = evidence.splitlines() or [evidence]
+    selected = lines[line_start - 1:line_end]
+    return "\n".join(
+        f"L{line_start + offset}: {_trim_grounding_span_line(line, literals)}"
+        for offset, line in enumerate(selected)
+    )
+
+
+def _trim_grounding_span_line(line: str, literals: list[str]) -> str:
+    text = str(line)
+    if len(text) <= GROUNDING_LITERAL_SPAN_MAX_LINE_CHARS:
+        return text
+    for literal in literals:
+        if not literal:
+            continue
+        index = text.find(literal)
+        if index < 0:
+            continue
+        half = max(1, (GROUNDING_LITERAL_SPAN_MAX_LINE_CHARS - len(literal)) // 2)
+        start = max(0, index - half)
+        end = min(len(text), index + len(literal) + half)
+        prefix = "..." if start else ""
+        suffix = "..." if end < len(text) else ""
+        return f"{prefix}{text[start:end]}{suffix}"
+    half = GROUNDING_LITERAL_SPAN_MAX_LINE_CHARS // 2
+    return f"{text[:half]}...{text[-half:]}"
 
 
 def _missing_grounding_state_writes(
@@ -4980,6 +5189,53 @@ def _reference_list(value) -> list[str]:
     return _string_list(value)
 
 
+def _observation_reference_map(observations: list[dict]) -> dict[str, str]:
+    refs: dict[str, str] = {}
+    index = 1
+    for observation in observations:
+        if not isinstance(observation, dict):
+            continue
+        observation_id = str(observation.get("id") or "").strip()
+        if not observation_id:
+            continue
+        refs[f"obs_{index}"] = observation_id
+        index += 1
+    return refs
+
+
+def _observation_ref_by_id(observations: list[dict]) -> dict[str, str]:
+    return {
+        observation_id: ref
+        for ref, observation_id in _observation_reference_map(observations).items()
+    }
+
+
+def _observation_reference_payload(observations: list[dict], *, limit: int = 12) -> list[dict]:
+    refs = _observation_reference_map(observations)
+    payload = []
+    by_id = {
+        str(item.get("id") or "").strip(): item
+        for item in observations
+        if isinstance(item, dict) and str(item.get("id") or "").strip()
+    }
+    for ref, observation_id in list(refs.items())[-limit:]:
+        observation = by_id.get(observation_id, {})
+        payload.append({
+            "ref": ref,
+            "id": observation_id,
+            "tool": str(observation.get("tool") or ""),
+            "title": str(observation.get("title") or observation.get("summary") or ""),
+        })
+    return payload
+
+
+def _observation_refs(value: dict) -> list[str]:
+    return _dedupe_strings([
+        *_reference_list(value.get("observation_ids")),
+        *_reference_list(value.get("evidence")),
+    ])
+
+
 def _belief_status(raw: dict, default: str = "unverified") -> str:
     allowed = {
         "unverified",
@@ -5015,7 +5271,7 @@ def _beliefs(value) -> list[dict]:
         if not isinstance(raw, dict):
             continue
         statement = _belief_text(raw)
-        evidence = _reference_list(raw.get("evidence"))
+        evidence = _observation_refs(raw)
         status = _belief_status(raw, default="supported" if evidence else "unverified")
         if not statement:
             continue
@@ -5048,7 +5304,7 @@ def _resolutions(value) -> list[dict]:
             "status": status,
             "kind": _resolution_kind(raw, status),
             "answer": str(raw.get("answer") or "").strip(),
-            "evidence": _string_list(raw.get("evidence")),
+            "evidence": _observation_refs(raw),
             "belief_ids": _string_list(raw.get("belief_ids")),
             "reason": str(raw.get("reason") or "").strip(),
         }
@@ -5060,7 +5316,13 @@ def _resolutions(value) -> list[dict]:
     return items
 
 
-def _canonical_evidence_id(evidence_id: str, known_ids: set[str]) -> str:
+def _canonical_evidence_id(
+    evidence_id: str,
+    known_ids: set[str],
+    observation_refs: dict[str, str] | None = None,
+) -> str:
+    if observation_refs and evidence_id in observation_refs:
+        return observation_refs[evidence_id]
     if evidence_id in known_ids:
         return evidence_id
     # Cross-task prefix mapping: a resolution from an earlier analysis pass
@@ -5076,16 +5338,20 @@ def _canonical_evidence_id(evidence_id: str, known_ids: set[str]) -> str:
     return matches[0] if len(matches) == 1 else ""
 
 
-def _normalize_evidence_refs(item: dict, known_ids: set[str]) -> list[str]:
+def _normalize_evidence_refs(
+    item: dict,
+    known_ids: set[str],
+    observation_refs: dict[str, str] | None = None,
+) -> list[str]:
     normalized = []
     missing = []
-    for evidence_id in item.get("evidence", []):
-        canonical = _canonical_evidence_id(evidence_id, known_ids)
+    for evidence_id in _observation_refs(item):
+        canonical = _canonical_evidence_id(evidence_id, known_ids, observation_refs)
         if canonical:
             normalized.append(canonical)
         else:
             missing.append(evidence_id)
-    item["evidence"] = normalized
+    item["evidence"] = _dedupe_strings(normalized)
     return missing
 
 
@@ -5095,6 +5361,7 @@ def _validate_resolution_refs(resolutions: list[dict], beliefs: list[dict], obse
         for item in observations
         if isinstance(item, dict) and str(item.get("id") or "").strip()
     }
+    observation_refs = _observation_reference_map(observations)
     belief_by_id = {
         str(item.get("id") or "").strip(): item
         for item in beliefs
@@ -5102,7 +5369,7 @@ def _validate_resolution_refs(resolutions: list[dict], beliefs: list[dict], obse
     }
     usable_belief_status = {"plausible", "supported", "strongly_supported", "runtime_confirmed"}
     for resolution in resolutions:
-        missing_evidence = _normalize_evidence_refs(resolution, evidence_ids)
+        missing_evidence = _normalize_evidence_refs(resolution, evidence_ids, observation_refs)
         if missing_evidence:
             raise ValueError(
                 f"resolution {resolution['unknown_id']} references unknown evidence ids: "
@@ -5131,13 +5398,55 @@ def _validate_belief_refs(beliefs: list[dict], observations: list[dict]) -> None
         for item in observations
         if isinstance(item, dict) and str(item.get("id") or "").strip()
     }
+    observation_refs = _observation_reference_map(observations)
     for belief in beliefs:
-        missing = _normalize_evidence_refs(belief, evidence_ids)
+        missing = _normalize_evidence_refs(belief, evidence_ids, observation_refs)
         if missing:
             raise ValueError(
                 f"belief {belief['id']} references unknown evidence ids: "
                 + ", ".join(missing)
             )
+
+
+def _salvage_resolution_candidates(arguments: dict, observations: list[dict]) -> list[dict]:
+    resolutions = _resolutions(arguments.get("resolutions"))
+    if not resolutions:
+        return []
+    evidence_ids = {
+        str(item.get("id") or "").strip()
+        for item in observations
+        if isinstance(item, dict) and str(item.get("id") or "").strip()
+    }
+    observation_refs = _observation_reference_map(observations)
+    salvaged = []
+    for resolution in resolutions:
+        if not (
+            str(resolution.get("unknown_id") or "").strip()
+            and (
+                str(resolution.get("answer") or "").strip()
+                or str(resolution.get("reason") or "").strip()
+            )
+        ):
+            continue
+        missing = _normalize_evidence_refs(resolution, evidence_ids, observation_refs)
+        if missing:
+            resolution["invalid_evidence_ids"] = missing
+            resolution["evidence_binding"] = "unbound"
+        if not resolution.get("evidence") and not resolution.get("belief_ids"):
+            bound = _bind_grounding_evidence({"resolutions": [dict(resolution)]}, observations)
+            resolution = bound["resolutions"][0]
+        if not resolution.get("evidence") and not resolution.get("belief_ids"):
+            resolution["evidence_binding"] = "unbound"
+            if resolution.get("status") == "resolved":
+                resolution["status"] = "partially_resolved"
+                resolution["reason"] = (
+                    resolution.get("reason")
+                    or "Resolution answer was retained, but valid observation evidence is still unbound."
+                )
+        elif missing:
+            resolution["evidence_binding"] = "rebound"
+        salvaged.append(resolution)
+    return salvaged
 
 
 def _drop_invalid_belief_refs(
@@ -5150,10 +5459,11 @@ def _drop_invalid_belief_refs(
         for item in observations
         if isinstance(item, dict) and str(item.get("id") or "").strip()
     }
+    observation_refs = _observation_reference_map(observations)
     changed = False
     for belief in beliefs:
         original = belief.get("evidence", [])
-        _normalize_evidence_refs(belief, evidence_ids)
+        _normalize_evidence_refs(belief, evidence_ids, observation_refs)
         evidence = belief.get("evidence", [])
         if evidence != original:
             changed = True
@@ -5470,6 +5780,7 @@ def _drop_invalid_resolution_refs(
         for item in observations
         if isinstance(item, dict) and str(item.get("id") or "").strip()
     }
+    observation_refs = _observation_reference_map(observations)
     usable_beliefs = {
         str(item.get("id") or "").strip()
         for item in beliefs
@@ -5480,7 +5791,7 @@ def _drop_invalid_resolution_refs(
     changed = False
     for resolution in resolutions:
         original_evidence = resolution.get("evidence", [])
-        _normalize_evidence_refs(resolution, evidence_ids)
+        _normalize_evidence_refs(resolution, evidence_ids, observation_refs)
         evidence = resolution.get("evidence", [])
         beliefs = [item for item in resolution.get("belief_ids", []) if item in usable_beliefs]
         changed = changed or evidence != original_evidence or beliefs != resolution.get("belief_ids", [])

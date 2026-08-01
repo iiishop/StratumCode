@@ -13,6 +13,7 @@ class ChatState(StrEnum):
     INITIALIZING = "initializing"
     ANALYZING = "analyzing"
     INVESTIGATING = "investigating"
+    WAITING_FOR_USER = "waiting_for_user"
     DESIGNING = "designing"
     PATCH_PLANNING = "patch_planning"
     IMPLEMENTING = "implementing"
@@ -25,8 +26,22 @@ class ChatState(StrEnum):
 _CHAT_TRANSITIONS = {
     ChatState.INITIALIZING: {ChatState.ANALYZING, ChatState.INVESTIGATING, ChatState.FAILED},
     ChatState.ANALYZING: {ChatState.INVESTIGATING, ChatState.FAILED},
-    ChatState.INVESTIGATING: {ChatState.INVESTIGATING, ChatState.DESIGNING, ChatState.SAVING_SESSION, ChatState.COMPLETED, ChatState.FAILED},
-    ChatState.DESIGNING: {ChatState.INVESTIGATING, ChatState.PATCH_PLANNING, ChatState.SAVING_SESSION, ChatState.COMPLETED, ChatState.FAILED},
+    ChatState.INVESTIGATING: {
+        ChatState.INVESTIGATING,
+        ChatState.WAITING_FOR_USER,
+        ChatState.DESIGNING,
+        ChatState.SAVING_SESSION,
+        ChatState.COMPLETED,
+        ChatState.FAILED,
+    },
+    ChatState.DESIGNING: {
+        ChatState.INVESTIGATING,
+        ChatState.WAITING_FOR_USER,
+        ChatState.PATCH_PLANNING,
+        ChatState.SAVING_SESSION,
+        ChatState.COMPLETED,
+        ChatState.FAILED,
+    },
     ChatState.PATCH_PLANNING: {
         ChatState.ANALYZING,
         ChatState.INVESTIGATING,
@@ -36,11 +51,25 @@ _CHAT_TRANSITIONS = {
         ChatState.COMPLETED,
         ChatState.FAILED,
     },
-    ChatState.IMPLEMENTING: {ChatState.INVESTIGATING, ChatState.VALIDATING, ChatState.SAVING_SESSION, ChatState.COMPLETED, ChatState.FAILED},
-    ChatState.VALIDATING: {ChatState.DESIGNING, ChatState.INVESTIGATING, ChatState.SAVING_SESSION, ChatState.COMPLETED, ChatState.FAILED},
+    ChatState.IMPLEMENTING: {
+        ChatState.INVESTIGATING,
+        ChatState.WAITING_FOR_USER,
+        ChatState.VALIDATING,
+        ChatState.SAVING_SESSION,
+        ChatState.COMPLETED,
+        ChatState.FAILED,
+    },
+    ChatState.VALIDATING: {
+        ChatState.DESIGNING,
+        ChatState.INVESTIGATING,
+        ChatState.WAITING_FOR_USER,
+        ChatState.SAVING_SESSION,
+        ChatState.COMPLETED,
+        ChatState.FAILED,
+    },
     ChatState.SAVING_SESSION: {ChatState.COMPLETED, ChatState.FAILED},
 }
-_TERMINAL_CHAT_STATES = {ChatState.COMPLETED, ChatState.FAILED}
+_TERMINAL_CHAT_STATES = {ChatState.WAITING_FOR_USER, ChatState.COMPLETED, ChatState.FAILED}
 
 
 @dataclass

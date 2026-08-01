@@ -3,7 +3,7 @@ from __future__ import annotations
 from uuid import uuid4
 
 from ..agent_runtime import start_event
-from .investigating import prepare_investigation
+from .investigating_refactored import prepare_investigation
 from . import task_analysis
 
 SKILL_LABEL = "Task analyzer"

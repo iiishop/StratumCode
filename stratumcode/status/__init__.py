@@ -5,7 +5,7 @@ from . import (
     designing,
     implementing,
     initializing,
-    investigating,
+    investigating_refactored as investigating,
     patch_planning,
     saving_session,
     validating,

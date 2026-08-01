@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from .. import sessions
-from .investigating import prepare_investigation
+from .investigating_refactored import prepare_investigation
 from .session_memory import _select_session_memory, _session_context
 from .user_context import _workspace_snapshot
 

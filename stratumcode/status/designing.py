@@ -3,6 +3,7 @@ from __future__ import annotations
 from .. import design_planner
 from .clearifying import queue_clearify, queue_investigation_unknown
 from .task_contract import run_request
+from .user_waiting import user_question_event
 
 
 def handle(run):
@@ -55,6 +56,18 @@ def handle(run):
             unknown_id=unknown_id,
             unknown_type=str(gap.get("type") or "product_decision"),
         )
-        run.transition(chat.ChatState.INVESTIGATING, "Design planning queued a clearify decision.")
+        yield user_question_event(
+            run,
+            question=question,
+            reason=reason,
+            unknown_id=unknown_id,
+            checkpoint_phase="design_checkpoint",
+            resume_state="patch_planning",
+            extra={
+                "analysis": run.analysis,
+                "design_plan": run.design_plan,
+            },
+        )
+        run.transition(chat.ChatState.WAITING_FOR_USER, "Design planning queued a clearify decision.")
         return
     run.transition(chat.ChatState.PATCH_PLANNING, "Design plan has no blocking gaps.")

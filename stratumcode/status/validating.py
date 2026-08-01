@@ -3,6 +3,7 @@ from __future__ import annotations
 from .. import implementation_runner
 from .clearifying import queue_clearify
 from .task_contract import run_request
+from .user_waiting import prepared_user_question_event, user_question_event
 
 
 def handle(run):
@@ -33,7 +34,20 @@ def handle(run):
                 result.get("question") or result.get("summary") or "Which validated behavior should be accepted?",
                 reason=result.get("summary") or "Validation requires a product decision.",
             )
-            run.transition(chat.ChatState.INVESTIGATING, "Validation queued a clearify decision.")
+            yield user_question_event(
+                run,
+                question=result.get("question") or result.get("summary") or "Which validated behavior should be accepted?",
+                reason=result.get("summary") or "Validation requires a product decision.",
+                checkpoint_phase="validation_checkpoint",
+                resume_state="validating",
+                extra={
+                    "validation_result": result,
+                    "patch_plan": run.patch_plan or {},
+                    "changed_files": changed_files,
+                    **({"options": result["options"]} if isinstance(result.get("options"), list) else {}),
+                },
+            )
+            run.transition(chat.ChatState.WAITING_FOR_USER, "Validation queued a clearify decision.")
         elif next_state in {chat.ChatState.DESIGNING, chat.ChatState.INVESTIGATING}:
             _add_validation_context(run)
             if next_state == chat.ChatState.DESIGNING:
@@ -75,7 +89,16 @@ def handle(run):
                 reason=data.get("reason") or "Validation requires a product decision.",
                 unknown_id=str(data.get("unknown_id") or ""),
             )
-            run.transition(chat.ChatState.INVESTIGATING, "Validation queued a clearify decision.")
+            yield prepared_user_question_event(
+                event,
+                checkpoint_phase="validation_checkpoint",
+                resume_state="validating",
+                extra={
+                    "patch_plan": run.patch_plan or {},
+                    "changed_files": changed_files,
+                },
+            )
+            run.transition(chat.ChatState.WAITING_FOR_USER, "Validation queued a clearify decision.")
             return
         if event.get("op") == "done" and isinstance(event.get("validation_result"), dict):
             run.validation_result = event["validation_result"]
@@ -90,7 +113,20 @@ def handle(run):
                 result.get("question") or result.get("summary") or "Which validated behavior should be accepted?",
                 reason=result.get("summary") or "Validation requires a product decision.",
             )
-            run.transition(chat.ChatState.INVESTIGATING, "Validation queued a clearify decision.")
+            yield user_question_event(
+                run,
+                question=result.get("question") or result.get("summary") or "Which validated behavior should be accepted?",
+                reason=result.get("summary") or "Validation requires a product decision.",
+                checkpoint_phase="validation_checkpoint",
+                resume_state="validating",
+                extra={
+                    "validation_result": result,
+                    "patch_plan": run.patch_plan or {},
+                    "changed_files": changed_files,
+                    **({"options": result["options"]} if isinstance(result.get("options"), list) else {}),
+                },
+            )
+            run.transition(chat.ChatState.WAITING_FOR_USER, "Validation queued a clearify decision.")
         elif next_state in {chat.ChatState.DESIGNING, chat.ChatState.INVESTIGATING}:
             _add_validation_context(run)
             if next_state == chat.ChatState.DESIGNING:

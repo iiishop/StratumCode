@@ -3,6 +3,7 @@ from __future__ import annotations
 from .. import implementation_runner
 from .clearifying import queue_clearify
 from .task_contract import run_request
+from .user_waiting import prepared_user_question_event
 
 
 def handle(run):
@@ -26,7 +27,13 @@ def handle(run):
                 reason=data.get("reason") or "Implementation requires a product decision.",
                 unknown_id=str(data.get("unknown_id") or ""),
             )
-            run.transition(chat.ChatState.INVESTIGATING, "Implementation queued a clearify decision.")
+            yield prepared_user_question_event(
+                event,
+                checkpoint_phase="implementation_checkpoint",
+                resume_state="implementing",
+                extra={"patch_plan": run.patch_plan or {}},
+            )
+            run.transition(chat.ChatState.WAITING_FOR_USER, "Implementation queued a clearify decision.")
             return
         if event.get("op") == "done" and isinstance(event.get("implementation"), dict):
             run.implementation_result = event["implementation"]
