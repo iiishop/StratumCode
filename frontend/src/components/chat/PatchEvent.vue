@@ -48,8 +48,33 @@ const stepId = computed(() => props.event.metadata?.step_id || payload.value.ste
 const authId = computed(() => props.event.metadata?.authorization_id || payload.value.authorization_id || '')
 const attemptId = computed(() => props.event.metadata?.attempt_id || payload.value.attempt_id || '')
 const purpose = computed(() => props.event.metadata?.purpose || payload.value.purpose || matchingStep.value?.purpose || '')
-const operationSummary = computed(() => props.event.metadata?.operation_summary || payload.value.operation_summary || '')
+const actualChange = computed(() => payload.value.change_record?.actual || payload.value.actual || {})
+const operationSummary = computed(() => props.event.metadata?.operation_summary || payload.value.operation_summary || actualChange.value.executor_summary || '')
+const patchPurpose = computed(() => props.event.metadata?.patch_purpose || payload.value.patch_purpose || actualChange.value.patch_purpose || '')
+const purposeRationale = computed(() => props.event.metadata?.purpose_rationale || payload.value.purpose_rationale || actualChange.value.purpose_rationale || '')
+const stepRationale = computed(() => props.event.metadata?.step_rationale || payload.value.step_rationale || actualChange.value.step_rationale || '')
 const isState = computed(() => props.event.metadata?.is_state || payload.value.is_state || '')
+const intentRows = computed(() => [
+  {
+    key: 'change',
+    label: 'Change',
+    eyebrow: 'What changed',
+    text: operationSummary.value,
+  },
+  {
+    key: 'intent',
+    label: 'Patch intent',
+    eyebrow: 'Why this file',
+    text: patchPurpose.value,
+    detail: purposeRationale.value,
+  },
+  {
+    key: 'step',
+    label: 'Step progress',
+    eyebrow: 'Why it helps',
+    text: stepRationale.value,
+  },
+].filter(item => item.text || item.detail))
 
 const detail = computed(() => {
   const bits = [patchId.value, stepId.value, attemptId.value, isState.value, files.value.length ? `${files.value.length} files` : ''].filter(Boolean)
@@ -150,7 +175,6 @@ onUnmounted(() => rollbackTimeline?.revert())
           <span class="pe__step-id-badge">{{ matchingStep.id }}</span>
         </div>
         <p v-if="purpose" class="pe__step-purpose">{{ purpose }}</p>
-        <p v-if="operationSummary" class="pe__step-operation">{{ operationSummary }}</p>
         <p v-if="matchingStep.action" class="pe__step-action">{{ matchingStep.action }}</p>
         <div v-if="matchingStep.file || matchingStep.target" class="pe__step-tags">
           <code v-if="matchingStep.file" class="pe__step-tag pe__step-tag--file">{{ matchingStep.file }}</code>
@@ -159,6 +183,25 @@ onUnmounted(() => rollbackTimeline?.revert())
           <span v-if="isState" class="pe__step-tag">{{ isState }}</span>
         </div>
       </div>
+
+      <!-- patch intent audit -->
+      <section v-if="intentRows.length" class="pe__section pe__intent-audit">
+        <div class="pe__section-head">
+          <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 01-2 2H5a2 2 0 01-2-2V5a2 2 0 012-2h11"/></svg>
+          <span>Patch audit</span>
+          <span class="pe__audit-step">{{ stepId }}</span>
+        </div>
+        <div class="pe__audit-grid">
+          <article v-for="item in intentRows" :key="item.key" class="pe__audit-card" :class="`pe__audit-card--${item.key}`">
+            <div class="pe__audit-topline">
+              <span class="pe__audit-label">{{ item.label }}</span>
+              <span class="pe__audit-eyebrow">{{ item.eyebrow }}</span>
+            </div>
+            <p v-if="item.text" class="pe__audit-text">{{ item.text }}</p>
+            <p v-if="item.detail" class="pe__audit-detail">{{ item.detail }}</p>
+          </article>
+        </div>
+      </section>
 
       <!-- diff stats -->
       <div v-if="diff" class="pe__section pe__stats">
@@ -339,7 +382,6 @@ onUnmounted(() => rollbackTimeline?.revert())
   font: 700 8px/1.3 var(--mono, monospace);
 }
 .pe__step-purpose,
-.pe__step-operation,
 .pe__step-action {
   margin: 0;
   color: var(--text, #3f5274);
@@ -348,9 +390,6 @@ onUnmounted(() => rollbackTimeline?.revert())
 }
 .pe__step-purpose {
   font-weight: 650;
-}
-.pe__step-operation {
-  color: var(--muted, #687897);
 }
 .pe__step-tags {
   display: flex;
@@ -370,6 +409,104 @@ onUnmounted(() => rollbackTimeline?.revert())
   color: var(--ok, #11866f);
   background: rgba(17,134,111,.08);
   text-transform: uppercase;
+}
+
+/* ---- patch audit ---- */
+.pe__intent-audit {
+  gap: 8px;
+  border-color: color-mix(in srgb, var(--event, #e56b2f) 16%, #d9e3f5);
+  background:
+    linear-gradient(135deg, color-mix(in srgb, var(--event, #e56b2f) 4%, transparent), transparent 42%),
+    #fff;
+}
+
+.pe__audit-step {
+  margin-left: auto;
+  color: color-mix(in srgb, var(--event, #e56b2f) 70%, #5e6f8b);
+  font-weight: 800;
+}
+
+.pe__audit-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 7px;
+}
+
+.pe__audit-card {
+  position: relative;
+  display: grid;
+  align-content: start;
+  gap: 5px;
+  min-width: 0;
+  min-height: 86px;
+  padding: 9px 10px 10px;
+  border: 1px solid rgba(23, 86, 209, .08);
+  border-radius: 7px;
+  background: #f8fafd;
+  overflow: hidden;
+}
+
+.pe__audit-card::before {
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 3px;
+  content: "";
+  background: var(--audit-accent, var(--event, #e56b2f));
+  opacity: .8;
+}
+
+.pe__audit-card--change { --audit-accent: #3b5998; }
+.pe__audit-card--intent { --audit-accent: #e56b2f; }
+.pe__audit-card--step { --audit-accent: #11866f; }
+
+.pe__audit-topline {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+}
+
+.pe__audit-label {
+  color: var(--text-h, #102a5c);
+  font: 800 10px/1.2 var(--mono, monospace);
+}
+
+.pe__audit-eyebrow {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-muted, #71809c);
+  font: 650 8px/1.2 var(--mono, monospace);
+  text-transform: uppercase;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pe__audit-text,
+.pe__audit-detail {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.pe__audit-text {
+  color: var(--text, #3f5274);
+  font-size: 11px;
+  font-weight: 620;
+  line-height: 1.45;
+}
+
+.pe__audit-detail {
+  color: var(--muted, #687897);
+  font-size: 10px;
+  line-height: 1.48;
+}
+
+@media (max-width: 760px) {
+  .pe__audit-grid {
+    grid-template-columns: 1fr;
+  }
+  .pe__audit-card {
+    min-height: 0;
+  }
 }
 
 /* ---- stats ---- */
