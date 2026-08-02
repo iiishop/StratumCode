@@ -4555,6 +4555,8 @@ def _semantic_missing_reason(missing: list[dict]) -> str:
 def _resolution_requires_semantic_audit(resolution: dict, initial_unknowns: list[dict]) -> bool:
     if _is_user_product_decision(resolution, initial_unknowns):
         return False
+    if _is_engineering_decision_resolution(resolution, initial_unknowns):
+        return False
     if str(resolution.get("kind") or "derived_inference") not in SEMANTIC_AUDIT_KINDS:
         return False
     return (
@@ -6203,6 +6205,19 @@ def _is_user_product_decision(
     return any(
         _same_unknown_id(item.get("id"), unknown_id)
         and item.get("type") == "product_decision"
+        for item in unknowns
+        if isinstance(item, dict)
+    )
+
+
+def _is_engineering_decision_resolution(
+    resolution: dict,
+    unknowns: list[dict],
+) -> bool:
+    unknown_id = str(resolution.get("unknown_id") or "").strip()
+    return any(
+        _same_unknown_id(item.get("id"), unknown_id)
+        and item.get("type") == "engineering_decision"
         for item in unknowns
         if isinstance(item, dict)
     )

@@ -37,14 +37,15 @@ class InvestigatingUseCase:
         input_data = self.context_builder.build(run, memory_snapshot)
         result = yield from self.event_consumer.consume(run, input_data)
 
-        if result.investigation is None:
+        if result.investigation is None and result.pending_question is None:
             run.transition(chat.ChatState.FAILED, "Investigation failed.")
             return
 
-        run.last_investigation = result.investigation
-        self.memory.record_stage_delta(run, "investigation", result.memory_delta)
+        if result.investigation is not None:
+            run.last_investigation = result.investigation
+            self.memory.record_stage_delta(run, "investigation", result.memory_delta)
 
-        br_state = result.investigation.get("bugfix_readiness_state")
+        br_state = (result.investigation or {}).get("bugfix_readiness_state")
         if br_state:
             run.bugfix_readiness = br_state
 

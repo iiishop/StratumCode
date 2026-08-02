@@ -36,8 +36,8 @@ class InvestigationEventConsumer:
             if event.get("event") == "task_update":
                 self._apply_task_update_event(run, event)
             if event.get("op") == "start" and event.get("event") == "user_question" and event.get("data", {}).get("clearify_tool"):
-                yield event
-                continue
+                result.pending_question = event
+                return result
             if event.get("op") == "start" and event.get("event") == "user_question":
                 result.pending_question = event
                 continue
