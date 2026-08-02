@@ -96,6 +96,13 @@ function onWorkspaceClick(workspace) {
 watch(() => props.activeWorkspace?.id, (newId, oldId) => {
   if (newId && newId !== oldId) {
     collapsedWorkspaceId.value = newId
+    const key = newId
+    if (visibleCounts.value[key] !== undefined) {
+      visibleCounts.value = {
+        ...visibleCounts.value,
+        [key]: SESSION_PAGE_SIZE,
+      }
+    }
   }
 })
 
