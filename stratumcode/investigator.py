@@ -7,6 +7,7 @@ import platform
 import re
 from collections.abc import Iterator
 from enum import StrEnum
+from functools import lru_cache
 from itertools import count
 from pathlib import Path
 from uuid import uuid4
@@ -51,6 +52,7 @@ _REPAIR_ALLOWED_TOOL_NAMES = frozenset({
     "grep",
     "glob",
     "code_nav",
+    "lsp_tool",
     "record_investigation_findings",
 })
 OBSERVATION_EVIDENCE_CHARS = 8000
@@ -58,6 +60,7 @@ GROUNDING_LITERAL_SPAN_CONTEXT_LINES = 2
 GROUNDING_LITERAL_SPAN_MAX_LINES = 16
 GROUNDING_LITERAL_SPAN_MAX_LINE_CHARS = 360
 GROUNDING_LITERAL_SPAN_MAX_ITEMS = 12
+PROJECT_FILE_SCAN_LIMIT = 20000
 DISCOVERY_CONTRACT_FIELDS = (
     "hypothesis",
     "expected_observation",
@@ -99,6 +102,7 @@ class InvestigationPhase(StrEnum):
     SYNTHESIZE = "synthesize"
     READ_ONLY_FINISH = "read_only_finish"
     RESOLVE = "resolve"
+    DISCOVERY_REQUIRED = "discovery_required"
     DISCOVER = "discover"
 
 
@@ -138,6 +142,18 @@ def _phase_tools(
             _record_findings_tool_schema(),
             _finish_tool_schema(),
         ]
+    if phase == InvestigationPhase.DISCOVERY_REQUIRED:
+        return [
+            tool for tool in tools
+            if ((tool.get("function") or {}).get("name") or "")
+            not in {
+                "clearify",
+                "finish_investigation",
+                "record_investigation_findings",
+                "resolve_unknowns",
+                "subagent",
+            }
+        ]
     return list(tools)
 
 
@@ -163,6 +179,7 @@ def _investigation_directive(
     observations: list[dict],
     semantic_repair_required_ids: set[str],
     resolution_required_ids: list[str],
+    discovery_required_ids: list[str],
     clearify_unknown: dict | None,
     verification_request: dict | None,
     finish_evidence_blocked: bool,
@@ -251,7 +268,7 @@ def _investigation_directive(
             _phase_tool_choice(InvestigationPhase.FINISH),
             None,
         )
-    if force_synthesis_reason:
+    if force_synthesis_reason and not discovery_required_ids:
         prompt = force_synthesis_reason
         return (
             InvestigationPhase.SYNTHESIZE,
@@ -287,11 +304,47 @@ def _investigation_directive(
             _phase_tool_choice(InvestigationPhase.RESOLVE),
             prompt,
         )
+    if discovery_required_ids:
+        prompt = (
+            "These blocking project unknowns still lack enough project evidence: "
+            + ", ".join(discovery_required_ids)
+            + ". Continue discovery with read/grep/glob/code_nav/lsp_tool. "
+            "Do not call record_investigation_findings, resolve_unknowns, or "
+            "finish_investigation until a new observation materially narrows one "
+            "of these unknowns."
+        )
+        return (
+            InvestigationPhase.DISCOVERY_REQUIRED,
+            _phase_tools(InvestigationPhase.DISCOVERY_REQUIRED, tools=tools),
+            _phase_tool_choice(InvestigationPhase.DISCOVERY_REQUIRED),
+            prompt,
+        )
     return (
         InvestigationPhase.DISCOVER,
         _phase_tools(InvestigationPhase.DISCOVER, tools=tools),
         _phase_tool_choice(InvestigationPhase.DISCOVER),
-        None,
+        _discover_lsp_first_prompt(analysis),
+    )
+
+
+def _discover_lsp_first_prompt(analysis: dict) -> str | None:
+    if not any(
+        isinstance(item, dict)
+        and item.get("resolution_strategy") == "investigate_project"
+        for item in analysis.get("unknowns", [])
+    ):
+        return None
+    return (
+        "Discovery routing: for source-code questions, prefer LSP-first "
+        "navigation before whole-file reads. Use code_nav symbols for a known "
+        "file, code_nav inspect/definition/references for a known symbol, then "
+        "read only the relevant line ranges needed as grounding evidence. If "
+        "code_nav reports an unavailable language server, use lsp_tool "
+        "status/install once for that language; if LSP remains unavailable, "
+        "fall back to grep/read and record that fallback. For cross-file, "
+        "parent/caller, consumer, or state-transition claims, gather semantic "
+        "references or the corresponding caller/consumer observations before "
+        "resolving."
     )
 
 
@@ -401,6 +454,7 @@ def investigation_stream(
     duplicate_no_progress_count = 0
     duplicate_no_progress_total = 0
     force_synthesis_reason = ""
+    force_discovery_ids: list[str] = []
     finish_evidence_blocked = False
 
     for round_index in _round_indexes(max_rounds, start=0):
@@ -434,6 +488,13 @@ def investigation_stream(
                 else []
             ),
         ])
+        discovery_required_ids = list(force_discovery_ids)
+        if force_synthesis_reason and not discovery_required_ids:
+            discovery_required_ids = _unknowns_missing_project_evidence(
+                recorded_findings,
+                observations,
+                analysis,
+            )
         current_phase, current_tools, current_tool_choice, directive_prompt = _investigation_directive(
             recorded_findings=recorded_findings,
             analysis=analysis,
@@ -441,6 +502,7 @@ def investigation_stream(
             observations=observations,
             semantic_repair_required_ids=semantic_repair_required_ids,
             resolution_required_ids=resolution_required_ids,
+            discovery_required_ids=discovery_required_ids,
             clearify_unknown=clearify_unknown,
             verification_request=verification_request,
             finish_evidence_blocked=finish_evidence_blocked,
@@ -686,6 +748,13 @@ def investigation_stream(
                     resolutions = _resolutions(arguments.get("resolutions"))
                     if not resolutions:
                         raise ValueError("resolve_unknowns requires at least one valid resolution")
+                    resolutions = _canonicalize_resolution_unknown_ids(
+                        resolutions,
+                        _analysis_with_recorded_unknowns(
+                            analysis,
+                            recorded_findings,
+                        ),
+                    )
                     _validate_resolution_refs(
                         resolutions,
                         _beliefs(recorded_findings.get("beliefs")),
@@ -875,7 +944,14 @@ def investigation_stream(
                         duplicate_no_progress_count = 0
                         duplicate_no_progress_total = 0
                         force_synthesis_reason = ""
+                        force_discovery_ids = []
                     last_record_signature = record_signature
+                    if repeated_record_no_progress:
+                        force_discovery_ids = _unknowns_missing_project_evidence(
+                            recorded_findings,
+                            observations,
+                            analysis,
+                        )
                     if repeated_record_no_progress >= MAX_REPEATED_RECORD_NO_PROGRESS:
                         finalization_reason = (
                             "Runtime stopped after repeated record_investigation_findings "
@@ -1226,6 +1302,7 @@ def investigation_stream(
                 duplicate_no_progress_count = 0
                 duplicate_no_progress_total = 0
                 force_synthesis_reason = ""
+                force_discovery_ids = []
                 if verification_request and _is_hypothesis_verifier_call(name, arguments):
                     attempted_verifications.add((
                         verification_request["unknown_id"],
@@ -1417,8 +1494,10 @@ def _tool_call_summary(tool_calls: list[dict]) -> str:
 
 
 def _tool_call_subject(name: str, arguments: dict) -> str:
-    if name in {"read", "glob", "grep", "code_nav", "webfetch"}:
+    if name in {"read", "glob", "grep", "code_nav", "lsp_tool", "webfetch"}:
         value = arguments.get("path") or arguments.get("pattern") or arguments.get("query") or arguments.get("url")
+        if not value and name == "lsp_tool":
+            value = arguments.get("language") or arguments.get("server") or arguments.get("action")
         if not value and name == "grep":
             patterns = arguments.get("patterns") if isinstance(arguments.get("patterns"), list) else []
             if patterns:
@@ -1890,6 +1969,36 @@ def _unknowns_needing_resolution(recorded: dict, observations: list[dict], analy
     ]
 
 
+def _unknowns_missing_project_evidence(
+    recorded: dict,
+    observations: list[dict],
+    analysis: dict | None,
+) -> list[str]:
+    initial = [
+        item for item in (analysis or {}).get("unknowns", [])
+        if isinstance(item, dict)
+        and item.get("blocking")
+        and item.get("resolution_strategy") == "investigate_project"
+        and str(item.get("id") or "").strip()
+    ]
+    if not initial:
+        return []
+    completed = {
+        str(item.get("unknown_id") or "").strip()
+        for item in recorded.get("resolutions", [])
+        if isinstance(item, dict)
+        and str(item.get("status") or "") in {"resolved", "deferred"}
+        and str(item.get("unknown_id") or "").strip()
+    }
+    supported = _supported_unknown_ids(recorded, observations)
+    return [
+        str(item["id"])
+        for item in initial
+        if not any(_same_unknown_id(item["id"], done_id) for done_id in completed)
+        and not any(_same_unknown_id(item["id"], supported_id) for supported_id in supported)
+    ]
+
+
 def _pending_observation_unknown_ids(
     observations: list[dict],
     pending_observation_ids: list[str],
@@ -1960,6 +2069,8 @@ def _supported_unknown_ids(recorded: dict, observations: list[dict]) -> set[str]
 
 
 def _positive_project_observation(item: dict) -> bool:
+    if str(item.get("tool") or "") == "lsp_tool":
+        return False
     tool = registry.get(str(item.get("tool") or ""))
     if (
         item.get("tool") not in PROJECT_EVIDENCE_TOOLS
@@ -3703,6 +3814,8 @@ def _validate_tool_contract(
     discovery_contract: dict[str, str] | None = None,
     relax_discovery_contract: bool = False,
 ) -> None:
+    if name == "lsp_tool":
+        return
     if not reason:
         raise ValueError(f"{name} requires reason")
     discovery_contract = discovery_contract or {}
@@ -3715,25 +3828,66 @@ def _validate_tool_contract(
             raise ValueError(
                 f"{name} requires discovery contract fields: " + ", ".join(missing)
             )
-    known = {
-        str(item.get("id") or "").strip(): item
-        for item in (analysis or {}).get("unknowns", [])
-        if isinstance(item, dict) and str(item.get("id") or "").strip()
-    }
+    known = _known_unknowns_by_canonical_id(analysis)
     if not orientation and not target_unknown_ids:
         raise ValueError(f"{name} requires target_unknown_ids unless orientation is true")
-    unknown = [item for item in target_unknown_ids if known and item not in known]
+    unknown = [
+        item for item in target_unknown_ids
+        if known and _normalize_unknown_id(item) not in known
+    ]
     if unknown:
         raise ValueError(f"{name} target_unknown_ids not in task contract: {', '.join(unknown)}")
     if name == "clearify":
         invalid = [
             item for item in target_unknown_ids
-            if known.get(item, {}).get("type") != "product_decision"
+            if known.get(_normalize_unknown_id(item), {}).get("type") != "product_decision"
         ]
         if invalid:
             raise ValueError(
                 "clearify requires product_decision targets: " + ", ".join(invalid)
             )
+
+
+def _known_unknowns_by_canonical_id(analysis: dict | None) -> dict[str, dict]:
+    return {
+        _normalize_unknown_id(item.get("id")): item
+        for item in (analysis or {}).get("unknowns", [])
+        if isinstance(item, dict) and _normalize_unknown_id(item.get("id"))
+    }
+
+
+def _canonicalize_resolution_unknown_ids(
+    resolutions: list[dict],
+    analysis: dict | None,
+) -> list[dict]:
+    known = _known_unknowns_by_canonical_id(analysis)
+    if not known:
+        return resolutions
+    result = []
+    invalid = []
+    for resolution in resolutions:
+        unknown_id = str(resolution.get("unknown_id") or "").strip()
+        canonical_id = _normalize_unknown_id(unknown_id)
+        if canonical_id not in known:
+            invalid.append(unknown_id)
+            continue
+        if (
+            resolution.get("status") == "needs_clearify"
+            and known[canonical_id].get("type") != "product_decision"
+        ):
+            raise ValueError(
+                "needs_clearify resolutions require product_decision unknowns: "
+                + unknown_id
+            )
+        item = dict(resolution)
+        item["unknown_id"] = canonical_id
+        result.append(item)
+    if invalid:
+        raise ValueError(
+            "resolve_unknowns unknown_id not in task contract: "
+            + ", ".join(invalid)
+        )
+    return result
 
 
 def _target_unknown_ids(arguments: dict) -> list[str]:
@@ -4001,6 +4155,7 @@ def _finish_payload(
     else:
         _validate_resolution_refs(resolutions, beliefs, observations or [])
     resolutions = _enforce_resolution_evidence(resolutions, initial_unknowns, strict=not repair_conflicts)
+    resolutions = _strip_closed_resolution_repair_diagnostics(resolutions)
     unknowns = _drop_resolved_unknowns(unknowns, resolutions, repairs)
     unresolved = _unresolved_from_resolutions(resolutions, initial_unknowns)
     unknowns = _merge_unknowns(unresolved + unknowns + decision_unknowns + new_unknowns)
@@ -4117,6 +4272,19 @@ def _finish_payload(
     if repair_request:
         final["resolution_repair"] = repair_request
     return final
+
+
+def _strip_closed_resolution_repair_diagnostics(resolutions: list[dict]) -> list[dict]:
+    cleaned = []
+    for resolution in resolutions:
+        if not isinstance(resolution, dict):
+            continue
+        item = dict(resolution)
+        if item.get("status") in {"resolved", "deferred"}:
+            item.pop("repair_mode", None)
+            item.pop("semantic_missing", None)
+        cleaned.append(item)
+    return cleaned
 
 
 def _investigation_project_facts(
@@ -5475,20 +5643,88 @@ def _drop_invalid_belief_refs(
 
 
 _FILE_REF_RE = re.compile(
-    r"([A-Za-z0-9_./\\-]+\.(?:py|vue|js|ts))"
+    r"(?<![A-Za-z0-9_$])"
+    r"([A-Za-z0-9_./\\-]+\.[A-Za-z0-9][A-Za-z0-9_+-]{0,15})"
+    r"(?![A-Za-z0-9_$])"
 )
-_FILE_REF_SKIP = frozenset({
-    "package.json", "tsconfig.json", "vite.config.ts", "pyproject.toml",
-    "requirements.txt", "README.md", "readme.md", ".gitignore", "Dockerfile",
-    "dockerfile", "Cargo.toml", "pom.xml", "build.gradle", "settings.gradle",
-    "Makefile", "makefile", "LICENSE", "license",
-})
 
 
 def _normalize_path(p: str) -> str:
     p = str(p).replace("\\", "/").strip()
     p = re.sub(r"^[A-Za-z]:/", "", p)
     return p.lstrip("./").lower()
+
+
+@lru_cache(maxsize=8)
+def _workspace_file_catalog(workspace_dir: str) -> tuple[frozenset[str], frozenset[str]]:
+    if not workspace_dir:
+        return frozenset(), frozenset()
+    try:
+        from .tools.builtin.common import _ignored
+
+        root = Path(workspace_dir).resolve()
+        if not root.is_dir():
+            return frozenset(), frozenset()
+        files: set[str] = set()
+        stack = [root]
+        while stack and len(files) < PROJECT_FILE_SCAN_LIMIT:
+            current = stack.pop()
+            try:
+                children = list(current.iterdir())
+            except OSError:
+                continue
+            for child in children:
+                if _ignored(child, root):
+                    continue
+                if child.is_dir():
+                    stack.append(child)
+                    continue
+                if not child.is_file():
+                    continue
+                rel = _normalize_path(child.relative_to(root).as_posix())
+                if rel:
+                    files.add(rel)
+                if len(files) >= PROJECT_FILE_SCAN_LIMIT:
+                    break
+        basenames = {item.rsplit("/", 1)[-1] for item in files}
+        return frozenset(files), frozenset(basenames)
+    except Exception:
+        return frozenset(), frozenset()
+
+
+def _observed_file_paths(observations: list[dict]) -> set[str]:
+    files = {
+        _normalize_path(item.get("path") or "")
+        for item in observations
+        if isinstance(item, dict) and str(item.get("path") or "").strip()
+    }
+    return {item for item in files if item}
+
+
+def _file_ref_matches(path: str, ref: str) -> bool:
+    basename = ref.rsplit("/", 1)[-1]
+    return path == ref or path.endswith("/" + ref) or path.endswith("/" + basename)
+
+
+def _project_file_ref(
+    ref_raw: str,
+    observations: list[dict],
+    workspace_dir: str = "",
+) -> str:
+    if "://" in str(ref_raw):
+        return ""
+    ref = _normalize_path(ref_raw)
+    if not ref or ref.endswith(".pyc"):
+        return ""
+    observed = _observed_file_paths(observations) | _hit_files_from_observations(observations)
+    for path in sorted(observed, key=len):
+        if _file_ref_matches(path, ref):
+            return path
+    files, _ = _workspace_file_catalog(str(workspace_dir or ""))
+    for path in sorted(files, key=len):
+        if _file_ref_matches(path, ref):
+            return path
+    return ""
 
 
 def _hit_files_from_observations(observations: list[dict]) -> set[str]:
@@ -5523,19 +5759,24 @@ def _hit_files_from_observations(observations: list[dict]) -> set[str]:
     return files
 
 
-def _require_file_reads(resolutions: list[dict], observations: list[dict]) -> list[str]:
-    """Return issues when a resolution claims a code file's behavior without
+def _require_file_reads(
+    resolutions: list[dict],
+    observations: list[dict],
+    workspace_dir: str = "",
+) -> list[str]:
+    """Return issues when a resolution claims a project file's behavior without
     ever reading it.
 
-    The answer text is scanned for code-file references (sessions.py,
-    frontend/.../HomePage.vue, etc.). References that carry a symbol or a
+    The answer text is scanned for references that resolve to real project
+    files (sessions.py, frontend/.../HomePage.vue, config schemas, etc.).
+    References that carry a symbol or a
     behavioral claim ("sessions.py's generate_title writes the name field")
     require a ``read`` observation of that file. A bare existential mention
     ("App.vue is the root component") only requires the file to be known --
     grep/glob hits are sufficient evidence the file exists and contains the
-    searched symbol. Only code files (.py/.vue/.js/.ts) are checked;
-    config/docs files are skipped because mentioning them is not a behavior
-    claim.
+    searched symbol. Candidate paths are filtered through observed paths and
+    the workspace file catalog, so dotted identifiers such as ``props.sessions``
+    are not treated as files.
     """
     read_files: set[str] = set()
     for item in observations:
@@ -5555,18 +5796,17 @@ def _require_file_reads(resolutions: list[dict], observations: list[dict]) -> li
         answer = " ".join(str(resolution.get(field) or "") for field in ("answer", "reason"))
         for match in _FILE_REF_RE.finditer(answer):
             ref_raw = match.group(1)
-            ref = _normalize_path(ref_raw)
-            if not ref or ref in _FILE_REF_SKIP or ref.endswith(".pyc"):
+            ref = _project_file_ref(ref_raw, observations, workspace_dir)
+            if not ref:
                 continue
-            basename = ref.rsplit("/", 1)[-1]
             read_matched = any(
-                rf == ref or rf.endswith("/" + ref) or rf.endswith("/" + basename)
+                _file_ref_matches(rf, ref)
                 for rf in read_files
             )
             if read_matched:
                 continue
             if _ref_is_existential(answer, match) and any(
-                rf == ref or rf.endswith("/" + ref) or rf.endswith("/" + basename)
+                _file_ref_matches(rf, ref)
                 for rf in hit_files
             ):
                 continue
@@ -5602,7 +5842,9 @@ def _ref_is_existential(answer: str, match) -> bool:
 
 
 _FILE_SYMBOL_RE = re.compile(
-    r"([A-Za-z0-9_./\\-]+\.(?:py|vue|js|ts))\s*(?:的|中|里|内|:)?\s*([A-Za-z_][A-Za-z0-9_]*)\s*(?:\(\))?"
+    r"(?<![A-Za-z0-9_$])"
+    r"([A-Za-z0-9_./\\-]+\.[A-Za-z0-9][A-Za-z0-9_+-]{0,15})"
+    r"(?:\s|[^A-Za-z0-9_$./\\-]){0,8}([A-Za-z_][A-Za-z0-9_]*)\s*(?:\(\))?"
 )
 
 # Generic language/stdlib/argument words that must never be treated as
@@ -5690,17 +5932,16 @@ def _require_lsp_definition_reads(
             if queried >= max_queries:
                 return issues
             ref_raw, symbol = match.group(1), match.group(2)
-            ref = _normalize_path(ref_raw)
+            ref = _project_file_ref(ref_raw, observations, workspace_dir)
             if not ref or ref.endswith(".pyc") or symbol in _DEF_READ_NOISE_SYMBOLS:
                 continue
-            definition_file = _lsp_definition_file(ref_raw, symbol, workspace_dir)
+            definition_file = _lsp_definition_file(ref, symbol, workspace_dir)
             queried += 1
             if not definition_file:
                 continue
             norm_def = _normalize_path(definition_file)
-            basename = norm_def.rsplit("/", 1)[-1]
             matched = any(
-                rf == norm_def or rf.endswith("/" + norm_def) or rf.endswith("/" + basename)
+                _file_ref_matches(rf, norm_def)
                 for rf in read_files
             )
             if not matched:
@@ -5769,7 +6010,7 @@ def _drop_invalid_resolution_refs(
     repairs: list[str],
     workspace_dir: str = "",
 ) -> list[dict]:
-    file_issues = _require_file_reads(resolutions, observations)
+    file_issues = _require_file_reads(resolutions, observations, workspace_dir)
     if workspace_dir:
         lsp_issues = _require_lsp_definition_reads(resolutions, observations, workspace_dir)
         file_issues = file_issues + lsp_issues

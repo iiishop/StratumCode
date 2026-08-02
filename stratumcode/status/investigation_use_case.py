@@ -54,6 +54,12 @@ class InvestigatingUseCase:
             run.transition(chat.ChatState.WAITING_FOR_USER, "Investigation queued a clearify decision.")
             return
 
+        step_question = self._step_clearify_question(run)
+        if step_question:
+            yield step_question
+            run.transition(chat.ChatState.WAITING_FOR_USER, "Investigation queued a clearify decision.")
+            return
+
         blocked_question = self._blocked_task_question(run)
         if blocked_question:
             yield blocked_question
@@ -62,7 +68,7 @@ class InvestigatingUseCase:
 
         decision = self.transition_policy.decide(run, result)
         run.transition(decision.next_state, decision.reason)
-        if result.pending_output and run.state != chat.ChatState.INVESTIGATING:
+        if result.pending_output and run.state not in {chat.ChatState.INVESTIGATING, chat.ChatState.FAILED}:
             yield self._investigation_facts_event(run)
             result.pending_output["data"]["content"] = self.summary.final_summary_text(run)
             yield result.pending_output
@@ -113,6 +119,62 @@ class InvestigatingUseCase:
                 },
             )
         return None
+
+    def _step_clearify_question(self, run) -> dict | None:
+        investigation = run.last_investigation or {}
+        step = investigation.get("step_result") if isinstance(investigation.get("step_result"), dict) else {}
+        if step.get("next_step") != "clearify":
+            return None
+        target_ids = [
+            self._unknown_tail(item)
+            for item in step.get("target_unknown_ids", [])
+            if self._unknown_tail(item)
+        ]
+        unknowns = [
+            item for item in (run.analysis or {}).get("unknowns", [])
+            if isinstance(item, dict)
+        ] + [
+            item for item in investigation.get("unknowns", [])
+            if isinstance(item, dict)
+        ]
+        for unknown_id in target_ids:
+            unknown = next(
+                (
+                    item for item in unknowns
+                    if self._unknown_tail(item.get("id")) == unknown_id
+                    and item.get("type") == "product_decision"
+                ),
+                None,
+            )
+            if not unknown:
+                continue
+            question = str(unknown.get("question") or step.get("continue_reason") or "").strip()
+            if not question:
+                continue
+            queue_clearify(
+                run,
+                question,
+                reason=str(step.get("continue_reason") or "Investigation requires a product decision."),
+                unknown_id=str(unknown.get("id") or unknown_id),
+            )
+            return user_question_event(
+                run,
+                question=question,
+                reason=str(step.get("continue_reason") or "Investigation requires a product decision."),
+                unknown_id=str(unknown.get("id") or unknown_id),
+                checkpoint_phase="investigation_checkpoint",
+                resume_state="investigating",
+                extra={
+                    "analysis": run.analysis,
+                    "investigation": run.last_investigation or {},
+                },
+            )
+        return None
+
+    @staticmethod
+    def _unknown_tail(value) -> str:
+        text = str(value or "").strip()
+        return text.rsplit(":", 1)[-1].strip() if text else ""
 
     def _investigation_facts_event(self, run) -> dict:
         return start_event(
