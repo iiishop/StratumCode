@@ -4,6 +4,7 @@ import { gsap } from 'gsap'
 import { animate, stagger as animeStagger } from 'animejs'
 import Sidebar from './components/Sidebar.vue'
 import HomePage from './components/HomePage.vue'
+import CodeStructurePanel from './components/CodeStructurePanel.vue'
 import StageModelSettings from './components/providers/StageModelSettings.vue'
 import McpPage from './components/mcp/McpPage.vue'
 import LspPage from './components/lsp/LspPage.vue'
@@ -16,6 +17,7 @@ import { useSessions } from './composables/useSessions'
 import { useWorkspaces } from './composables/useWorkspaces'
 
 const currentView = ref('home')
+const workspacePanel = ref('work')
 const {
   items: workspaces,
   active: activeWorkspace,
@@ -42,7 +44,7 @@ const lspMason = computed(() => lspStore.mason.value)
 const lspBootstrap = computed(() => lspStore.bootstrap.value)
 const lspBootstrapSteps = computed(() => lspStore.bootstrapSteps.value)
 const currentTitle = computed(() => ({
-  home: 'Workspace',
+  home: workspacePanel.value === 'structure' ? 'Code Structure' : 'Workspace',
   providers: 'Providers',
   mcp: 'MCP',
   lsp: 'LSP',
@@ -50,7 +52,7 @@ const currentTitle = computed(() => ({
   settings: 'Settings',
 })[currentView.value] || 'Workspace')
 const workspaceLabel = computed(() => activeWorkspace.value?.name || 'No workspace')
-const sessionLabel = computed(() => currentView.value === 'home' ? activeSession.value?.name : '')
+const sessionLabel = computed(() => currentView.value === 'home' && workspacePanel.value === 'work' ? activeSession.value?.name : '')
 const providers = ref([])
 const showForm = ref(false)
 const defaultPricingRule = () => ({
@@ -123,12 +125,14 @@ async function createSession(workspaceId = activeWorkspace.value?.id) {
   if (!workspaceId) return
   const session = await sessionStore.create(workspaceId)
   currentView.value = 'home'
+  workspacePanel.value = 'work'
   return session
 }
 
 async function openSession(id) {
   await sessionStore.open(id)
   currentView.value = 'home'
+  workspacePanel.value = 'work'
 }
 
 async function renameSession(id) {
@@ -150,6 +154,7 @@ async function createSessionForWorkspace(workspace) {
   if (sessionStore.items.value[0]) await sessionStore.open(sessionStore.items.value[0].id)
   else await createSession(workspace.id)
   currentView.value = 'home'
+  workspacePanel.value = 'work'
 }
 
 async function activateWorkspaceAndSession(id) {
@@ -543,6 +548,22 @@ watch(currentView, (v) => {
             <span class="shell__session">{{ sessionLabel }}</span>
           </template>
         </div>
+        <div v-if="currentView === 'home'" class="shell__panel-switch" aria-label="Workspace panel">
+          <button
+            type="button"
+            :class="{ 'is-active': workspacePanel === 'work' }"
+            @click="workspacePanel = 'work'"
+          >
+            Work
+          </button>
+          <button
+            type="button"
+            :class="{ 'is-active': workspacePanel === 'structure' }"
+            @click="workspacePanel = 'structure'"
+          >
+            Structure
+          </button>
+        </div>
         <div class="shell__runtime"><span></span>Local runtime</div>
       </header>
 
@@ -751,6 +772,7 @@ watch(currentView, (v) => {
       <KeepAlive>
         <HomePage
           v-if="currentView === 'home'"
+          v-show="workspacePanel === 'work'"
           :session="activeSession"
           :mcp-servers="mcpServers"
           :workspaces="workspaces"
@@ -762,6 +784,12 @@ watch(currentView, (v) => {
           @delete-session="removeSession"
         />
       </KeepAlive>
+      <template v-if="currentView === 'home'">
+        <CodeStructurePanel
+          v-show="workspacePanel === 'structure'"
+          :workspace="activeWorkspace"
+        />
+      </template>
       <McpPage
         v-if="currentView === 'mcp'"
         :servers="mcpServers"
@@ -1100,11 +1128,12 @@ watch(currentView, (v) => {
 }
 
 .shell__bar {
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
   min-height: 48px;
   flex: 0 0 48px;
   align-items: center;
-  justify-content: space-between;
+  gap: 16px;
   padding: 0 20px;
   border-bottom: 1px solid var(--border);
   background: rgba(255, 255, 255, 0.94);
@@ -1140,8 +1169,44 @@ watch(currentView, (v) => {
   white-space: nowrap;
 }
 
+.shell__panel-switch {
+  display: inline-grid;
+  grid-template-columns: repeat(2, minmax(84px, 1fr));
+  align-items: center;
+  justify-self: center;
+  padding: 3px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--code-bg);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.82);
+}
+
+.shell__panel-switch button {
+  height: 28px;
+  min-width: 0;
+  padding: 0 12px;
+  border: 0;
+  border-radius: 6px;
+  color: var(--text-muted);
+  background: transparent;
+  font: 600 10px/1 var(--mono);
+  cursor: pointer;
+  transition: color var(--transition-fast), background var(--transition-fast), box-shadow var(--transition-fast);
+}
+
+.shell__panel-switch button:hover {
+  color: var(--text-h);
+}
+
+.shell__panel-switch button.is-active {
+  color: var(--accent-text);
+  background: #ffffff;
+  box-shadow: var(--shadow-sm);
+}
+
 .shell__runtime {
   gap: 7px;
+  justify-self: end;
   color: var(--text-muted);
   font: 10px/1 var(--mono);
 }
@@ -1574,6 +1639,18 @@ watch(currentView, (v) => {
 .pm__models-item:hover { background: var(--code-bg-hover); }
 
 @media (max-width: 900px) {
+  .shell__bar {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+
+  .shell__panel-switch {
+    justify-self: end;
+  }
+
+  .shell__runtime {
+    display: none;
+  }
+
   .pm { padding: 36px 28px 64px; }
   .pm__presets { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .pm__form { grid-template-columns: 1fr 1fr; }
@@ -1586,8 +1663,17 @@ watch(currentView, (v) => {
 }
 
 @media (max-width: 620px) {
-  .shell__bar { padding-inline: 14px; }
-  .shell__runtime { display: none; }
+  .shell__bar {
+    grid-template-columns: 1fr;
+    min-height: 82px;
+    align-content: center;
+    gap: 8px;
+    padding-inline: 14px;
+  }
+  .shell__panel-switch {
+    width: 100%;
+    justify-self: stretch;
+  }
   .pm { padding: 28px 18px 48px; }
   .pm__top { align-items: flex-start; gap: 18px; }
   .pm__add-btn { flex: 0 0 auto; }
