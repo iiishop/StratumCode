@@ -630,6 +630,16 @@ def _validation_tools() -> list[dict]:
                 },
             },
             "question": {"type": "string"},
+            "reason_code": {
+                "type": "string",
+                "enum": [
+                    "missing_finish_validation",
+                    "insufficient_evidence",
+                    "validation_tool_failed",
+                    "implementation_issue",
+                    "product_decision",
+                ],
+            },
             "options": {
                 "type": "array",
                 "items": {
@@ -1074,16 +1084,23 @@ def _validation_stream(
     else:
         validation_result = _unfinished_validation_result(changed_files, semantic_checked)
     # If model inspected code but didn't call finish_validation, force one retry
-    if semantic_checked and validation_result.get("verdict") == "inconclusive":
+    if semantic_checked and validation_result.get("reason_code") == "missing_finish_validation":
         force_tools = _validation_tools()
         finish_only = [t for t in force_tools if t.get("function", {}).get("name") == "finish_validation"]
         if finish_only:
             messages.append({"role": "user", "content": (
                 "You inspected code but did not call finish_validation. "
                 "You MUST call finish_validation now with a definitive verdict. "
-                "If the code is correct: passed. If you found issues: local_repair with details."
+                "If the code is correct: passed. If you found issues: local_repair with details. "
+                "Do not call any other tool and do not answer in prose."
             )})
-            assistant = _call_model(provider, model, messages, tools=finish_only, tool_choice="required")
+            assistant = _call_model(
+                provider,
+                model,
+                messages,
+                tools=finish_only,
+                tool_choice={"type": "function", "function": {"name": "finish_validation"}},
+            )
             if usage := _usage_delta(pricing_rules, assistant.pop("_usage", {})):
                 _add_usage(usage_total, usage)
             tool_calls = assistant.get("tool_calls") or []
@@ -1106,6 +1123,20 @@ def _validation_stream(
                             })
                     except Exception:
                         pass
+            if validation_result.get("reason_code") == "missing_finish_validation":
+                validation_result = _validation_result(
+                    "failed",
+                    "Validation agent violated the finish_validation contract after the forced finish-only retry.",
+                    changed_files,
+                    reason_code="missing_finish_validation",
+                    issues=[{
+                        "id": "VALIDATION-CONTRACT",
+                        "severity": "high",
+                        "summary": "Validation inspected code but did not call finish_validation.",
+                        "category": "code_defect",
+                        "direction": "falls_short",
+                    }],
+                )
     if validation_result is None:
         validation_result = _unfinished_validation_result(changed_files, semantic_checked)
     yield start_event(f"{run_id}-output", "output", {
@@ -1115,6 +1146,7 @@ def _validation_stream(
     # Emit validation result for frontend display
     yield start_event(f"{run_id}-result", "validation_result", {
         "verdict": validation_result.get("verdict"),
+        "reason_code": validation_result.get("reason_code"),
         "summary": validation_result.get("summary"),
         "issues": validation_result.get("issues", []),
         "stage_id": stage_id,
@@ -1131,9 +1163,11 @@ def _validation_result(
     issues: list[dict] | None = None,
     question: str = "",
     options: list[dict] | None = None,
+    reason_code: str = "",
 ) -> dict:
     return {
         "verdict": verdict,
+        "reason_code": reason_code,
         "summary": summary,
         "issues": issues or [],
         "changed_files": sorted(set(changed_files)),
@@ -1149,12 +1183,14 @@ def _unfinished_validation_result(changed_files: list[str], semantic_checked: bo
             "inconclusive",
             "Semantic validation ended before a clear pass/fail result.",
             changed_files,
+            reason_code="insufficient_evidence",
         )
     return _validation_result(
         "inconclusive",
         "Semantic validation inspected changed files but did not call finish_validation. "
         "The implementation cannot be accepted without an explicit validation verdict.",
         changed_files,
+        reason_code="missing_finish_validation",
     )
 
 
@@ -1166,11 +1202,12 @@ def _finish_validation_arguments(arguments: dict, changed_files: list[str]) -> d
     issues = arguments.get("issues") if isinstance(arguments.get("issues"), list) else []
     question = str(arguments.get("question") or "").strip()
     options = arguments.get("options") if isinstance(arguments.get("options"), list) else []
+    reason_code = _normalized_validation_reason_code(str(arguments.get("reason_code") or ""), verdict)
     if verdict == "passed" and issues:
         raise ValueError("passed verdict cannot include issues")
     if verdict == "clearify" and not question:
         raise ValueError("clearify verdict requires question")
-    return _validation_result(verdict, summary, changed_files, {}, issues, question, options)
+    return _validation_result(verdict, summary, changed_files, {}, issues, question, options, reason_code)
 
 
 def _normalized_validation_verdict(value: str) -> str:
@@ -1186,6 +1223,29 @@ def _normalized_validation_verdict(value: str) -> str:
         "inconclusive",
         "failed",
     } else "inconclusive"
+
+
+def _normalized_validation_reason_code(value: str, verdict: str) -> str:
+    value = value.strip().casefold()
+    if verdict == "passed":
+        return ""
+    if value in {
+        "missing_finish_validation",
+        "insufficient_evidence",
+        "validation_tool_failed",
+        "implementation_issue",
+        "product_decision",
+    }:
+        return value
+    if verdict in {"local_repair", "redesign"}:
+        return "implementation_issue"
+    if verdict == "missing_evidence":
+        return "insufficient_evidence"
+    if verdict == "clearify":
+        return "product_decision"
+    if verdict == "failed":
+        return "validation_tool_failed"
+    return ""
 
 
 def _checkpoint_output(reason: str) -> dict:

@@ -882,6 +882,12 @@ Report concrete issues with their step_id, patch_id, category, and deviation
 direction when applicable; the design and patch-planning states will create
 the next authorized patch plan.
 
+Always finish by calling finish_validation. Set reason_code to
+implementation_issue for local_repair/redesign, insufficient_evidence for
+missing_evidence/inconclusive evidence gaps, product_decision for clearify, and
+validation_tool_failed only when validation itself failed. Do not rely on prose
+as the validation result.
+
 The runtime enforces finish_validation schema, verdict rules, user-decision
 questions, and the validation-evidence gate for passed verdicts."""
 

@@ -60,6 +60,7 @@ _CHAT_TRANSITIONS = {
         ChatState.FAILED,
     },
     ChatState.VALIDATING: {
+        ChatState.VALIDATING,
         ChatState.DESIGNING,
         ChatState.INVESTIGATING,
         ChatState.WAITING_FOR_USER,

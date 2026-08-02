@@ -142,18 +142,37 @@ def _state_after_validation(run):
     from .. import chat
 
     verdict = str((run.validation_result or {}).get("verdict") or "inconclusive")
+    reason_code = str((run.validation_result or {}).get("reason_code") or "")
     if verdict == "passed":
         return chat._chat_finish_state(run)
     if verdict in {"local_repair", "redesign"}:
+        if not _has_validation_repair_signal(run.validation_result or {}):
+            return chat.ChatState.FAILED
         return chat.ChatState.DESIGNING
     if verdict == "inconclusive":
         run.validation_inconclusive_count += 1
+        if reason_code == "missing_finish_validation":
+            if run.validation_inconclusive_count <= 1:
+                return chat.ChatState.VALIDATING
+            return chat.ChatState.FAILED
+        if reason_code == "insufficient_evidence":
+            return chat.ChatState.INVESTIGATING
         return chat.ChatState.DESIGNING
     if verdict == "missing_evidence":
         return chat.ChatState.INVESTIGATING
     if verdict == "clearify":
         return "clearify"
     return chat.ChatState.FAILED
+
+
+def _has_validation_repair_signal(result: dict) -> bool:
+    if result.get("repair_plan"):
+        return True
+    issues = result.get("issues") if isinstance(result.get("issues"), list) else []
+    return any(
+        isinstance(issue, dict) and str(issue.get("summary") or "").strip()
+        for issue in issues
+    )
 
 
 def _add_validation_context(run) -> None:
