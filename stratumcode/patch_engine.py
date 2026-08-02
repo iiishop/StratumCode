@@ -537,6 +537,9 @@ def _change_record(request: dict, prepared: list[dict], root: Path) -> dict:
         },
         "actual": {
             "executor_summary": str(request.get("operation_summary") or ""),
+            "patch_purpose": str(request.get("patch_purpose") or ""),
+            "purpose_rationale": str(request.get("purpose_rationale") or ""),
+            "step_rationale": str(request.get("step_rationale") or ""),
             "step_complete": bool(request.get("step_complete", True)),
             "changed_files": changed_files,
             "unmodified_authorized_files": sorted(set(planned_files) - set(changed_files)),

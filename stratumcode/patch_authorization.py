@@ -64,23 +64,7 @@ def create_authorization(plan: dict, workspace_dir: str) -> dict:
 
 
 def validate_request(request: dict, root: Path, changed_bytes: int = 0) -> None:
-    auth_id = str(request.get("authorization_id") or "").strip()
-    if not auth_id:
-        raise AuthorizationError("AUTHORIZATION_NOT_FOUND", "authorization_id is required")
-    row = _get(auth_id)
-    if not row or not row.get("active"):
-        raise AuthorizationError("AUTHORIZATION_NOT_FOUND", auth_id)
-    if float(row.get("expires_at") or 0) and time.time() > float(row["expires_at"]):
-        raise AuthorizationError("AUTHORIZATION_EXPIRED", "authorization expired")
-    if row["workspace_root"] != _root_key(root):
-        raise AuthorizationError("AUTHORIZATION_EXPIRED", "authorization belongs to a different workspace")
-    if str(request.get("plan_hash") or "").strip() != row["plan_hash"]:
-        raise AuthorizationError("PLAN_HASH_MISMATCH", "patch request plan_hash does not match authorization")
-    step_id = str(request.get("step_id") or "").strip()
-    steps = json.loads(row["allowed_steps_json"])
-    step = steps.get(step_id)
-    if not step:
-        raise AuthorizationError("STEP_NOT_AUTHORIZED", step_id)
+    row, step_id, step = validate_step_reference(request, root)
     states = _loads(row.get("step_states_json"), {})
     if states.get(step_id) == "validation_required":
         raise AuthorizationError("STEP_ALREADY_APPLIED", step_id)
@@ -107,6 +91,48 @@ def validate_request(request: dict, root: Path, changed_bytes: int = 0) -> None:
             raise AuthorizationError("OPERATION_NOT_AUTHORIZED", f"modify_existing is not authorized for step {step_id}")
     if changed_bytes > int(step.get("max_changed_bytes") or 0):
         raise AuthorizationError("PATCH_TOO_LARGE", "changed bytes exceed step authorization")
+
+
+def validate_step_reference(request: dict, root: Path) -> tuple[dict, str, dict]:
+    auth_id = str(request.get("authorization_id") or "").strip()
+    if not auth_id:
+        raise AuthorizationError("AUTHORIZATION_NOT_FOUND", "authorization_id is required")
+    row = _get(auth_id)
+    if not row or not row.get("active"):
+        raise AuthorizationError("AUTHORIZATION_NOT_FOUND", auth_id)
+    if float(row.get("expires_at") or 0) and time.time() > float(row["expires_at"]):
+        raise AuthorizationError("AUTHORIZATION_EXPIRED", "authorization expired")
+    if row["workspace_root"] != _root_key(root):
+        raise AuthorizationError("AUTHORIZATION_EXPIRED", "authorization belongs to a different workspace")
+    if str(request.get("plan_hash") or "").strip() != row["plan_hash"]:
+        raise AuthorizationError("PLAN_HASH_MISMATCH", "patch request plan_hash does not match authorization")
+    step_id = str(request.get("step_id") or "").strip()
+    steps = json.loads(row["allowed_steps_json"])
+    step = steps.get(step_id)
+    if not step:
+        raise AuthorizationError("STEP_NOT_AUTHORIZED", step_id)
+    return row, step_id, step
+
+
+def mark_step_satisfied(auth_id: str, step_id: str) -> None:
+    row = _get(auth_id)
+    if not row:
+        raise AuthorizationError("AUTHORIZATION_NOT_FOUND", auth_id)
+    states = _loads(row.get("step_states_json"), {})
+    if states.get(str(step_id)) == "validation_required":
+        raise AuthorizationError("STEP_ALREADY_APPLIED", str(step_id))
+    consumed = set(_loads(row.get("consumed_steps_json"), []))
+    consumed.add(str(step_id))
+    states[str(step_id)] = "validation_required"
+    with db.db_session() as conn:
+        conn.execute(
+            "UPDATE patch_authorizations SET consumed_steps_json = ?, step_states_json = ? WHERE id = ?",
+            (
+                json.dumps(sorted(consumed), ensure_ascii=False),
+                json.dumps(states, ensure_ascii=False),
+                auth_id,
+            ),
+        )
 
 
 def mark_step_applied(auth_id: str, step_id: str, attempt_id: str = "", *, complete: bool = True) -> None:

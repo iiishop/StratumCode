@@ -944,6 +944,7 @@ def _runtime_steps(value, analysis: dict, design_plan: dict, facts: list[dict]) 
             "id": f"IS{index}",
             "mode": str(item.get("mode") or "modify").strip(),
             "purpose": str(item.get("purpose") or "").strip(),
+            "responsibility_key": str(item.get("responsibility_key") or "").strip(),
             "file": str(item.get("file") or "").strip(),
             "target": str(item.get("target") or "").strip(),
             "action": str(item.get("action") or "").strip(),
@@ -978,6 +979,7 @@ def _merge_duplicate_responsibilities(steps: list[dict]) -> list[dict]:
             )
         for field in (
             "purpose",
+            "responsibility_key",
             "action",
             "required_behavior_if_removed",
             "minimality_check",
@@ -1384,6 +1386,8 @@ def _apply_verified_step_revisions(steps: list[dict], value) -> None:
             "minimality_check",
         ):
             step[field] = str(revised.get(field) or "").strip()
+        if revised.get("responsibility_key"):
+            step["responsibility_key"] = str(revised.get("responsibility_key") or "").strip()
         step["completion_conditions"] = _strings(revised.get("completion_conditions"))
         step["out_of_scope"] = _strings(revised.get("out_of_scope"))
 
@@ -1408,6 +1412,8 @@ def _merge_verified_step_groups(steps: list[dict], value) -> None:
             "minimality_check",
         ):
             destination[field] = str(merged.get(field) or "").strip()
+        if merged.get("responsibility_key"):
+            destination["responsibility_key"] = str(merged.get("responsibility_key") or "").strip()
         destination["completion_conditions"] = _strings(merged.get("completion_conditions"))
         destination["out_of_scope"] = _strings(merged.get("out_of_scope"))
     steps[:] = [step for index, step in enumerate(steps) if index not in remove]
@@ -1485,7 +1491,7 @@ def _step_responsibility_key(step: dict) -> tuple[str, str, str]:
     return (
         str(step.get("mode") or "modify").strip().casefold(),
         str(step.get("file") or "").strip().replace("\\", "/").casefold(),
-        _normalized_target(step.get("target")),
+        _normalized_target(step.get("responsibility_key") or step.get("target")),
     )
 
 

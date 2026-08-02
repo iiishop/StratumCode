@@ -334,9 +334,14 @@ Principles:
 - Use clearify only for an unresolved blocking product_decision. A direct question
   that can be answered from established facts does not need conversational orientation.
 - Prefer current project facts over framework defaults or general knowledge.
-- Use code_nav for symbol/function/class questions and grep/read for literal
-  text. Use python_static_check first for Python duplicate/dead-code/import
-  audits. Reuse previous observations before repeating discovery.
+- Use LSP-first navigation for source-code questions: code_nav symbols for a
+  known file, code_nav inspect/definition/references for a known symbol, then
+  read only the relevant line ranges as grounding evidence. If code_nav reports
+  an unavailable language server, use lsp_tool status/install once for that
+  language, then retry or fall back to grep/read. Use grep/read first only for
+  literal text searches or when LSP is unavailable. Use python_static_check
+  first for Python duplicate/dead-code/import audits. Reuse previous
+  observations before repeating discovery.
 - Use terminal for runtime facts or project commands. Set background=true for
   servers, watchers, or slow commands, then use process/read_terminal to inspect
   the same session instead of starting duplicate commands.
@@ -614,6 +619,7 @@ For patch_step_for_design_decision:
       "file": "workspace-relative path",
       "mode": "modify|create",
       "purpose": "behavior-level reason this step must exist",
+      "responsibility_key": "stable shared behavior or state boundary this step implements",
       "target": "function/class/component/route",
       "action": "specific code-level action",
       "acceptance_slots": [1],
@@ -698,6 +704,9 @@ Rules:
   not plan extraction for action=skip candidates. action=review candidates may
   be planned only when the design chose a behavior-preserving variant strategy.
 - Make each purpose describe behavior, not just the file operation.
+- Set responsibility_key to the smallest behavior/state boundary that must be
+  complete as one unit. Steps with the same file, mode, and responsibility_key
+  should be merged instead of emitted separately.
 - Include one runnable check or the smallest manual check when no test framework exists.
 - Never invent constructors, helper methods, classes, commands, or test files in
   tests_or_checks. Use only identifiers grounded in project facts, the approved
@@ -804,13 +813,24 @@ Set step_complete=false when one authorized step must be split across multiple
 apply_patch calls. Set it to true only on the final call after all completion
 conditions for that step are satisfied. Use a fresh attempt_id for each distinct
 patch payload; reuse an attempt_id only to retry the identical payload.
+Each apply_patch call is one purposeful programmer edit to exactly one file.
+Use operation_summary for what changed, patch_purpose for why this file edit is
+needed now, purpose_rationale for how the code change matches patch_purpose,
+and step_rationale for why this patch advances or satisfies the implementation
+step. Split one implementation step across multiple apply_patch calls when it
+requires multiple files or separable edits.
 Never use identical old_text/new_text or canceling operations to mark a step
 complete. Report a plan or authorization conflict instead.
+For an authorized step that is already satisfied by the current code, call
+finish_step with verdict=already_satisfied and cite the read evidence. For a
+wrong or impossible step, call finish_step with verdict=plan_conflict or
+verdict=blocked. Never finish a pending step in prose.
 After the final successful apply_patch call, do not reread the changed files;
 validation owns post-patch semantic inspection.
 
 The runtime enforces apply_patch authorization, step ids, injected metadata,
-required tool fields, missing patch steps, and stale snapshot errors."""
+required tool fields, missing patch steps, finish_step evidence, and stale
+snapshot errors."""
 
 VALIDATION_RUNNER = """\
 You are StratumCode's validation runner. Write user-visible text in {language}.
@@ -826,13 +846,18 @@ Validate the patch after implementation. Do not edit files in this stage.
 
 Use read, code_nav, terminal, and available MCP tools to inspect changed code,
 run checks, and inspect identifiers that could resolve incorrectly.
-Start from patch_records, changed_files, and the patch plan. Each patch record
+Start from patch_records, satisfied_steps, changed_files, and the patch plan.
+Each satisfied_steps item is a step closed without file edits and must be
+validated from its cited evidence plus the current code. Each patch record
 contains the authorized intent and deterministic added/removed code. Treat the
 intent as authoritative, executor_summary as an untrusted claim, and the code
 chunks as the actual change. Group records by step_id in their supplied order:
 step_complete=false marks an intermediate patch, so evaluate the combined
 changes for that step rather than requiring each intermediate record to satisfy
-the whole step. Check whether the final code fulfills its purpose and completion
+the whole step. For each patch record, compare actual.patch_purpose and
+actual.purpose_rationale against the one-file code change, then compare
+actual.step_rationale against the implementation step intent before judging the
+whole step. Check whether the final code fulfills its purpose and completion
 conditions, violates out_of_scope, expands behavior beyond the purpose, or
 implements less than the purpose requires. Read each changed file once, then
 inspect only directly related callers or symbols needed to prove the acceptance
@@ -1372,6 +1397,7 @@ def build_patch_step_slot_user(
                 "file": "workspace-relative path",
                 "mode": "modify|create",
                 "purpose": "why this step exists",
+                "responsibility_key": "stable shared behavior or state boundary",
                 "target": "function/class/component/route",
                 "action": "specific code-level action",
                 "acceptance_slots": [1],
@@ -1418,6 +1444,7 @@ def build_patch_verification_slot_user(
                     "mode": str(item.get("mode") or "modify"),
                     "file": str(item.get("file") or ""),
                     "purpose": str(item.get("purpose") or ""),
+                    "responsibility_key": str(item.get("responsibility_key") or ""),
                     "target": str(item.get("target") or ""),
                     "action": str(item.get("action") or ""),
                     "acceptance_slots": item.get("acceptance_slots", []),
@@ -1477,6 +1504,7 @@ def build_patch_verification_slot_user(
                 "reason": "why these have the same normalized file, mode, implementation responsibility, and outcome",
                 "merged_content": {
                     "purpose": "consolidated behavior-level purpose",
+                    "responsibility_key": "canonical shared behavior or state boundary",
                     "target": "canonical target",
                     "action": "complete non-conflicting action",
                     "required_behavior_if_removed": "what breaks if removed",

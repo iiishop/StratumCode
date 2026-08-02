@@ -24,7 +24,7 @@ from .agent_runtime import (
 from .tools import registry
 
 TERMINAL_TOOLS = ("terminal", "process", "read_terminal")
-IMPLEMENTATION_TOOLS = ("read", *TERMINAL_TOOLS, "apply_patch")
+IMPLEMENTATION_TOOLS = ("read", *TERMINAL_TOOLS, "apply_patch", "finish_step")
 VALIDATION_TOOLS = ("read", "code_nav", *TERMINAL_TOOLS)
 LEGACY_USER_DECISION_VERDICT = "user_decision"
 
@@ -85,6 +85,7 @@ def implementation_stream(
     patch_call_count = 0
     patch_call_limit = app_settings.get_round_limit("implementation_patch_calls")
     rollback_ids: list[str] = []
+    satisfied_steps: list[dict] = []
     tool_error_limit = app_settings.get_round_limit("implementation_tool_error_rounds")
     for round_index in _round_indexes(app_settings.get_round_limit("implementation_rounds")):
         assistant = _call_model(provider, model, messages, tools=tools)
@@ -106,19 +107,29 @@ def implementation_stream(
             final_text = text.strip()
             missing_steps = _missing_steps(required_steps, applied_steps)
             if missing_steps:
-                messages.append({"role": "user", "content": (
-                    "Implementation is not complete. Apply every authorized implementation step before finishing. "
-                    f"Missing step ids: {', '.join(missing_steps)}."
-                )})
-                continue
+                reason = _rollback_checkpoint_reason(
+                    "Implementation returned prose while authorized steps were still pending. "
+                    "Each pending step must finish through apply_patch or finish_step, not by assistant text. "
+                    f"Missing step ids: {', '.join(missing_steps)}.",
+                    rollback_ids,
+                    workspace_dir,
+                    _authorization_id(patch_plan),
+                )
+                yield start_event(f"{run_id}-protocol-checkpoint", "output", _checkpoint_output(reason))
+                yield {"op": "update", "id": stage_id, "patch": {"state": "failed", "phase": "implementation_protocol_checkpoint"}}
+                return
             condition_issues = _completion_condition_issues(patch_plan, workspace_dir, applied_steps)
             if condition_issues:
-                messages.append({"role": "user", "content": (
-                    "Implementation is not complete. These completion conditions are still false:\n"
-                    + "\n".join(f"- {item}" for item in condition_issues)
-                    + "\nApply a focused repair patch using the affected authorized step id."
-                )})
-                continue
+                reason = _rollback_checkpoint_reason(
+                    "Implementation returned prose while completion conditions were still false:\n"
+                    + "\n".join(f"- {item}" for item in condition_issues),
+                    rollback_ids,
+                    workspace_dir,
+                    _authorization_id(patch_plan),
+                )
+                yield start_event(f"{run_id}-completion-protocol-checkpoint", "output", _checkpoint_output(reason))
+                yield {"op": "update", "id": stage_id, "patch": {"state": "failed", "phase": "implementation_completion_protocol_checkpoint"}}
+                return
             break
 
         round_had_success = False
@@ -176,6 +187,25 @@ def implementation_stream(
                     step_id = str(arguments.get("step_id") or "").strip()
                     if _authorized_step_complete(patch_plan, step_id):
                         applied_steps.add(step_id)
+                elif name == "finish_step" and not tool_failed:
+                    finish = _finish_step_output(output)
+                    verdict = str(finish.get("verdict") or arguments.get("verdict") or "")
+                    step_id = str(finish.get("step_id") or arguments.get("step_id") or "").strip()
+                    if verdict == "already_satisfied":
+                        applied_steps.add(step_id)
+                        satisfied_steps.append(finish or dict(arguments))
+                        round_made_progress = True
+                    else:
+                        reason = _rollback_checkpoint_reason(
+                            f"Implementation step {step_id or '?'} reported {verdict or 'blocked'}: "
+                            f"{finish.get('summary') or arguments.get('summary') or ''}",
+                            rollback_ids,
+                            workspace_dir,
+                            _authorization_id(patch_plan),
+                        )
+                        yield start_event(f"{run_id}-finish-step-checkpoint", "output", _checkpoint_output(reason))
+                        yield {"op": "update", "id": stage_id, "patch": {"state": "failed", "phase": f"implementation_{verdict or 'blocked'}_checkpoint"}}
+                        return
             except Exception as exc:
                 if name == "apply_patch":
                     round_had_patch_failure = True
@@ -296,6 +326,7 @@ def implementation_stream(
         "missing_steps": missing_steps,
         "changed_files": sorted(set(changed_files)),
         "patch_records": patch_records,
+        "satisfied_steps": satisfied_steps,
         "semantic_checked": False,
     }}
 
@@ -308,6 +339,7 @@ def validation_stream(
     workspace_dir: str,
     changed_files: list[str],
     patch_records: list[dict] | None = None,
+    satisfied_steps: list[dict] | None = None,
     validation_hint: str = "",
 ) -> Iterator[dict]:
     result = yield from _validation_stream(
@@ -317,6 +349,7 @@ def validation_stream(
         workspace_dir=workspace_dir,
         changed_files=changed_files,
         patch_records=patch_records or [],
+        satisfied_steps=satisfied_steps or [],
         validation_hint=validation_hint,
     )
     if result:
@@ -331,6 +364,7 @@ def resume_validation_stream(
     workspace_dir: str,
     changed_files: list[str],
     patch_records: list[dict] | None = None,
+    satisfied_steps: list[dict] | None = None,
     validation_hint: str = "",
 ) -> Iterator[dict]:
     result = yield from _validation_stream(
@@ -340,6 +374,7 @@ def resume_validation_stream(
         workspace_dir=workspace_dir,
         changed_files=changed_files,
         patch_records=patch_records or [],
+        satisfied_steps=satisfied_steps or [],
         validation_hint=validation_hint,
     )
     if result:
@@ -625,6 +660,8 @@ def _tools_for(names: tuple[str, ...]) -> list[dict]:
         if tool:
             if name == "apply_patch":
                 tools.append(openai_tool_schema(tool.name, tool.description, _apply_patch_parameters()))
+            elif name == "finish_step":
+                tools.append(openai_tool_schema(tool.name, tool.description, _finish_step_parameters()))
             else:
                 tools.append(openai_tool_schema(tool.name, tool.description, tool.parameters))
     return tools
@@ -639,8 +676,13 @@ def _apply_patch_parameters() -> dict:
             "attempt_id": {"type": "string"},
             "step_complete": {"type": "boolean"},
             "operation_summary": {"type": "string"},
+            "patch_purpose": {"type": "string"},
+            "purpose_rationale": {"type": "string"},
+            "step_rationale": {"type": "string"},
             "files": {
                 "type": "array",
+                "minItems": 1,
+                "maxItems": 1,
                 "items": {
                     "type": "object",
                     "properties": {
@@ -668,12 +710,36 @@ def _apply_patch_parameters() -> dict:
                 },
             },
         },
-        "required": ["step_id", "step_complete", "operation_summary", "files"],
+        "required": ["step_id", "step_complete", "operation_summary", "patch_purpose", "purpose_rationale", "step_rationale", "files"],
+    }
+
+
+def _finish_step_parameters() -> dict:
+    return {
+        "type": "object",
+        "properties": {
+            "step_id": {"type": "string"},
+            "verdict": {"type": "string", "enum": ["already_satisfied", "plan_conflict", "blocked"]},
+            "summary": {"type": "string"},
+            "evidence": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "file": {"type": "string"},
+                        "line_range": {"type": "string"},
+                        "reason": {"type": "string"},
+                    },
+                    "required": ["reason"],
+                },
+            },
+        },
+        "required": ["step_id", "verdict", "summary"],
     }
 
 
 def _prepare_tool_arguments(name: str, arguments: dict, patch_plan: dict) -> dict:
-    if name != "apply_patch":
+    if name not in {"apply_patch", "finish_step"}:
         return arguments
     step_id = str(arguments.get("step_id") or "").strip()
     auth = patch_plan.get("execution_authorization") or {}
@@ -683,6 +749,16 @@ def _prepare_tool_arguments(name: str, arguments: dict, patch_plan: dict) -> dic
     )
     if not step:
         raise ValueError(f"patch step is not in the authorized patch plan: {step_id}")
+    if name == "apply_patch":
+        files = arguments.get("files")
+        if not isinstance(files, list) or len(files) != 1:
+            raise ValueError("apply_patch must modify exactly one file; split a multi-file implementation step across multiple apply_patch calls")
+        if not str(arguments.get("patch_purpose") or "").strip():
+            raise ValueError("apply_patch requires patch_purpose explaining why this file edit is needed")
+        if not str(arguments.get("purpose_rationale") or "").strip():
+            raise ValueError("apply_patch requires purpose_rationale explaining how this code change matches patch_purpose")
+        if not str(arguments.get("step_rationale") or "").strip():
+            raise ValueError("apply_patch requires step_rationale explaining why this patch advances or satisfies the implementation step")
     allowed = (auth.get("allowed_steps") or {}).get(step_id) or {}
     patched = dict(arguments)
     patched["authorization_id"] = auth.get("authorization_id", "")
@@ -692,6 +768,8 @@ def _prepare_tool_arguments(name: str, arguments: dict, patch_plan: dict) -> dic
     patched["decision_ids"] = allowed.get("decision_ids") or step.get("decision_ids") or []
     patched["project_fact_ids"] = allowed.get("project_fact_ids") or step.get("project_fact_ids") or []
     patched["completion_conditions"] = allowed.get("completion_conditions") or step.get("completion_conditions") or []
+    if name == "finish_step":
+        return patched
     patched["required_behavior_if_removed"] = allowed.get("required_behavior_if_removed") or step.get("required_behavior_if_removed") or ""
     patched["reason"] = patched["purpose"] or step.get("action") or str(arguments.get("operation_summary") or "")
     patched["step_complete"] = bool(patched.get("step_complete", True))
@@ -760,6 +838,14 @@ def _tool_retry_hint(name: str, error: str, patch_plan: dict) -> str:
             "Do not combine step ids such as IS1+IS2; call apply_patch once per step."
             + suffix
         )
+    if name == "apply_patch" and "exactly one file" in error:
+        return "Call apply_patch for one file only. Keep the same step_id and split multi-file work into separate apply_patch calls."
+    if name == "apply_patch" and "patch_purpose" in error:
+        return "Add patch_purpose explaining why this specific file edit is needed for the current step."
+    if name == "apply_patch" and "purpose_rationale" in error:
+        return "Add purpose_rationale explaining how this code change matches patch_purpose."
+    if name == "apply_patch" and "step_rationale" in error:
+        return "Add step_rationale explaining why this patch advances or satisfies the implementation step."
     if "invalid tool JSON" in error:
         return "Call the tool again with valid JSON arguments only."
     return "Correct the tool arguments and retry. If the patch plan is wrong, stop and explain why."
@@ -838,6 +924,15 @@ def _patch_record_from_output(output: str) -> dict:
     return record if isinstance(record, dict) else {}
 
 
+def _finish_step_output(output: str) -> dict:
+    try:
+        data = json.loads(output or "{}")
+        payload = json.loads(data.get("output") or "{}")
+    except (TypeError, json.JSONDecodeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
 def _validation_stream(
     *,
     message: str,
@@ -846,6 +941,7 @@ def _validation_stream(
     workspace_dir: str,
     changed_files: list[str],
     patch_records: list[dict],
+    satisfied_steps: list[dict],
     validation_hint: str = "",
 ) -> Iterator[dict]:
     setting = model_settings.resolve(model_settings.DEFAULT_STAGE)
@@ -884,6 +980,7 @@ def _validation_stream(
             "patch_plan": patch_plan,
             "changed_files": sorted(set(changed_files)),
             "patch_records": patch_records,
+            "satisfied_steps": satisfied_steps,
             "workspace_dir": workspace_dir,
             "validation_hint": validation_hint or None,
         }, ensure_ascii=False)},

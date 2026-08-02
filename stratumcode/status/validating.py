@@ -14,6 +14,7 @@ def handle(run):
     else:
         changed_files = []
     patch_records = (run.implementation_result or {}).get("patch_records") or []
+    satisfied_steps = (run.implementation_result or {}).get("satisfied_steps") or []
     # Hard gate: py_compile every changed Python file before semantic validation
     py_issues = _check_python_syntax(changed_files, run.workspace_dir)
     if py_issues:
@@ -79,6 +80,7 @@ def handle(run):
         workspace_dir=run.workspace_dir,
         changed_files=changed_files,
         patch_records=patch_records,
+        satisfied_steps=satisfied_steps,
         validation_hint=validation_hint,
     ):
         if event.get("op") == "start" and event.get("event") == "user_question":
