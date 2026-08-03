@@ -260,7 +260,7 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
         <Transition name="sb-fade">
           <small v-if="!collapsed">Add a folder</small>
         </Transition>
-        <svg v-else width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+        <svg v-if="collapsed" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
           <path d="M12 5v14M5 12h14" />
         </svg>
       </button>
