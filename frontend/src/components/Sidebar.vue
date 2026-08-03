@@ -118,30 +118,35 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
 <template>
   <aside class="sb" :class="{ 'is-collapsed': collapsed }" aria-label="Primary navigation">
     <header class="sb__top">
-      <button class="sb__brand" type="button" title="Open workspace" aria-label="Open workspace" @click="emit('navigate', 'home')">
+      <button class="sb__brand" type="button" :data-tip="'StratumCode'" title="Open workspace" aria-label="Open workspace" @click="emit('navigate', 'home')">
         <span class="sb__mark">S</span>
-        <span v-if="!collapsed">StratumCode</span>
+        <Transition name="sb-fade">
+          <span v-if="!collapsed">StratumCode</span>
+        </Transition>
       </button>
       <button class="sb__top-action" type="button" title="Add workspace" aria-label="Add workspace" @click="emit('add-workspace')">
         <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round">
           <path d="M12 5v14M5 12h14" />
         </svg>
       </button>
-      <button class="sb__collapse-toggle" type="button" :title="collapsed ? 'Expand sidebar' : 'Collapse sidebar'" :aria-label="collapsed ? 'Expand sidebar' : 'Collapse sidebar'" @click="toggleCollapsed">
-        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-          <path v-if="!collapsed" d="m9 6 6 6-6 6" />
-          <path v-else d="m15 6-6 6 6 6" />
+      <button class="sb__collapse-toggle" type="button" :data-tip="collapsed ? 'Expand sidebar' : 'Collapse sidebar'" :title="collapsed ? 'Expand sidebar' : 'Collapse sidebar'" :aria-label="collapsed ? 'Expand sidebar' : 'Collapse sidebar'" @click="toggleCollapsed">
+        <svg width="13" height="13" class="sb__collapse-icon" :class="{ 'is-collapsed': collapsed }" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="m9 6 6 6-6 6" />
         </svg>
       </button>
     </header>
 
     <div class="sb__new-wrap">
-      <button class="sb__new" type="button" title="New session" @click="createSession">
+      <button class="sb__new" type="button" :data-tip="'New session'" title="New session" @click="createSession">
         <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round">
           <path d="M12 5v14M5 12h14" />
         </svg>
-        <span v-if="!collapsed">New session</span>
-        <kbd v-if="!collapsed">Ctrl N</kbd>
+        <Transition name="sb-fade">
+          <span v-if="!collapsed">New session</span>
+        </Transition>
+        <Transition name="sb-fade">
+          <kbd v-if="!collapsed">Ctrl N</kbd>
+        </Transition>
       </button>
     </div>
 
@@ -151,6 +156,7 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
         :key="item.id"
         class="sb__nav-item"
         :class="{ 'is-active': active === item.id }"
+        :data-tip="item.label"
         :aria-current="active === item.id ? 'page' : undefined"
         :title="item.label"
         type="button"
@@ -159,7 +165,9 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
           <path :d="item.icon" />
         </svg>
-        <span v-if="!collapsed">{{ item.label }}</span>
+        <Transition name="sb-fade">
+          <span v-if="!collapsed">{{ item.label }}</span>
+        </Transition>
       </button>
     </nav>
 
@@ -171,13 +179,19 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
         :class="{ 'is-open': activeWorkspace?.id === workspace.id && collapsedWorkspaceId !== workspace.id }"
       >
         <div class="sb__workspace-row" :class="{ 'is-active': activeWorkspace?.id === workspace.id }">
-          <button class="sb__workspace" type="button" :title="collapsed ? workspaceLabel(workspace) : workspace.path" @click="onWorkspaceClick(workspace)">
+          <button class="sb__workspace" type="button" :data-tip="workspaceLabel(workspace)" :title="collapsed ? workspaceLabel(workspace) : workspace.path" @click="onWorkspaceClick(workspace)">
             <span class="sb__avatar" :class="index % 2 ? 'is-red' : 'is-blue'">{{ initials(workspace) }}</span>
-            <span v-if="!collapsed" class="sb__workspace-name">{{ workspaceLabel(workspace) }}</span>
-            <span v-if="!collapsed" class="sb__state" :class="{ 'is-live': workspace.is_active }">{{ workspace.is_active ? 'open' : 'idle' }}</span>
-            <svg v-if="!collapsed" class="sb__chev" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
-              <path d="m9 6 6 6-6 6" />
-            </svg>
+            <Transition name="sb-fade">
+              <span v-if="!collapsed" class="sb__workspace-name">{{ workspaceLabel(workspace) }}</span>
+            </Transition>
+            <Transition name="sb-fade">
+              <span v-if="!collapsed" class="sb__state" :class="{ 'is-live': workspace.is_active }">{{ workspace.is_active ? 'open' : 'idle' }}</span>
+            </Transition>
+            <Transition name="sb-fade">
+              <svg v-if="!collapsed" class="sb__chev" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                <path d="m9 6 6 6-6 6" />
+              </svg>
+            </Transition>
           </button>
           <button
             v-if="workspaces.length > 1"
@@ -239,9 +253,13 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
         </Transition>
       </section>
 
-      <button v-if="!workspaces.length" class="sb__empty sb__empty-workspace" type="button" title="Add workspace" @click="emit('add-workspace')">
-        <span v-if="!collapsed">No workspace</span>
-        <small v-if="!collapsed">Add a folder</small>
+      <button v-if="!workspaces.length" class="sb__empty sb__empty-workspace" type="button" :data-tip="'Add workspace'" title="Add workspace" @click="emit('add-workspace')">
+        <Transition name="sb-fade">
+          <span v-if="!collapsed">No workspace</span>
+        </Transition>
+        <Transition name="sb-fade">
+          <small v-if="!collapsed">Add a folder</small>
+        </Transition>
         <svg v-else width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
           <path d="M12 5v14M5 12h14" />
         </svg>
@@ -252,7 +270,9 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
 
     <footer class="sb__footer">
       <span class="sb__status-dot" />
-      <span v-if="!collapsed">Runtime ready</span>
+      <Transition name="sb-fade">
+        <span v-if="!collapsed">Runtime ready</span>
+      </Transition>
     </footer>
   </aside>
 </template>
@@ -839,6 +859,106 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
   flex: 0 0 5px;
   border-radius: 50%;
   background: var(--green);
+}
+
+/* 文字淡入淡出（收缩/展开时） */
+.sb-fade-enter-active,
+.sb-fade-leave-active {
+  transition: opacity 130ms ease;
+}
+
+.sb-fade-enter-from,
+.sb-fade-leave-to {
+  opacity: 0;
+}
+
+/* --- 收缩态 --- */
+.sb.is-collapsed {
+  --sb-w: 64px;
+  overflow: visible;
+  contain: layout; /* 去掉 paint，允许 tooltip 溢出到侧栏外 */
+}
+
+/* 收缩态：hover 气泡提示 */
+.sb.is-collapsed [data-tip] {
+  position: relative;
+}
+
+.sb.is-collapsed [data-tip]::after {
+  content: attr(data-tip);
+  position: absolute;
+  left: calc(100% + 12px);
+  top: 50%;
+  transform: translateY(-50%) translateX(-4px);
+  z-index: 40;
+  padding: 5px 9px;
+  border-radius: 6px;
+  background: rgba(15, 23, 42, 0.92);
+  color: #ffffff;
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1.3;
+  white-space: nowrap;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 120ms ease 60ms, transform 120ms ease 60ms;
+}
+
+.sb.is-collapsed [data-tip]:hover::after {
+  opacity: 1;
+  transform: translateY(-50%) translateX(0);
+}
+
+/* 收缩态：nav 圆形图标 + active 蓝底 */
+.sb.is-collapsed .sb__nav-item {
+  width: 30px;
+  height: 30px;
+  justify-content: center;
+  margin: 2px auto;
+  padding: 0;
+  border-radius: 50%;
+}
+
+.sb.is-collapsed .sb__nav-item.is-active {
+  background: var(--blue);
+  color: #ffffff;
+}
+
+.sb.is-collapsed .sb__nav-item.is-active:hover {
+  background: var(--blue);
+}
+
+/* 收缩态：New session 圆形 */
+.sb.is-collapsed .sb__new {
+  width: 30px;
+  height: 30px;
+  margin: 0 auto;
+  justify-content: center;
+  border-radius: 50%;
+  padding: 0;
+}
+
+/* 收缩态：workspace 头像稍大 */
+.sb.is-collapsed .sb__avatar {
+  width: 24px;
+  height: 24px;
+  flex-basis: 24px;
+  font-size: 9px;
+}
+
+/* 收缩态：footer 状态点居中 */
+.sb.is-collapsed .sb__footer {
+  justify-content: center;
+  padding: 0;
+}
+
+/* 收缩切换箭头旋转 */
+.sb__collapse-icon {
+  transition: transform 260ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.sb__collapse-icon.is-collapsed {
+  transform: rotate(180deg);
 }
 
 @media (max-width: 760px) {
