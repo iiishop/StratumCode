@@ -724,11 +724,74 @@ onBeforeUnmount(() => {
 
 /* --- running/done states --- */
 .is-running .update-row__progress-bar.is-visible { opacity: 1; }
+
+/* running 时进度条斜纹流动 */
+.is-running .update-row__progress-bar::after {
+  background-image:
+    linear-gradient(90deg,
+      rgba(59, 130, 246, 0.28),
+      rgba(59, 130, 246, 0.18) 60%,
+      rgba(255, 255, 255, 0.24) 100%),
+    repeating-linear-gradient(45deg, rgba(255, 255, 255, 0.16) 0 6px, transparent 6px 12px);
+  background-size: 100% 100%, 200% 100%;
+  animation: bar-stripes 1.1s linear infinite;
+}
+
+.track--dev.is-running .update-row__progress-bar::after {
+  background-image:
+    linear-gradient(90deg,
+      rgba(16, 185, 129, 0.28),
+      rgba(16, 185, 129, 0.18) 60%,
+      rgba(255, 255, 255, 0.24) 100%),
+    repeating-linear-gradient(45deg, rgba(255, 255, 255, 0.16) 0 6px, transparent 6px 12px);
+  background-size: 100% 100%, 200% 100%;
+  animation: bar-stripes 1.1s linear infinite;
+}
+
+@keyframes bar-stripes {
+  to { background-position: 0 0, 200% 0; }
+}
+
 .is-done .update-row__progress-bar.is-visible {
   opacity: 1;
   position: relative;
   height: 0;
   margin-bottom: 0;
+}
+
+/* done 时进度条绿光脉冲 */
+.is-done .update-row__progress-bar.is-visible::after {
+  background: linear-gradient(90deg,
+    rgba(16, 185, 129, 0.34),
+    rgba(16, 185, 129, 0.18) 60%,
+    rgba(255, 255, 255, 0.22) 100%);
+  animation: done-glow 1.4s ease-out;
+}
+
+@keyframes done-glow {
+  0% { box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.55); }
+  100% { box-shadow: 0 0 0 14px rgba(16, 185, 129, 0); }
+}
+
+/* 行 hover 提升 */
+.update-row {
+  transition: transform 160ms ease, border-color 160ms ease, box-shadow 160ms ease;
+}
+
+.update-row:hover {
+  transform: translateY(-1px);
+  border-color: var(--accent-border);
+  box-shadow: 0 8px 22px rgba(16, 42, 92, 0.08);
+}
+
+/* 箭头 hover */
+.update-row__arrow:not(:disabled):hover {
+  transform: scale(1.12);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.25), 0 3px 12px rgba(59, 130, 246, 0.4);
+}
+
+.track--dev .update-row__arrow:not(:disabled):hover {
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.25), 0 3px 12px rgba(16, 185, 129, 0.4);
 }
 
 /* --- reduced motion --- */

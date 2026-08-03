@@ -29,7 +29,9 @@ onUnmounted(() => window.clearInterval(timer))
       <span class="update-status__commit">
         {{ commitLabel }}<span v-if="devSuffix" class="update-status__new">{{ devSuffix }}</span>
       </span>
-      <span v-if="loading" class="update-status__loading">checking</span>
+      <span v-if="loading" class="update-status__loading">
+        <span class="update-status__spinner"></span>checking
+      </span>
     </button>
     <span v-if="error" class="update-status__error">{{ error }}</span>
     <UpdatePanel
@@ -64,7 +66,19 @@ onUnmounted(() => window.clearInterval(timer))
   background: var(--code-bg);
   font: 10px/1 var(--mono);
   cursor: pointer;
-  transition: border-color var(--transition-fast), background var(--transition-fast), color var(--transition-fast);
+  transition: border-color var(--transition-fast), background var(--transition-fast), color var(--transition-fast), transform 140ms ease, box-shadow var(--transition-fast);
+}
+
+.update-status__button:hover {
+  border-color: var(--accent-border);
+  color: var(--text-h);
+  background: var(--accent-bg);
+  transform: translateY(-1px);
+  box-shadow: 0 3px 10px rgba(23, 86, 209, 0.14);
+}
+
+.update-status__button:active {
+  transform: translateY(0) scale(0.96);
 }
 
 .update-status__button.has-update {
@@ -74,12 +88,16 @@ onUnmounted(() => window.clearInterval(timer))
     linear-gradient(135deg, rgba(245, 200, 66, 0.26), transparent 46%),
     var(--text-h);
   box-shadow: 0 0 0 3px rgba(245, 200, 66, 0.16);
+  animation: update-pulse 2.6s ease-in-out infinite;
 }
 
-.update-status__button:hover {
-  border-color: var(--accent-border);
-  color: var(--text-h);
-  background: var(--accent-bg);
+@keyframes update-pulse {
+  0%, 100% {
+    box-shadow: 0 0 0 3px rgba(245, 200, 66, 0.16);
+  }
+  50% {
+    box-shadow: 0 0 0 7px rgba(245, 200, 66, 0.3);
+  }
 }
 
 .update-status__button.has-update:hover {
@@ -106,10 +124,25 @@ onUnmounted(() => window.clearInterval(timer))
   font-weight: 700;
 }
 
-.update-status__loading,
-.update-status__error {
+.update-status__loading {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
   color: var(--text-muted);
   font: 10px/1 var(--mono);
+}
+
+.update-status__spinner {
+  width: 9px;
+  height: 9px;
+  border: 1.5px solid var(--border-strong);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: update-spin 0.7s linear infinite;
+}
+
+@keyframes update-spin {
+  to { transform: rotate(360deg); }
 }
 
 .update-status__error {
@@ -118,5 +151,6 @@ onUnmounted(() => window.clearInterval(timer))
   color: var(--err);
   text-overflow: ellipsis;
   white-space: nowrap;
+  font: 10px/1 var(--mono);
 }
 </style>

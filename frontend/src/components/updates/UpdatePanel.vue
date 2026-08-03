@@ -57,40 +57,49 @@ async function restart() {
 
 <template>
   <Teleport to="body">
-    <div class="update-panel__scrim" @click="emit('close')"></div>
-    <section class="update-panel" role="dialog" aria-modal="true" aria-label="Updates">
-      <header class="update-panel__head">
-        <div>
-          <h2>Updates</h2>
-          <p>{{ status.repo || 'iiishop/StratumCode' }} — Stable follows GitHub releases, dev tracks origin/main</p>
-        </div>
-        <div class="update-panel__head-actions">
-          <button class="update-panel__check" type="button" @click="emit('refresh', true)">
-            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M21 12a9 9 0 1 1-2.64-6.36"/><polyline points="21 3 21 9 15 9"/>
-            </svg>
-            Check now
-          </button>
-          <button class="update-panel__close" type="button" aria-label="Close updates" @click="emit('close')">
-            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round">
-              <path d="M18 6 6 18M6 6l12 12" />
-            </svg>
-          </button>
-        </div>
-      </header>
-
-      <div class="update-panel__body">
-        <div v-if="showDiagnostics" class="update-panel__warnings">
-          <div v-for="(d, i) in diagnostics" :key="i" class="update-panel__warning">
-            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/>
-            </svg>
-            <div>
-              <p class="update-panel__warning-msg">{{ d.message }}</p>
-              <p class="update-panel__warning-hint">{{ d.hint }}</p>
+    <Transition name="update-panel">
+      <div class="update-panel__wrap">
+        <div class="update-panel__scrim" @click="emit('close')"></div>
+        <section class="update-panel" role="dialog" aria-modal="true" aria-label="Updates">
+          <header class="update-panel__head">
+            <div class="update-panel__head-title">
+              <span class="update-panel__head-mark">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M4 17l6-6-6-6"/><path d="M12 19h8"/>
+                </svg>
+              </span>
+              <div>
+                <h2>Updates</h2>
+                <p>{{ status.repo || 'iiishop/StratumCode' }} — Stable follows GitHub releases, dev tracks origin/main</p>
+              </div>
             </div>
-          </div>
-        </div>
+            <div class="update-panel__head-actions">
+              <button class="update-panel__check" type="button" @click="emit('refresh', true)">
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M21 12a9 9 0 1 1-2.64-6.36"/><polyline points="21 3 21 9 15 9"/>
+                </svg>
+                Check now
+              </button>
+              <button class="update-panel__close" type="button" aria-label="Close updates" @click="emit('close')">
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round">
+                  <path d="M18 6 6 18M6 6l12 12" />
+                </svg>
+              </button>
+            </div>
+          </header>
+
+          <div class="update-panel__body">
+            <div v-if="showDiagnostics" class="update-panel__warnings">
+              <div v-for="(d, i) in diagnostics" :key="i" class="update-panel__warning">
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/>
+                </svg>
+                <div>
+                  <p class="update-panel__warning-msg">{{ d.message }}</p>
+                  <p class="update-panel__warning-hint">{{ d.hint }}</p>
+                </div>
+              </div>
+            </div>
         <UpdateProgressRow
           title="Stable release"
           :current-label="`v${status.current_version}`"
@@ -124,31 +133,81 @@ async function restart() {
           @restart="restart"
         />
       </div>
-    </section>
+        </section>
+      </div>
+    </Transition>
   </Teleport>
 </template>
 
 <style scoped>
-.update-panel__scrim {
+.update-panel__wrap {
   position: fixed;
   inset: 0;
   z-index: 40;
+  pointer-events: none;
+}
+
+.update-panel__scrim {
+  position: absolute;
+  inset: 0;
+  pointer-events: auto;
   background: rgba(16, 42, 92, 0.18);
   backdrop-filter: blur(2px);
+  transition: opacity 0.22s ease;
 }
 
 .update-panel {
-  position: fixed;
+  position: absolute;
   right: 18px;
   bottom: 50px;
   z-index: 41;
+  pointer-events: auto;
   width: min(640px, calc(100vw - 28px));
   max-height: min(720px, calc(100dvh - 72px));
   overflow: hidden;
   border: 1px solid var(--border-strong);
   border-radius: var(--radius-lg);
-  background: rgba(255, 255, 255, 0.98);
-  box-shadow: 0 4px 32px rgba(16, 42, 92, 0.12), 0 0 0 1px rgba(16, 42, 92, 0.04);
+  background:
+    radial-gradient(120% 90% at 100% 0%, rgba(59, 130, 246, 0.07), transparent 55%),
+    linear-gradient(180deg, #ffffff, #f8fafd);
+  box-shadow:
+    0 12px 44px rgba(16, 42, 92, 0.16),
+    0 2px 8px rgba(16, 42, 92, 0.08),
+    0 0 0 1px rgba(16, 42, 92, 0.04);
+}
+
+/* 顶部 accent 光带 */
+.update-panel::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 0;
+  height: 2px;
+  background: linear-gradient(90deg, #3b82f6, #10b981 55%, rgba(16, 185, 129, 0.1));
+  opacity: 0.85;
+}
+
+/* 入场/退场动画 */
+.update-panel-enter-active,
+.update-panel-leave-active {
+  transition: opacity 0.22s ease;
+}
+.update-panel-enter-active .update-panel,
+.update-panel-leave-active .update-panel {
+  transition: transform 0.28s cubic-bezier(0.16, 1, 0.3, 1), opacity 0.22s ease;
+}
+.update-panel-enter-from,
+.update-panel-leave-to {
+  opacity: 0;
+}
+.update-panel-enter-from .update-panel {
+  transform: translateY(16px) scale(0.97);
+  opacity: 0;
+}
+.update-panel-leave-to .update-panel {
+  transform: translateY(10px) scale(0.98);
+  opacity: 0;
 }
 
 .update-panel__head {
@@ -158,12 +217,35 @@ async function restart() {
   gap: 16px;
   padding: 18px 18px 14px;
   border-bottom: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.6);
+}
+
+.update-panel__head-title {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  min-width: 0;
+}
+
+.update-panel__head-mark {
+  display: grid;
+  width: 32px;
+  height: 32px;
+  flex-shrink: 0;
+  place-items: center;
+  margin-top: 2px;
+  border: 1px solid rgba(59, 130, 246, 0.28);
+  border-radius: 10px;
+  color: #ffffff;
+  background: linear-gradient(135deg, #3b82f6, #2563eb);
+  box-shadow: 0 3px 10px rgba(59, 130, 246, 0.3), inset 0 1px 0 rgba(255, 255, 255, 0.25);
 }
 
 .update-panel__head h2 {
   margin: 0;
   color: var(--text-h);
   font: 570 20px/1.1 var(--heading);
+  letter-spacing: -0.01em;
 }
 
 .update-panel__head p {
@@ -189,20 +271,32 @@ async function restart() {
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
   color: var(--text-h);
-  background: transparent;
+  background: linear-gradient(180deg, #ffffff, var(--code-bg));
+  box-shadow: 0 1px 2px rgba(16, 42, 92, 0.06), inset 0 1px 0 rgba(255, 255, 255, 0.8);
   font: 600 11px/1 var(--sans);
   cursor: pointer;
-  transition: border-color var(--transition-fast), background var(--transition-fast), color var(--transition-fast);
+  transition: border-color var(--transition-fast), background var(--transition-fast), color var(--transition-fast), transform 120ms ease, box-shadow var(--transition-fast);
 }
 
 .update-panel__check:hover {
   border-color: var(--accent-border);
   color: var(--accent);
-  background: var(--accent-bg);
+  background: linear-gradient(180deg, #ffffff, var(--accent-bg));
+  transform: translateY(-1px);
+  box-shadow: 0 3px 10px rgba(23, 86, 209, 0.16), inset 0 1px 0 rgba(255, 255, 255, 0.8);
+}
+
+.update-panel__check:active {
+  transform: translateY(0) scale(0.97);
 }
 
 .update-panel__check svg {
   flex-shrink: 0;
+  transition: transform 300ms ease;
+}
+
+.update-panel__check:active svg {
+  transform: rotate(180deg);
 }
 
 .update-panel__close {
@@ -216,11 +310,16 @@ async function restart() {
   color: var(--text-muted);
   background: transparent;
   cursor: pointer;
+  transition: color var(--transition-fast), background var(--transition-fast), transform 120ms ease;
 }
 
 .update-panel__close:hover {
   color: var(--text-h);
   background: var(--code-bg-hover);
+}
+
+.update-panel__close:active {
+  transform: scale(0.92);
 }
 
 .update-panel__body {
