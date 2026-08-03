@@ -1,11 +1,13 @@
 <script setup>
 import { nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import html2canvas from 'html2canvas'
+import { MacDockGenie } from '../../lib/MacDockGenie.js'
 
-// 通用底栏弹出面板：从触发元素位置"生长"出来（macOS Dock 弹窗风格），
-// 收回时缩回触发元素。可复用于底栏任意入口（更新面板、后续的通知/设置等）。
-//
-// 不用 Vue <Transition>（Teleport 场景 enter 过渡偶发不触发），
-// 改用 v-show + 手动 .is-open 类切换：显示后 nextTick 再加类，保证过渡必然发生。
+// 通用底栏弹出面板：
+// - 打开：macOS Dock 弹窗风格，从触发元素（锚点）边"展开"（scaleY + 锚点固定 + 过冲）
+// - 收起：macOS 精灵效果（Genie Effect）——截取面板快照，切片沿贝塞尔弧线吸入底栏按钮
+// 可复用于底栏任意入口（更新面板、后续的通知/设置等）。
+// 不用 Vue <Transition>（Teleport 场景 enter 过渡偶发不触发），手动控制类与动画。
 
 const props = defineProps({
   modelValue: { type: Boolean, default: false },
@@ -24,10 +26,8 @@ const emit = defineEmits(['update:modelValue'])
 const panelEl = ref(null)
 const visible = ref(false)
 const open = ref(false)
-const closing = ref(false)
 const panelStyle = ref({})
 const arrowStyle = ref({})
-let hideTimer = 0
 
 function resolveAnchor() {
   const el = props.anchor
@@ -91,26 +91,82 @@ function positionPanel() {
 }
 
 watch(() => props.modelValue, async (v) => {
-  window.clearTimeout(hideTimer)
   if (v) {
+    cleanupGenieCanvas()
     visible.value = true
-    closing.value = false
     await nextTick()
     positionPanel()
     // 下一帧再加 .is-open，保证生长动画必然触发
     requestAnimationFrame(() => { open.value = true })
   } else {
-    // 收回动画：缩回触发元素
-    open.value = false
-    closing.value = true
-    hideTimer = window.setTimeout(() => {
-      if (!props.modelValue) {
-        closing.value = false
-        visible.value = false
-      }
-    }, 220)
+    // 收起：精灵效果吸入底栏按钮
+    closeWithGenie()
   }
 })
+
+// 精灵吸入动画：截快照 → 隐藏面板 → canvas 切片沿弧线吸入 Dock 目标
+async function closeWithGenie() {
+  const panel = panelEl.value
+  if (!panel) {
+    open.value = false
+    visible.value = false
+    return
+  }
+
+  // 1. 截取面板快照（html2canvas）
+  let snapshot
+  try {
+    snapshot = await html2canvas(panel, { backgroundColor: null, scale: 1, useCORS: true })
+  } catch (err) {
+    // 快照失败降级：直接隐藏（不阻塞关闭）
+    console.warn('[DockPopover] genie snapshot failed, fallback to instant close', err)
+    open.value = false
+    visible.value = false
+    return
+  }
+
+  const rect = panel.getBoundingClientRect()
+
+  // 2. 隐藏面板
+  open.value = false
+  visible.value = false
+
+  // 3. 全屏 canvas 层播放吸入动画
+  const canvas = document.createElement('canvas')
+  canvas.width = window.innerWidth
+  canvas.height = window.innerHeight
+  canvas.dataset.genie = '1'
+  canvas.style.cssText = 'position:fixed;left:0;top:0;z-index:45;pointer-events:none;'
+  document.body.appendChild(canvas)
+
+  const anchor = resolveAnchor()
+  let dockTarget
+  if (anchor) {
+    const ar = anchor.getBoundingClientRect()
+    dockTarget = { x: ar.left + ar.width / 2, y: ar.top + ar.height / 2 }
+  } else {
+    dockTarget = { x: window.innerWidth - 60, y: window.innerHeight - 30 }
+  }
+
+  const genie = new MacDockGenie(
+    canvas,
+    snapshot,
+    { left: rect.left, top: rect.top, width: rect.width, height: rect.height },
+    dockTarget,
+    {
+      duration: 800,
+      pathFunction: [0.2, -0.5, 0.8, 1.2],
+      staggerFactor: 0.6,
+      sliceWidth: 3,
+    },
+  )
+  genie.start(() => canvas.remove())
+}
+
+// 打开时清理可能残留的 genie canvas（动画中重新打开）
+function cleanupGenieCanvas() {
+  document.querySelectorAll('canvas[data-genie]').forEach((c) => c.remove())
+}
 
 function onResize() {
   if (visible.value && open.value) positionPanel()
@@ -119,7 +175,7 @@ function onResize() {
 onMounted(() => window.addEventListener('resize', onResize))
 onBeforeUnmount(() => {
   window.removeEventListener('resize', onResize)
-  window.clearTimeout(hideTimer)
+  cleanupGenieCanvas()
 })
 </script>
 
@@ -127,7 +183,7 @@ onBeforeUnmount(() => {
   <Teleport to="body">
     <div v-show="visible" class="dock-popover">
       <div class="dock-popover__scrim" @click="emit('update:modelValue', false)"></div>
-      <div ref="panelEl" class="dock-popover__panel" :class="{ 'is-open': open, 'is-closing': closing }" :style="panelStyle">
+      <div ref="panelEl" class="dock-popover__panel" :class="{ 'is-open': open }" :style="panelStyle">
         <span v-if="showArrow" class="dock-popover__arrow" :style="arrowStyle"></span>
         <slot></slot>
       </div>
