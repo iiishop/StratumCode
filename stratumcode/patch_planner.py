@@ -413,11 +413,44 @@ def patch_planning_stream(
                 "content": reason,
                 "streaming": False,
             })
-            yield {"op": "update", "id": stage_id, "patch": {
-                "state": "error",
-                "phase": "patch_planning_failed",
-            }}
-            return
+            # 给模型修正机会：去掉无效 skip 或改为具体代码修改，而不是直接判失败
+            skip_repair_ok = False
+            for skip_repair_attempt in _attempt_indexes(attempts):
+                messages.extend([
+                    {"role": "assistant", "content": json.dumps(verification or {}, ensure_ascii=False)[:4000]},
+                    {"role": "user", "content": (
+                        reason
+                        + "\nRemove the rejected runtime skip candidates or replace them "
+                        + "with concrete code changes, then return corrected patch_verification JSON."
+                    )},
+                ])
+                verification = yield from _content_json_stream(
+                    provider,
+                    model,
+                    messages,
+                    pricing_rules,
+                    usage_total,
+                    run_id,
+                    f"verification-skip-repair-{skip_repair_attempt}",
+                )
+                rejected_skips = _rejected_skip_reviews(verification.get("skip_reviews"))
+                if not rejected_skips:
+                    skip_repair_ok = True
+                    break
+            if not skip_repair_ok:
+                reason = "Patch verification rejected runtime skip candidates after repair: " + "; ".join(
+                    str(item.get("reason") or item.get("decision_slot"))
+                    for item in rejected_skips
+                )
+                yield start_event(f"{run_id}-skip-rejected", "output", {
+                    "content": reason,
+                    "streaming": False,
+                })
+                yield {"op": "update", "id": stage_id, "patch": {
+                    "state": "error",
+                    "phase": "patch_planning_failed",
+                }}
+                return
         if isinstance(verification, dict):
             _merge_acceptance_verification(
                 acceptance_verification,

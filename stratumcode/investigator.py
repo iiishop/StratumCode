@@ -231,6 +231,26 @@ def _investigation_directive(
             _phase_tool_choice(InvestigationPhase.CLEARIFY),
             prompt,
         )
+    pending_evidence = _clearify_pending_evidence_unknowns(recorded_findings)
+    if pending_evidence:
+        prompt = (
+            "The user has already answered the pending product decision(s), but "
+            "those clearify answers have no code evidence yet. Use "
+            "read/grep/glob/code_nav to locate the actual implementation sites, "
+            "record the evidence, then call finish_investigation again. "
+            "Pending evidence: "
+            f"{json.dumps(pending_evidence, ensure_ascii=False)}"
+        )
+        return (
+            InvestigationPhase.FINISH_WITH_EVIDENCE_GAP,
+            _phase_tools(
+                InvestigationPhase.FINISH_WITH_EVIDENCE_GAP,
+                tools=tools,
+                finish_evidence_blocked=True,
+            ),
+            _phase_tool_choice(InvestigationPhase.FINISH_WITH_EVIDENCE_GAP),
+            prompt,
+        )
     if verification_request:
         prompt = (
             "The semantic quality gate requires independent verification before this "
@@ -1890,9 +1910,36 @@ def _recorded_resolves_initial_unknowns(
     resolved = [
         str(item.get("unknown_id") or "").strip()
         for item in recorded.get("resolutions", [])
-        if isinstance(item, dict) and str(item.get("status") or "") in {"resolved", "deferred"}
+        if isinstance(item, dict)
+        and str(item.get("status") or "") in {"resolved", "deferred"}
+        and not _clearify_resolution_lacks_evidence(item)
     ]
     return all(any(_same_unknown_id(required_id, item) for item in resolved) for required_id in required_ids)
+
+
+def _clearify_resolution_lacks_evidence(item: dict) -> bool:
+    """clearify 的用户答案若没有文件证据，不算完全解决。
+
+    用户决定（如"返回复数"）只是产品决策，模型还必须实际调查代码、
+    把修改目标位置写进 evidence——否则后续 patch_planning 无从下手
+    （也杜绝了 answers 里"模型自解析 vs 用户决定"并存导致的重复询问）。"""
+    if str(item.get("reason") or "") != CLEARIFY_RESOLUTION_REASON:
+        return False
+    return not _reference_list(item.get("evidence"))
+
+
+def _clearify_pending_evidence_unknowns(recorded: dict) -> list[dict]:
+    """clearify 已答但还没有代码证据的 resolution。
+
+    用户决定只是产品决策，模型必须 read/grep 定位实现位置并写进 evidence，
+    才算真正完成该 unknown 的调查。"""
+    return [
+        item
+        for item in recorded.get("resolutions", [])
+        if isinstance(item, dict)
+        and str(item.get("reason") or "") == CLEARIFY_RESOLUTION_REASON
+        and not _reference_list(item.get("evidence"))
+    ]
 
 
 def _pending_clearify_unknown(
@@ -5247,7 +5294,30 @@ def _merge_recorded_findings(current: dict, update: dict) -> dict:
             if field == "resolutions" and belief_aliases:
                 value = [_remap_resolution_belief_ids(item, belief_aliases) for item in value]
             merged[field] = _merge_list_by_identity(merged[field], value)
+            if field == "resolutions":
+                # clearify 用户答案是权威决定：覆盖同 unknown 的先前模型自解析，
+                # 避免 answers 里两条矛盾答案并存（重复 clearify 的根源）。
+                merged[field] = _supersede_resolutions_with_clearify(merged[field])
     return merged
+
+
+def _supersede_resolutions_with_clearify(resolutions: list[dict]) -> list[dict]:
+    clearify_ids = {
+        str(item.get("unknown_id") or "").strip()
+        for item in resolutions
+        if isinstance(item, dict) and str(item.get("reason") or "") == CLEARIFY_RESOLUTION_REASON
+    }
+    if not clearify_ids:
+        return resolutions
+    return [
+        item
+        for item in resolutions
+        if not (
+            isinstance(item, dict)
+            and str(item.get("unknown_id") or "").strip() in clearify_ids
+            and str(item.get("reason") or "") != CLEARIFY_RESOLUTION_REASON
+        )
+    ]
 
 
 def _merge_beliefs_by_identity(left: list, right: list) -> tuple[list, dict[str, str]]:
