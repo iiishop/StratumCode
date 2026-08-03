@@ -7,6 +7,7 @@ import os
 import platform
 import re
 import sys
+import time
 from collections.abc import Iterator
 from enum import StrEnum
 from functools import lru_cache
@@ -4885,8 +4886,50 @@ def _unsupported_grounding_literals(
             # 产生不了这个字面量。要求观察证据毫无意义，直接放行。
             if _is_python_stdlib_module(module) or _is_framework_module(module):
                 continue
+            # LSP 兜底：框架列表没覆盖的（冷门语言/新框架），问 LSP 符号
+            # 在项目里有没有定义。只有 server 正常返回"查不到"（NOT_FOUND）
+            # 才按框架/外部引用豁免——这是可信信号。UNAVAILABLE（自动安装+
+            # 退避重试后仍不可用）不豁免：宁可要求证据等环境修复，也不能把
+            # 未观察的项目代码引用误放行（同名文件层只兜底被观察过的文件）。
+            lsp_anchor = next(
+                (item for item in evidence_obs if item.get("path")),
+                None,
+            )
+            if lsp_anchor is not None:
+                workspace = _infer_workspace_root(str(lsp_anchor.get("path") or ""))
+                if workspace:
+                    status = _lsp_definition_file_typed(
+                        str(lsp_anchor.get("path")),
+                        module,
+                        workspace,
+                    )
+                    if status == LSP_DEFINITION_NOT_FOUND:
+                        continue
         unsupported.append(literal)
     return _dedupe_strings(unsupported)
+
+
+def _infer_workspace_root(path: str) -> str:
+    """从文件路径向上找项目根（含 .git 或常见项目标记文件的目录）。"""
+    current = os.path.dirname(os.path.abspath(path))
+    markers = (".git", "pyproject.toml", "package.json", "go.mod", "Cargo.toml",
+               "*.csproj", "*.sln", "pom.xml", "build.gradle", "composer.json",
+               "Gemfile", "mix.exs")
+    while True:
+        if any(
+            os.path.exists(os.path.join(current, marker))
+            or (marker.startswith("*.") and any(
+                os.path.exists(os.path.join(current, name))
+                for name in os.listdir(current)
+                if name.endswith(marker[1:])
+            ))
+            for marker in markers
+        ):
+            return current
+        parent = os.path.dirname(current)
+        if parent == current:
+            return ""
+        current = parent
 
 
 def _observation_covers_module(observations: list[dict], module: str) -> bool:
@@ -6261,8 +6304,97 @@ def _lsp_definition_file(path: str, symbol: str, workspace_dir: str) -> str | No
     """Resolve the file where ``symbol`` is defined via the code_nav LSP tool.
 
     Returns the absolute definition file path, or None when LSP is unavailable
-    or the symbol cannot be resolved (best-effort).
+    or the symbol cannot be resolved (best-effort). 兼容旧调用方：
+    路径 与 三态中的 NOT_FOUND/UNAVAILABLE 统一折叠为 None。
     """
+    status = _lsp_definition_file_typed(path, symbol, workspace_dir)
+    if status in (LSP_DEFINITION_NOT_FOUND, LSP_DEFINITION_UNAVAILABLE):
+        return None
+    return status if isinstance(status, str) else None
+
+
+LSP_DEFINITION_NOT_FOUND = "___lsp_definition_not_found___"
+LSP_DEFINITION_UNAVAILABLE = "___lsp_definition_unavailable___"
+
+
+@lru_cache(maxsize=256)
+def _lsp_definition_file_typed(path: str, symbol: str, workspace_dir: str) -> str:
+    """三态 LSP 定义查询：定义文件路径 / NOT_FOUND / UNAVAILABLE。
+
+    - 查到定义文件：符号是项目代码（不豁免，且定义文件可作为读证据要求）。
+    - NOT_FOUND：server 正常但符号无定义 —— 框架/外部引用的强信号（豁免）。
+    - UNAVAILABLE：server 没装/无法启动 —— 自动安装（lsp_tool install by
+      language）并指数退避重试（1s/2s/4s）；仍不可用返回 UNAVAILABLE。
+      调用方按"框架引用"豁免（同名文件层已兜底项目代码，不会误放行）。
+    """
+    for attempt in range(3):
+        result = _lsp_definition_file_once(path, symbol, workspace_dir)
+        if result is not LSP_DEFINITION_UNAVAILABLE:
+            return result
+        if attempt < 2:
+            _try_install_lsp_for_path(path, workspace_dir)
+            time.sleep(1.0 * (2 ** attempt))  # 1s, 2s
+    return LSP_DEFINITION_UNAVAILABLE
+
+
+def _try_install_lsp_for_path(path: str, workspace_dir: str) -> bool:
+    """按文件扩展名推断语言，自动安装最合适的 LSP server（mason）。
+
+    失败静默（返回 False）——LSP 安装是 best-effort，装不上就走
+    UNAVAILABLE 分支，由调用方按框架引用豁免兜底。
+    """
+    try:
+        from . import lsp
+
+        language = _extension_language(path)
+        if not language:
+            return False
+        candidates = lsp.list_all(language=language)
+        if not candidates:
+            return False
+        picked = next(
+            (item for item in candidates if item.get("available")),
+            candidates[0],
+        )
+        name = str(picked.get("name") or "").strip()
+        if not name:
+            return False
+        existing = lsp.get(name) if hasattr(lsp, "get") else None
+        if isinstance(existing, dict) and existing.get("status") == "ready":
+            return True
+        result = lsp.install(name)
+        return bool(isinstance(result, dict) and result.get("ok"))
+    except Exception:
+        return False
+
+
+_EXTENSION_LANGUAGE = {
+    ".py": "python", ".pyw": "python",
+    ".js": "javascript", ".mjs": "javascript", ".cjs": "javascript",
+    ".ts": "typescript", ".tsx": "typescriptreact", ".jsx": "javascriptreact",
+    ".vue": "vue", ".svelte": "svelte",
+    ".cs": "csharp", ".fs": "fsharp", ".vb": "vb",
+    ".java": "java", ".kt": "kotlin", ".kts": "kotlin", ".scala": "scala",
+    ".go": "go", ".rs": "rust",
+    ".c": "c", ".h": "c", ".cpp": "cpp", ".cc": "cpp", ".cxx": "cpp",
+    ".hpp": "cpp", ".hxx": "cpp",
+    ".rb": "ruby", ".php": "php", ".swift": "swift",
+    ".lua": "lua", ".r": "r", ".m": "objective-c", ".mm": "objective-cpp",
+    ".dart": "dart", ".ex": "elixir", ".exs": "elixir",
+    ".hs": "haskell", ".erl": "erlang", ".ml": "ocaml",
+    ".sql": "sql", ".sh": "bash", ".bash": "bash", ".zsh": "bash",
+    ".toml": "toml", ".yaml": "yaml", ".yml": "yaml", ".json": "json",
+    ".html": "html", ".css": "css", ".scss": "scss",
+}
+
+
+def _extension_language(path: str) -> str:
+    ext = os.path.splitext(str(path).lower())[1]
+    return _EXTENSION_LANGUAGE.get(ext, "")
+
+
+def _lsp_definition_file_once(path: str, symbol: str, workspace_dir: str) -> str:
+    """单次 LSP 定义查询，返回三态（不重试不安装）。"""
     try:
         import asyncio
 
@@ -6276,15 +6408,36 @@ def _lsp_definition_file(path: str, symbol: str, workspace_dir: str) -> str | No
             )
         )
     except Exception:
-        return None
+        return LSP_DEFINITION_UNAVAILABLE
     if not isinstance(result, ToolResult) or result.title.startswith("[error]"):
-        return None
+        return LSP_DEFINITION_UNAVAILABLE
     try:
         payload = json.loads(result.output)
     except (json.JSONDecodeError, TypeError):
-        return None
-    if not isinstance(payload, dict) or not payload.get("ok"):
-        return None
+        return LSP_DEFINITION_UNAVAILABLE
+    if not isinstance(payload, dict):
+        return LSP_DEFINITION_UNAVAILABLE
+    if not payload.get("ok"):
+        message = str(payload.get("message") or "").casefold()
+        unavailable = any(
+            token in message
+            for token in (
+                "lsp server not found",
+                "no lsp server",
+                "no enabled available lsp server",
+                "server not available",
+                "executable is unavailable",
+                "not installed",
+                "no server",
+                "could not start",
+                "unable to connect",
+                "not found",
+                "is not installed",
+            )
+        )
+        if unavailable or payload.get("kind") == "error":
+            return LSP_DEFINITION_UNAVAILABLE
+        return LSP_DEFINITION_NOT_FOUND
     result_val = payload.get("result")
     items = None
     if isinstance(result_val, dict):
