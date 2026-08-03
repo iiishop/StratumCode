@@ -124,13 +124,13 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
           <span v-if="!collapsed">StratumCode</span>
         </Transition>
       </button>
-      <button class="sb__top-action" type="button" title="Add workspace" aria-label="Add workspace" @click="emit('add-workspace')">
-        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round">
+      <button class="sb__top-action" type="button" :data-tip="'Add workspace'" title="Add workspace" aria-label="Add workspace" @click="emit('add-workspace')">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round">
           <path d="M12 5v14M5 12h14" />
         </svg>
       </button>
       <button class="sb__collapse-toggle" type="button" :data-tip="collapsed ? 'Expand sidebar' : 'Collapse sidebar'" :title="collapsed ? 'Expand sidebar' : 'Collapse sidebar'" :aria-label="collapsed ? 'Expand sidebar' : 'Collapse sidebar'" @click="toggleCollapsed">
-        <svg width="13" height="13" class="sb__collapse-icon" :class="{ 'is-collapsed': collapsed }" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <svg width="14" height="14" class="sb__collapse-icon" :class="{ 'is-collapsed': collapsed }" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
           <path d="m9 6 6 6-6 6" />
         </svg>
       </button>
@@ -359,21 +359,26 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
 
 .sb__collapse-toggle {
   display: grid;
-  width: 20px;
-  height: 20px;
-  flex: 0 0 20px;
+  width: 26px;
+  height: 26px;
+  flex: 0 0 26px;
   place-items: center;
   border: 0;
-  border-radius: 3px;
-  background: transparent;
-  color: var(--faint);
+  border-radius: 6px;
+  background: rgba(15, 23, 42, 0.06);
+  color: var(--muted);
   cursor: pointer;
+  transition: background 120ms ease, color 120ms ease, transform 120ms ease;
 }
 
 .sb__collapse-toggle:hover,
 .sb__collapse-toggle:focus-visible {
-  background: rgba(15, 23, 42, .05);
+  background: rgba(15, 23, 42, 0.12);
   color: var(--text);
+}
+
+.sb__collapse-toggle:active {
+  transform: scale(0.92);
 }
 
 .sb__top-action,
@@ -390,11 +395,30 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
   cursor: pointer;
 }
 
+/* 顶部加号（添加 workspace）：主操作，明确按钮感 */
+.sb__top-action {
+  width: 26px;
+  height: 26px;
+  flex-basis: 26px;
+  border-radius: 6px;
+  background: rgba(37, 99, 235, 0.09);
+  color: var(--blue);
+  transition: background 120ms ease, color 120ms ease, transform 120ms ease;
+}
+
 .sb__top-action:hover,
-.sb__top-action:focus-visible,
+.sb__top-action:focus-visible {
+  background: var(--blue);
+  color: #ffffff;
+}
+
+.sb__top-action:active {
+  transform: scale(0.92);
+}
+
 .sb__row-action:hover,
 .sb__row-action:focus-visible {
-  background: rgba(15, 23, 42, .05);
+  background: rgba(15, 23, 42, 0.05);
   color: var(--text);
 }
 
