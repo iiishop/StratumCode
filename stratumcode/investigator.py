@@ -91,6 +91,14 @@ _NEGATIVE_CLAIM_RE = re.compile(
     r"没有独立|无独立|没有任何|均未|"
     r"not found|does not exist|absent|no evidence|undocumented)"
 )
+
+# read_only 模式下按设计不可得的"运行时证据"要求（审计模型常误提）：
+# 这类 missing 在只读调查中被过滤，不进入 REPAIR（见 _apply_investigation_audit）。
+_RUNTIME_EVIDENCE_RE = re.compile(
+    r"(运行时|runtime|测试|测试用例|日志|复现|reproduce|"
+    r"实际运行|运行表现|可观察.*运行|运行.*验证|跑一下|执行.*验证|"
+    r"可复现行为)"
+)
 RECORD_RECOVERY_REASON = "Record pending observations and required resolutions."
 
 
@@ -1041,6 +1049,7 @@ def investigation_stream(
                             observations=observations,
                             strict_grounding=_analysis_requests_implementation(analysis),
                             allow_verification=subagent_enabled and _analysis_requests_implementation(analysis),
+                            analysis=analysis,
                         )
                         semantic_repair_required_ids = _semantic_repair_resolution_ids(
                             recorded_findings,
@@ -3297,6 +3306,7 @@ def _finalize_investigation(
                         recorded_findings,
                         quality_audit,
                         observations=observations or [],
+                        analysis=analysis or {},
                     )
                 messages.append({
                     "role": "tool",
@@ -4401,6 +4411,7 @@ def _apply_investigation_audit(
     observations: list[dict] | None = None,
     strict_grounding: bool = True,
     allow_verification: bool = True,
+    analysis: dict | None = None,
 ) -> tuple[dict, list[dict], dict[str, str]]:
     result = {field: list(recorded.get(field, [])) for field in FINDING_FIELDS}
     beliefs = [dict(item) for item in result["beliefs"] if isinstance(item, dict)]
@@ -4531,6 +4542,16 @@ def _apply_investigation_audit(
                 continue
             status = "investigate"
         missing = _semantic_missing_items(verdict.get("missing"))
+        original_missing = missing
+        # read_only 模式下，"运行时证据"（测试/日志/复现/实际运行表现）按设计
+        # 不可得。审计模型若要求这类证据，直接移除——代码路径推断 + 明确声明
+        # 无运行时证据，就是该 unknown 在只读调查中的最终答案，不应进入 REPAIR。
+        if missing and _analysis_is_read_only(analysis):
+            missing = [
+                item
+                for item in missing
+                if not _RUNTIME_EVIDENCE_RE.search(str(item.get("requirement") or ""))
+            ]
         # 语义门禁打回时无条件进入 append_missing_only 修复：
         # 不依赖 verdict 是否带 repair_mode 字段（audit 模型常缺失该字段，
         # 缺失时旧实现 pop 掉 repair_mode，导致下一轮 repair_ids 为空、
@@ -4542,7 +4563,13 @@ def _apply_investigation_audit(
         else:
             resolution.pop("repair_mode", None)
             resolution.pop("semantic_missing", None)
-        resolution["status"] = "partially_resolved"
+        if missing:
+            resolution["status"] = "partially_resolved"
+        elif original_missing and _analysis_is_read_only(analysis):
+            # 缺失要求全部是"运行时证据"类且被只读约束过滤：代码路径推断即最终答案
+            resolution["status"] = "resolved"
+        else:
+            resolution["status"] = "partially_resolved"
         resolution["reason"] = (
             reason
             or _semantic_missing_reason(missing)
