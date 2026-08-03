@@ -84,6 +84,42 @@ export function useSkills() {
     }
   }
 
+  async function placeSkill(skillName) {
+    // NDJSON 流：收集 subagent 事件，返回 done 事件的 result
+    const response = await fetch('/api/subagents/place-skill', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ skill: skillName }),
+    })
+    if (!response.ok) throw new Error(`Place request failed (${response.status})`)
+    if (!response.body) throw new Error('No response stream')
+    const reader = response.body.getReader()
+    const decoder = new TextDecoder()
+    let buffer = ''
+    let result = null
+    for (;;) {
+      const { done, value } = await reader.read()
+      if (done) break
+      buffer += decoder.decode(value, { stream: true })
+      let idx
+      while ((idx = buffer.indexOf('\n')) >= 0) {
+        const line = buffer.slice(0, idx).trim()
+        buffer = buffer.slice(idx + 1)
+        if (!line) continue
+        let event
+        try {
+          event = JSON.parse(line)
+        } catch {
+          continue
+        }
+        if (event.op === 'done') result = event.result || event.error || null
+        else if (event.op === 'error') throw new Error(event.message || 'Place failed')
+      }
+    }
+    if (result === null) throw new Error('No placement result')
+    return result
+  }
+
   async function remove(item) {
     const path = item?.path || ''
     busy.value = path
@@ -151,7 +187,7 @@ export function useSkills() {
   return {
     local, results, roots, targets, assignments, modes, preview, runtime,
     loading, searching, busy, error,
-    load, search, add, create, remove, installRuntime, show, configure,
+    load, search, add, create, placeSkill, remove, installRuntime, show, configure,
   }
 }
 

@@ -120,6 +120,7 @@ _ROUTES: dict[tuple[str, str], object] = {
     ("POST", "/api/chat"):                  lambda h, b: h._handle_chat(b),
     ("POST", "/api/chat/answer"):           lambda h, b: h._handle_chat_answer(b),
     ("POST", "/api/subagents/mcp-install"): lambda h, b: h._handle_mcp_install(b),
+    ("POST", "/api/subagents/place-skill"): lambda h, b: h._handle_place_skill(b),
     ("POST", "/api/skills/search"):         lambda h, b: h._json(skills.search(str(b.get("query") or ""))),
     ("POST", "/api/skills/add"):            lambda h, b: h._json(skills.add(str(b.get("source") or ""))),
     ("POST", "/api/skills/create"):         lambda h, b: h._json(skills.create(str(b.get("name") or ""), str(b.get("description") or ""), str(b.get("content") or ""))),
@@ -368,6 +369,27 @@ class _Handler(SimpleHTTPRequestHandler):
             return
         except Exception as exc:
             _logger.exception("mcp installer stream failed")
+            try:
+                self.wfile.write(json.dumps({"op": "error", "message": str(exc)}, ensure_ascii=False).encode() + b"\n")
+                self.wfile.flush()
+            except _CLIENT_DISCONNECT_ERRORS:
+                pass
+
+    def _handle_place_skill(self, body: dict):
+        skill_ref = body.get("skill", "")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/x-ndjson; charset=utf-8")
+        self.send_header("Cache-Control", "no-cache, no-transform")
+        self.send_header("Connection", "close")
+        self.end_headers()
+        try:
+            for event in subagents.skill_placement_stream(skill_ref, self._workspace_path()):
+                self.wfile.write(json.dumps(event, ensure_ascii=False).encode() + b"\n")
+                self.wfile.flush()
+        except _CLIENT_DISCONNECT_ERRORS:
+            return
+        except Exception as exc:
+            _logger.exception("skill placement stream failed")
             try:
                 self.wfile.write(json.dumps({"op": "error", "message": str(exc)}, ensure_ascii=False).encode() + b"\n")
                 self.wfile.flush()

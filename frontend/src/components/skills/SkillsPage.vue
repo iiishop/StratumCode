@@ -58,6 +58,7 @@ async function deleteSkill(item) {
         :modes="store.modes.value"
         :preview="store.preview.value"
         :busy="store.busy.value"
+        :on-place="store.placeSkill"
         @save="store.configure"
         @select="store.show"
         @delete="deleteSkill"

@@ -10,6 +10,7 @@ const props = defineProps({
   modes: { type: Object, default: () => ({}) },
   preview: { type: Object, default: null },
   busy: { type: String, default: '' },
+  onPlace: { type: Function, default: null },
 })
 const emit = defineEmits(['save', 'select', 'delete'])
 
@@ -24,6 +25,32 @@ const collapsed = reactive(new Set())
 const dirty = reactive(new Set())
 const draftAssignments = reactive({})
 const draftModes = reactive({})
+const placing = ref(false)
+const placeResult = ref(null)
+const placeError = ref('')
+
+async function placeFocused() {
+  if (!focused.value || placing.value) return
+  placing.value = true
+  placeResult.value = null
+  placeError.value = ''
+  try {
+    if (typeof props.onPlace === 'function') {
+      placeResult.value = await props.onPlace(focused.value.name)
+    } else {
+      placeError.value = 'Placement handler is not wired up.'
+    }
+  } catch (reason) {
+    placeError.value = reason.message || String(reason)
+  } finally {
+    placing.value = false
+  }
+}
+
+const placeTarget = computed(() => {
+  const id = placeResult.value?.target_id
+  return props.targets.find(item => item.id === id) || null
+})
 
 const active = computed(() => props.targets.find(item => item.id === activeId.value) || props.targets[0])
 const focused = computed(() => props.items.find(item => item.id === focusedId.value) || null)
@@ -314,6 +341,16 @@ function targetColor(id) {
               <div class="sc__detail-actions">
                 <span v-if="focusedState.label" class="sc__detail-state" :class="focusedState.cls">{{ focusedState.label }}</span>
                 <button
+                  type="button"
+                  class="sc__place"
+                  :class="{ 'is-running': placing }"
+                  :disabled="placing"
+                  title="Ask skill-placer where this skill fits best"
+                  @click="placeFocused"
+                >
+                  {{ placing ? 'Judging…' : 'Judge placement' }}
+                </button>
+                <button
                   v-if="focused.source_label === 'stratumcode'"
                   type="button"
                   class="sc__delete"
@@ -343,6 +380,27 @@ function targetColor(id) {
                 </button>
                 <span v-if="!usedTargets.length">No targets</span>
               </div>
+            </div>
+            <div v-if="placeResult || placeError" class="sc__place-result">
+              <template v-if="placeResult">
+                <div class="sc__place-result-head">
+                  <strong>Placement suggestion</strong>
+                  <span v-if="placeResult.fallback" class="sc__place-fallback">fallback</span>
+                </div>
+                <div class="sc__place-result-body">
+                  <span class="sc__place-target" :style="placeTarget ? { '--tag-color': targetColor(placeTarget.id).bg } : {}">
+                    {{ placeTarget ? placeTarget.label : placeResult.target_id }}
+                  </span>
+                  <span class="sc__place-confidence" :class="`is-${placeResult.confidence || 'low'}`">
+                    {{ placeResult.confidence || 'low' }} confidence
+                  </span>
+                  <p v-if="placeResult.rationale" class="sc__place-rationale">{{ placeResult.rationale }}</p>
+                  <p v-if="placeResult.alternatives?.length" class="sc__place-alt">
+                    Alternatives: {{ placeResult.alternatives.join(', ') }}
+                  </p>
+                </div>
+              </template>
+              <p v-else class="sc__place-error">{{ placeError }}</p>
             </div>
             <div class="sc__instructions">
               <strong>Instructions</strong>
@@ -413,6 +471,46 @@ function targetColor(id) {
 .sc__skills { display: grid; grid-template-rows: auto auto minmax(0, 1fr) auto; min-width: 0; min-height: 0; }
 .sc__detail { min-width: 0; overflow: auto; padding: 18px 20px; scrollbar-width: thin; scrollbar-color: var(--border-strong) transparent; }
 .sc__detail-actions { display: flex; align-items: center; gap: 10px; }
+.sc__place {
+  padding: 4px 10px;
+  border: 1px solid var(--accent-border);
+  border-radius: 999px;
+  color: var(--accent);
+  background: transparent;
+  font: 700 8px var(--mono);
+  cursor: pointer;
+  transition: color 120ms ease, background 120ms ease, border-color 120ms ease, transform 120ms ease;
+}
+.sc__place:hover:not(:disabled) { color: #fff; background: var(--accent); border-color: var(--accent); }
+.sc__place:active:not(:disabled) { transform: scale(.95); }
+.sc__place:disabled { opacity: .5; cursor: default; }
+.sc__place.is-running { color: var(--text-muted); border-color: var(--border); }
+.sc__place-result {
+  margin: 12px 0;
+  padding: 10px 12px;
+  border: 1px solid var(--accent-border);
+  border-radius: 8px;
+  background: var(--accent-bg);
+}
+.sc__place-result-head { display: flex; align-items: center; gap: 8px; margin-bottom: 7px; }
+.sc__place-result-head strong { color: var(--text-h); font: 800 9px var(--mono); text-transform: uppercase; letter-spacing: .03em; }
+.sc__place-fallback { padding: 1px 5px; border-radius: 3px; color: #a16207; background: rgba(245, 158, 11, .15); font: 700 7px var(--mono); text-transform: uppercase; }
+.sc__place-result-body { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.sc__place-target {
+  padding: 3px 9px;
+  border: 1px solid var(--tag-color, var(--accent-border));
+  border-radius: 999px;
+  color: var(--tag-color, var(--accent));
+  background: color-mix(in srgb, var(--tag-color, var(--accent)) 12%, transparent);
+  font: 800 9px var(--mono);
+}
+.sc__place-confidence { padding: 2px 6px; border-radius: 3px; font: 700 8px var(--mono); text-transform: uppercase; }
+.sc__place-confidence.is-high { color: #0f7d65; background: rgba(15, 125, 101, .12); }
+.sc__place-confidence.is-medium { color: #a16207; background: rgba(245, 158, 11, .12); }
+.sc__place-confidence.is-low { color: var(--text-muted); background: var(--bg); }
+.sc__place-rationale { flex-basis: 100%; margin: 4px 0 0; color: var(--text); font: 9px/1.55 var(--sans); }
+.sc__place-alt { flex-basis: 100%; margin: 2px 0 0; color: var(--text-muted); font: 8px var(--mono); }
+.sc__place-error { margin: 12px 0; padding: 9px 11px; border: 1px solid var(--err-border); border-radius: 6px; color: var(--err); background: var(--err-bg); font: 9px var(--mono); }
 .sc__detail-state { padding: 3px 7px; border-radius: 4px; font: 700 8px var(--mono); text-transform: uppercase; letter-spacing: .03em; white-space: nowrap; }
 .sc__detail-state.is-explicit { color: #fff; background: var(--accent); }
 .sc__detail-state.is-inherited { color: var(--text-h); background: var(--accent-bg); }
