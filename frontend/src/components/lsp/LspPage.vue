@@ -677,18 +677,18 @@ function toggleEnabled(server) {
   justify-content: flex-end;
 }
 
-.lsp-modal__close--danger {
+.lsp-modal__head .lsp-modal__close--danger {
   padding: 6px 12px;
-  border: 1px solid var(--err);
+  border: 1px solid #d92d3d;
   border-radius: var(--radius-sm);
   color: #fff;
-  background: var(--err);
+  background: #d92d3d;
   font: 600 9px var(--mono);
   cursor: pointer;
   transition: filter 120ms ease, transform 120ms ease;
 }
-.lsp-modal__close--danger:hover { filter: brightness(1.1); }
-.lsp-modal__close--danger:active { transform: scale(.96); }
+.lsp-modal__head .lsp-modal__close--danger:hover { filter: brightness(1.1); }
+.lsp-modal__head .lsp-modal__close--danger:active { transform: scale(.96); }
 
 @media (max-width: 720px) {
   .lsp-page { padding: 30px 18px 52px; }
