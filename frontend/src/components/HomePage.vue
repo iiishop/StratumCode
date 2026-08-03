@@ -656,6 +656,10 @@ async function generateSessionTitle(sessionId, userText, assistantMsg) {
     }
   } catch {
     // Title generation is non-critical
+  } finally {
+    // 请求完成后（无论成功失败）清除标题生成中标志，结束加载动画
+    if (target) target.titleGenerating = false
+    if (props.session?.id === sessionId) props.session.titleGenerating = false
   }
 }
 

@@ -320,9 +320,6 @@ def generate_title(session_id: int, user_message: str, ai_response: str) -> str:
         use_skills=False,
     )
     title = (assistant.get("content") or "").strip()
-    # Enforce 10-character limit
-    if len(title) > 10:
-        title = title[:10]
     if title:
         rename(session_id, title)
     return title

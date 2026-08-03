@@ -216,7 +216,8 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
                 :class="{ 'is-active': activeSession?.id === session.id }"
               >
                 <button class="sb__session" type="button" title="Open session" @click="emit('open-session', session.id)">
-                  <span class="sb__session-name">{{ session.name }}</span>
+                  <span v-if="session.titleGenerating" class="sb__session-name"><span class="sb__session-spinner"></span></span>
+                  <span v-else class="sb__session-name">{{ session.name }}</span>
                   <span class="sb__props">
                     <span v-if="tokenLabel(session)" class="sb__prop is-tokens">{{ tokenLabel(session) }}</span>
                     <span v-if="session.state?.provider || session.provider" class="sb__prop">{{ session.state?.provider || session.provider }}</span>
@@ -735,6 +736,20 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
   color: var(--text);
   font-size: 11.5px;
   font-weight: 500;
+}
+
+.sb__session-spinner {
+  display: inline-block;
+  width: 12px;
+  height: 12px;
+  border: 2px solid rgba(15, 23, 42, .18);
+  border-top-color: var(--blue);
+  border-radius: 50%;
+  animation: sb-spin .7s linear infinite;
+}
+
+@keyframes sb-spin {
+  to { transform: rotate(360deg); }
 }
 
 .sb__session-row.is-active .sb__session-name {
