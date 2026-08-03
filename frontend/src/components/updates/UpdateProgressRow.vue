@@ -86,6 +86,8 @@ const barStyle = computed(() => {
   return { '--bar-pct': `${pct}%` }
 })
 
+const pctText = computed(() => `${Math.round(Math.min(100, Math.max(0, props.progress)))}%`)
+
 // -- start animation when state becomes running ----------------------
 watch(() => props.state, async (s, prev) => {
   if (s === 'running') {
@@ -119,7 +121,7 @@ watch(() => props.state, async (s, prev) => {
         ease: 'power3.inOut',
       }, 0)
       .set(bar, {
-        height: `${labelHeight * 1.1}px`,
+        height: '10px',
         width: '100%',
       }, 0.1)
       .to(bar, { opacity: 1, duration: 0.18 }, 0.18)
@@ -280,6 +282,8 @@ onBeforeUnmount(() => {
         :class="{ 'is-visible': running || done }"
         :style="barStyle"
       >
+        <span class="update-row__progress-head"></span>
+        <span v-if="running" class="update-row__progress-pct">{{ pctText }}</span>
         <span ref="edgeShine" class="update-row__edge-shine"></span>
         <span ref="fireworkContainer" class="update-row__fireworks"></span>
       </div>
@@ -314,8 +318,24 @@ onBeforeUnmount(() => {
           class="update-row__restart"
           type="button"
           @click="emit('restart')"
-        >Restart</button>
+        >
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M21 12a9 9 0 1 1-2.64-6.36"/><polyline points="21 3 21 9 15 9"/>
+          </svg>
+          Restart
+        </button>
       </div>
+
+      <!-- 完成徽章 -->
+      <Transition name="done-pop">
+        <div v-if="done" class="update-row__done">
+          <span class="update-row__done-check">
+            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5" /></svg>
+          </span>
+          <span class="update-row__done-label">Updated to</span>
+          <span class="update-row__done-ver">{{ targetLabel }}</span>
+        </div>
+      </Transition>
     </div>
 
     <!-- 元信息 -->
@@ -570,16 +590,16 @@ onBeforeUnmount(() => {
   height: 0;
   pointer-events: none;
   opacity: 0;
-  border: 1px solid rgba(59, 130, 246, 0.34);
+  border: 1px solid rgba(59, 130, 246, 0.4);
   border-radius: 999px;
-  background: linear-gradient(90deg, rgba(59, 130, 246, 0.13), rgba(59, 130, 246, 0.06) 70%);
+  background: linear-gradient(90deg, rgba(59, 130, 246, 0.12), rgba(59, 130, 246, 0.05) 70%);
   overflow: hidden;
   transition: opacity 0.18s ease;
 }
 
 .track--dev .update-row__progress-bar {
-  border-color: rgba(16, 185, 129, 0.34);
-  background: linear-gradient(90deg, rgba(16, 185, 129, 0.13), rgba(16, 185, 129, 0.06) 70%);
+  border-color: rgba(16, 185, 129, 0.4);
+  background: linear-gradient(90deg, rgba(16, 185, 129, 0.12), rgba(16, 185, 129, 0.05) 70%);
 }
 
 .update-row__progress-bar::after {
@@ -591,30 +611,73 @@ onBeforeUnmount(() => {
   width: var(--bar-pct, 0%);
   border-radius: 999px;
   background: linear-gradient(90deg,
-    rgba(59, 130, 246, 0.32),
-    rgba(59, 130, 246, 0.2) 60%,
-    rgba(255, 255, 255, 0.26) 100%
+    #3b82f6,
+    #60a5fa 55%,
+    #93c5fd 100%
   );
-  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.16);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.35),
+    0 0 10px rgba(59, 130, 246, 0.5);
   transition: width 0.26s cubic-bezier(0.16, 1, 0.3, 1);
 }
 
 .track--dev .update-row__progress-bar::after {
   background: linear-gradient(90deg,
-    rgba(16, 185, 129, 0.32),
-    rgba(16, 185, 129, 0.2) 60%,
-    rgba(255, 255, 255, 0.26) 100%
+    #10b981,
+    #34d399 55%,
+    #6ee7b7 100%
   );
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.35),
+    0 0 10px rgba(16, 185, 129, 0.5);
+}
+
+/* 进度条端头发光点 */
+.update-row__progress-head {
+  position: absolute;
+  z-index: 2;
+  left: var(--bar-pct, 0%);
+  top: 50%;
+  transform: translate(-50%, -50%);
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: #ffffff;
+  box-shadow: 0 0 8px 2px rgba(255, 255, 255, 0.8), 0 0 16px 4px rgba(59, 130, 246, 0.5);
+  transition: left 0.26s cubic-bezier(0.16, 1, 0.3, 1);
+  pointer-events: none;
+}
+
+.track--dev .update-row__progress-head {
+  box-shadow: 0 0 8px 2px rgba(255, 255, 255, 0.8), 0 0 16px 4px rgba(16, 185, 129, 0.5);
+}
+
+/* done 时端头光点让位给对勾徽章 */
+.is-done .update-row__progress-head {
+  display: none;
+}
+
+/* 百分比数字 */
+.update-row__progress-pct {
+  position: absolute;
+  right: 10px;
+  top: 50%;
+  transform: translateY(-50%);
+  z-index: 3;
+  font: 700 9px/1 var(--mono);
+  color: #ffffff;
+  text-shadow: 0 1px 2px rgba(16, 42, 92, 0.4);
+  pointer-events: none;
 }
 
 /* running 时斜纹流动 */
 .is-running .update-row__progress-bar::after {
   background-image:
     linear-gradient(90deg,
-      rgba(59, 130, 246, 0.32),
-      rgba(59, 130, 246, 0.2) 60%,
-      rgba(255, 255, 255, 0.26) 100%),
-    repeating-linear-gradient(45deg, rgba(255, 255, 255, 0.18) 0 6px, transparent 6px 12px);
+      #3b82f6,
+      #60a5fa 55%,
+      #93c5fd 100%),
+    repeating-linear-gradient(45deg, rgba(255, 255, 255, 0.22) 0 6px, transparent 6px 12px);
   background-size: 100% 100%, 200% 100%;
   animation: bar-stripes 1.1s linear infinite;
 }
@@ -622,10 +685,10 @@ onBeforeUnmount(() => {
 .track--dev.is-running .update-row__progress-bar::after {
   background-image:
     linear-gradient(90deg,
-      rgba(16, 185, 129, 0.32),
-      rgba(16, 185, 129, 0.2) 60%,
-      rgba(255, 255, 255, 0.26) 100%),
-    repeating-linear-gradient(45deg, rgba(255, 255, 255, 0.18) 0 6px, transparent 6px 12px);
+      #10b981,
+      #34d399 55%,
+      #6ee7b7 100%),
+    repeating-linear-gradient(45deg, rgba(255, 255, 255, 0.22) 0 6px, transparent 6px 12px);
   background-size: 100% 100%, 200% 100%;
   animation: bar-stripes 1.1s linear infinite;
 }
@@ -641,18 +704,64 @@ onBeforeUnmount(() => {
   margin-bottom: 0;
 }
 
-/* done 时绿光脉冲 */
+/* done 时进度条满格绿 + 光脉冲 */
 .is-done .update-row__progress-bar.is-visible::after {
-  background: linear-gradient(90deg,
-    rgba(16, 185, 129, 0.36),
-    rgba(16, 185, 129, 0.2) 60%,
-    rgba(255, 255, 255, 0.24) 100%);
+  width: 100%;
+  background: linear-gradient(90deg, #10b981, #34d399);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.35), 0 0 12px rgba(16, 185, 129, 0.6);
   animation: done-glow 1.4s ease-out;
 }
 
 @keyframes done-glow {
-  0% { box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.55); }
-  100% { box-shadow: 0 0 0 14px rgba(16, 185, 129, 0); }
+  0% { box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.35), 0 0 0 0 rgba(16, 185, 129, 0.55); }
+  100% { box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.35), 0 0 0 14px rgba(16, 185, 129, 0); }
+}
+
+/* --- 完成徽章 --- */
+.update-row__done {
+  position: absolute;
+  left: 4px;
+  top: 50%;
+  transform: translateY(-50%);
+  z-index: 6;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 5px 12px 5px 7px;
+  border: 1px solid rgba(16, 185, 129, 0.4);
+  border-radius: 999px;
+  background: linear-gradient(180deg, #ffffff, rgba(16, 185, 129, 0.08));
+  box-shadow: 0 2px 8px rgba(16, 185, 129, 0.18), inset 0 1px 0 rgba(255, 255, 255, 0.9);
+}
+
+.update-row__done-check {
+  display: grid;
+  width: 18px;
+  height: 18px;
+  place-items: center;
+  border-radius: 50%;
+  color: #ffffff;
+  background: linear-gradient(135deg, #10b981, #059669);
+  box-shadow: 0 1px 4px rgba(16, 185, 129, 0.4), inset 0 1px 0 rgba(255, 255, 255, 0.3);
+}
+
+.update-row__done-label {
+  font: 600 10px/1 var(--sans);
+  color: var(--text-muted);
+}
+
+.update-row__done-ver {
+  font: 700 11.5px/1 var(--mono);
+  color: #047857;
+}
+
+.done-pop-enter-active {
+  transition: transform 0.34s cubic-bezier(0.34, 1.56, 0.64, 1), opacity 0.22s ease;
+}
+
+.done-pop-enter-from {
+  transform: translateY(-50%) scale(0.7);
+  opacity: 0;
 }
 
 /* --- edge shine / fireworks --- */
@@ -761,29 +870,37 @@ onBeforeUnmount(() => {
 
 /* --- restart 按钮 --- */
 .update-row__restart {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
   height: 32px;
   padding: 0 16px;
-  border: 1px solid #3b82f6;
+  border: 1px solid #10b981;
   border-radius: 999px;
   color: #ffffff;
-  background: linear-gradient(135deg, #3b82f6, #2563eb);
+  background: linear-gradient(135deg, #10b981, #059669);
   font: 600 11px/1 var(--mono);
   cursor: pointer;
   flex-shrink: 0;
   margin-left: auto;
-  box-shadow: 0 2px 8px rgba(59, 130, 246, 0.3);
-  transition: transform 140ms ease, box-shadow 140ms ease;
-}
-
-.track--dev .update-row__restart {
-  border-color: #10b981;
-  background: linear-gradient(135deg, #10b981, #059669);
-  box-shadow: 0 2px 8px rgba(16, 185, 129, 0.3);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.25), 0 2px 8px rgba(16, 185, 129, 0.32);
+  transition: transform 150ms cubic-bezier(0.16, 1, 0.3, 1), box-shadow 150ms ease, filter 150ms ease;
 }
 
 .update-row__restart:hover {
   transform: translateY(-1px);
-  box-shadow: 0 4px 14px rgba(59, 130, 246, 0.4);
+  filter: brightness(1.06);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.28), 0 5px 16px rgba(16, 185, 129, 0.42);
+}
+
+.update-row__restart:active {
+  transform: translateY(0) scale(0.96);
+  filter: brightness(0.94);
+  box-shadow: inset 0 2px 4px rgba(16, 42, 92, 0.25), 0 1px 3px rgba(16, 185, 129, 0.2);
+}
+
+.update-row__restart svg {
+  flex-shrink: 0;
 }
 
 /* --- 元信息 --- */
