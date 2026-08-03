@@ -184,6 +184,26 @@ const focusedState = computed(() => {
   if (isInherited(focused.value.id)) return { label: 'Inherited', cls: 'is-inherited' }
   return { label: 'Not assigned', cls: 'is-unassigned' }
 })
+
+// 柔和色板（与主蓝 #1756d1 协调，低饱和不刺眼）
+const SKILL_COLORS = [
+  { bg: '#1756d1' }, { bg: '#6d4dc4' }, { bg: '#0f8a8a' },
+  { bg: '#2e8b57' }, { bg: '#c05621' }, { bg: '#b5458f' },
+]
+const GROUP_COLORS = { global: '#1756d1', state: '#6d4dc4', subagent: '#0f8a8a' }
+
+function skillColor(name) {
+  let h = 0
+  const s = String(name || '?')
+  for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) >>> 0
+  return SKILL_COLORS[h % SKILL_COLORS.length]
+}
+function targetColor(id) {
+  let h = 0
+  const s = String(id || '?')
+  for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) >>> 0
+  return SKILL_COLORS[h % SKILL_COLORS.length]
+}
 </script>
 
 <template>
@@ -215,7 +235,7 @@ const focusedState = computed(() => {
               </label>
               <section v-for="group in groups" :key="group.kind" class="sc__target-group">
                 <button type="button" class="sc__group-toggle" @click="toggleGroup(group.kind)">
-                  <span>{{ collapsed.has(group.kind) ? '›' : '⌄' }} {{ group.label }}</span>
+                  <span><i class="sc__group-dot" :style="{ background: GROUP_COLORS[group.kind] }"></i>{{ collapsed.has(group.kind) ? '›' : '⌄' }} {{ group.label }}</span>
                   <small>{{ group.items.length }}</small>
                 </button>
                 <div v-if="!collapsed.has(group.kind)">
@@ -267,6 +287,7 @@ const focusedState = computed(() => {
                 :aria-label="`Use ${item.name} for ${active?.label}`"
                 @change="toggleSkill(item.id)"
               />
+              <span class="sc__skill-badge" :style="{ background: skillColor(item.name).bg }">{{ item.name.charAt(0).toUpperCase() }}</span>
               <button type="button" class="sc__skill-info" @click="focus(item)">
                 <strong>{{ item.name }}</strong>
                 <span>{{ item.description || 'Missing description' }}</span>
@@ -282,9 +303,12 @@ const focusedState = computed(() => {
       <aside class="sc__detail">
         <template v-if="focused">
           <div class="sc__detail-head">
-            <div>
-              <small>{{ focused.source_label }}</small>
-              <h2>{{ focused.name }}</h2>
+            <div class="sc__detail-title">
+              <span class="sc__skill-badge sc__skill-badge--lg" :style="{ background: skillColor(focused.name).bg }">{{ focused.name.charAt(0).toUpperCase() }}</span>
+              <div>
+                <small>{{ focused.source_label }}</small>
+                <h2>{{ focused.name }}</h2>
+              </div>
             </div>
             <div class="sc__detail-actions">
               <span v-if="focusedState.label" class="sc__detail-state" :class="focusedState.cls">{{ focusedState.label }}</span>
@@ -307,7 +331,13 @@ const focusedState = computed(() => {
           <div class="sc__usage">
             <strong>Used by</strong>
             <div>
-              <button v-for="target in usedTargets" :key="target.id" type="button" @click="activeId = target.id">
+              <button
+                v-for="target in usedTargets"
+                :key="target.id"
+                type="button"
+                :style="{ '--tag-color': targetColor(target.id).bg }"
+                @click="activeId = target.id"
+              >
                 {{ target.label }}
               </button>
               <span v-if="!usedTargets.length">No targets</span>
@@ -397,10 +427,13 @@ const focusedState = computed(() => {
 .sc__filters button { height: 25px; padding: 0 8px; border: 1px solid transparent; border-radius: 4px; color: var(--text-muted); background: transparent; font: 9px var(--mono); cursor: pointer; }
 .sc__filters button.is-active { border-color: var(--border); color: var(--text-h); background: var(--bg); }
 .sc__skill-list { overflow: auto; }
-.sc__skill { display: grid; grid-template-columns: 18px minmax(0, 1fr); align-items: center; gap: 8px; min-height: 58px; padding: 7px 11px; border-bottom: 1px solid var(--border); }
+.sc__skill { display: grid; grid-template-columns: 18px 22px minmax(0, 1fr); align-items: center; gap: 8px; min-height: 58px; padding: 7px 11px; border-bottom: 1px solid var(--border); }
 .sc__skill:hover, .sc__skill.is-focused { background: var(--accent-bg); }
 .sc__skill.has-issue { box-shadow: inset 2px 0 var(--warn); }
 .sc__skill input { accent-color: var(--accent); }
+.sc__skill-badge { display: inline-grid; width: 18px; height: 18px; place-items: center; border-radius: 5px; color: #fff; font: 700 9px var(--sans); box-shadow: inset 0 -1px 0 rgba(0, 0, 0, 0.15); }
+.sc__skill-badge--lg { width: 36px; height: 36px; flex: 0 0 36px; border-radius: 9px; font-size: 15px; }
+.sc__group-dot { display: inline-block; width: 7px; height: 7px; margin-right: 6px; border-radius: 50%; vertical-align: middle; }
 .sc__skill-info { display: grid; gap: 3px; min-width: 0; padding: 0; border: 0; color: inherit; background: transparent; text-align: left; cursor: pointer; }
 .sc__skill-info strong { overflow: hidden; color: var(--text-h); font: 500 11px var(--sans); text-overflow: ellipsis; white-space: nowrap; }
 .sc__skill-info span { overflow: hidden; color: var(--text-muted); font: 9px var(--mono); text-overflow: ellipsis; white-space: nowrap; }
@@ -409,7 +442,8 @@ const focusedState = computed(() => {
 .sc__selection-count { padding: 9px 12px; border-top: 1px solid var(--border); color: var(--text-muted); font: 9px var(--mono); }
 .sc__detail { padding: 15px; }
 .sc__detail-head { display: flex; align-items: start; justify-content: space-between; gap: 12px; }
-.sc__detail-head h2 { margin: 3px 0 0; overflow-wrap: anywhere; color: var(--text-h); font: 600 15px var(--sans); }
+.sc__detail-title { display: flex; align-items: center; gap: 12px; min-width: 0; }
+.sc__detail-title h2 { margin: 3px 0 0; overflow-wrap: anywhere; color: var(--text-h); font: 600 15px var(--sans); }
 .sc__detail-head small { color: var(--accent); font: 8px var(--mono); text-transform: uppercase; }
 .sc__delete { border: 0; color: var(--err); background: transparent; font: 9px var(--mono); cursor: pointer; }
 .sc__description { margin: 12px 0 16px; color: var(--text); font: 10px/1.5 var(--mono); }
@@ -418,7 +452,8 @@ const focusedState = computed(() => {
 .sc__meta dd { margin: 0; overflow-wrap: anywhere; color: var(--text-h); }
 .sc__usage > strong, .sc__instructions > strong { display: block; margin-bottom: 8px; color: var(--text-muted); font: 700 8px var(--mono); text-transform: uppercase; }
 .sc__usage > div { display: flex; flex-wrap: wrap; gap: 5px; }
-.sc__usage button { padding: 3px 6px; border: 1px solid var(--border); border-radius: 4px; color: var(--text); background: var(--bg); font: 8px var(--mono); cursor: pointer; }
+.sc__usage button { padding: 3px 6px; border: 1px solid color-mix(in srgb, var(--tag-color, var(--accent)) 45%, transparent); border-radius: 4px; color: var(--tag-color, var(--accent)); background: color-mix(in srgb, var(--tag-color, var(--accent)) 8%, transparent); font: 8px var(--mono); cursor: pointer; }
+.sc__usage button:hover { background: color-mix(in srgb, var(--tag-color, var(--accent)) 16%, transparent); }
 .sc__usage span, .sc__instructions > span { color: var(--text-muted); font: 9px var(--mono); }
 .sc__instructions { margin-top: 18px; padding-top: 14px; border-top: 1px solid var(--border); }
 .sc__instructions :deep(.se) { font-size: 12px; }
