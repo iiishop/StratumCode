@@ -694,6 +694,10 @@ async function continueAfterAnswer(answer) {
   })
   const data = await response.json().catch(() => ({}))
   if (!response.ok) throw new Error(data.error || `Answer submit failed (${response.status})`)
+  // 回答已提交，恢复被 clearify 挂起的 run，让调查/设计等继续跑。
+  if (event?.data?.id) {
+    await chatStream(message, { question_id: event.data.id }, '/api/chat/resume')
+  }
   // Immediately persist answer_status='submitted' — no debounce window.
   // Vue 3 emit is fire-and-forget; the parent saveActiveSessionState awaits the backend.
   const sessionId = props.session?.id

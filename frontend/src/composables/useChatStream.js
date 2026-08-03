@@ -28,10 +28,10 @@ export function useChatStream(onRender, onPacket) {
     onRender?.()
   }
 
-  async function stream(message, request) {
+  async function stream(message, request, url = '/api/chat') {
     controller?.abort()
     controller = new AbortController()
-    const response = await fetch('/api/chat', {
+    const response = await fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(request),
