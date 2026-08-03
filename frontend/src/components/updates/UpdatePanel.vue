@@ -188,6 +188,8 @@ async function restart() {
   bottom: 50px;
   z-index: 41;
   pointer-events: auto;
+  display: flex;
+  flex-direction: column;
   width: min(640px, calc(100vw - 28px));
   max-height: min(720px, calc(100dvh - 72px));
   overflow: hidden;
@@ -490,10 +492,34 @@ async function restart() {
 }
 
 .update-panel__body {
+  flex: 1;
+  min-height: 0;
   display: grid;
   gap: 12px;
   padding: 16px;
-  overflow: auto;
+  overflow-y: auto;
+}
+
+/* 滚动条美化 */
+.update-panel__body::-webkit-scrollbar {
+  width: 8px;
+}
+
+.update-panel__body::-webkit-scrollbar-thumb {
+  border-radius: 999px;
+  background: var(--border-strong);
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+
+.update-panel__body::-webkit-scrollbar-thumb:hover {
+  background: var(--text-muted);
+  background-clip: content-box;
+  border: 2px solid transparent;
+}
+
+.update-panel__body::-webkit-scrollbar-track {
+  background: transparent;
 }
 
 .update-panel__warnings {
