@@ -58,8 +58,13 @@ def apply_events(channel: str):
 
 
 def restart() -> dict:
-    """Restart the current StratumCode process after the HTTP response returns."""
-    command = [str(ROOT / '.venv' / 'Scripts' / 'python.exe'), str(ROOT / '.venv' / 'Scripts' / 'stratumcode')]
+    """Restart the current StratumCode process after the HTTP response returns.
+
+    跨平台：Windows venv 用 Scripts/，macOS/Linux 用 bin/，不硬编码路径。
+    用当前解释器直接调入口函数，不依赖 console script wrapper（git pull 不会重建它）。
+    """
+    entry = "main_dev" if "dev" in os.path.basename(sys.argv[0]) else "main"
+    command = [sys.executable, "-c", f"from stratumcode.main import {entry}; {entry}()"]
 
     def relaunch() -> None:
         subprocess.Popen(command, cwd=str(ROOT), close_fds=True)
