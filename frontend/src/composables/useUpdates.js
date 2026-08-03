@@ -28,11 +28,11 @@ export function useUpdates() {
   const loading = ref(false)
   const error = ref('')
 
-  async function refresh() {
+  async function refresh(force = false) {
     loading.value = true
     error.value = ''
     try {
-      status.value = { ...DEFAULT_STATUS, ...(await request('/updates/status')) }
+      status.value = { ...DEFAULT_STATUS, ...(await request(`/updates/status${force ? '?refresh=1' : ''}`)) }
     } catch (reason) {
       error.value = reason.message
     } finally {

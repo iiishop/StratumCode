@@ -24,8 +24,13 @@ _GIT_REMOTE_CACHE: dict = {}
 _GIT_BEHIND_CACHE: dict = {}
 
 
-def status() -> dict:
+def status(force_refresh: bool = False) -> dict:
     """Return local and remote update metadata."""
+    if force_refresh:
+        # 主动检查：绕过缓存立即查询 GitHub（release + git 远端）
+        _RELEASE_CACHE.clear()
+        _GIT_REMOTE_CACHE.clear()
+        _GIT_BEHIND_CACHE.clear()
     current_version = _local_version()
     current_commit = _git(["rev-parse", "HEAD"], check=False).strip()
     short_commit = _git(["rev-parse", "--short", "HEAD"], check=False).strip()

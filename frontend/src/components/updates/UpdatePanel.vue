@@ -64,11 +64,19 @@ async function restart() {
           <h2>Updates</h2>
           <p>{{ status.repo || 'iiishop/StratumCode' }} — Stable follows GitHub releases, dev tracks origin/main</p>
         </div>
-        <button class="update-panel__close" type="button" aria-label="Close updates" @click="emit('close')">
-          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round">
-            <path d="M18 6 6 18M6 6l12 12" />
-          </svg>
-        </button>
+        <div class="update-panel__head-actions">
+          <button class="update-panel__check" type="button" @click="emit('refresh', true)">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M21 12a9 9 0 1 1-2.64-6.36"/><polyline points="21 3 21 9 15 9"/>
+            </svg>
+            Check now
+          </button>
+          <button class="update-panel__close" type="button" aria-label="Close updates" @click="emit('close')">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round">
+              <path d="M18 6 6 18M6 6l12 12" />
+            </svg>
+          </button>
+        </div>
       </header>
 
       <div class="update-panel__body">
@@ -163,6 +171,38 @@ async function restart() {
   color: var(--text-muted);
   font-size: 10.5px;
   line-height: 1.4;
+}
+
+.update-panel__head-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.update-panel__check {
+  display: inline-flex;
+  height: 30px;
+  align-items: center;
+  gap: 6px;
+  padding: 0 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text-h);
+  background: transparent;
+  font: 600 11px/1 var(--sans);
+  cursor: pointer;
+  transition: border-color var(--transition-fast), background var(--transition-fast), color var(--transition-fast);
+}
+
+.update-panel__check:hover {
+  border-color: var(--accent-border);
+  color: var(--accent);
+  background: var(--accent-bg);
+}
+
+.update-panel__check svg {
+  flex-shrink: 0;
 }
 
 .update-panel__close {

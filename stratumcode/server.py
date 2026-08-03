@@ -24,6 +24,11 @@ _CLIENT_DISCONNECT_ERRORS = (BrokenPipeError, ConnectionResetError, ConnectionAb
 
 # -- 路由系统 ---------------------------------------------------------------
 
+def _force_refresh(handler) -> bool:
+    """GET /api/updates/status?refresh=1 时强制绕过缓存主动检查。"""
+    params = parse_qs(urlparse(handler.path).query)
+    return str((params.get("refresh") or ["0"])[0]).strip().casefold() in ("1", "true", "yes")
+
 def _dispatch(handler, method, body=None):
     """统一路由分发。返回 True 表示已处理，False 表示未匹配。"""
     path = urlparse(handler.path).path
@@ -95,7 +100,7 @@ _ROUTES: dict[tuple[str, str], object] = {
     ("GET", "/api/files/list"):      lambda h, b: h._handle_file_list(),
     ("GET", "/api/tools"):           lambda h, b: (mcp.load_enabled(), h._json([t.to_json() for t in registry.list_all()])),
     ("GET", "/api/terminal/processes"): lambda h, b: h._json({"items": terminal_manager.list_sessions(background_only=True)}),
-    ("GET", "/api/updates/status"): lambda h, b: h._json(updates.status()),
+    ("GET", "/api/updates/status"): lambda h, b: h._json(updates.status(_force_refresh(h))),
     ("GET", "/api/git/status"): lambda h, b: h._json(git_panel.snapshot(h._workspace_path())),
     ("GET", "/api/code-structure/functions"): _get_code_structure_functions,
 
