@@ -1,6 +1,8 @@
 import asyncio
 import json
 import logging
+import queue
+import threading
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
@@ -13,6 +15,9 @@ _logger = logging.getLogger(__name__)
 _MAX_BODY_SIZE = 1_000_000
 _FILE_PREVIEW_LINES = 120
 _FILE_PREVIEW_BYTES = 64_000
+# 流式响应空闲心跳间隔。WKWebView(NSURLSession) 默认 60s 无数据就断连，
+# 模型调用间隙 / clearify 等待用户回答时流会长时间无事件，必须发心跳保活。
+_STREAM_IDLE_PING_SECONDS = 25
 _IGNORED_DIRS = {".git", ".venv", "venv", "node_modules", "dist", "__pycache__", ".pytest_cache"}
 _CLIENT_DISCONNECT_ERRORS = (BrokenPipeError, ConnectionResetError, ConnectionAbortedError)
 
@@ -295,8 +300,31 @@ class _Handler(SimpleHTTPRequestHandler):
         self.send_header("Cache-Control", "no-cache, no-transform")
         self.send_header("Connection", "close")
         self.end_headers()
+
+        # 事件生产放独立线程，主线程从队列取；空闲超过阈值发心跳保活，
+        # 防止 WKWebView(NSURLSession) 60s 无数据断连（Mac 上表现为 Load failed）。
+        pending: queue.Queue = queue.Queue(maxsize=256)
+
+        def _produce() -> None:
+            try:
+                for event in events:
+                    pending.put(event)
+                pending.put(None)
+            except Exception as exc:
+                _logger.exception("chat stream producer failed")
+                pending.put({"op": "error", "message": f"Chat stream failed: {exc}"})
+
+        threading.Thread(target=_produce, daemon=True).start()
         try:
-            for event in events:
+            while True:
+                try:
+                    event = pending.get(timeout=_STREAM_IDLE_PING_SECONDS)
+                except queue.Empty:
+                    self.wfile.write(b'{"op":"ping"}\n')
+                    self.wfile.flush()
+                    continue
+                if event is None:
+                    break
                 self.wfile.write(json.dumps(event, ensure_ascii=False).encode() + b"\n")
                 self.wfile.flush()
         except _CLIENT_DISCONNECT_ERRORS:

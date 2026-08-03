@@ -12,6 +12,7 @@ export function useChatStream(onRender, onPacket) {
   }
 
   function applyPacket(message, packet, active) {
+    if (packet.op === 'ping') return  // 保活心跳，无业务含义
     if (packet.op === 'start') {
       startEvent(message, packet, active)
       return
