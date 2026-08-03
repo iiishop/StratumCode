@@ -1,9 +1,11 @@
 <script setup>
-import { onBeforeUnmount, onMounted, ref } from 'vue'
+import { nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 
 // 通用底栏弹出面板：从触发元素位置"生长"出来（macOS Dock 弹窗风格），
 // 收回时缩回触发元素。可复用于底栏任意入口（更新面板、后续的通知/设置等）。
-// 动画用 CSS Transition（transform-origin 指向触发元素，实现"生长"感）。
+//
+// 不用 Vue <Transition>（Teleport 场景 enter 过渡偶发不触发），
+// 改用 v-show + 手动 .is-open 类切换：显示后 nextTick 再加类，保证过渡必然发生。
 
 const props = defineProps({
   modelValue: { type: Boolean, default: false },
@@ -20,8 +22,11 @@ const props = defineProps({
 const emit = defineEmits(['update:modelValue'])
 
 const panelEl = ref(null)
+const visible = ref(false)
+const open = ref(false)
 const panelStyle = ref({})
 const arrowStyle = ref({})
+let hideTimer = 0
 
 function resolveAnchor() {
   const el = props.anchor
@@ -84,29 +89,43 @@ function positionPanel() {
   }
 }
 
-function onEnter() {
-  positionPanel()
-}
+watch(() => props.modelValue, async (v) => {
+  window.clearTimeout(hideTimer)
+  if (v) {
+    visible.value = true
+    await nextTick()
+    positionPanel()
+    // 下一帧再加 .is-open，保证 scale 过渡必然触发（从 0.5 生长到 1）
+    requestAnimationFrame(() => { open.value = true })
+  } else {
+    // 缩回动画
+    open.value = false
+    hideTimer = window.setTimeout(() => {
+      if (!props.modelValue) visible.value = false
+    }, 220)
+  }
+})
 
 function onResize() {
-  if (props.modelValue) positionPanel()
+  if (visible.value && open.value) positionPanel()
 }
 
 onMounted(() => window.addEventListener('resize', onResize))
-onBeforeUnmount(() => window.removeEventListener('resize', onResize))
+onBeforeUnmount(() => {
+  window.removeEventListener('resize', onResize)
+  window.clearTimeout(hideTimer)
+})
 </script>
 
 <template>
   <Teleport to="body">
-    <Transition name="dock-popover" @enter="onEnter">
-      <div v-if="modelValue" class="dock-popover">
-        <div class="dock-popover__scrim" @click="emit('update:modelValue', false)"></div>
-        <div ref="panelEl" class="dock-popover__panel" :style="panelStyle">
-          <span v-if="showArrow" class="dock-popover__arrow" :style="arrowStyle"></span>
-          <slot></slot>
-        </div>
+    <div v-show="visible" class="dock-popover">
+      <div class="dock-popover__scrim" @click="emit('update:modelValue', false)"></div>
+      <div ref="panelEl" class="dock-popover__panel" :class="{ 'is-open': open }" :style="panelStyle">
+        <span v-if="showArrow" class="dock-popover__arrow" :style="arrowStyle"></span>
+        <slot></slot>
       </div>
-    </Transition>
+    </div>
   </Teleport>
 </template>
 
@@ -121,26 +140,26 @@ onBeforeUnmount(() => window.removeEventListener('resize', onResize))
 .dock-popover__panel {
   position: fixed;
   z-index: 41;
-  will-change: transform, opacity;
-}
-
-/* macOS 生长动画 */
-.dock-popover-enter-active .dock-popover__panel {
-  transition: transform 0.3s cubic-bezier(0.34, 1.56, 0.64, 1), opacity 0.2s ease;
-}
-
-.dock-popover-enter-from .dock-popover__panel {
+  /* 初始：缩小的隐藏态 */
   transform: scale(0.5);
   opacity: 0;
+  will-change: transform, opacity;
+  transition:
+    transform 0.32s cubic-bezier(0.34, 1.56, 0.64, 1),
+    opacity 0.2s ease;
 }
 
-.dock-popover-leave-active .dock-popover__panel {
-  transition: transform 0.16s ease-in, opacity 0.14s ease;
+/* macOS Dock 生长动画：从触发元素方向放大浮现 */
+.dock-popover__panel.is-open {
+  transform: scale(1);
+  opacity: 1;
 }
 
-.dock-popover-leave-to .dock-popover__panel {
-  transform: scale(0.55);
-  opacity: 0;
+/* 收回时更干脆 */
+.dock-popover__panel:not(.is-open) {
+  transition:
+    transform 0.16s ease-in,
+    opacity 0.14s ease;
 }
 
 .dock-popover__arrow {
