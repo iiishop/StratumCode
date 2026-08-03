@@ -117,12 +117,13 @@ function toggleEnabled(server) {
         <button
           v-if="!mason.available"
           type="button"
+          class="btn-sheen"
           :disabled="busyId === 'mason'"
           @click="showMasonModal = true"
         >
           {{ busyId === 'mason' ? 'Installing' : 'Install Mason' }}
         </button>
-        <button type="button" :disabled="loading" @click="emit('refresh')">
+        <button type="button" class="btn-sheen" :disabled="loading" @click="emit('refresh')">
           {{ loading ? 'Loading' : 'Refresh' }}
         </button>
       </div>
@@ -171,8 +172,8 @@ function toggleEnabled(server) {
             <div class="lsp-server__actions">
               <button
                 type="button"
-                class="lsp-server__action"
-                :class="{ 'is-danger': server.installed }"
+                class="lsp-server__action btn-sheen"
+                :class="{ 'is-danger btn-sheen--red': server.installed }"
                 :disabled="!!busyId"
                 @click.stop="onAction(server)"
               >{{ actionButton(server) }}</button>
@@ -228,8 +229,8 @@ function toggleEnabled(server) {
           <div class="lsp-server__actions">
             <button
               type="button"
-              class="lsp-server__action"
-              :class="{ 'is-danger': server.installed }"
+              class="lsp-server__action btn-sheen"
+              :class="{ 'is-danger btn-sheen--red': server.installed }"
               :disabled="!!busyId"
               @click.stop="onAction(server)"
             >{{ actionButton(server) }}</button>
@@ -287,7 +288,7 @@ function toggleEnabled(server) {
           </div>
         </div>
         <div class="lsp-modal__actions">
-          <button type="button" :disabled="busyId === 'mason'" @click="emit('install-mason')">
+          <button type="button" class="btn-sheen" :disabled="busyId === 'mason'" @click="emit('install-mason')">
             {{ busyId === 'mason' ? 'Installing' : 'Confirm install' }}
           </button>
         </div>

@@ -47,7 +47,7 @@ async function deleteSkill(item) {
       <div class="sp__head">
         <span class="sp__title">Skills</span>
         <div class="sp__head-actions">
-          <button type="button" class="sp__btn sp__btn--pri" @click="showCreate = true">New skill</button>
+          <button type="button" class="sp__btn sp__btn--pri btn-sheen" @click="showCreate = true">New skill</button>
         </div>
       </div>
 
@@ -72,13 +72,13 @@ async function deleteSkill(item) {
         </div>
         <div v-if="!store.runtime.value.available" class="sp__runtime">
           <span>npx unavailable — remote search disabled</span>
-          <button type="button" class="sp__btn sp__btn--pri" :disabled="store.busy.value === 'runtime'" @click="store.installRuntime">
+          <button type="button" class="sp__btn sp__btn--pri btn-sheen" :disabled="store.busy.value === 'runtime'" @click="store.installRuntime">
             {{ store.busy.value === 'runtime' ? 'Installing' : 'Install Node.js' }}
           </button>
         </div>
         <div class="sp__tools">
           <input v-model="query" placeholder="Find remote skills" @keydown.enter="doSearch" />
-          <button type="button" class="sp__btn sp__btn--pri" @click="doSearch">Search</button>
+          <button type="button" class="sp__btn sp__btn--pri btn-sheen" @click="doSearch">Search</button>
           <input v-model="source" placeholder="Add URL, package, or path" @keydown.enter="addSource()" />
         </div>
       </section>
@@ -97,7 +97,7 @@ async function deleteSkill(item) {
           <button
             v-if="!item.installed"
             type="button"
-            class="sp__btn sp__btn--pri sp__item-add"
+            class="sp__btn sp__btn--pri btn-sheen sp__item-add"
             :disabled="store.busy.value === sourceFor(item)"
             @click.stop="addSource(sourceFor(item))"
           >
@@ -127,7 +127,7 @@ async function deleteSkill(item) {
         </label>
         <div class="sp__modal-actions">
           <button type="button" class="sp__btn" @click="showCreate = false">Cancel</button>
-          <button type="submit" class="sp__btn sp__btn--pri" :disabled="store.busy.value === 'create'">
+          <button type="submit" class="sp__btn sp__btn--pri btn-sheen" :disabled="store.busy.value === 'create'">
             {{ store.busy.value === 'create' ? 'Creating' : 'Create' }}
           </button>
         </div>

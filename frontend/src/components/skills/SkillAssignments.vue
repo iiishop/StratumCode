@@ -218,7 +218,7 @@ function targetColor(id) {
           <button type="button" :class="{ 'is-active': view === 'configure' }" @click="view = 'configure'">Configure</button>
           <button type="button" :class="{ 'is-active': view === 'matrix' }" @click="view = 'matrix'">Matrix</button>
         </div>
-        <button type="button" class="sc__save" :disabled="!activeDirty || saving" @click="apply">
+        <button type="button" class="sc__save btn-sheen" :disabled="!activeDirty || saving" @click="apply">
           {{ saving ? 'Saving' : 'Save' }}
         </button>
       </div>
