@@ -954,6 +954,12 @@ def investigation_stream(
                         continue
                     _require_finding_fields(arguments)
                     _reject_empty_repair(arguments, recorded_findings)
+                    # 剥离模型提交的 repair 诊断字段：repair_mode/semantic_missing
+                    # 只能由 audit 质量门打标。REPAIR 阶段模型会从上下文把上一轮
+                    # missing 原样抄进提交的 resolution，不清理则 merge 后
+                    # _semantic_repair_resolution_ids 永远判该 unknown 待修，
+                    # 即使证据已补齐也无限 REPAIR（U4 类死循环根因）。
+                    arguments = _strip_submitted_repair_diagnostics(arguments)
                     recorded_findings = _merge_recorded_findings(recorded_findings, arguments)
                     recorded_findings = _bind_grounding_evidence(
                         recorded_findings,
@@ -4300,6 +4306,28 @@ def _finish_payload(
     if repair_request:
         final["resolution_repair"] = repair_request
     return final
+
+
+def _strip_submitted_repair_diagnostics(arguments: dict) -> dict:
+    """record 时剥离模型提交的 repair 诊断字段（repair_mode/semantic_missing）。
+
+    这些字段是 audit 质量门的输出标记，模型在 REPAIR 阶段会从上下文把上一轮
+    的 missing 原样抄进自己提交的 resolution。若不清理，merge 后
+    _semantic_repair_resolution_ids 看到 repair_mode 就永远判该 unknown 待修，
+    即使模型已补齐证据，也会无限 REPAIR（U4 类死循环根因）。
+    """
+    cleaned = dict(arguments)
+    resolutions = cleaned.get("resolutions")
+    if isinstance(resolutions, list):
+        cleaned["resolutions"] = [
+            (
+                {key: value for key, value in item.items() if key not in {"repair_mode", "semantic_missing"}}
+                if isinstance(item, dict)
+                else item
+            )
+            for item in resolutions
+        ]
+    return cleaned
 
 
 def _strip_closed_resolution_repair_diagnostics(resolutions: list[dict]) -> list[dict]:
