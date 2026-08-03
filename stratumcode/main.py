@@ -22,36 +22,25 @@ WORKSPACE_DIR = FRONTEND_DIR.parent
 class Api:
     """Expose native OS dialogs to the webview frontend."""
 
+    def __init__(self):
+        self._window = None
+
+    def set_window(self, window):
+        self._window = window
+
     def select_folder(self) -> str:
-        if sys.platform == "darwin":
-            return self._select_folder_macos()
-        import tkinter as tk
-        import tkinter.filedialog
+        """原生目录选择对话框（pywebview 内部在主线程调度，跨平台安全）。
 
-        root = tk.Tk()
-        root.withdraw()
-        root.attributes("-topmost", True)
-        path = tkinter.filedialog.askdirectory(title="Select workspace folder")
-        root.destroy()
-        return path if path else ""
-
-    @staticmethod
-    def _select_folder_macos() -> str:
-        # uv 管理的 macOS Python 不带 tkinter（python-build-standalone 仅 Windows 含 Tk），
-        # 改用 pyobjc 的 NSOpenPanel 选目录。
-        try:
-            import AppKit
-        except ImportError:
+        macOS 直接用 AppKit NSOpenPanel 会崩在
+        "NSWindow should only be instantiated on the main thread"——
+        JS bridge 调用跑在后台线程，AppKit 要求主线程操作 UI。
+        pywebview 的 create_file_dialog 自己处理线程调度，一劳永逸。
+        """
+        window = self._window
+        if window is None:
             return ""
-        panel = AppKit.NSOpenPanel.openPanel()
-        panel.setCanChooseFiles_(False)
-        panel.setCanChooseDirectories_(True)
-        panel.setAllowsMultipleSelection_(False)
-        panel.setTitle_("Select workspace folder")
-        if panel.runModal() != AppKit.NSModalResponseOK:
-            return ""
-        url = panel.URL()
-        return str(url.path()) if url else ""
+        result = window.create_file_dialog(webview.FileDialog.FOLDER)
+        return str(result[0]) if result else ""
 
 
 def _frontend_deps_installed() -> bool:
@@ -110,7 +99,9 @@ def main():
     port = server.server_address[1]
     threading.Thread(target=server.serve_forever, daemon=True).start()
 
-    webview.create_window("StratumCode", f"http://localhost:{port}", js_api=Api())
+    api = Api()
+    window = webview.create_window("StratumCode", f"http://localhost:{port}", js_api=api)
+    api.set_window(window)
     webview.start()
 
 
@@ -133,5 +124,7 @@ def main_dev():
     url = f"http://localhost:{vite_port}"
     _wait_for(url, timeout=15)
 
-    webview.create_window("StratumCode", url, js_api=Api())
+    api = Api()
+    window = webview.create_window("StratumCode", url, js_api=api)
+    api.set_window(window)
     webview.start()
