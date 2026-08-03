@@ -289,44 +289,70 @@ async function restart() {
 }
 
 .update-panel__check {
+  position: relative;
   display: inline-flex;
-  height: 30px;
+  height: 32px;
   align-items: center;
-  gap: 6px;
-  padding: 0 12px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  color: var(--text-h);
-  background: linear-gradient(180deg, #ffffff, var(--code-bg));
-  box-shadow: 0 1px 2px rgba(16, 42, 92, 0.06), inset 0 1px 0 rgba(255, 255, 255, 0.8);
+  gap: 7px;
+  padding: 0 14px;
+  overflow: hidden;
+  border: 1px solid rgba(59, 130, 246, 0.45);
+  border-radius: 999px;
+  color: #ffffff;
+  background: linear-gradient(135deg, #3b82f6, #2563eb);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.28), 0 2px 6px rgba(59, 130, 246, 0.3);
   font: 600 11px/1 var(--sans);
   cursor: pointer;
-  transition: border-color var(--transition-fast), background var(--transition-fast), color var(--transition-fast), transform 120ms ease, box-shadow var(--transition-fast);
+  transition: transform 170ms cubic-bezier(0.16, 1, 0.3, 1), box-shadow 170ms ease, filter 170ms ease;
 }
 
-.update-panel__check:hover {
-  border-color: var(--accent-border);
-  color: var(--accent);
-  background: linear-gradient(180deg, #ffffff, var(--accent-bg));
-  transform: translateY(-1px);
-  box-shadow: 0 3px 10px rgba(23, 86, 209, 0.16), inset 0 1px 0 rgba(255, 255, 255, 0.8);
+/* hover：上浮 + 亮度提升 + 光晕扩散 */
+.update-panel__check:hover:not(:disabled) {
+  transform: translateY(-2px);
+  filter: brightness(1.08);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.32), 0 7px 20px rgba(59, 130, 246, 0.44);
 }
 
-.update-panel__check:active {
-  transform: translateY(0) scale(0.97);
+/* 扫光：hover 时一道高光从左扫到右 */
+.update-panel__check::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: -40%;
+  width: 32%;
+  background: linear-gradient(105deg, transparent, rgba(255, 255, 255, 0.38), transparent);
+  transform: skewX(-20deg);
+  transition: left 0.55s cubic-bezier(0.16, 1, 0.3, 1);
+  pointer-events: none;
+}
+
+.update-panel__check:hover:not(:disabled)::before {
+  left: 125%;
+}
+
+/* active：按下内缩 + 阴影收拢 */
+.update-panel__check:active:not(:disabled) {
+  transform: translateY(0) scale(0.95);
+  filter: brightness(0.94);
+  box-shadow: inset 0 2px 5px rgba(16, 42, 92, 0.3), 0 1px 3px rgba(59, 130, 246, 0.2);
 }
 
 .update-panel__check svg {
   flex-shrink: 0;
-  transition: transform 300ms ease;
+  transition: transform 320ms cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+.update-panel__check:hover:not(:disabled) svg {
+  transform: rotate(120deg);
 }
 
 .update-panel__check-spinner {
   width: 10px;
   height: 10px;
   flex-shrink: 0;
-  border: 1.5px solid var(--accent-border);
-  border-top-color: var(--accent);
+  border: 1.5px solid rgba(255, 255, 255, 0.4);
+  border-top-color: #ffffff;
   border-radius: 50%;
   animation: check-spin 0.7s linear infinite;
 }
@@ -337,7 +363,8 @@ async function restart() {
 
 .update-panel__check:disabled {
   cursor: default;
-  opacity: 0.75;
+  opacity: 0.8;
+  filter: saturate(0.6);
 }
 
 .update-panel__check:active svg {
