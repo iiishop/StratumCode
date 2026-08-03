@@ -6,6 +6,7 @@ const props = defineProps({
   status: { type: Object, required: true },
   applyUpdate: { type: Function, required: true },
   restartApp: { type: Function, required: true },
+  checking: { type: Boolean, default: false },
 })
 
 const emit = defineEmits(['close', 'refresh'])
@@ -84,11 +85,12 @@ async function restart() {
               </div>
             </div>
             <div class="update-panel__head-actions">
-              <button class="update-panel__check" type="button" @click="emit('refresh', true)">
-                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <button class="update-panel__check" type="button" :disabled="checking" @click="emit('refresh', true)">
+                <span v-if="checking" class="update-panel__check-spinner"></span>
+                <svg v-else width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                   <path d="M21 12a9 9 0 1 1-2.64-6.36"/><polyline points="21 3 21 9 15 9"/>
                 </svg>
-                Check now
+                {{ checking ? 'Checking' : 'Check now' }}
               </button>
               <button class="update-panel__close" type="button" aria-label="Close updates" @click="emit('close')">
                 <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round">
@@ -317,6 +319,25 @@ async function restart() {
 .update-panel__check svg {
   flex-shrink: 0;
   transition: transform 300ms ease;
+}
+
+.update-panel__check-spinner {
+  width: 10px;
+  height: 10px;
+  flex-shrink: 0;
+  border: 1.5px solid var(--accent-border);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: check-spin 0.7s linear infinite;
+}
+
+@keyframes check-spin {
+  to { transform: rotate(360deg); }
+}
+
+.update-panel__check:disabled {
+  cursor: default;
+  opacity: 0.75;
 }
 
 .update-panel__check:active svg {

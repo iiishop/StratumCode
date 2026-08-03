@@ -49,6 +49,22 @@ const statusText = computed(() => {
   return props.available ? 'Update available' : 'Current'
 })
 
+// 折叠时显示的摘要：去掉 markdown 标记取前 90 字符
+const previewText = computed(() => {
+  if (!props.releaseBody) return ''
+  const text = props.releaseBody
+    .split('\n')
+    .map(line => line
+      .replace(/^#{1,6}\s*/, '')
+      .replace(/^[-*+]\s*/, '')
+      .replace(/[*_`~]/g, '')
+      .trim())
+    .filter(Boolean)
+    .join(' ')
+    .trim()
+  return text.length > 90 ? `${text.slice(0, 90)}…` : text
+})
+
 // -- animation refs --------------------------------------------------
 const rowEl = ref(null)
 const arrowBtn = ref(null)
@@ -316,14 +332,27 @@ onBeforeUnmount(() => {
 
     <p class="update-row__detail">{{ message || detail }}</p>
 
-    <div v-if="releaseBody" class="update-row__notes">
+    <div v-if="releaseBody" class="update-row__notes" :class="{ 'is-open': notesExpanded }">
       <button class="update-row__notes-toggle" type="button" @click="notesExpanded = !notesExpanded">
-        {{ notesExpanded ? 'Hide release notes' : 'Show release notes' }}
-        <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" :class="{ 'is-open': notesExpanded }">
-          <polyline points="6 9 12 15 18 9" />
-        </svg>
+        <span class="update-row__notes-toggle-icon">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" /><polyline points="14 2 14 8 20 8" /><line x1="8" y1="13" x2="16" y2="13" /><line x1="8" y1="17" x2="13" y2="17" />
+          </svg>
+        </span>
+        <span class="update-row__notes-toggle-text">
+          <span class="update-row__notes-toggle-label">Release notes</span>
+          <span v-if="!notesExpanded && previewText" class="update-row__notes-preview">{{ previewText }}</span>
+        </span>
+        <span class="update-row__notes-toggle-btn">
+          {{ notesExpanded ? 'Hide' : 'Show' }}
+          <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" :class="{ 'is-open': notesExpanded }">
+            <polyline points="6 9 12 15 18 9" />
+          </svg>
+        </span>
       </button>
-      <div v-if="notesExpanded" class="update-row__notes-body" v-html="parsedNotes"></div>
+      <div class="update-row__notes-body-wrap" :class="{ 'is-open': notesExpanded }">
+        <div class="update-row__notes-body" v-html="parsedNotes"></div>
+      </div>
     </div>
   </article>
 </template>
@@ -367,6 +396,19 @@ onBeforeUnmount(() => {
 .update-row.is-disabled { opacity: 0.55; }
 .update-row.is-error { border-color: var(--err-border); }
 .update-row.is-error .update-row__detail { color: var(--err); }
+
+/* done 行绿色氛围 */
+.update-row.is-done {
+  border-color: rgba(16, 185, 129, 0.35);
+  background:
+    radial-gradient(140% 120% at 100% 0%, rgba(16, 185, 129, 0.07), transparent 60%),
+    linear-gradient(180deg, #ffffff, #f5fbf8);
+  box-shadow: 0 1px 3px rgba(16, 185, 129, 0.08);
+}
+
+.update-row.is-done .update-row__detail {
+  color: #047857;
+}
 
 /* --- 头部 --- */
 .update-row__head {
@@ -801,75 +843,246 @@ onBeforeUnmount(() => {
 .update-row__notes { margin-top: 2px; }
 
 .update-row__notes-toggle {
-  display: inline-flex;
+  display: flex;
   align-items: center;
-  gap: 4px;
-  padding: 3px 8px;
-  border: 0;
+  gap: 10px;
+  width: 100%;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
   color: var(--text-muted);
-  background: transparent;
+  background: linear-gradient(180deg, #ffffff, var(--code-bg));
   font: 600 10px/1 var(--mono);
   cursor: pointer;
-  transition: color 120ms;
+  text-align: left;
+  transition: border-color 160ms ease, background 160ms ease, box-shadow 160ms ease;
 }
 
 .update-row__notes-toggle:hover {
-  color: var(--accent-text);
+  border-color: var(--accent-border);
+  background: linear-gradient(180deg, #ffffff, var(--accent-bg));
+  box-shadow: 0 2px 8px rgba(23, 86, 209, 0.08);
 }
 
-.update-row__notes-toggle svg { transition: transform 180ms; }
-.update-row__notes-toggle svg.is-open { transform: rotate(180deg); }
+.update-row.is-open .update-row__notes-toggle {
+  border-color: var(--accent-border);
+  border-bottom-left-radius: 0;
+  border-bottom-right-radius: 0;
+}
+
+.update-row__notes-toggle-icon {
+  display: grid;
+  width: 26px;
+  height: 26px;
+  flex-shrink: 0;
+  place-items: center;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text-muted);
+  background: #ffffff;
+  transition: color 160ms ease, border-color 160ms ease;
+}
+
+.update-row__notes-toggle:hover .update-row__notes-toggle-icon {
+  color: var(--accent);
+  border-color: var(--accent-border);
+}
+
+.update-row__notes-toggle-text {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+  flex: 1;
+}
+
+.update-row__notes-toggle-label {
+  font: 600 10.5px/1.2 var(--sans);
+  color: var(--text-h);
+  letter-spacing: 0.01em;
+}
+
+.update-row__notes-preview {
+  overflow: hidden;
+  font: 10.5px/1.45 var(--sans);
+  color: var(--text-muted);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.update-row__notes-toggle-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+  padding: 4px 9px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--text-muted);
+  background: #ffffff;
+  font: 600 9.5px/1 var(--mono);
+  transition: color 160ms ease, border-color 160ms ease, background 160ms ease;
+}
+
+.update-row__notes-toggle:hover .update-row__notes-toggle-btn {
+  color: var(--accent);
+  border-color: var(--accent-border);
+  background: var(--accent-bg);
+}
+
+.update-row__notes-toggle-btn svg { transition: transform 220ms cubic-bezier(0.16, 1, 0.3, 1); }
+.update-row__notes-toggle-btn svg.is-open { transform: rotate(180deg); }
+
+/* 展开高度动画：grid-template-rows 0fr → 1fr */
+.update-row__notes-body-wrap {
+  display: grid;
+  grid-template-rows: 0fr;
+  transition: grid-template-rows 0.32s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.update-row__notes-body-wrap.is-open {
+  grid-template-rows: 1fr;
+}
+
+.update-row__notes-body-wrap > .update-row__notes-body {
+  overflow: hidden;
+  min-height: 0;
+}
 
 .update-row__notes-body {
-  margin-top: 8px;
-  padding: 12px 14px;
+  margin: 0;
+  padding: 14px 16px;
   border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  background: rgba(248, 250, 253, 0.7);
-  max-height: 260px;
+  border-top: 0;
+  border-radius: 0 0 var(--radius) var(--radius);
+  background:
+    radial-gradient(140% 100% at 100% 0%, rgba(59, 130, 246, 0.05), transparent 55%),
+    rgba(248, 250, 253, 0.75);
+  max-height: 300px;
   overflow-y: auto;
-  font-size: 11px;
-  line-height: 1.55;
+  font-size: 11.5px;
+  line-height: 1.6;
   color: var(--text-muted);
+  opacity: 0;
+  transform: translateY(-4px);
+  transition: opacity 0.26s ease 0.06s, transform 0.3s cubic-bezier(0.16, 1, 0.3, 1) 0.06s;
+}
+
+.update-row__notes-body-wrap.is-open > .update-row__notes-body {
+  opacity: 1;
+  transform: translateY(0);
 }
 
 .update-row__notes-body :deep(h2),
 .update-row__notes-body :deep(h3) {
-  margin: 12px 0 4px;
-  font-size: 12px;
+  position: relative;
+  margin: 14px 0 6px;
+  padding-left: 10px;
+  font-size: 12.5px;
   color: var(--text-h);
+}
+
+.update-row__notes-body :deep(h2)::before,
+.update-row__notes-body :deep(h3)::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 2px;
+  bottom: 2px;
+  width: 3px;
+  border-radius: 3px;
+  background: linear-gradient(180deg, #3b82f6, #60a5fa);
+}
+
+.track--dev .update-row__notes-body :deep(h2)::before,
+.track--dev .update-row__notes-body :deep(h3)::before {
+  background: linear-gradient(180deg, #10b981, #34d399);
 }
 
 .update-row__notes-body :deep(h2):first-child,
 .update-row__notes-body :deep(h3):first-child { margin-top: 0; }
 
-.update-row__notes-body :deep(p) { margin: 4px 0; }
+.update-row__notes-body :deep(p) { margin: 6px 0; }
 
 .update-row__notes-body :deep(ul),
 .update-row__notes-body :deep(ol) {
-  margin: 4px 0;
-  padding-left: 18px;
+  margin: 6px 0;
+  padding-left: 20px;
 }
 
-.update-row__notes-body :deep(li) { margin: 2px 0; }
+.update-row__notes-body :deep(ul) { list-style: none; }
+.update-row__notes-body :deep(ul > li) { position: relative; margin: 3px 0; padding-left: 4px; }
+.update-row__notes-body :deep(ul > li)::before {
+  content: "";
+  position: absolute;
+  left: -14px;
+  top: 0.55em;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--accent);
+}
+
+.track--dev .update-row__notes-body :deep(ul > li)::before {
+  background: #10b981;
+}
+
+.update-row__notes-body :deep(ol) { list-style: decimal; }
+.update-row__notes-body :deep(ol > li) { margin: 3px 0; }
+.update-row__notes-body :deep(ol > li)::marker { color: var(--accent); font-weight: 700; }
 
 .update-row__notes-body :deep(code) {
-  padding: 1px 4px;
-  border-radius: 3px;
-  background: var(--code-bg);
-  font-size: 10px;
+  padding: 1.5px 5px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: #eef2f8;
+  font-size: 10.5px;
+  color: var(--text-h);
 }
 
-.update-row__notes-body :deep(a) { color: #3b82f6; }
+.update-row__notes-body :deep(pre) {
+  margin: 8px 0;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: #0f1b33;
+  overflow-x: auto;
+}
+
+.update-row__notes-body :deep(pre code) {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: #dbe6ff;
+}
+
+.update-row__notes-body :deep(a) {
+  color: #3b82f6;
+  text-decoration: none;
+  border-bottom: 1px dashed rgba(59, 130, 246, 0.4);
+  transition: border-color 120ms;
+}
+
+.update-row__notes-body :deep(a:hover) {
+  border-bottom-style: solid;
+}
 
 .update-row__notes-body :deep(blockquote) {
-  margin: 6px 0;
-  padding: 4px 10px;
-  border-left: 2px solid var(--border-strong);
+  margin: 8px 0;
+  padding: 6px 12px;
+  border-left: 3px solid var(--border-strong);
+  border-radius: 0 6px 6px 0;
+  background: rgba(16, 42, 92, 0.04);
   color: var(--text-muted);
 }
 
 .update-row__notes-body :deep(strong) { color: var(--text-h); }
+
+.update-row__notes-body :deep(hr) {
+  margin: 10px 0;
+  border: 0;
+  height: 1px;
+  background: var(--border);
+}
 
 /* --- reduced motion --- */
 @media (prefers-reduced-motion: reduce) {

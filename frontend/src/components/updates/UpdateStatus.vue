@@ -38,6 +38,7 @@ onUnmounted(() => window.clearInterval(timer))
     <UpdatePanel
       v-if="open"
       :status="status"
+      :checking="loading"
       :apply-update="apply"
       :restart-app="restart"
       @close="open = false"
