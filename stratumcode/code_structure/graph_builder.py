@@ -76,6 +76,7 @@ class CallGraphBuilder:
                 "symbol_count": len(symbols),
                 "call_count": len(calls),
                 "edge_count": len(edges),
+                "semantic_status": self.providers.semantic_status(str(meta.get("semantic_mode") or "fast")),
             },
         )
 
@@ -92,7 +93,7 @@ class CallGraphBuilder:
                 return target, "static_resolved", 0.9, call.provenance + [provider.name]
         if pack and (call.name in pack.builtin_symbols or call.name.rsplit(".", 1)[-1] in pack.builtin_symbols):
             return None, "builtin_call", 0.8, call.provenance + ["language-pack:builtin"]
-        if "." in call.name:
+        if "." in call.name or "::" in call.name:
             return None, "external_member_call", 0.55, call.provenance + ["member-call"]
         return None, "unresolved", 0.35, call.provenance
 

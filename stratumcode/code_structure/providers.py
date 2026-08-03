@@ -125,9 +125,10 @@ class NameIndexSemanticProvider:
     name = "name-index"
 
     def resolve(self, call: CallSite, symbols: list[Symbol], workspace_dir: str) -> str | None:
+        lookup_name = call.name.rsplit("::", 1)[-1]
         if "." in call.name:
             return None
-        same_name = [item for item in symbols if item.language == call.language and item.name == call.name]
+        same_name = [item for item in symbols if item.language == call.language and item.name == lookup_name]
         if not same_name:
             return None
         same_file = [item for item in same_name if item.file == call.file]
@@ -144,11 +145,16 @@ class LspDefinitionSemanticProvider:
     def __init__(self, max_requests: int = 120) -> None:
         self.max_requests = max_requests
         self._requests = 0
+        self._responses = 0
+        self._resolved = 0
         self._disabled = False
+        self._disabled_languages: set[str] = set()
+        self._server = ""
+        self._error = ""
         self._cache: dict[tuple[str, int, int], str | None] = {}
 
     def resolve(self, call: CallSite, symbols: list[Symbol], workspace_dir: str) -> str | None:
-        if self._disabled or self._requests >= self.max_requests:
+        if self._disabled or call.language in self._disabled_languages or self._requests >= self.max_requests:
             return None
         key = (call.file, call.range.start_line, call.range.start_col)
         if key in self._cache:
@@ -161,13 +167,33 @@ class LspDefinitionSemanticProvider:
                 "line": call.range.start_line,
                 "character": call.range.start_col,
             }, workspace_dir)
-        except Exception:
-            self._disabled = True
+        except Exception as exc:
+            self._disabled_languages.add(call.language)
+            self._error = str(exc)
             self._cache[key] = None
             return None
+        self._responses += 1
+        self._server = str(raw.get("server") or self._server)
         target = _symbol_from_lsp_definition(raw.get("result"), symbols, workspace_dir)
+        if target:
+            self._resolved += 1
         self._cache[key] = target
         return target
+
+    def status(self) -> dict:
+        return {
+            "provider": self.name,
+            "attempted": self._requests > 0,
+            "used": self._responses > 0,
+            "server": self._server,
+            "error": self._error,
+            "requests": self._requests,
+            "responses": self._responses,
+            "resolved": self._resolved,
+            "disabled": self._disabled,
+            "disabled_languages": sorted(self._disabled_languages),
+            "fallback": "name-index" if self._disabled_languages or self._responses == 0 else "",
+        }
 
 
 class ProviderRegistry:
@@ -185,6 +211,44 @@ class ProviderRegistry:
             LspDefinitionSemanticProvider(max_requests=max_requests),
             NameIndexSemanticProvider(),
         ])
+
+    def semantic_status(self, mode: str) -> dict:
+        if mode != "lsp":
+            return {
+                "mode": mode,
+                "provider": "",
+                "attempted": False,
+                "used": False,
+                "server": "",
+                "error": "",
+                "requests": 0,
+                "responses": 0,
+                "resolved": 0,
+                "disabled": False,
+                "disabled_languages": [],
+                "fallback": "name-index",
+            }
+        for provider in self.semantic:
+            status = getattr(provider, "status", None)
+            if callable(status):
+                return {
+                    "mode": mode,
+                    **status(),
+                }
+        return {
+            "mode": mode,
+            "provider": "",
+            "attempted": False,
+            "used": False,
+            "server": "",
+            "error": "",
+            "requests": 0,
+            "responses": 0,
+            "resolved": 0,
+            "disabled": False,
+            "disabled_languages": [],
+            "fallback": "name-index",
+        }
 
 
 def _iter_matches(query: RegexQuery, source: str):
@@ -230,7 +294,7 @@ def _leading_comment(source: str, line_offsets: list[int], offset: int) -> str:
         if text.startswith("#"):
             collected.append(text[1:].strip())
         elif text.startswith("//"):
-            collected.append(text[2:].strip())
+            collected.append(text.lstrip("/").strip())
         else:
             break
         line_index -= 1

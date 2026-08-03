@@ -1,0 +1,47 @@
+id: rust
+extensions: [".rs"]
+semantic:
+  provider: lsp
+syntax:
+  provider: regex-query
+  symbols:
+    - pattern: "^\\s*(?P<signature>(?:pub(?:\\([^\\n)]*\\))?\\s+)?(?:(?:async|const|unsafe)\\s+)*(?:extern\\s+\"[^\"]+\"\\s+)?fn\\s+(?P<name>[A-Za-z_][A-Za-z0-9_]*)\\s*(?:<[^\\n>{};]*>)?\\s*\\([^\\n;{}]*\\)\\s*(?:->\\s*[^\\n{;]+)?(?:\\s+where\\s+[^\\n{]+)?\\s*(?:\\{|;))"
+  calls:
+    - pattern: "(?<![A-Za-z0-9_$.!:])(?P<name>[A-Za-z_][A-Za-z0-9_]*(?:(?:\\.|::)[A-Za-z_][A-Za-z0-9_]*)*)\\s*\\("
+    - pattern: "(?<![A-Za-z0-9_$.!:])(?P<name>[A-Za-z_][A-Za-z0-9_]*(?:(?:\\.|::)[A-Za-z_][A-Za-z0-9_]*)*!)\\s*[\\(\\[]"
+builtin_symbols:
+  - println!
+  - print!
+  - eprintln!
+  - format!
+  - vec!
+  - panic!
+  - assert!
+  - assert_eq!
+  - assert_ne!
+  - dbg!
+  - Some
+  - None
+  - Ok
+  - Err
+  - Box::new
+ignored_symbols:
+  - if
+  - for
+  - while
+  - loop
+  - match
+ignored_calls:
+  - if
+  - for
+  - while
+  - loop
+  - match
+  - return
+  - let
+  - fn
+  - unsafe
+  - async
+  - move
+dependency:
+  roots: ["target", ".cargo"]

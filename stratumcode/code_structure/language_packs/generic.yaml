@@ -1,5 +1,5 @@
 id: generic
-extensions: [".go", ".rs", ".java", ".kt", ".kts", ".cpp", ".cc", ".cxx", ".c", ".h", ".hpp", ".php", ".rb", ".swift"]
+extensions: [".go", ".java", ".kt", ".kts", ".cpp", ".cc", ".cxx", ".c", ".h", ".hpp", ".php", ".rb", ".swift"]
 semantic:
   provider: lsp
 syntax:

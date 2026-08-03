@@ -8,6 +8,7 @@ const props = defineProps({
   workspace: { type: Object, default: null },
   active: { type: Boolean, default: false },
 })
+const emit = defineEmits(['open-lsp'])
 
 const graph = ref(null)
 const loading = ref(false)
@@ -24,6 +25,7 @@ const nodePositions = ref({})
 const projectNodes = computed(() => (graph.value?.nodes || []).filter(node => node.kind === 'project'))
 const edges = computed(() => graph.value?.edges || [])
 const diagnostics = computed(() => graph.value?.diagnostics || [])
+const semanticStatus = computed(() => graph.value?.meta?.semantic_status || null)
 
 const nodeDegree = computed(() => {
   const degree = new Map()
@@ -134,6 +136,38 @@ const stats = computed(() => ({
   visibleNodes: filteredGraphNodes.value.length,
   visibleEdges: flowEdges.value.length + visibleSelfEdges.value.length,
 }))
+
+const semanticBadge = computed(() => {
+  const status = semanticStatus.value
+  if (!status || status.mode !== 'lsp') return null
+  if (status.used && status.error) {
+    const languages = status.disabled_languages?.length ? ` Disabled: ${status.disabled_languages.join(', ')}.` : ''
+    return {
+      kind: 'warn',
+      label: status.server ? `LSP partial ${status.server}` : 'LSP partial',
+      detail: `${status.resolved || 0} definitions resolved from ${status.requests || 0} requests. ${status.error}.${languages} Using fallback where needed.`,
+    }
+  }
+  if (status.used) {
+    return {
+      kind: 'ok',
+      label: status.server ? `LSP ${status.server}` : 'LSP active',
+      detail: `${status.resolved || 0} definitions resolved from ${status.requests || 0} requests.`,
+    }
+  }
+  if (!status.attempted) {
+    return {
+      kind: 'idle',
+      label: 'LSP idle',
+      detail: 'No visible call site required semantic definition lookup.',
+    }
+  }
+  return {
+    kind: 'warn',
+    label: 'LSP fallback',
+    detail: `${status.error || 'No matching enabled LSP server responded.'} Using name-index fallback. Open the LSP page to install or enable a server for this language.`,
+  }
+})
 
 watch(() => props.active, (active) => {
   if (active && !loaded.value && !loading.value) loadGraph()
@@ -746,6 +780,21 @@ function onNodeDrag(payload) {
         <input v-model="semanticMode" true-value="lsp" false-value="fast" type="checkbox" />
         LSP semantic
       </label>
+      <span
+        v-if="semanticBadge"
+        class="structure-panel__semantic-status"
+        :class="`is-${semanticBadge.kind}`"
+        :title="semanticBadge.detail"
+      >
+        <span>{{ semanticBadge.label }}</span>
+        <button
+          v-if="semanticBadge.kind === 'warn'"
+          type="button"
+          @click="emit('open-lsp')"
+        >
+          Open LSP
+        </button>
+      </span>
       <div class="structure-panel__stats">
         <span>{{ stats.functions }} functions</span>
         <span>{{ stats.calls }} calls</span>
@@ -1034,6 +1083,53 @@ function onNodeDrag(payload) {
   accent-color: #315f9c;
 }
 
+.structure-panel__semantic-status {
+  display: inline-flex;
+  height: 24px;
+  align-items: center;
+  gap: 7px;
+  padding: 0 8px;
+  border: 1px solid #d4deea;
+  border-radius: 999px;
+  color: #526a84;
+  background: #f8fbff;
+  font: 10px/1 var(--mono);
+  white-space: nowrap;
+}
+
+.structure-panel__semantic-status button {
+  height: 18px;
+  padding: 0 6px;
+  border: 1px solid currentColor;
+  border-radius: 999px;
+  color: inherit;
+  background: rgba(255, 255, 255, 0.62);
+  font: 9px/1 var(--mono);
+  cursor: pointer;
+}
+
+.structure-panel__semantic-status button:hover {
+  background: rgba(255, 255, 255, 0.9);
+}
+
+.structure-panel__semantic-status.is-ok {
+  border-color: #b9dcc8;
+  color: #25734a;
+  background: #eef8f2;
+}
+
+.structure-panel__semantic-status.is-warn {
+  border-color: #ead1a8;
+  color: #8a5d19;
+  background: #fff7e8;
+}
+
+.structure-panel__semantic-status.is-idle {
+  border-color: #d4deea;
+  color: #66798d;
+  background: #f3f6fa;
+}
+
 .structure-panel__stats {
   margin-left: auto;
   color: #637891;
@@ -1305,6 +1401,10 @@ function onNodeDrag(payload) {
   --module-lang-color: #2f8f9d;
 }
 
+:deep(.structure-module-group--lang-rust) .module-group {
+  --module-lang-color: #a85f2b;
+}
+
 :deep(.structure-module-group--lang-javascript) .module-group,
 :deep(.structure-module-group--lang-typescript) .module-group {
   --module-lang-color: #b88716;
@@ -1515,6 +1615,10 @@ function onNodeDrag(payload) {
 
 :deep(.structure-flow-node--lang-csharp) .function-node {
   --function-lang-color: #2f8f9d;
+}
+
+:deep(.structure-flow-node--lang-rust) .function-node {
+  --function-lang-color: #a85f2b;
 }
 
 :deep(.structure-flow-node--lang-javascript) .function-node,

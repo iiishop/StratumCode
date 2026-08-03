@@ -789,6 +789,7 @@ watch(currentView, (v) => {
           v-show="workspacePanel === 'structure'"
           :workspace="activeWorkspace"
           :active="workspacePanel === 'structure'"
+          @open-lsp="currentView = 'lsp'"
         />
       </template>
       <McpPage

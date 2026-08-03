@@ -30,10 +30,12 @@ class CodeStructureEngine:
         packs: LanguagePackRegistry | None = None,
         providers: ProviderRegistry | None = None,
         graph_builder: CallGraphBuilder | None = None,
+        semantic_mode: str = "fast",
     ) -> None:
         self.packs = packs or LanguagePackRegistry.load_default()
         self.providers = providers or ProviderRegistry()
         self.graph_builder = graph_builder or CallGraphBuilder(self.providers)
+        self.semantic_mode = semantic_mode
 
     def analyze(self, workspace_dir: str) -> CodeStructureGraph:
         root = Path(workspace_dir).resolve()
@@ -64,6 +66,7 @@ class CodeStructureEngine:
                 "workspace": str(root),
                 "file_count": len(files),
                 "packs": [pack.id for pack in self.packs.all()],
+                "semantic_mode": self.semantic_mode,
                 "semantic_providers": [provider.name for provider in self.providers.semantic],
             },
             workspace_dir=str(root),
@@ -131,4 +134,4 @@ class CodeStructureEngine:
 
 def analyze_workspace(workspace_dir: str, *, semantic: str = "fast") -> dict:
     providers = ProviderRegistry.with_lsp() if semantic == "lsp" else ProviderRegistry()
-    return CodeStructureEngine(providers=providers).analyze(workspace_dir).to_json()
+    return CodeStructureEngine(providers=providers, semantic_mode=semantic).analyze(workspace_dir).to_json()
