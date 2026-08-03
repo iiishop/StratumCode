@@ -1,4 +1,5 @@
 import os
+import json
 import socket
 import subprocess
 import sys
@@ -53,9 +54,28 @@ class Api:
         return str(url.path()) if url else ""
 
 
+def _frontend_deps_installed() -> bool:
+    """Check that every dependency declared in package.json exists in node_modules."""
+    pkg_path = FRONTEND_DIR / "package.json"
+    if not pkg_path.exists():
+        return False
+    try:
+        pkg = json.loads(pkg_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    deps = {**pkg.get("dependencies", {}), **pkg.get("devDependencies", {})}
+    if not deps:
+        return False
+    for name in deps:
+        if not (FRONTEND_DIR / "node_modules" / name).exists():
+            return False
+    return True
+
+
 def _ensure_frontend_deps():
-    """Ensure frontend dependencies are installed; run npm install when node_modules is missing."""
-    if not (FRONTEND_DIR / "node_modules").exists():
+    """Ensure frontend dependencies are installed; run npm install when node_modules is missing or incomplete."""
+    if not _frontend_deps_installed():
+        # shell=True 仅用于固定字符串 "npm install"（无任何拼接输入），无注入风险
         subprocess.run("npm install", cwd=str(FRONTEND_DIR), shell=True, check=True)
 
 
