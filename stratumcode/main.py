@@ -30,6 +30,12 @@ class Api:
         path = tkinter.filedialog.askdirectory(title="Select workspace folder")
         root.destroy()
         return path if path else ""
+def _ensure_frontend_deps():
+    """Ensure frontend dependencies are installed; run npm install when node_modules is missing."""
+    if not (FRONTEND_DIR / "node_modules").exists():
+        subprocess.run("npm install", cwd=str(FRONTEND_DIR), shell=True, check=True)
+
+
 def _free_port():
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.bind(("", 0))
@@ -44,13 +50,16 @@ def _wait_for(url, timeout):
             return
         except OSError:
             time.sleep(0.3)
+    raise RuntimeError(
+        f"Frontend dev server did not start within {timeout}s ({url}). "
+        f"Check frontend/vite.err.log for details."
+    )
 
 
 def main():
-    if not (DIST_DIR / "index.html").exists():
-        subprocess.run(
-            "npm run build", cwd=str(FRONTEND_DIR), shell=True, check=True,
-        )
+    _ensure_frontend_deps()
+    # 生产模式：每次启动都重新 build，避免 dist 陈旧
+    subprocess.run("npm run build", cwd=str(FRONTEND_DIR), shell=True, check=True)
 
     workspaces.reconcile(str(WORKSPACE_DIR))
     workspace = workspaces.active(str(WORKSPACE_DIR))["path"]
@@ -63,6 +72,7 @@ def main():
 
 
 def main_dev():
+    _ensure_frontend_deps()
     api_port = _free_port()
     workspaces.reconcile(str(WORKSPACE_DIR))
     workspace = workspaces.active(str(WORKSPACE_DIR))["path"]
@@ -73,7 +83,9 @@ def main_dev():
     vite_port = _free_port()
     subprocess.Popen(
         f"npm run dev -- --port {vite_port}", cwd=str(FRONTEND_DIR), shell=True,
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env,
+        stdout=open(FRONTEND_DIR / "vite.out.log", "w"),
+        stderr=open(FRONTEND_DIR / "vite.err.log", "w"),
+        env=env,
     )
     url = f"http://localhost:{vite_port}"
     _wait_for(url, timeout=15)
