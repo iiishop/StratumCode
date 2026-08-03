@@ -66,6 +66,8 @@ const visibleSelfEdges = computed(() => visibleGraphEdges.value.filter(edge => e
 
 const visibleCallEdges = computed(() => visibleGraphEdges.value.filter(edge => edge.source !== edge.target))
 
+const aggregatedCallEdges = computed(() => aggregateCallEdges(visibleCallEdges.value))
+
 const selfEdgesByNode = computed(() => {
   const byNode = new Map()
   for (const edge of visibleSelfEdges.value) {
@@ -76,7 +78,7 @@ const selfEdgesByNode = computed(() => {
 })
 
 const flowNodes = computed(() => {
-  const positions = layoutGraph(filteredGraphNodes.value, visibleCallEdges.value)
+  const positions = layoutGraph(filteredGraphNodes.value, aggregatedCallEdges.value)
   const selfEdgeMap = selfEdgesByNode.value
   const functionNodes = filteredGraphNodes.value.map((node, index) => ({
     id: node.id,
@@ -105,7 +107,7 @@ const flowNodes = computed(() => {
   ]
 })
 
-const flowEdges = computed(() => visibleCallEdges.value.map(edge => ({
+const flowEdges = computed(() => aggregatedCallEdges.value.map(edge => ({
     id: edge.id,
     type: 'callEdge',
     source: edge.source,
@@ -121,6 +123,7 @@ const flowEdges = computed(() => visibleCallEdges.value.map(edge => ({
     class: [
       'structure-flow-edge',
       `structure-flow-edge--${edge.kind}`,
+      edge.calls.length > 1 ? 'structure-flow-edge--multi' : '',
       isEdgeRelatedToSelectedNode(edge) ? 'structure-flow-edge--active' : '',
     ].filter(Boolean).join(' '),
   })))
@@ -174,6 +177,31 @@ function nodeLocation(node) {
 
 function docSummary(doc) {
   return doc?.summary || doc?.description || ''
+}
+
+function aggregateCallEdges(callEdges) {
+  const groups = new Map()
+  for (const edge of callEdges) {
+    const key = `${edge.source}\u0000${edge.target}`
+    const current = groups.get(key)
+    if (!current) {
+      groups.set(key, {
+        ...edge,
+        id: `edge-group:${stableHash(key)}`,
+        calls: [edge],
+        order: edge.order,
+      })
+      continue
+    }
+    current.calls.push(edge)
+    current.order = Math.min(current.order, edge.order)
+    current.confidence = Math.max(current.confidence || 0, edge.confidence || 0)
+    if (current.kind !== edge.kind) current.kind = 'mixed'
+  }
+  return [...groups.values()].map(edge => ({
+    ...edge,
+    calls: edge.calls.sort((a, b) => (a.order || 0) - (b.order || 0)),
+  }))
 }
 
 function hasDoc(doc) {
@@ -590,8 +618,15 @@ function compareLayoutNodes(a, b) {
 }
 
 function isEdgeRelatedToSelectedNode(edge) {
+  const rawEdge = edge?.data?.raw || edge
   return selected.value?.type === 'node'
-    && (edge.source === selected.value.item?.id || edge.target === selected.value.item?.id)
+    && (rawEdge.source === selected.value.item?.id || rawEdge.target === selected.value.item?.id)
+}
+
+function isEdgeSelectedOrRelated(edge) {
+  const rawEdge = edge?.data?.raw || edge
+  return isEdgeRelatedToSelectedNode(rawEdge)
+    || (selected.value?.type === 'edge' && selected.value.item?.id === rawEdge.id)
 }
 
 function edgePath(edge) {
@@ -609,6 +644,22 @@ function edgeLabelStyle(edge) {
   const [, labelX, labelY] = edgePath(edge)
   return {
     transform: `translate(-50%, -50%) translate(${labelX}px, ${labelY}px)`,
+  }
+}
+
+function edgeCallLabelStyle(edge, index, total) {
+  if (total <= 1) return edgeLabelStyle(edge)
+  const t = (index + 1) / (total + 1)
+  const dx = edge.targetX - edge.sourceX
+  const dy = edge.targetY - edge.sourceY
+  const length = Math.max(1, Math.hypot(dx, dy))
+  const perpendicularX = -dy / length
+  const perpendicularY = dx / length
+  const offset = (index % 2 === 0 ? -1 : 1) * Math.min(44, 18 + total * 4)
+  const x = edge.sourceX + dx * t + perpendicularX * offset
+  const y = edge.sourceY + dy * t + perpendicularY * offset
+  return {
+    transform: `translate(-50%, -50%) translate(${x}px, ${y}px)`,
   }
 }
 
@@ -758,10 +809,20 @@ function onNodeDrag(payload) {
               :marker-end="edgeProps.markerEnd"
               :interaction-width="18"
             />
-            <EdgeLabelRenderer v-if="isEdgeRelatedToSelectedNode(edgeProps.data.raw)">
-              <div class="call-edge-label" :style="edgeLabelStyle(edgeProps)">
-                <span class="call-edge-label__order">#{{ edgeProps.data.raw.order }}</span>
-                <code v-html="highlightedCallLine(edgeProps)" />
+            <EdgeLabelRenderer v-if="edgeProps.data.raw.calls.length > 1 || isEdgeSelectedOrRelated(edgeProps.data.raw)">
+              <template v-if="isEdgeSelectedOrRelated(edgeProps.data.raw)">
+                <div
+                  v-for="(call, index) in edgeProps.data.raw.calls"
+                  :key="call.id"
+                  class="call-edge-label"
+                  :style="edgeCallLabelStyle(edgeProps, index, edgeProps.data.raw.calls.length)"
+                >
+                  <span class="call-edge-label__order">#{{ call.order }}</span>
+                  <code v-html="highlightedCallLine(call)" />
+                </div>
+              </template>
+              <div v-else class="call-edge-label call-edge-label--compact" :style="edgeLabelStyle(edgeProps)">
+                x{{ edgeProps.data.raw.calls.length }}
               </div>
             </EdgeLabelRenderer>
           </template>
@@ -830,21 +891,30 @@ function onNodeDrag(payload) {
 
         <template v-else-if="selected?.type === 'edge'">
           <p class="structure-panel__detail-kicker">Call edge</p>
-          <h2>{{ selected.item.line_text || selected.item.call_text }}</h2>
-          <dl>
-            <dt>Order</dt>
-            <dd>#{{ selected.item.order }}</dd>
-            <dt>Call line</dt>
-            <dd>{{ selected.item.line_text || selected.item.call_text }}</dd>
-            <dt>Location</dt>
-            <dd>{{ selected.item.file }}:{{ selected.item.line }}</dd>
-            <dt>Kind</dt>
-            <dd>{{ selected.item.kind }}</dd>
-            <dt>Confidence</dt>
-            <dd>{{ Math.round((selected.item.confidence || 0) * 100) }}%</dd>
-            <dt>Provenance</dt>
-            <dd>{{ selected.item.provenance?.join(' + ') || '-' }}</dd>
-          </dl>
+          <h2>
+            {{ selected.item.calls?.length > 1 ? `${selected.item.calls.length} calls` : selected.item.line_text || selected.item.call_text }}
+          </h2>
+          <details class="structure-panel__section" open>
+            <summary>Calls</summary>
+            <ol class="structure-panel__call-list">
+              <li v-for="call in selected.item.calls || [selected.item]" :key="call.id">
+                <span>#{{ call.order }}</span>
+                <code>{{ call.line_text || call.call_text }}</code>
+                <small>{{ call.file }}:{{ call.range?.start_line || call.line || '-' }}</small>
+              </li>
+            </ol>
+          </details>
+          <details class="structure-panel__section" open>
+            <summary>Metadata</summary>
+            <dl>
+              <dt>Kind</dt>
+              <dd>{{ selected.item.kind }}</dd>
+              <dt>Confidence</dt>
+              <dd>{{ Math.round((selected.item.confidence || 0) * 100) }}%</dd>
+              <dt>Provenance</dt>
+              <dd>{{ selected.item.provenance?.join(' + ') || '-' }}</dd>
+            </dl>
+          </details>
         </template>
 
         <template v-else>
@@ -1489,6 +1559,11 @@ function onNodeDrag(payload) {
   stroke-dasharray: 6 4;
 }
 
+:deep(.structure-flow-edge--mixed .vue-flow__edge-path),
+:deep(.structure-flow-edge--multi .vue-flow__edge-path) {
+  stroke-width: 2.4;
+}
+
 :deep(.structure-flow-edge--active .vue-flow__edge-path) {
   stroke: #315f9c;
   stroke-width: 2.8;
@@ -1508,6 +1583,16 @@ function onNodeDrag(payload) {
   box-shadow: 0 14px 34px rgba(31, 47, 70, 0.18);
   backdrop-filter: blur(10px);
   pointer-events: all;
+}
+
+.call-edge-label--compact {
+  padding: 4px 7px;
+  border-color: #c9d8ea;
+  border-radius: 999px;
+  color: #315f9c;
+  background: rgba(244, 248, 253, 0.96);
+  box-shadow: 0 8px 18px rgba(31, 47, 70, 0.12);
+  font: 10px/1 var(--mono);
 }
 
 .call-edge-label__order {
@@ -1542,6 +1627,42 @@ function onNodeDrag(payload) {
 
 .call-edge-label :deep(.tok--num) {
   color: #315f9c;
+}
+
+.structure-panel__call-list {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 0 11px 12px;
+  list-style: none;
+}
+
+.structure-panel__call-list li {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 4px 8px;
+  padding: 8px;
+  border: 1px solid #dce5ef;
+  border-radius: 6px;
+  background: #f8fbff;
+}
+
+.structure-panel__call-list span {
+  color: #315f9c;
+  font: 10px/1.4 var(--mono);
+}
+
+.structure-panel__call-list code {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: #18324f;
+  font: 10px/1.4 var(--mono);
+}
+
+.structure-panel__call-list small {
+  grid-column: 2;
+  color: #6c7f96;
+  font: 9px/1.2 var(--mono);
 }
 
 @media (max-width: 900px) {
