@@ -7,6 +7,12 @@ from .investigating_refactored import prepare_investigation
 from . import task_analysis
 
 SKILL_LABEL = "Task analyzer"
+SKILL_GUIDE = (
+    "While analyzing, the agent parses the user request, splits it into "
+    "unknowns, and produces a task contract. Best for: task decomposition and "
+    "analysis procedures, requirement-to-task templates, checklists that turn a "
+    "vague request into a structured investigation plan."
+)
 
 
 def handle(run):

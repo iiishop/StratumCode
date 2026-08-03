@@ -28,6 +28,13 @@ def targets() -> list[dict]:
         "name": GLOBAL_TARGET,
         "label": "Global",
         "description": "Available to targets that merge global skills.",
+        "guide": (
+            "Global skills load into every state and subagent that merges the "
+            "global list. Best for cross-cutting capabilities used regardless of "
+            "task phase — output formatting, common workflows, utility procedures, "
+            "team conventions. Avoid: phase-specific or agent-specific procedures; "
+            "those belong to a state or subagent target instead."
+        ),
     }]
     for state, handler in handlers().items():
         module = import_module(handler.__module__)
@@ -40,6 +47,7 @@ def targets() -> list[dict]:
             "name": name,
             "label": str(getattr(module, "SKILL_LABEL", name.replace("_", " ").title())),
             "description": f"Skills available while the agent is {name.replace('_', ' ')}.",
+            "guide": str(getattr(module, "SKILL_GUIDE", "") or ""),
         })
     for agent in list_available():
         name = str(agent.get("name") or "").strip()
@@ -51,6 +59,7 @@ def targets() -> list[dict]:
             "name": name,
             "label": str(agent.get("display_name") or name),
             "description": str(agent.get("task") or ""),
+            "guide": str(agent.get("guide") or agent.get("task") or ""),
         })
     return result
 

@@ -1569,6 +1569,69 @@ def build_validation_runner_system(language: str) -> str:
     return VALIDATION_RUNNER.format(language=language) + "\n"
 
 
+SKILL_PLACER = """\
+You decide where a skill should live in the StratumCode skill system.
+
+The system has three kinds of targets:
+
+1. global — Skills here load into every state and subagent that merges the
+   global list. Best for cross-cutting capabilities used regardless of task
+   phase (output formatting, common workflows, utility procedures, team
+   conventions). Avoid putting phase-specific or agent-specific procedures
+   here.
+
+2. state:<name> — Skills load while the main agent is in that state (analyzing,
+   investigating, designing, patch_planning, implementing, validating). Best
+   for procedures that only make sense during that phase of the workflow.
+
+3. subagent:<name> — Skills load while that subagent runs. Best for procedures
+   owned by a specific subagent (mcp-installer, hypothesis-verifier,
+   skill-placer) or that only that subagent needs.
+
+The user will give you a skill (its SKILL.md content and metadata). You will
+also receive the current target list with each target's guide.
+
+Decide the single best target, considering:
+
+- What the skill does (its triggers, procedures, and when it is useful).
+- The target guide — do not recommend a target whose guide says the skill
+  category does not belong there.
+- merge vs replace mode: state and subagent targets are either merge (loaded
+  alongside global) or replace (loaded instead of global). If the skill would
+  conflict with global skills under replace mode, prefer global or a merge-mode
+  target.
+- If the skill is generic and phase-independent, global is usually right.
+- If the skill is clearly tied to one state (e.g. only useful during
+  investigation), prefer that state target over global.
+
+Respond with ONLY a JSON object, no markdown fences:
+
+{{
+  "target_id": "global | state:<name> | subagent:<name>",
+  "rationale": "short explanation of why this target fits the skill",
+  "confidence": "high | medium | low",
+  "alternatives": ["optional second-choice target ids"]
+}}
+"""
+
+
+def build_skill_placer_system(output_language: str = "zh") -> str:
+    return SKILL_PLACER.format(output_language=output_language_section(output_language))
+
+
+def build_skill_placer_user(skill_name: str, skill_meta: str, skill_content: str, targets_json: str) -> str:
+    return (
+        "## Skill to place\n"
+        f"name: {skill_name}\n"
+        f"metadata: {skill_meta}\n"
+        "SKILL.md content:\n"
+        f"{skill_content[:12000]}\n\n"
+        "## Available targets (with guides)\n"
+        f"{targets_json}\n\n"
+        "Return the placement decision as JSON."
+    )
+
+
 def build_mcp_installer_system(output_language: str = "zh") -> str:
     return MCP_INSTALLER.format(output_language=output_language_section(output_language))
 

@@ -4,6 +4,14 @@ from .. import patch_planner
 from .task_contract import run_request
 
 
+SKILL_GUIDE = (
+    "While patch planning, the agent turns verified findings into a concrete "
+    "patch plan with file changes, decision slots, and skip reviews. Best for: "
+    "patch-planning procedures, change-impact analysis, safe-minimal-edit "
+    "conventions, plan review checklists."
+)
+
+
 def handle(run):
     from .. import chat
 

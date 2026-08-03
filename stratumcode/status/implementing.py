@@ -4,6 +4,14 @@ from .. import implementation_runner
 from .task_contract import run_request
 
 
+SKILL_GUIDE = (
+    "While implementing, the agent applies the patch plan to real files and "
+    "edits code. Best for: code-generation and editing procedures, language- or "
+    "framework-specific coding conventions, project-specific style rules, "
+    "refactoring playbooks."
+)
+
+
 def handle(run):
     from .. import chat
 

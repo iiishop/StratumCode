@@ -5,9 +5,10 @@ import json
 import re
 from collections.abc import Iterator
 from itertools import count
+from pathlib import Path
 from uuid import uuid4
 
-from . import app_settings, hypothesis_verifier, mcp, model_settings, prompt, providers, skill_runtime
+from . import app_settings, hypothesis_verifier, mcp, model_settings, prompt, providers, skills, skill_runtime
 from .agent.tools import openai_tool_schema
 from .agent_runtime import (
     add_usage as _add_usage,
@@ -36,6 +37,9 @@ def run_stream(agent: str, task: str, workspace_dir: str = ".") -> Iterator[dict
             return
         if name == "hypothesis-verifier":
             yield from hypothesis_verify_stream(task, workspace_dir)
+            return
+        if name == "skill-placer":
+            yield from skill_placement_stream(task, workspace_dir)
             return
         raise ValueError(f"unknown subagent: {agent}")
 
@@ -569,3 +573,231 @@ def _first_url(text: str) -> str:
 def _short(value: str, limit: int) -> str:
     text = " ".join(str(value).split())
     return text if len(text) <= limit else text[:limit - 1] + "..."
+
+
+def skill_placement_stream(skill_ref: str, workspace_dir: str = ".") -> Iterator[dict]:
+    """判断一个 skill 最适合放在哪个 target（global / state:<name> / subagent:<name>）。
+
+    skill_ref 可以是 skill 名（name）、id（目录路径）、或 skill_file 路径。
+    读取当前全部 targets（含每个部分的 skill 指南）+ 该 skill 的 SKILL.md，
+    让模型给出放置建议（target_id + rationale + confidence + alternatives）。
+    """
+    skill_ref = (skill_ref or "").strip()
+    if not skill_ref:
+        yield {"op": "done", "error": "skill reference is required"}
+        return
+
+    run_id = uuid4().hex[:10]
+    agent_id = f"{run_id}-agent"
+    yield start_event(agent_id, "subagent", {
+        "name": "@skill-placer",
+        "task": f"Place skill: {_short(skill_ref, 140)}",
+        "status": "running",
+        "open": True,
+    })
+
+    try:
+        skill = _find_skill(skill_ref)
+        if skill is None:
+            result = {
+                "ok": False,
+                "error": f"skill not found: {skill_ref}",
+                "target_id": None,
+                "rationale": "",
+                "confidence": "low",
+                "alternatives": [],
+            }
+            yield {"op": "update", "id": agent_id, "patch": {
+                "status": "error",
+                "result": json.dumps(result, ensure_ascii=False),
+            }}
+            yield {"op": "done", "result": result}
+            return
+
+        content = ""
+        skill_file = Path(str(skill.get("skill_file") or ""))
+        if skill_file.is_file():
+            try:
+                content = skill_file.read_text(encoding="utf-8", errors="replace")
+            except Exception:
+                content = ""
+
+        targets_json = json.dumps(
+            [
+                {
+                    "id": item["id"],
+                    "kind": item["kind"],
+                    "name": item["name"],
+                    "label": item["label"],
+                    "guide": str(item.get("guide") or ""),
+                }
+                for item in skill_runtime.targets()
+            ],
+            ensure_ascii=False,
+            indent=2,
+        )
+
+        setting = _installer_setting()
+        if setting is None:
+            result = _deterministic_placement(skill, content)
+        else:
+            result = yield from _react_place(skill, content, targets_json, run_id, setting)
+
+        yield {"op": "update", "id": agent_id, "patch": {
+            "status": "done",
+            "result": json.dumps(result, ensure_ascii=False),
+        }}
+        yield start_event(f"{run_id}-output", "output", {
+            "content": json.dumps(result, ensure_ascii=False),
+            "streaming": False,
+        })
+        yield {"op": "done", "result": result}
+    except Exception as exc:
+        yield {"op": "update", "id": agent_id, "patch": {
+            "status": "error",
+            "result": str(exc),
+        }}
+        yield {"op": "done", "error": str(exc)}
+
+
+def _find_skill(skill_ref: str) -> dict | None:
+    """按 name / id（目录路径）/ skill_file 路径找本地 skill。"""
+    ref = (skill_ref or "").strip().casefold()
+    if not ref:
+        return None
+    items = skills.list_local()["items"]
+    for item in items:
+        if str(item.get("name") or "").casefold() == ref:
+            return item
+    for item in items:
+        if str(item.get("id") or "").casefold() == ref:
+            return item
+    for item in items:
+        if str(item.get("skill_file") or "").casefold() == ref:
+            return item
+    return None
+
+
+def _react_place(
+    skill: dict,
+    content: str,
+    targets_json: str,
+    run_id: str,
+    setting: dict,
+) -> Iterator[dict]:
+    provider = setting["provider"]
+    model = setting["model_id"]
+    pricing_rules = providers.get_model_pricing(provider["id"], model)
+    usage_total = _empty_usage(pricing_rules)
+    messages = [
+        {"role": "system", "content": prompt.build_skill_placer_system(app_settings.get_output_language())},
+        {"role": "user", "content": prompt.build_skill_placer_user(
+            str(skill.get("name") or ""),
+            json.dumps(skill.get("metadata") or {}, ensure_ascii=False)[:3000],
+            content,
+            targets_json,
+        )},
+    ]
+
+    thinking_id = f"{run_id}-thinking"
+    yield start_event(thinking_id, "thinking", {"text": "", "done": False, "open": True})
+    assistant = _call_model(provider, model, messages, tools=None)
+    if usage := _usage_delta(pricing_rules, assistant.pop("_usage", {})):
+        _add_usage(usage_total, usage)
+        yield start_event(f"{run_id}-usage", "usage", {"delta": usage, "total": usage_total})
+    text = _assistant_visible_text(assistant)
+    yield {"op": "update", "id": thinking_id, "patch": {"text": text, "done": True}}
+    return _parse_placement_json(text)
+
+
+def _parse_placement_json(text: str) -> dict:
+    """从模型输出提取放置决策 JSON（容忍 markdown fence 和前后杂讯）。"""
+    raw = (text or "").strip()
+    if raw.startswith("```"):
+        raw = re.sub(r"^```[a-zA-Z]*\s*", "", raw)
+        raw = re.sub(r"\s*```$", "", raw)
+    try:
+        parsed = json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        match = re.search(r"\{.*\}", raw, re.DOTALL)
+        if not match:
+            return {
+                "ok": False,
+                "error": "model did not return a placement JSON",
+                "target_id": None,
+                "rationale": _short(raw, 300),
+                "confidence": "low",
+                "alternatives": [],
+            }
+        try:
+            parsed = json.loads(match.group(0))
+        except (json.JSONDecodeError, TypeError):
+            return {
+                "ok": False,
+                "error": "model returned unparseable placement output",
+                "target_id": None,
+                "rationale": _short(raw, 300),
+                "confidence": "low",
+                "alternatives": [],
+            }
+    if not isinstance(parsed, dict):
+        return {
+            "ok": False,
+            "error": "placement output is not an object",
+            "target_id": None,
+            "rationale": "",
+            "confidence": "low",
+            "alternatives": [],
+        }
+    target_id = str(parsed.get("target_id") or "").strip()
+    valid = {item["id"] for item in skill_runtime.targets()}
+    if target_id not in valid:
+        return {
+            "ok": False,
+            "error": f"model suggested unknown target: {target_id or '(empty)'}",
+            "target_id": target_id or None,
+            "rationale": str(parsed.get("rationale") or ""),
+            "confidence": str(parsed.get("confidence") or "low"),
+            "alternatives": [str(x) for x in (parsed.get("alternatives") or []) if str(x) in valid],
+        }
+    return {
+        "ok": True,
+        "target_id": target_id,
+        "rationale": str(parsed.get("rationale") or ""),
+        "confidence": str(parsed.get("confidence") or "low"),
+        "alternatives": [str(x) for x in (parsed.get("alternatives") or []) if str(x) in valid],
+    }
+
+
+def _deterministic_placement(skill: dict, content: str) -> dict:
+    """无模型兜底：按 SKILL.md 内容关键词给出保守建议。
+
+    不是语义判断，只是保证 subagent 在模型不可用时仍能产出有用输出。
+    """
+    haystack = " ".join([
+        str(skill.get("name") or ""),
+        str(skill.get("description") or ""),
+        content,
+    ]).casefold()
+    if any(token in haystack for token in ("investigat", "grounding", "evidence", "grep", "trace")):
+        target_id = "state:investigating"
+    elif any(token in haystack for token in ("test", "validat", "quality gate", "regression")):
+        target_id = "state:validating"
+    elif any(token in haystack for token in ("implement", "coding convention", "refactor", "edit code")):
+        target_id = "state:implementing"
+    elif any(token in haystack for token in ("mcp", "model-context-protocol")):
+        target_id = "subagent:mcp-installer"
+    elif any(token in haystack for token in ("plan", "patch plan", "impact", "risk")):
+        target_id = "state:patch_planning"
+    elif any(token in haystack for token in ("analy", "task decompos", "requirement")):
+        target_id = "state:analyzing"
+    else:
+        target_id = "global"
+    return {
+        "ok": True,
+        "target_id": target_id,
+        "rationale": "deterministic keyword fallback (no model configured); review the suggestion manually",
+        "confidence": "low",
+        "alternatives": ["global"],
+        "fallback": True,
+    }

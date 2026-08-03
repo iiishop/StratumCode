@@ -5,6 +5,14 @@ from .clearifying import queue_clearify, queue_investigation_unknown, user_quest
 from .task_contract import run_request
 
 
+SKILL_GUIDE = (
+    "While designing, the agent produces an implementation plan with concrete "
+    "code steps, completion conditions, and out-of-scope boundaries. Best for: "
+    "architecture and design procedures, plan templates, change-impact and "
+    "risk-analysis checklists, decision-record conventions."
+)
+
+
 def handle(run):
     from .. import chat
 

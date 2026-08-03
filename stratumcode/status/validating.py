@@ -5,6 +5,14 @@ from .clearifying import queue_clearify, user_question_and_wait
 from .task_contract import run_request
 
 
+SKILL_GUIDE = (
+    "While validating, the agent verifies the applied patch: builds, tests, "
+    "and quality gates. Best for: test-writing procedures, verification "
+    "workflows, quality-gate and regression checklists, language build/test "
+    "tooling conventions."
+)
+
+
 def handle(run):
     from .. import chat
 
