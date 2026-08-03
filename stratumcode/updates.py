@@ -5,6 +5,7 @@ import subprocess
 import sys
 import threading
 import shutil
+import time
 from pathlib import Path
 from urllib.request import Request, urlopen
 
@@ -13,6 +14,14 @@ REPO = "iiishop/StratumCode"
 ROOT = Path(__file__).resolve().parent.parent
 VERSION_FILE = ROOT / "VERSION"
 GITHUB_API = f"https://api.github.com/repos/{REPO}"
+
+# GitHub REST API 未认证限流 60 次/小时/IP；前端每分钟轮询一次更新状态，
+# 不缓存必然撞限流。release 信息缓存 10 分钟（<=6 次/小时），git 远端信息缓存 2 分钟。
+_RELEASE_CACHE_TTL_SECONDS = 600
+_GIT_REMOTE_CACHE_TTL_SECONDS = 120
+_RELEASE_CACHE: dict = {}
+_GIT_REMOTE_CACHE: dict = {}
+_GIT_BEHIND_CACHE: dict = {}
 
 
 def status() -> dict:
@@ -114,10 +123,14 @@ def _local_version() -> str:
 
 
 def _latest_release():
+    now = time.time()
+    if _RELEASE_CACHE and now - _RELEASE_CACHE.get("at", 0) < _RELEASE_CACHE_TTL_SECONDS:
+        return _RELEASE_CACHE.get("release", {}), _RELEASE_CACHE.get("error")
     try:
         with urlopen(_request(f"{GITHUB_API}/releases/latest"), timeout=8) as response:
             data = json.loads(response.read().decode("utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
+        _RELEASE_CACHE.update({"at": now, "release": {}, "error": str(exc)})
         return {}, str(exc)
     release = {
         "tag_name": str(data.get("tag_name") or ""),
@@ -126,25 +139,39 @@ def _latest_release():
         "body": str(data.get("body") or ""),
         "published_at": str(data.get("published_at") or ""),
     }
+    _RELEASE_CACHE.update({"at": now, "release": release, "error": None})
     return release, None
 
 
 def _remote_main_commit():
+    now = time.time()
+    if _GIT_REMOTE_CACHE and now - _GIT_REMOTE_CACHE.get("at", 0) < _GIT_REMOTE_CACHE_TTL_SECONDS:
+        return _GIT_REMOTE_CACHE.get("remote_commit", ""), _GIT_REMOTE_CACHE.get("remote_error")
     try:
         out = _git(["ls-remote", "origin", "refs/heads/main"], check=False, timeout=20)
         if not out.strip():
+            _GIT_REMOTE_CACHE.update({"at": now, "remote_commit": "", "remote_error": "git ls-remote returned empty — origin remote missing or unreachable"})
             return "", "git ls-remote returned empty — origin remote missing or unreachable"
-        return out.split()[0], None
+        commit = out.split()[0]
+        _GIT_REMOTE_CACHE.update({"at": now, "remote_commit": commit, "remote_error": None})
+        return commit, None
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError) as exc:
+        _GIT_REMOTE_CACHE.update({"at": now, "remote_commit": "", "remote_error": str(exc)})
         return "", str(exc)
 
 
 def _commits_behind():
+    now = time.time()
+    if _GIT_BEHIND_CACHE and now - _GIT_BEHIND_CACHE.get("at", 0) < _GIT_REMOTE_CACHE_TTL_SECONDS:
+        return _GIT_BEHIND_CACHE.get("commits_behind", 0), _GIT_BEHIND_CACHE.get("behind_error")
     try:
         _git(["fetch", "origin", "main"], timeout=60)
         out = _git(["rev-list", "--count", "HEAD..origin/main"], timeout=20)
-        return int(out.strip() or "0"), None
+        count = int(out.strip() or "0")
+        _GIT_BEHIND_CACHE.update({"at": now, "commits_behind": count, "behind_error": None})
+        return count, None
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError, ValueError) as exc:
+        _GIT_BEHIND_CACHE.update({"at": now, "commits_behind": 0, "behind_error": str(exc)})
         return 0, str(exc)
 
 
