@@ -25,9 +25,15 @@ const SESSION_PAGE_SIZE = 8
 const visibleCounts = ref({})
 const collapsedWorkspaceId = ref(null)
 const collapsed = ref(false)
+const sbRef = ref(null)
 
 function toggleCollapsed() {
   collapsed.value = !collapsed.value
+  // 过渡期间抑制 tooltip：折叠时元素滑到鼠标下方会误触发 hover 气泡
+  const el = sbRef.value
+  if (!el) return
+  el.classList.add('is-animating')
+  window.setTimeout(() => el.classList.remove('is-animating'), 340)
 }
 
 const NAV = [
@@ -116,7 +122,7 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
 </script>
 
 <template>
-  <aside class="sb" :class="{ 'is-collapsed': collapsed }" aria-label="Primary navigation">
+  <aside ref="sbRef" class="sb" :class="{ 'is-collapsed': collapsed }" aria-label="Primary navigation">
     <header class="sb__top">
       <button class="sb__brand" type="button" :data-tip="'StratumCode'" title="Open workspace" aria-label="Open workspace" @click="emit('navigate', 'home')">
         <span class="sb__mark">S</span>
@@ -303,7 +309,7 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
   contain: layout paint;
   user-select: none;
   -webkit-user-select: none;
-  transition: width 240ms cubic-bezier(.16, 1, .3, 1), flex-basis 240ms cubic-bezier(.16, 1, .3, 1);
+  transition: width 320ms cubic-bezier(.16, 1, .3, 1), flex-basis 320ms cubic-bezier(.16, 1, .3, 1);
 }
 
 .sb.is-collapsed {
@@ -446,17 +452,8 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
   font-weight: 500;
   opacity: .56;
   transition: background 120ms ease, color 120ms ease, opacity 120ms ease,
-    width 220ms cubic-bezier(.16, 1, .3, 1), height 220ms cubic-bezier(.16, 1, .3, 1),
-    border-radius 220ms ease, margin 220ms cubic-bezier(.16, 1, .3, 1), padding 220ms ease;
-}
-
-.sb.is-collapsed .sb__new {
-  justify-content: center;
-  width: 30px;
-  height: 30px;
-  margin: 2px auto;
-  padding: 0;
-  border-radius: 50%;
+    width 300ms cubic-bezier(.16, 1, .3, 1), height 300ms cubic-bezier(.16, 1, .3, 1),
+    border-radius 300ms ease, margin 300ms cubic-bezier(.16, 1, .3, 1), padding 300ms ease;
 }
 
 .sb__new:hover,
@@ -495,17 +492,8 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
   font-weight: 500;
   text-align: left;
   transition: background 100ms ease, color 100ms ease,
-    width 220ms cubic-bezier(.16, 1, .3, 1), height 220ms cubic-bezier(.16, 1, .3, 1),
-    border-radius 220ms ease, margin 220ms cubic-bezier(.16, 1, .3, 1), padding 220ms ease;
-}
-
-.sb.is-collapsed .sb__nav-item {
-  justify-content: center;
-  width: 30px;
-  height: 30px;
-  margin: 2px auto;
-  padding: 0;
-  border-radius: 50%;
+    width 300ms cubic-bezier(.16, 1, .3, 1), height 300ms cubic-bezier(.16, 1, .3, 1),
+    border-radius 300ms ease, margin 300ms cubic-bezier(.16, 1, .3, 1), padding 300ms ease;
 }
 
 .sb__nav-item:hover,
@@ -574,7 +562,7 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
   font-size: 11.5px;
   font-weight: 550;
   text-align: left;
-  transition: padding 220ms cubic-bezier(.16, 1, .3, 1), justify-content 220ms ease, background 100ms ease, color 100ms ease;
+  transition: padding 300ms cubic-bezier(.16, 1, .3, 1), justify-content 300ms ease, background 100ms ease, color 100ms ease;
 }
 
 .sb.is-collapsed .sb__workspace {
@@ -607,16 +595,8 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
   color: #ffffff;
   font-size: 8px;
   font-weight: 700;
-  transition: width 220ms cubic-bezier(.16, 1, .3, 1), height 220ms cubic-bezier(.16, 1, .3, 1),
-    flex-basis 220ms cubic-bezier(.16, 1, .3, 1), border-radius 220ms ease, font-size 220ms ease;
-}
-
-.sb.is-collapsed .sb__avatar {
-  width: 24px;
-  height: 24px;
-  flex-basis: 24px;
-  border-radius: 50%;
-  font-size: 9px;
+  transition: width 300ms cubic-bezier(.16, 1, .3, 1), height 300ms cubic-bezier(.16, 1, .3, 1),
+    flex-basis 300ms cubic-bezier(.16, 1, .3, 1), border-radius 300ms ease, font-size 300ms ease;
 }
 
 .sb__avatar.is-blue {
@@ -935,11 +915,11 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
 /* 文字时序错开：收缩时文字先快速淡出（宽度后收），
    展开时宽度先展开、文字延迟淡入——避免文字挤在窄条里闪现 */
 .sb.is-collapsed .sb-fade-leave-active {
-  transition: opacity 80ms ease;
+  transition: opacity 100ms ease;
 }
 
 .sb:not(.is-collapsed) .sb-fade-enter-active {
-  transition: opacity 160ms ease 130ms;
+  transition: opacity 200ms ease 170ms;
 }
 
 /* --- 收缩态 --- */
@@ -979,6 +959,12 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
   transform: translateY(-50%) translateX(0);
 }
 
+/* 折叠过渡期间抑制 tooltip 误触（元素位移到鼠标下方会误触发 hover） */
+.sb.is-animating [data-tip]::after {
+  opacity: 0 !important;
+  transform: translateY(-50%) translateX(-4px) !important;
+}
+
 /* 收缩态：nav 圆形图标 + active 蓝底 */
 .sb.is-collapsed .sb__nav-item {
   width: 30px;
@@ -1008,11 +994,12 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
   padding: 0;
 }
 
-/* 收缩态：workspace 头像稍大 */
+/* 收缩态：workspace 头像稍大、圆形 */
 .sb.is-collapsed .sb__avatar {
   width: 24px;
   height: 24px;
   flex-basis: 24px;
+  border-radius: 50%;
   font-size: 9px;
 }
 
@@ -1024,7 +1011,7 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
 
 /* 收缩切换箭头旋转 */
 .sb__collapse-icon {
-  transition: transform 260ms cubic-bezier(0.16, 1, 0.3, 1);
+  transition: transform 300ms cubic-bezier(0.16, 1, 0.3, 1);
 }
 
 .sb__collapse-icon.is-collapsed {
