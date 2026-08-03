@@ -62,6 +62,7 @@ const restartBtn = ref(null)
 let progressTl = null
 let spinOutTl = null
 let prevProgress = 0
+let completionFired = false
 
 // -- progress indicator position (CSS custom property) ---------------
 const barStyle = computed(() => {
@@ -70,46 +71,55 @@ const barStyle = computed(() => {
 })
 
 // -- start animation when state becomes running ----------------------
-watch(() => props.state, async (s) => {
-  if (s !== 'running') return
-  await nextTick()
-  if (!arrowBtn.value || !versionCurrent.value || !progressBar.value) return
+watch(() => props.state, async (s, prev) => {
+  if (s === 'running') {
+    completionFired = false
+    await nextTick()
+    if (!arrowBtn.value || !versionCurrent.value || !progressBar.value) return
 
-  // Kill any stale animation
-  progressTl?.kill()
-  spinOutTl?.kill()
+    // Kill any stale animation
+    progressTl?.kill()
+    spinOutTl?.kill()
 
-  const arrow = arrowBtn.value
-  const curLabel = versionCurrent.value
-  const bar = progressBar.value
-  const labelHeight = curLabel.offsetHeight
+    const arrow = arrowBtn.value
+    const curLabel = versionCurrent.value
+    const bar = progressBar.value
+    const labelHeight = curLabel.offsetHeight
 
-  // Phase 1: arrow shrink + text fade + move left + rotate 90°
-  const arrowRect = arrow.getBoundingClientRect()
-  const labelRect = curLabel.getBoundingClientRect()
-  const moveX = labelRect.left - arrowRect.left + labelRect.width + 8
+    // Phase 1: arrow shrink + text fade + move left + rotate 90°
+    const arrowRect = arrow.getBoundingClientRect()
+    const labelRect = curLabel.getBoundingClientRect()
+    const moveX = labelRect.left - arrowRect.left + labelRect.width + 8
 
-  progressTl = gsap.timeline({ defaults: { ease: 'power2.inOut' } })
+    progressTl = gsap.timeline({ defaults: { ease: 'power2.inOut' } })
 
-  progressTl
-    .to(curLabel, { opacity: 0.8, scale: 0.96, duration: 0.26 }, 0)
-    .to(arrow, {
-      scale: 0.86,
-      x: moveX,
-      rotate: 90,
-      duration: 0.26,
-      ease: 'power3.inOut',
-    }, 0)
-    .set(bar, {
-      height: `${labelHeight * 1.1}px`,
-      width: '100%',
-    }, 0.1)
-    .to(bar, { opacity: 1, duration: 0.18 }, 0.18)
-    .set(arrow, { position: 'absolute' }, 0)
+    progressTl
+      .to(curLabel, { opacity: 0.8, scale: 0.96, duration: 0.26 }, 0)
+      .to(arrow, {
+        scale: 0.86,
+        x: moveX,
+        rotate: 90,
+        duration: 0.26,
+        ease: 'power3.inOut',
+      }, 0)
+      .set(bar, {
+        height: `${labelHeight * 1.1}px`,
+        width: '100%',
+      }, 0.1)
+      .to(bar, { opacity: 1, duration: 0.18 }, 0.18)
+      .set(arrow, { position: 'absolute' }, 0)
 
-  // Start tracking progress
-  prevProgress = 0
-  requestAnimationFrame(trackProgress)
+    // Start tracking progress
+    prevProgress = 0
+    requestAnimationFrame(trackProgress)
+    return
+  }
+  // 更新过快时 progress 还没到 100、state 已经 done（本地更新秒级完成），
+  // trackProgress 不会触发完成动画——这里强制补发。
+  if (s === 'done' && prev === 'running' && !completionFired) {
+    await nextTick()
+    onProgressComplete()
+  }
 })
 
 // -- track progress updates ------------------------------------------
@@ -136,8 +146,10 @@ function trackProgress() {
 
 // -- completion animation --------------------------------------------
 async function onProgressComplete() {
+  if (completionFired) return
+  completionFired = true
   await nextTick()
-  if (!arrowBtn.value || !fireworkContainer.value || !edgeShine.value || !versionTarget.value || !restartBtn.value) return
+  if (!arrowBtn.value || !fireworkContainer.value || !edgeShine.value || !versionTarget.value) return
 
   const arrow = arrowBtn.value
   const fireworks = fireworkContainer.value
@@ -190,12 +202,14 @@ async function onProgressComplete() {
       duration: 0.2,
       ease: 'power2.in',
     }, 0.82)
-    .fromTo(restart, { opacity: 0, scale: 0.92 }, {
+  if (restart) {
+    spinOutTl.fromTo(restart, { opacity: 0, scale: 0.92 }, {
       opacity: 1,
       scale: 1,
       duration: 0.22,
       ease: 'back.out(1.4)',
     }, 0.9)
+  }
 }
 
 // -- firework particles ----------------------------------------------
