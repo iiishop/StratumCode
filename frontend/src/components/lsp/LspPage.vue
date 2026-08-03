@@ -277,7 +277,7 @@ function toggleEnabled(server) {
             <h2>Install Mason</h2>
             <p>Git and Neovim are required before Mason can manage LSP servers.</p>
           </div>
-          <button type="button" :disabled="busyId === 'mason'" @click="showMasonModal = false">Close</button>
+          <button type="button" class="lsp-modal__close--danger" :disabled="busyId === 'mason'" @click="showMasonModal = false">Close</button>
         </div>
         <div class="lsp-modal__bar"><span :style="{ width: `${bootstrapProgress}%` }"></span></div>
         <div class="lsp-modal__steps">
@@ -287,7 +287,6 @@ function toggleEnabled(server) {
           </div>
         </div>
         <div class="lsp-modal__actions">
-          <button type="button" :disabled="busyId === 'mason'" @click="showMasonModal = false">Cancel</button>
           <button type="button" :disabled="busyId === 'mason'" @click="emit('install-mason')">
             {{ busyId === 'mason' ? 'Installing' : 'Confirm install' }}
           </button>
@@ -677,6 +676,19 @@ function toggleEnabled(server) {
   margin-top: 16px;
   justify-content: flex-end;
 }
+
+.lsp-modal__close--danger {
+  padding: 6px 12px;
+  border: 1px solid var(--err);
+  border-radius: var(--radius-sm);
+  color: #fff;
+  background: var(--err);
+  font: 600 9px var(--mono);
+  cursor: pointer;
+  transition: filter 120ms ease, transform 120ms ease;
+}
+.lsp-modal__close--danger:hover { filter: brightness(1.1); }
+.lsp-modal__close--danger:active { transform: scale(.96); }
 
 @media (max-width: 720px) {
   .lsp-page { padding: 30px 18px 52px; }
