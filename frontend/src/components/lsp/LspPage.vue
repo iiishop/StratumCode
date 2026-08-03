@@ -678,17 +678,49 @@ function toggleEnabled(server) {
 }
 
 .lsp-modal__head .lsp-modal__close--danger {
-  padding: 6px 12px;
+  position: relative;
+  display: inline-flex;
+  height: 30px;
+  align-items: center;
+  padding: 0 13px;
+  overflow: hidden;
   border: 1px solid #d92d3d;
-  border-radius: var(--radius-sm);
-  color: #fff;
-  background: #d92d3d;
-  font: 600 9px var(--mono);
+  border-radius: 999px;
+  color: #ffffff;
+  background: linear-gradient(135deg, #ef4444, #d92d3d);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.25), 0 2px 6px rgba(217, 45, 61, 0.3);
+  font: 600 9px/1 var(--mono);
   cursor: pointer;
-  transition: filter 120ms ease, transform 120ms ease;
+  transition: transform 170ms cubic-bezier(0.16, 1, 0.3, 1), box-shadow 170ms ease, filter 170ms ease;
 }
-.lsp-modal__head .lsp-modal__close--danger:hover { filter: brightness(1.1); }
-.lsp-modal__head .lsp-modal__close--danger:active { transform: scale(.96); }
+/* hover：上浮 + 亮度提升 + 光晕扩散（与 Check now 一致） */
+.lsp-modal__head .lsp-modal__close--danger:hover:not(:disabled) {
+  transform: translateY(-2px);
+  filter: brightness(1.08);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.28), 0 7px 20px rgba(217, 45, 61, 0.44);
+}
+/* 扫光：hover 时一道高光从左扫到右 */
+.lsp-modal__head .lsp-modal__close--danger::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: -40%;
+  width: 32%;
+  background: linear-gradient(105deg, transparent, rgba(255, 255, 255, 0.38), transparent);
+  transform: skewX(-20deg);
+  transition: left 0.55s cubic-bezier(0.16, 1, 0.3, 1);
+  pointer-events: none;
+}
+.lsp-modal__head .lsp-modal__close--danger:hover:not(:disabled)::before {
+  left: 125%;
+}
+/* active：按下内缩 + 阴影收拢 */
+.lsp-modal__head .lsp-modal__close--danger:active:not(:disabled) {
+  transform: translateY(0) scale(0.95);
+  filter: brightness(0.94);
+  box-shadow: inset 0 2px 5px rgba(120, 20, 30, 0.3), 0 1px 3px rgba(217, 45, 61, 0.2);
+}
 
 @media (max-width: 720px) {
   .lsp-page { padding: 30px 18px 52px; }
