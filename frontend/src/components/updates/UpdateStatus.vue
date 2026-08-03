@@ -5,6 +5,7 @@ import { useUpdates } from '../../composables/useUpdates'
 
 const { status, loading, error, refresh, apply, restart } = useUpdates()
 const open = ref(false)
+const statusBtn = ref(null)
 let timer = 0
 
 const releaseSuffix = computed(() => status.value.stable_available ? `(${status.value.latest_version})` : '')
@@ -22,7 +23,7 @@ onUnmounted(() => window.clearInterval(timer))
 
 <template>
   <div class="update-status">
-    <button class="update-status__button" :class="{ 'has-update': hasUpdate }" type="button" @click="open = true">
+    <button ref="statusBtn" class="update-status__button" :class="{ 'has-update': hasUpdate }" type="button" @click="open = true">
       <span class="update-status__dot" :class="{ 'is-update': hasUpdate, 'is-checking': loading }"></span>
       <span class="update-status__version">
         v{{ status.current_version }}<span v-if="releaseSuffix" class="update-status__new">{{ releaseSuffix }}</span>
@@ -36,9 +37,10 @@ onUnmounted(() => window.clearInterval(timer))
     </button>
     <span v-if="error" class="update-status__error">{{ error }}</span>
     <UpdatePanel
-      v-if="open"
+      :open="open"
       :status="status"
       :checking="loading"
+      :anchor="statusBtn"
       :apply-update="apply"
       :restart-app="restart"
       @close="open = false"

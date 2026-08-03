@@ -1,12 +1,16 @@
 <script setup>
 import { computed, reactive, ref } from 'vue'
+import DockPopover from '../common/DockPopover.vue'
 import UpdateProgressRow from './UpdateProgressRow.vue'
 
 const props = defineProps({
+  open: { type: Boolean, default: false },
   status: { type: Object, required: true },
   applyUpdate: { type: Function, required: true },
   restartApp: { type: Function, required: true },
   checking: { type: Boolean, default: false },
+  // 触发元素（底栏按钮），DockPopover 从它生长出来
+  anchor: { type: Object, default: null },
 })
 
 const emit = defineEmits(['close', 'refresh'])
@@ -67,11 +71,13 @@ async function restart() {
 </script>
 
 <template>
-  <Teleport to="body">
-    <Transition name="update-panel">
-      <div class="update-panel__wrap">
-        <div class="update-panel__scrim" @click="emit('close')"></div>
-        <section class="update-panel" role="dialog" aria-modal="true" aria-label="Updates">
+  <DockPopover
+    :model-value="open"
+    :anchor="anchor"
+    width="min(640px, calc(100vw - 28px))"
+    @update:model-value="emit('close')"
+  >
+    <section class="update-panel" role="dialog" aria-modal="true" aria-label="Updates">
           <header class="update-panel__head">
             <div class="update-panel__head-title">
               <span class="update-panel__head-mark">
@@ -159,39 +165,16 @@ async function restart() {
           @restart="restart"
         />
       </div>
-        </section>
-      </div>
-    </Transition>
-  </Teleport>
+      </section>
+  </DockPopover>
 </template>
 
 <style scoped>
-.update-panel__wrap {
-  position: fixed;
-  inset: 0;
-  z-index: 40;
-  pointer-events: none;
-}
-
-.update-panel__scrim {
-  position: absolute;
-  inset: 0;
-  pointer-events: auto;
-  background: rgba(16, 42, 92, 0.18);
-  backdrop-filter: blur(2px);
-  transition: opacity 0.22s ease;
-}
-
 .update-panel {
-  position: absolute;
-  right: 18px;
-  bottom: 50px;
-  z-index: 41;
-  pointer-events: auto;
   display: flex;
   flex-direction: column;
-  width: min(640px, calc(100vw - 28px));
-  max-height: min(720px, calc(100dvh - 72px));
+  width: 100%;
+  max-height: min(720px, calc(100dvh - 80px));
   overflow: hidden;
   border: 1px solid var(--border-strong);
   border-radius: var(--radius-lg);
@@ -214,28 +197,7 @@ async function restart() {
   height: 2px;
   background: linear-gradient(90deg, #3b82f6, #10b981 55%, rgba(16, 185, 129, 0.1));
   opacity: 0.85;
-}
-
-/* 入场/退场动画 */
-.update-panel-enter-active,
-.update-panel-leave-active {
-  transition: opacity 0.22s ease;
-}
-.update-panel-enter-active .update-panel,
-.update-panel-leave-active .update-panel {
-  transition: transform 0.28s cubic-bezier(0.16, 1, 0.3, 1), opacity 0.22s ease;
-}
-.update-panel-enter-from,
-.update-panel-leave-to {
-  opacity: 0;
-}
-.update-panel-enter-from .update-panel {
-  transform: translateY(16px) scale(0.97);
-  opacity: 0;
-}
-.update-panel-leave-to .update-panel {
-  transform: translateY(10px) scale(0.98);
-  opacity: 0;
+  border-radius: var(--radius-lg) var(--radius-lg) 0 0;
 }
 
 .update-panel__head {
