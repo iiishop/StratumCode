@@ -2508,6 +2508,7 @@ def _audit_recorded_findings(
         "scope": analysis.get("scope_statements", {}),
         "reference_baselines": analysis.get("reference_baselines", []),
         "unknowns": analysis.get("unknowns", []),
+        "execution_mode": analysis.get("execution_mode", ""),
     }
     all_beliefs = [
         item for item in recorded_findings.get("beliefs", [])

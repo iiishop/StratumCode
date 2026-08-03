@@ -483,6 +483,14 @@ reads of the relevant files that lack the claimed content). Do not return
 investigate merely because the absence is stated as "no definition exists" — the
 absence IS the answer. Keep requiring cited observations for positive claims
 ("the trigger is X", "the module defines Y"); only the negative claim is exempt.
+In read_only mode, runtime evidence (tests, logs, reproductions) is unavailable
+by design. A resolution that explains runtime behavior as inference from code
+paths — explicitly stating that no tests, logs, or runtime traces exist — is
+grounded for its code-path claims; do not require tests/logs/reproduction, and
+do not return verify for runtime behavior when the mode forbids running
+anything. Distinguish claims about what the code does (grounded by code
+observations) from claims about what happens at runtime (acceptable as stated
+inference in read_only mode).
 Do not treat library-style modules, public classes, or an empty entrypoint as
 dead code unless project metadata, tests, docs, or the user-requested runtime
 contract proves the repository must be directly executable. Without that proof,
