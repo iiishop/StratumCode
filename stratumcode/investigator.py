@@ -6,6 +6,7 @@ import json
 import os
 import platform
 import re
+import sys
 from collections.abc import Iterator
 from enum import StrEnum
 from functools import lru_cache
@@ -4799,6 +4800,49 @@ _PYTHON_STDLIB_MODULES = frozenset({
 })
 
 
+def _is_python_stdlib_module(name: str) -> bool:
+    """标准库判断：优先用运行时权威列表（sys.stdlib_module_names，
+    Python 3.10+ 内置、自动跟随版本），手写列表只作兜底。"""
+    return name in _PYTHON_STDLIB_MODULES or name in getattr(sys, "stdlib_module_names", ())
+
+
+# 其他语言的框架/语言级根命名空间：与 Python 标准库同理，它们是语言环境
+# 的一部分，项目里没有对应源文件，grep/read 永远产生不了这些引用
+# （System.Math.Sqrt / UnityEngine.Debug.Log / java.lang.Math.sqrt /
+# console.log / std::vector / fmt.Println 等）。模型在答案里引用它们
+# 是"计划使用框架 API"，不是"声称项目里有这段代码"，无需观察证据。
+_FRAMEWORK_ROOTS = frozenset({
+    # .NET / C# / F# / VB
+    "System", "Microsoft", "Windows", "System.Runtime",
+    # Unity（C# 变种：引擎级命名空间）
+    "UnityEngine", "UnityEditor",
+    # Java / Kotlin / JVM
+    "java", "javax", "jakarta", "jdk", "kotlin",
+    # Rust
+    "std", "core", "alloc",
+    # C / C++（std:: 已被提取规则跳过，这里兜底 boost 等）
+    "boost", "glib",
+    # Go 标准库包
+    "bufio", "bytes", "container", "crypto", "database", "encoding", "errors",
+    "flag", "fmt", "hash", "html", "image", "index", "io", "log", "math", "mime",
+    "net", "os", "path", "reflect", "regexp", "runtime", "sort", "strconv",
+    "strings", "sync", "syscall", "testing", "text", "time", "unicode",
+    "unsafe",
+    # JavaScript / TypeScript 内置全局
+    "Array", "BigInt", "Date", "Intl", "JSON", "Map", "Math", "Number",
+    "Object", "Promise", "Proxy", "Reflect", "RegExp", "Set", "String",
+    "Symbol", "WeakMap", "WeakSet", "console", "fetch", "globalThis",
+    "navigator", "window", "document", "WebSocket",
+    # PHP
+    "PHP", "Spl",
+})
+
+
+def _is_framework_module(name: str) -> bool:
+    """非 Python 语言/框架级根命名空间判断。"""
+    return name in _FRAMEWORK_ROOTS
+
+
 def _unsupported_grounding_literals(
     resolution: dict,
     recorded: dict,
@@ -4831,13 +4875,15 @@ def _unsupported_grounding_literals(
         # REPAIR 死循环（useSessions.open 类根因）。
         if "." in literal:
             module = literal.split(".")[0]
-            if module in _PYTHON_STDLIB_MODULES:
-                # 标准库引用（cmath.sqrt / os.path / json.dumps）不是项目代码：
-                # 语言环境的一部分，项目里没有对应源文件，grep/read 永远
-                # 产生不了这个字面量。要求观察证据毫无意义（cmath.sqrt 死循环
-                # 类根因），直接放行。
-                continue
+            # 先查项目内同名源文件：项目真有这个模块（如项目自己的 utils.py
+            # 或 System.cs）→ 模块文件豁免（类5），不进入框架判断。
             if _observation_covers_module(evidence_obs, module):
+                continue
+            # 语言/框架级根引用（cmath.sqrt / System.Math.Sqrt /
+            # UnityEngine.Debug.Log / java.lang.Math.sqrt / console.log）：
+            # 语言环境的一部分，项目里没有对应源文件，grep/read 永远
+            # 产生不了这个字面量。要求观察证据毫无意义，直接放行。
+            if _is_python_stdlib_module(module) or _is_framework_module(module):
                 continue
         unsupported.append(literal)
     return _dedupe_strings(unsupported)
