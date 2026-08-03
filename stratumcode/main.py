@@ -1,11 +1,11 @@
 import os
 import socket
 import subprocess
+import sys
 import threading
 import time
 from pathlib import Path
 from urllib.request import urlopen
-import tkinter.filedialog
 
 import webview
 
@@ -22,7 +22,10 @@ class Api:
     """Expose native OS dialogs to the webview frontend."""
 
     def select_folder(self) -> str:
+        if sys.platform == "darwin":
+            return self._select_folder_macos()
         import tkinter as tk
+        import tkinter.filedialog
 
         root = tk.Tk()
         root.withdraw()
@@ -30,6 +33,26 @@ class Api:
         path = tkinter.filedialog.askdirectory(title="Select workspace folder")
         root.destroy()
         return path if path else ""
+
+    @staticmethod
+    def _select_folder_macos() -> str:
+        # uv 管理的 macOS Python 不带 tkinter（python-build-standalone 仅 Windows 含 Tk），
+        # 改用 pyobjc 的 NSOpenPanel 选目录。
+        try:
+            import AppKit
+        except ImportError:
+            return ""
+        panel = AppKit.NSOpenPanel.openPanel()
+        panel.setCanChooseFiles_(False)
+        panel.setCanChooseDirectories_(True)
+        panel.setAllowsMultipleSelection_(False)
+        panel.setTitle_("Select workspace folder")
+        if panel.runModal() != AppKit.NSModalResponseOK:
+            return ""
+        url = panel.URL()
+        return str(url.path()) if url else ""
+
+
 def _ensure_frontend_deps():
     """Ensure frontend dependencies are installed; run npm install when node_modules is missing."""
     if not (FRONTEND_DIR / "node_modules").exists():
