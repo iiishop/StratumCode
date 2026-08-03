@@ -177,13 +177,18 @@ def _phase_tool_choice(phase: InvestigationPhase) -> str | dict:
     forced = {
         InvestigationPhase.CLEARIFY: "clearify",
         InvestigationPhase.VERIFY: "subagent",
-        InvestigationPhase.REPAIR: "record_investigation_findings",
+        # REPAIR 不强制 record：repair 提示词要求"先用 read/grep 取证、
+        # 再 record 追加缺失项"。强制 record 会让模型无法取证，只能空转
+        # 重写结论（U1/U2/U3 类 REPAIR 死循环根因）。工具集仍限定在
+        # _REPAIR_ALLOWED_TOOL_NAMES + finish，模型必须推进 repair。
         InvestigationPhase.FINISH: "finish_investigation",
         InvestigationPhase.READ_ONLY_FINISH: "finish_investigation",
     }
     name = forced.get(phase)
     if name:
         return {"type": "function", "function": {"name": name}}
+    if phase == InvestigationPhase.REPAIR:
+        return "required"
     return "required"
 
 
@@ -699,7 +704,11 @@ def investigation_stream(
                             # Hard-lock: force the model to call finish_investigation
                             current_tool_choice = {"type": "function", "function": {"name": "finish_investigation"}}
                         continue
-                    if resolution_required_ids:
+                    if resolution_required_ids and not semantic_repair_required_ids:
+                        # 非 REPAIR 场景：初始 unknowns 已有证据记录，先 resolve
+                        # 再发现。REPAIR 阶段（semantic_repair_required_ids 非空）
+                        # 必须允许 read/grep 补证据——repair 提示词明确要求先取证
+                        # 再 record，拦截 discovery 会让模型空转重写结论而死循环。
                         required_tool = (
                             "resolve_unknowns"
                             if "resolve_unknowns" in allowed_tool_names
