@@ -187,19 +187,6 @@ async function restart() {
     0 0 0 1px rgba(16, 42, 92, 0.04);
 }
 
-/* 顶部 accent 光带 */
-.update-panel::before {
-  content: "";
-  position: absolute;
-  left: 0;
-  right: 0;
-  top: 0;
-  height: 2px;
-  background: linear-gradient(90deg, #3b82f6, #10b981 55%, rgba(16, 185, 129, 0.1));
-  opacity: 0.85;
-  border-radius: var(--radius-lg) var(--radius-lg) 0 0;
-}
-
 .update-panel__head {
   display: flex;
   align-items: flex-start;

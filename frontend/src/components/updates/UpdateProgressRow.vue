@@ -331,20 +331,6 @@ onBeforeUnmount(() => {
   box-shadow: 0 8px 24px rgba(16, 42, 92, 0.09);
 }
 
-.update-row::before {
-  content: "";
-  position: absolute;
-  left: 0;
-  top: 14px;
-  bottom: 14px;
-  width: 3px;
-  border-radius: 3px;
-  background: var(--border-strong);
-}
-
-.track--stable::before { background: linear-gradient(180deg, #3b82f6, #60a5fa); }
-.track--dev::before { background: linear-gradient(180deg, #10b981, #34d399); }
-
 .update-row.is-disabled { opacity: 0.55; }
 .update-row.is-error { border-color: var(--err-border); }
 .update-row.is-error .update-row__detail { color: var(--err); }
@@ -1058,28 +1044,9 @@ onBeforeUnmount(() => {
 
 .update-row__notes-body :deep(h2),
 .update-row__notes-body :deep(h3) {
-  position: relative;
   margin: 14px 0 6px;
-  padding-left: 10px;
   font-size: 12.5px;
   color: var(--text-h);
-}
-
-.update-row__notes-body :deep(h2)::before,
-.update-row__notes-body :deep(h3)::before {
-  content: "";
-  position: absolute;
-  left: 0;
-  top: 2px;
-  bottom: 2px;
-  width: 3px;
-  border-radius: 3px;
-  background: linear-gradient(180deg, #3b82f6, #60a5fa);
-}
-
-.track--dev .update-row__notes-body :deep(h2)::before,
-.track--dev .update-row__notes-body :deep(h3)::before {
-  background: linear-gradient(180deg, #10b981, #34d399);
 }
 
 .update-row__notes-body :deep(h2):first-child,
@@ -1153,8 +1120,7 @@ onBeforeUnmount(() => {
 .update-row__notes-body :deep(blockquote) {
   margin: 8px 0;
   padding: 6px 12px;
-  border-left: 3px solid var(--border-strong);
-  border-radius: 0 6px 6px 0;
+  border-radius: 6px;
   background: rgba(16, 42, 92, 0.04);
   color: var(--text-muted);
 }
