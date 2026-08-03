@@ -24,6 +24,7 @@ const emit = defineEmits(['update:modelValue'])
 const panelEl = ref(null)
 const visible = ref(false)
 const open = ref(false)
+const closing = ref(false)
 const panelStyle = ref({})
 const arrowStyle = ref({})
 let hideTimer = 0
@@ -93,15 +94,20 @@ watch(() => props.modelValue, async (v) => {
   window.clearTimeout(hideTimer)
   if (v) {
     visible.value = true
+    closing.value = false
     await nextTick()
     positionPanel()
-    // 下一帧再加 .is-open，保证 scale 过渡必然触发（从 0.5 生长到 1）
+    // 下一帧再加 .is-open，保证生长动画必然触发
     requestAnimationFrame(() => { open.value = true })
   } else {
-    // 缩回动画
+    // 收回动画：缩回触发元素
     open.value = false
+    closing.value = true
     hideTimer = window.setTimeout(() => {
-      if (!props.modelValue) visible.value = false
+      if (!props.modelValue) {
+        closing.value = false
+        visible.value = false
+      }
     }, 220)
   }
 })
@@ -121,7 +127,7 @@ onBeforeUnmount(() => {
   <Teleport to="body">
     <div v-show="visible" class="dock-popover">
       <div class="dock-popover__scrim" @click="emit('update:modelValue', false)"></div>
-      <div ref="panelEl" class="dock-popover__panel" :class="{ 'is-open': open }" :style="panelStyle">
+      <div ref="panelEl" class="dock-popover__panel" :class="{ 'is-open': open, 'is-closing': closing }" :style="panelStyle">
         <span v-if="showArrow" class="dock-popover__arrow" :style="arrowStyle"></span>
         <slot></slot>
       </div>
@@ -140,26 +146,55 @@ onBeforeUnmount(() => {
 .dock-popover__panel {
   position: fixed;
   z-index: 41;
-  /* 初始：缩小的隐藏态 */
-  transform: scale(0.5);
+  /* 初始：锚点边收拢的隐藏态（v-show 显示后由 .is-open 触发"展开"动画） */
+  transform: scaleY(0.05) scaleX(0.75);
   opacity: 0;
   will-change: transform, opacity;
-  transition:
-    transform 0.32s cubic-bezier(0.34, 1.56, 0.64, 1),
-    opacity 0.2s ease;
 }
 
-/* macOS Dock 生长动画：从触发元素方向放大浮现 */
+/* macOS Dock 弹出动画（NSPopover scale effect）：
+   - 不是整体缩放渐显，而是"从锚点边展开"：锚点边（transform-origin 所在边）固定不动，
+     对面边向外铺开（scaleY 高度展开 + 轻微 scaleX），像纸张从图标上展开
+   - 内容几乎立即不透明，视觉焦点在"展开"而不是"淡入" */
 .dock-popover__panel.is-open {
-  transform: scale(1);
-  opacity: 1;
+  animation: dock-grow 0.32s ease-out forwards;
 }
 
-/* 收回时更干脆 */
-.dock-popover__panel:not(.is-open) {
-  transition:
-    transform 0.16s ease-in,
-    opacity 0.14s ease;
+@keyframes dock-grow {
+  0% {
+    transform: scaleY(0.05) scaleX(0.75);
+    opacity: 0;
+  }
+  20% {
+    opacity: 1;
+  }
+  55% {
+    transform: scaleY(1.04) scaleX(1.01);
+    opacity: 1;
+  }
+  75% {
+    transform: scaleY(0.985) scaleX(1);
+  }
+  100% {
+    transform: scaleY(1) scaleX(1);
+    opacity: 1;
+  }
+}
+
+/* 收回：从锚点边快速收拢 */
+.dock-popover__panel.is-closing {
+  animation: dock-shrink 0.15s ease-in forwards;
+}
+
+@keyframes dock-shrink {
+  0% {
+    transform: scaleY(1) scaleX(1);
+    opacity: 1;
+  }
+  100% {
+    transform: scaleY(0.05) scaleX(0.75);
+    opacity: 0;
+  }
 }
 
 .dock-popover__arrow {
