@@ -207,34 +207,36 @@ const focusedState = computed(() => {
     <div v-if="view === 'configure'" class="sc__workspace">
       <div class="sc__left">
         <aside class="sc__targets" :class="{ 'is-folded': targetsFolded }">
-          <template v-if="!targetsFolded">
-            <label class="sc__search">
-              <span>Configuration targets</span>
-              <input v-model="targetQuery" placeholder="Search targets" />
-            </label>
-            <section v-for="group in groups" :key="group.kind" class="sc__target-group">
-              <button type="button" class="sc__group-toggle" @click="toggleGroup(group.kind)">
-                <span>{{ collapsed.has(group.kind) ? '›' : '⌄' }} {{ group.label }}</span>
-                <small>{{ group.items.length }}</small>
-              </button>
-              <div v-if="!collapsed.has(group.kind)">
-                <button
-                  v-for="target in group.items"
-                  :key="target.id"
-                  type="button"
-                  class="sc__target"
-                  :class="{ 'is-active': active?.id === target.id, 'is-dirty': dirty.has(target.id) }"
-                  @click="activeId = target.id"
-                >
-                  <span>{{ target.label }}</span>
-                  <small>{{ targetCount(target.id) }}</small>
+          <div class="sc__targets-scroll">
+            <template v-if="!targetsFolded">
+              <label class="sc__search">
+                <span>Configuration targets</span>
+                <input v-model="targetQuery" placeholder="Search targets" />
+              </label>
+              <section v-for="group in groups" :key="group.kind" class="sc__target-group">
+                <button type="button" class="sc__group-toggle" @click="toggleGroup(group.kind)">
+                  <span>{{ collapsed.has(group.kind) ? '›' : '⌄' }} {{ group.label }}</span>
+                  <small>{{ group.items.length }}</small>
                 </button>
-              </div>
-            </section>
-          </template>
-          <div v-else class="sc__targets-folded" @click="targetsFolded = false">
-            <span class="sc__targets-folded-label">Target</span>
-            <strong>{{ active?.label }}</strong>
+                <div v-if="!collapsed.has(group.kind)">
+                  <button
+                    v-for="target in group.items"
+                    :key="target.id"
+                    type="button"
+                    class="sc__target"
+                    :class="{ 'is-active': active?.id === target.id, 'is-dirty': dirty.has(target.id) }"
+                    @click="activeId = target.id"
+                  >
+                    <span>{{ target.label }}</span>
+                    <small>{{ targetCount(target.id) }}</small>
+                  </button>
+                </div>
+              </section>
+            </template>
+            <div v-else class="sc__targets-folded" @click="targetsFolded = false">
+              <span class="sc__targets-folded-label">Target</span>
+              <strong>{{ active?.label }}</strong>
+            </div>
           </div>
           <button type="button" class="sc__targets-fold-btn" @click="targetsFolded = !targetsFolded">
             {{ targetsFolded ? '⌄ Show targets' : '› Hide targets' }}
@@ -362,8 +364,10 @@ const focusedState = computed(() => {
 .sc__save, .sc__footer-actions .is-primary { color: #fff; background: var(--accent); }
 .sc button:disabled { opacity: .35; cursor: default; }
 .sc__workspace { display: grid; grid-template-columns: minmax(300px, 1fr) minmax(460px, 1.6fr); height: min(62vh, 560px); }
-.sc__left { display: grid; grid-template-rows: auto minmax(0, 1fr); min-width: 0; border-right: 1px solid var(--border); }
-.sc__targets { min-width: 0; max-height: 45%; overflow: auto; border-bottom: 1px solid var(--border); }
+.sc__left { display: grid; grid-template-rows: minmax(0, 45%) minmax(0, 1fr); min-width: 0; min-height: 0; border-right: 1px solid var(--border); }
+.sc__targets { display: flex; flex-direction: column; min-width: 0; min-height: 0; overflow: hidden; border-bottom: 1px solid var(--border); }
+.sc__targets-scroll { flex: 1 1 auto; min-height: 0; overflow: auto; }
+.sc__targets.is-folded .sc__targets-scroll { overflow: visible; }
 .sc__targets.is-folded { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; }
 .sc__targets-folded { display: flex; min-width: 0; align-items: baseline; gap: 8px; padding: 9px 12px; cursor: pointer; }
 .sc__targets-folded:hover { background: var(--accent-bg); }
@@ -371,7 +375,7 @@ const focusedState = computed(() => {
 .sc__targets-folded strong { overflow: hidden; color: var(--text-h); font: 10px var(--sans); text-overflow: ellipsis; white-space: nowrap; }
 .sc__targets-fold-btn { height: 26px; margin: 6px 10px; padding: 0 8px; border: 1px solid var(--border); border-radius: 4px; color: var(--text-muted); background: var(--bg); font: 9px var(--mono); cursor: pointer; white-space: nowrap; }
 .sc__targets-fold-btn:hover { border-color: var(--accent-border); color: var(--text-h); }
-.sc__skills { display: grid; grid-template-rows: auto auto minmax(0, 1fr) auto; min-width: 0; }
+.sc__skills { display: grid; grid-template-rows: auto auto minmax(0, 1fr) auto; min-width: 0; min-height: 0; }
 .sc__detail { min-width: 0; overflow: auto; padding: 18px 20px; }
 .sc__detail-actions { display: flex; align-items: center; gap: 10px; }
 .sc__detail-state { padding: 3px 7px; border-radius: 4px; font: 700 8px var(--mono); text-transform: uppercase; letter-spacing: .03em; white-space: nowrap; }
