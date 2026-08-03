@@ -682,7 +682,9 @@ function stopChat() {
 async function continueAfterAnswer(answer) {
   if (!answer) return
   const { message, event } = questionEventFor(answer)
-  if (!message || !event?.data?.clearify_tool) return
+  // 所有 user_question（模型 clearify 工具 / 系统 fallback / design / validation）都能回答，
+  // 不要求 clearify_tool 标记——系统 fallback 提问没有该字段，之前导致回答被静默丢弃。
+  if (!message || !event?.data?.id) return
   if (event?.data) Object.assign(event.data, {
     answer_status: 'submitted',
     selected_option_id: answer.selected_option_id,
