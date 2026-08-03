@@ -445,12 +445,18 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
   font-size: 11.5px;
   font-weight: 500;
   opacity: .56;
-  transition: background 120ms ease, color 120ms ease, opacity 120ms ease;
+  transition: background 120ms ease, color 120ms ease, opacity 120ms ease,
+    width 220ms cubic-bezier(.16, 1, .3, 1), height 220ms cubic-bezier(.16, 1, .3, 1),
+    border-radius 220ms ease, margin 220ms cubic-bezier(.16, 1, .3, 1), padding 220ms ease;
 }
 
 .sb.is-collapsed .sb__new {
   justify-content: center;
+  width: 30px;
+  height: 30px;
+  margin: 2px auto;
   padding: 0;
+  border-radius: 50%;
 }
 
 .sb__new:hover,
@@ -488,12 +494,18 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
   font-size: 12px;
   font-weight: 500;
   text-align: left;
-  transition: background 100ms ease, color 100ms ease;
+  transition: background 100ms ease, color 100ms ease,
+    width 220ms cubic-bezier(.16, 1, .3, 1), height 220ms cubic-bezier(.16, 1, .3, 1),
+    border-radius 220ms ease, margin 220ms cubic-bezier(.16, 1, .3, 1), padding 220ms ease;
 }
 
 .sb.is-collapsed .sb__nav-item {
   justify-content: center;
+  width: 30px;
+  height: 30px;
+  margin: 2px auto;
   padding: 0;
+  border-radius: 50%;
 }
 
 .sb__nav-item:hover,
@@ -562,6 +574,7 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
   font-size: 11.5px;
   font-weight: 550;
   text-align: left;
+  transition: padding 220ms cubic-bezier(.16, 1, .3, 1), justify-content 220ms ease, background 100ms ease, color 100ms ease;
 }
 
 .sb.is-collapsed .sb__workspace {
@@ -594,6 +607,16 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
   color: #ffffff;
   font-size: 8px;
   font-weight: 700;
+  transition: width 220ms cubic-bezier(.16, 1, .3, 1), height 220ms cubic-bezier(.16, 1, .3, 1),
+    flex-basis 220ms cubic-bezier(.16, 1, .3, 1), border-radius 220ms ease, font-size 220ms ease;
+}
+
+.sb.is-collapsed .sb__avatar {
+  width: 24px;
+  height: 24px;
+  flex-basis: 24px;
+  border-radius: 50%;
+  font-size: 9px;
 }
 
 .sb__avatar.is-blue {
@@ -907,6 +930,16 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
 .sb-fade-enter-from,
 .sb-fade-leave-to {
   opacity: 0;
+}
+
+/* 文字时序错开：收缩时文字先快速淡出（宽度后收），
+   展开时宽度先展开、文字延迟淡入——避免文字挤在窄条里闪现 */
+.sb.is-collapsed .sb-fade-leave-active {
+  transition: opacity 80ms ease;
+}
+
+.sb:not(.is-collapsed) .sb-fade-enter-active {
+  transition: opacity 160ms ease 130ms;
 }
 
 /* --- 收缩态 --- */
