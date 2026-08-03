@@ -4783,6 +4783,22 @@ def _grounding_unsupported_for_resolution(
     return unsupported
 
 
+_PYTHON_STDLIB_MODULES = frozenset({
+    "abc", "argparse", "array", "ast", "asyncio", "base64", "binascii", "bisect",
+    "builtins", "bz2", "cmath", "codecs", "collections", "concurrent", "contextlib",
+    "copy", "copyreg", "csv", "ctypes", "dataclasses", "datetime", "decimal",
+    "difflib", "email", "enum", "errno", "functools", "glob", "gzip", "hashlib",
+    "heapq", "hmac", "html", "http", "importlib", "inspect", "io", "itertools",
+    "json", "logging", "lzma", "math", "mmap", "multiprocessing", "operator", "os",
+    "pathlib", "pickle", "platform", "pprint", "queue", "random", "re", "sched",
+    "secrets", "select", "selectors", "shutil", "signal", "socket", "sqlite3",
+    "ssl", "stat", "statistics", "string", "struct", "subprocess", "sys",
+    "tempfile", "textwrap", "threading", "time", "traceback", "types", "typing",
+    "unicodedata", "unittest", "urllib", "uuid", "warnings", "weakref", "xml",
+    "zipfile", "zlib", "zoneinfo",
+})
+
+
 def _unsupported_grounding_literals(
     resolution: dict,
     recorded: dict,
@@ -4813,8 +4829,16 @@ def _unsupported_grounding_literals(
         # 本身不会出现在观察文本里。只要观察覆盖了对应源文件（path 命中
         # 模块名），就认为该引用已 grounded——否则模型永远补不出这个字面量，
         # REPAIR 死循环（useSessions.open 类根因）。
-        if "." in literal and _observation_covers_module(evidence_obs, literal.split(".")[0]):
-            continue
+        if "." in literal:
+            module = literal.split(".")[0]
+            if module in _PYTHON_STDLIB_MODULES:
+                # 标准库引用（cmath.sqrt / os.path / json.dumps）不是项目代码：
+                # 语言环境的一部分，项目里没有对应源文件，grep/read 永远
+                # 产生不了这个字面量。要求观察证据毫无意义（cmath.sqrt 死循环
+                # 类根因），直接放行。
+                continue
+            if _observation_covers_module(evidence_obs, module):
+                continue
         unsupported.append(literal)
     return _dedupe_strings(unsupported)
 
