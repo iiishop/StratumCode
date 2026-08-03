@@ -243,7 +243,6 @@ function moduleLabel(file) {
 function layoutGraph(nodes, graphEdges) {
   if (!nodes.length) return new Map()
   const groups = fileLayoutGroups(nodes, graphEdges)
-  if (groups.length <= 1 && !graphEdges.length) return packedLayout(nodes)
   return moduleFirstLayout(groups)
 }
 
@@ -255,8 +254,10 @@ function fileLayoutGroups(nodes, graphEdges) {
       groups.set(file, {
         id: file,
         nodes: [],
+        internalEdges: [],
         incoming: new Set(),
         outgoing: new Set(),
+        nodeOffsets: new Map(),
         width: 0,
         height: 0,
         rank: 0,
@@ -269,17 +270,21 @@ function fileLayoutGroups(nodes, graphEdges) {
   for (const edge of graphEdges) {
     const sourceFile = nodeToFile.get(edge.source)
     const targetFile = nodeToFile.get(edge.target)
-    if (!sourceFile || !targetFile || sourceFile === targetFile) continue
+    if (!sourceFile || !targetFile) continue
+    if (sourceFile === targetFile) {
+      groups.get(sourceFile)?.internalEdges.push(edge)
+      continue
+    }
     groups.get(sourceFile)?.outgoing.add(targetFile)
     groups.get(targetFile)?.incoming.add(sourceFile)
   }
 
   for (const group of groups.values()) {
     group.nodes.sort(compareLayoutNodes)
-    const columns = moduleColumnCount(group.nodes.length)
-    const rows = Math.ceil(group.nodes.length / columns)
-    group.width = 56 + columns * 254 + (columns - 1) * 62
-    group.height = 68 + rows * 126 + (rows - 1) * 48
+    const layout = internalModuleLayout(group)
+    group.nodeOffsets = layout.offsets
+    group.width = layout.width
+    group.height = layout.height
   }
   assignModuleRanks(groups)
   return [...groups.values()].sort(compareLayoutGroups)
@@ -307,21 +312,6 @@ function assignModuleRanks(groups) {
       group.rank = group.incoming.size || group.outgoing.size ? maxRank + 1 : maxRank + 2
     }
   }
-}
-
-function packedLayout(nodes) {
-  const positions = new Map()
-  const columnCount = Math.max(1, Math.ceil(Math.sqrt(nodes.length)))
-  const xStep = 318
-  const yStep = 154
-  nodes.forEach((node, index) => {
-    const offset = layoutOffset(node.id)
-    positions.set(node.id, {
-      x: (index % columnCount) * xStep + offset.x,
-      y: Math.floor(index / columnCount) * yStep + offset.y,
-    })
-  })
-  return positions
 }
 
 function moduleFirstLayout(groups) {
@@ -365,29 +355,186 @@ function moduleFirstLayout(groups) {
 }
 
 function placeNodesInsideModule(group, origin, positions) {
-  const columns = moduleColumnCount(group.nodes.length)
-  const nodeWidth = 254
-  const nodeHeight = 126
-  const gapX = 62
-  const gapY = 48
   const left = 28
   const top = 44
-  group.nodes.forEach((node, index) => {
-    const column = index % columns
-    const row = Math.floor(index / columns)
-    const offset = layoutOffset(node.id)
+  for (const node of group.nodes) {
+    const offset = group.nodeOffsets.get(node.id) || { x: 0, y: 0 }
     positions.set(node.id, {
-      x: origin.x + left + column * (nodeWidth + gapX) + offset.x * 0.22,
-      y: origin.y + top + row * (nodeHeight + gapY) + offset.y * 0.22,
+      x: origin.x + left + offset.x,
+      y: origin.y + top + offset.y,
     })
-  })
+  }
 }
 
-function moduleColumnCount(count) {
-  if (count <= 2) return count || 1
-  if (count <= 6) return 2
-  if (count <= 12) return 3
-  return 4
+function internalModuleLayout(group) {
+  const nodeWidth = 254
+  const nodeHeight = 126
+  const paddingX = 56
+  const paddingY = 68
+  const offsets = group.internalEdges.length
+    ? internalCallLayout(group, nodeWidth, nodeHeight)
+    : internalScatterLayout(group.nodes, nodeWidth, nodeHeight)
+  relaxInternalCollisions(group.nodes, offsets, nodeWidth, nodeHeight)
+
+  const bounds = [...offsets.values()].reduce((box, point) => ({
+    minX: Math.min(box.minX, point.x),
+    minY: Math.min(box.minY, point.y),
+    maxX: Math.max(box.maxX, point.x + nodeWidth),
+    maxY: Math.max(box.maxY, point.y + nodeHeight),
+  }), {
+    minX: Number.POSITIVE_INFINITY,
+    minY: Number.POSITIVE_INFINITY,
+    maxX: Number.NEGATIVE_INFINITY,
+    maxY: Number.NEGATIVE_INFINITY,
+  })
+
+  for (const point of offsets.values()) {
+    point.x -= bounds.minX
+    point.y -= bounds.minY
+  }
+  return {
+    offsets,
+    width: Math.max(304, bounds.maxX - bounds.minX + paddingX),
+    height: Math.max(206, bounds.maxY - bounds.minY + paddingY),
+  }
+}
+
+function internalCallLayout(group, nodeWidth, nodeHeight) {
+  const graph = internalAdjacency(group)
+  const rank = internalRanks(group, graph.incoming, graph.outgoing)
+  const ranks = new Map()
+  for (const node of group.nodes) {
+    const value = rank.get(node.id) || 0
+    if (!ranks.has(value)) ranks.set(value, [])
+    ranks.get(value).push(node)
+  }
+
+  const offsets = new Map()
+  const verticalGap = nodeHeight + 104
+  const rankKeys = [...ranks.keys()].sort((a, b) => a - b)
+  for (const rankKey of rankKeys) {
+    const nodes = ranks.get(rankKey).sort((a, b) => {
+      const anchorDiff = parentAnchor(a, graph.incoming, offsets) - parentAnchor(b, graph.incoming, offsets)
+      return anchorDiff || compareLayoutNodes(a, b)
+    })
+    const centerShift = rankKey % 2 === 0 ? 0 : nodeWidth * 0.42
+    nodes.forEach((node, index) => {
+      const seed = stableHash(node.id)
+      const anchor = parentAnchor(node, graph.incoming, offsets)
+      const fan = organicFanOffset(index, nodes.length, nodeWidth)
+      offsets.set(node.id, {
+        x: anchor + fan + centerShift + ((seed % 53) - 26) * 1.2,
+        y: rankKey * verticalGap + ((Math.floor(seed / 53) % 43) - 21) * 1.1 + (index % 2) * 34,
+      })
+    })
+  }
+  return offsets
+}
+
+function internalAdjacency(group) {
+  const incoming = new Map(group.nodes.map(node => [node.id, []]))
+  const outgoing = new Map(group.nodes.map(node => [node.id, []]))
+  for (const edge of group.internalEdges) {
+    if (edge.source === edge.target) continue
+    if (!incoming.has(edge.target) || !outgoing.has(edge.source)) continue
+    incoming.get(edge.target).push(edge.source)
+    outgoing.get(edge.source).push(edge.target)
+  }
+  return { incoming, outgoing }
+}
+
+function internalRanks(group, incoming, outgoing) {
+  const pending = new Map(group.nodes.map(node => [node.id, (incoming.get(node.id) || []).length]))
+  const rank = new Map()
+  const queue = group.nodes
+    .filter(node => (pending.get(node.id) || 0) === 0)
+    .sort(compareLayoutNodes)
+  for (const node of queue) rank.set(node.id, 0)
+  while (queue.length) {
+    const node = queue.shift()
+    const base = rank.get(node.id) || 0
+    for (const target of outgoing.get(node.id) || []) {
+      rank.set(target, Math.max(rank.get(target) || 0, base + 1))
+      pending.set(target, (pending.get(target) || 0) - 1)
+      if (pending.get(target) === 0) {
+        const targetNode = group.nodes.find(item => item.id === target)
+        if (targetNode) queue.push(targetNode)
+      }
+    }
+    queue.sort(compareLayoutNodes)
+  }
+  const fallbackRank = Math.max(0, ...rank.values()) + 1
+  for (const node of group.nodes) {
+    if (!rank.has(node.id)) rank.set(node.id, fallbackRank)
+  }
+  return rank
+}
+
+function parentAnchor(node, incoming, offsets) {
+  const anchors = (incoming.get(node.id) || [])
+    .map(id => offsets.get(id)?.x)
+    .filter(value => Number.isFinite(value))
+  if (!anchors.length) return 0
+  return anchors.reduce((sum, value) => sum + value, 0) / anchors.length
+}
+
+function organicFanOffset(index, count, nodeWidth) {
+  if (count <= 1) return 0
+  const lane = Math.ceil((index + 1) / 2)
+  const direction = index % 2 === 0 ? -1 : 1
+  const spread = nodeWidth * 0.92 + 74
+  return direction * lane * spread
+}
+
+function internalScatterLayout(nodes, nodeWidth, nodeHeight) {
+  const offsets = new Map()
+  const angle = Math.PI * (3 - Math.sqrt(5))
+  nodes.forEach((node, index) => {
+    const seed = stableHash(node.id)
+    const radius = Math.sqrt(index) * (nodeWidth * 0.72)
+    const theta = index * angle + (seed % 41) / 41
+    offsets.set(node.id, {
+      x: Math.cos(theta) * radius + (index % 3 - 1) * nodeWidth * 0.28,
+      y: Math.sin(theta) * radius * 0.72 + index * 29 + ((seed % 31) - 15),
+    })
+  })
+  return offsets
+}
+
+function relaxInternalCollisions(nodes, offsets, nodeWidth, nodeHeight) {
+  const gapX = 38
+  const gapY = 28
+  for (let pass = 0; pass < 7; pass += 1) {
+    for (let i = 0; i < nodes.length; i += 1) {
+      for (let j = i + 1; j < nodes.length; j += 1) {
+        const a = offsets.get(nodes[i].id)
+        const b = offsets.get(nodes[j].id)
+        if (!a || !b) continue
+        const overlapX = nodeWidth + gapX - Math.abs(a.x - b.x)
+        const overlapY = nodeHeight + gapY - Math.abs(a.y - b.y)
+        if (overlapX <= 0 || overlapY <= 0) continue
+        if (overlapX < overlapY) {
+          const push = overlapX / 2
+          if (a.x <= b.x) {
+            a.x -= push
+            b.x += push
+          } else {
+            a.x += push
+            b.x -= push
+          }
+        } else {
+          const push = overlapY / 2
+          if (a.y <= b.y) {
+            a.y -= push
+            b.y += push
+          } else {
+            a.y += push
+            b.y -= push
+          }
+        }
+      }
+    }
+  }
 }
 
 function compareLayoutGroups(a, b) {
