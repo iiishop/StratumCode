@@ -24,6 +24,11 @@ const emit = defineEmits([
 const SESSION_PAGE_SIZE = 8
 const visibleCounts = ref({})
 const collapsedWorkspaceId = ref(null)
+const collapsed = ref(false)
+
+function toggleCollapsed() {
+  collapsed.value = !collapsed.value
+}
 
 const NAV = [
   { id: 'home', label: 'All sessions', icon: 'M4 6h16v12H4z' },
@@ -111,15 +116,21 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
 </script>
 
 <template>
-  <aside class="sb" aria-label="Primary navigation">
+  <aside class="sb" :class="{ 'is-collapsed': collapsed }" aria-label="Primary navigation">
     <header class="sb__top">
-      <button class="sb__brand" type="button" aria-label="Open workspace" @click="emit('navigate', 'home')">
+      <button class="sb__brand" type="button" title="Open workspace" aria-label="Open workspace" @click="emit('navigate', 'home')">
         <span class="sb__mark">S</span>
-        <span>StratumCode</span>
+        <span v-if="!collapsed">StratumCode</span>
       </button>
       <button class="sb__top-action" type="button" title="Add workspace" aria-label="Add workspace" @click="emit('add-workspace')">
         <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round">
           <path d="M12 5v14M5 12h14" />
+        </svg>
+      </button>
+      <button class="sb__collapse-toggle" type="button" :title="collapsed ? 'Expand sidebar' : 'Collapse sidebar'" :aria-label="collapsed ? 'Expand sidebar' : 'Collapse sidebar'" @click="toggleCollapsed">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path v-if="!collapsed" d="m9 6 6 6-6 6" />
+          <path v-else d="m15 6-6 6 6 6" />
         </svg>
       </button>
     </header>
@@ -129,8 +140,8 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
         <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round">
           <path d="M12 5v14M5 12h14" />
         </svg>
-        <span>New session</span>
-        <kbd>Ctrl N</kbd>
+        <span v-if="!collapsed">New session</span>
+        <kbd v-if="!collapsed">Ctrl N</kbd>
       </button>
     </div>
 
@@ -141,13 +152,14 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
         class="sb__nav-item"
         :class="{ 'is-active': active === item.id }"
         :aria-current="active === item.id ? 'page' : undefined"
+        :title="item.label"
         type="button"
         @click="emit('navigate', item.id)"
       >
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
           <path :d="item.icon" />
         </svg>
-        <span>{{ item.label }}</span>
+        <span v-if="!collapsed">{{ item.label }}</span>
       </button>
     </nav>
 
@@ -159,11 +171,11 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
         :class="{ 'is-open': activeWorkspace?.id === workspace.id && collapsedWorkspaceId !== workspace.id }"
       >
         <div class="sb__workspace-row" :class="{ 'is-active': activeWorkspace?.id === workspace.id }">
-          <button class="sb__workspace" type="button" :title="workspace.path" @click="onWorkspaceClick(workspace)">
+          <button class="sb__workspace" type="button" :title="collapsed ? workspaceLabel(workspace) : workspace.path" @click="onWorkspaceClick(workspace)">
             <span class="sb__avatar" :class="index % 2 ? 'is-red' : 'is-blue'">{{ initials(workspace) }}</span>
-            <span class="sb__workspace-name">{{ workspaceLabel(workspace) }}</span>
-            <span class="sb__state" :class="{ 'is-live': workspace.is_active }">{{ workspace.is_active ? 'open' : 'idle' }}</span>
-            <svg class="sb__chev" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+            <span v-if="!collapsed" class="sb__workspace-name">{{ workspaceLabel(workspace) }}</span>
+            <span v-if="!collapsed" class="sb__state" :class="{ 'is-live': workspace.is_active }">{{ workspace.is_active ? 'open' : 'idle' }}</span>
+            <svg v-if="!collapsed" class="sb__chev" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
               <path d="m9 6 6 6-6 6" />
             </svg>
           </button>
@@ -227,9 +239,12 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
         </Transition>
       </section>
 
-      <button v-if="!workspaces.length" class="sb__empty sb__empty-workspace" type="button" @click="emit('add-workspace')">
-        <span>No workspace</span>
-        <small>Add a folder</small>
+      <button v-if="!workspaces.length" class="sb__empty sb__empty-workspace" type="button" title="Add workspace" @click="emit('add-workspace')">
+        <span v-if="!collapsed">No workspace</span>
+        <small v-if="!collapsed">Add a folder</small>
+        <svg v-else width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+          <path d="M12 5v14M5 12h14" />
+        </svg>
       </button>
 
       <p v-if="workspaceError" class="sb__error">{{ workspaceError }}</p>
@@ -237,7 +252,7 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
 
     <footer class="sb__footer">
       <span class="sb__status-dot" />
-      <span>Runtime ready</span>
+      <span v-if="!collapsed">Runtime ready</span>
     </footer>
   </aside>
 </template>
@@ -267,6 +282,11 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
   contain: layout paint;
   user-select: none;
   -webkit-user-select: none;
+  transition: width 240ms cubic-bezier(.16, 1, .3, 1), flex-basis 240ms cubic-bezier(.16, 1, .3, 1);
+}
+
+.sb.is-collapsed {
+  --sb-w: 64px;
 }
 
 .sb button {
@@ -281,6 +301,14 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
   justify-content: space-between;
   gap: 8px;
   padding: 0 14px;
+}
+.sb.is-collapsed .sb__top {
+  padding: 0 8px;
+  gap: 4px;
+}
+
+.sb.is-collapsed .sb__top .sb__top-action {
+  display: none;
 }
 
 .sb__brand {
@@ -307,6 +335,25 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
   color: #ffffff;
   font-size: 11px;
   font-weight: 700;
+}
+
+.sb__collapse-toggle {
+  display: grid;
+  width: 20px;
+  height: 20px;
+  flex: 0 0 20px;
+  place-items: center;
+  border: 0;
+  border-radius: 3px;
+  background: transparent;
+  color: var(--faint);
+  cursor: pointer;
+}
+
+.sb__collapse-toggle:hover,
+.sb__collapse-toggle:focus-visible {
+  background: rgba(15, 23, 42, .05);
+  color: var(--text);
 }
 
 .sb__top-action,
@@ -336,6 +383,10 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
   flex: 0 0 auto;
 }
 
+.sb.is-collapsed .sb__new-wrap {
+  margin: 0 6px 6px;
+}
+
 .sb__new {
   display: flex;
   width: 100%;
@@ -352,6 +403,11 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
   font-weight: 500;
   opacity: .56;
   transition: background 120ms ease, color 120ms ease, opacity 120ms ease;
+}
+
+.sb.is-collapsed .sb__new {
+  justify-content: center;
+  padding: 0;
 }
 
 .sb__new:hover,
@@ -390,6 +446,11 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
   font-weight: 500;
   text-align: left;
   transition: background 100ms ease, color 100ms ease;
+}
+
+.sb.is-collapsed .sb__nav-item {
+  justify-content: center;
+  padding: 0;
 }
 
 .sb__nav-item:hover,
@@ -458,6 +519,21 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
   font-size: 11.5px;
   font-weight: 550;
   text-align: left;
+}
+
+.sb.is-collapsed .sb__workspace {
+  justify-content: center;
+  padding: 0;
+}
+
+.sb.is-collapsed .sb__workspace-row > .sb__row-action {
+  display: none;
+}
+
+.sb.is-collapsed .sb__empty-workspace {
+  align-items: center;
+  justify-content: center;
+  padding: 0;
 }
 
 .sb__workspace-row:hover .sb__workspace,
