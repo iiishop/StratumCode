@@ -115,13 +115,57 @@ class InvestigatingUseCase:
     def _step_clearify_question(self, run) -> dict | None:
         investigation = run.last_investigation or {}
         step = investigation.get("step_result") if isinstance(investigation.get("step_result"), dict) else {}
-        if step.get("next_step") != "clearify":
-            return None
-        target_ids = [
-            self._unknown_tail(item)
-            for item in step.get("target_unknown_ids", [])
-            if self._unknown_tail(item)
-        ]
+        if step.get("next_step") == "clearify":
+            target_ids = [
+                self._unknown_tail(item)
+                for item in step.get("target_unknown_ids", [])
+                if self._unknown_tail(item)
+            ]
+            unknowns = [
+                item for item in (run.analysis or {}).get("unknowns", [])
+                if isinstance(item, dict)
+            ] + [
+                item for item in investigation.get("unknowns", [])
+                if isinstance(item, dict)
+            ]
+            for unknown_id in target_ids:
+                unknown = next(
+                    (
+                        item for item in unknowns
+                        if self._unknown_tail(item.get("id")) == unknown_id
+                        and item.get("type") == "product_decision"
+                    ),
+                    None,
+                )
+                if not unknown:
+                    continue
+                question = str(unknown.get("question") or step.get("continue_reason") or "").strip()
+                if not question:
+                    continue
+                queue_clearify(
+                    run,
+                    question,
+                    reason=str(step.get("continue_reason") or "Investigation requires a product decision."),
+                    unknown_id=str(unknown.get("id") or unknown_id),
+                )
+                return user_question_event(
+                    run,
+                    question=question,
+                    reason=str(step.get("continue_reason") or "Investigation requires a product decision."),
+                    unknown_id=str(unknown.get("id") or unknown_id),
+                    checkpoint_phase="investigation_checkpoint",
+                    resume_state="investigating",
+                    extra={
+                        "analysis": run.analysis,
+                        "investigation": run.last_investigation or {},
+                    },
+                )
+        # 系统兜底：调查结束后仍有 blocking 的 product_decision 未解决 → 直接 clearify。
+        # product_decision 没有"代码证据"可查，模型死磕调查只会无限 continue（曾因此死循环）。
+        return self._pending_product_decision_question(run)
+
+    def _pending_product_decision_question(self, run) -> dict | None:
+        investigation = run.last_investigation or {}
         unknowns = [
             item for item in (run.analysis or {}).get("unknowns", [])
             if isinstance(item, dict)
@@ -129,31 +173,25 @@ class InvestigatingUseCase:
             item for item in investigation.get("unknowns", [])
             if isinstance(item, dict)
         ]
-        for unknown_id in target_ids:
-            unknown = next(
-                (
-                    item for item in unknowns
-                    if self._unknown_tail(item.get("id")) == unknown_id
-                    and item.get("type") == "product_decision"
-                ),
-                None,
-            )
-            if not unknown:
+        resolved_ids = self._recorded_resolved_ids(investigation)
+        for unknown in unknowns:
+            if str(unknown.get("type") or "").strip().casefold() != "product_decision":
                 continue
-            question = str(unknown.get("question") or step.get("continue_reason") or "").strip()
+            if not unknown.get("blocking"):
+                continue
+            unknown_id = str(unknown.get("id") or "").strip()
+            if not unknown_id or self._unknown_tail(unknown_id) in resolved_ids:
+                continue
+            question = str(unknown.get("question") or unknown.get("text") or "").strip()
             if not question:
                 continue
-            queue_clearify(
-                run,
-                question,
-                reason=str(step.get("continue_reason") or "Investigation requires a product decision."),
-                unknown_id=str(unknown.get("id") or unknown_id),
-            )
+            reason = str(unknown.get("why") or "Investigation requires a product decision.")
+            queue_clearify(run, question, reason=reason, unknown_id=unknown_id)
             return user_question_event(
                 run,
                 question=question,
-                reason=str(step.get("continue_reason") or "Investigation requires a product decision."),
-                unknown_id=str(unknown.get("id") or unknown_id),
+                reason=reason,
+                unknown_id=unknown_id,
                 checkpoint_phase="investigation_checkpoint",
                 resume_state="investigating",
                 extra={
@@ -162,6 +200,18 @@ class InvestigatingUseCase:
                 },
             )
         return None
+
+    def _recorded_resolved_ids(self, investigation: dict) -> set[str]:
+        resolved = set()
+        for record in investigation.get("resolutions", []) if isinstance(investigation.get("resolutions"), list) else []:
+            if not isinstance(record, dict):
+                continue
+            if str(record.get("status") or "") not in ("resolved", "partially_resolved", "deferred"):
+                continue
+            tail = self._unknown_tail(str(record.get("unknown_id") or ""))
+            if tail:
+                resolved.add(tail)
+        return resolved
 
     @staticmethod
     def _unknown_tail(value) -> str:

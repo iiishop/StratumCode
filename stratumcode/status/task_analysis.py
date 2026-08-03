@@ -921,7 +921,7 @@ def _runtime_unknowns(
             ).strip().casefold()
             if unknown_type == "product_decision":
                 blocking = True
-                strategy = "investigate_project"
+                strategy = "clearify"
             else:
                 strategy = (
                     "deferred"
