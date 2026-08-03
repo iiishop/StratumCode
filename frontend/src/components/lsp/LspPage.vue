@@ -697,6 +697,8 @@ function toggleEnabled(server) {
 .lsp-modal__head .lsp-modal__close--danger:hover:not(:disabled) {
   transform: translateY(-2px);
   filter: brightness(1.08);
+  background: linear-gradient(135deg, #ef4444, #d92d3d);
+  border-color: #d92d3d;
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.28), 0 7px 20px rgba(217, 45, 61, 0.44);
 }
 /* 扫光：hover 时一道高光从左扫到右 */
@@ -719,6 +721,8 @@ function toggleEnabled(server) {
 .lsp-modal__head .lsp-modal__close--danger:active:not(:disabled) {
   transform: translateY(0) scale(0.95);
   filter: brightness(0.94);
+  background: linear-gradient(135deg, #ef4444, #d92d3d);
+  border-color: #d92d3d;
   box-shadow: inset 0 2px 5px rgba(120, 20, 30, 0.3), 0 1px 3px rgba(217, 45, 61, 0.2);
 }
 
