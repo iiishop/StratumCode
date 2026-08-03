@@ -359,22 +359,21 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
 
 .sb__collapse-toggle {
   display: grid;
-  width: 26px;
-  height: 26px;
-  flex: 0 0 26px;
+  width: 28px;
+  height: 28px;
+  flex: 0 0 28px;
   place-items: center;
   border: 0;
-  border-radius: 6px;
-  background: rgba(15, 23, 42, 0.06);
-  color: var(--muted);
+  border-radius: 7px;
+  background: rgba(15, 23, 42, 0.1);
+  color: var(--text);
   cursor: pointer;
   transition: background 120ms ease, color 120ms ease, transform 120ms ease;
 }
 
 .sb__collapse-toggle:hover,
 .sb__collapse-toggle:focus-visible {
-  background: rgba(15, 23, 42, 0.12);
-  color: var(--text);
+  background: rgba(15, 23, 42, 0.18);
 }
 
 .sb__collapse-toggle:active {
@@ -395,21 +394,20 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
   cursor: pointer;
 }
 
-/* 顶部加号（添加 workspace）：主操作，明确按钮感 */
+/* 顶部加号（添加 workspace）：实底主按钮，常态可见 */
 .sb__top-action {
-  width: 26px;
-  height: 26px;
-  flex-basis: 26px;
-  border-radius: 6px;
-  background: rgba(37, 99, 235, 0.09);
-  color: var(--blue);
+  width: 28px;
+  height: 28px;
+  flex-basis: 28px;
+  border-radius: 7px;
+  background: var(--blue);
+  color: #ffffff;
   transition: background 120ms ease, color 120ms ease, transform 120ms ease;
 }
 
 .sb__top-action:hover,
 .sb__top-action:focus-visible {
-  background: var(--blue);
-  color: #ffffff;
+  background: #1d4ed8;
 }
 
 .sb__top-action:active {
@@ -772,7 +770,7 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
   display: flex;
   flex: 0 0 auto;
   gap: 2px;
-  opacity: 0;
+  opacity: 0.55; /* 常态可见，hover 全显 */
   transition: opacity 120ms ease;
 }
 
@@ -805,7 +803,7 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
 
 .sb__workspace-row > .sb__row-action {
   margin-right: 4px;
-  opacity: 0;
+  opacity: 0.55; /* 常态可见，hover 全显 */
   transition: opacity 120ms ease;
 }
 
