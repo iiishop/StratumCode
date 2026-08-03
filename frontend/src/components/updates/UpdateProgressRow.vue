@@ -93,39 +93,19 @@ watch(() => props.state, async (s, prev) => {
   if (s === 'running') {
     completionFired = false
     await nextTick()
-    if (!arrowBtn.value || !versionCurrent.value || !progressBar.value) return
+    if (!progressBar.value) return
 
     // Kill any stale animation
     progressTl?.kill()
     spinOutTl?.kill()
 
-    const arrow = arrowBtn.value
-    const curLabel = versionCurrent.value
     const bar = progressBar.value
-    const labelHeight = curLabel.offsetHeight
 
-    // Phase 1: arrow shrink + text fade + move left + rotate 90°
-    const arrowRect = arrow.getBoundingClientRect()
-    const labelRect = curLabel.getBoundingClientRect()
-    const moveX = labelRect.left - arrowRect.left + labelRect.width + 8
-
-    progressTl = gsap.timeline({ defaults: { ease: 'power2.inOut' } })
-
+    // 进度条在版本行下方展开：0 → 10px + 淡入，箭头按钮留在原位
+    progressTl = gsap.timeline({ defaults: { ease: 'power2.out' } })
     progressTl
-      .to(curLabel, { opacity: 0.8, scale: 0.96, duration: 0.26 }, 0)
-      .to(arrow, {
-        scale: 0.86,
-        x: moveX,
-        rotate: 90,
-        duration: 0.26,
-        ease: 'power3.inOut',
-      }, 0)
-      .set(bar, {
-        height: '10px',
-        width: '100%',
-      }, 0.1)
-      .to(bar, { opacity: 1, duration: 0.18 }, 0.18)
-      .set(arrow, { position: 'absolute' }, 0)
+      .set(bar, { height: '10px', width: '100%' })
+      .to(bar, { opacity: 1, duration: 0.2 }, 0.05)
 
     // Start tracking progress
     prevProgress = 0
@@ -144,20 +124,10 @@ watch(() => props.state, async (s, prev) => {
 function trackProgress() {
   if (props.state !== 'running') return
   const pct = Math.min(100, Math.max(0, props.progress))
-  if (pct !== prevProgress) {
-    prevProgress = pct
-    // Arrow follows progress
-    if (arrowBtn.value && progressBar.value) {
-      const barWidth = progressBar.value.offsetWidth
-      const arrowW = arrowBtn.value.offsetWidth
-      const left = (barWidth * pct) / 100 - arrowW / 2
-      gsap.to(arrowBtn.value, { left, duration: 0.26, ease: 'power2.out' })
-    }
-  }
   if (pct < 100) {
     requestAnimationFrame(trackProgress)
   } else {
-    // Progress complete → spin-out + firework
+    // Progress complete → firework
     onProgressComplete()
   }
 }
@@ -167,31 +137,15 @@ async function onProgressComplete() {
   if (completionFired) return
   completionFired = true
   await nextTick()
-  if (!arrowBtn.value || !fireworkContainer.value || !edgeShine.value || !versionTarget.value) return
+  if (!progressBar.value || !fireworkContainer.value || !edgeShine.value) return
 
-  const arrow = arrowBtn.value
+  const bar = progressBar.value
   const fireworks = fireworkContainer.value
   const shine = edgeShine.value
-  const newLabel = versionTarget.value
-  const restart = restartBtn.value
 
+  // Edge shine slides around progress bar
   spinOutTl = gsap.timeline()
-
-  // Spin out: 0.1s = 1 rotation, 0.3s = 5 rotations total, size to 200%, opacity to 0
   spinOutTl
-    .to(arrow, {
-      rotate: 360 * 5 + 90,
-      scale: 2,
-      opacity: 0,
-      duration: 0.3,
-      ease: 'power4.in',
-      onComplete: () => {
-        // Firework burst at arrow position
-        spawnFireworks(fireworks)
-        arrow.style.display = 'none'
-      },
-    }, 0)
-    // Edge shine slides around progress bar
     .fromTo(shine, { opacity: 1, left: 0, top: 0 }, {
       duration: 0.6,
       ease: 'none',
@@ -202,32 +156,10 @@ async function onProgressComplete() {
         '75%': { left: 0, top: 'calc(100% - 2px)' },
         '100%': { left: 0, top: 0 },
       },
-    }, 0.3)
-    .to(shine, { opacity: 0, duration: 0.15 }, 0.9)
-    // New version flash
-    .fromTo(newLabel, { opacity: 0.5 }, {
-      opacity: 1,
-      duration: 0.22,
-      repeat: 1,
-      yoyo: true,
-      ease: 'power1.inOut',
-    }, 0.5)
-    // Fade to restart button
-    .fromTo(versionCurrent.value, { display: 'block' }, { display: 'none', duration: 0 }, 0.8)
-    .fromTo(newLabel, { opacity: 1 }, {
-      opacity: 0,
-      scale: 0.96,
-      duration: 0.2,
-      ease: 'power2.in',
-    }, 0.82)
-  if (restart) {
-    spinOutTl.fromTo(restart, { opacity: 0, scale: 0.92 }, {
-      opacity: 1,
-      scale: 1,
-      duration: 0.22,
-      ease: 'back.out(1.4)',
-    }, 0.9)
-  }
+    }, 0)
+    .to(shine, { opacity: 0, duration: 0.15 }, 0.6)
+  // Firework burst at the progress bar end
+  spawnFireworks(fireworks)
 }
 
 // -- firework particles ----------------------------------------------
@@ -524,7 +456,9 @@ onBeforeUnmount(() => {
 /* --- 版本对比舞台 --- */
 .update-row__stage {
   position: relative;
-  min-height: 38px;
+  display: grid;
+  gap: 8px;
+  min-height: 44px;
 }
 
 .update-row__version-row {
@@ -533,8 +467,9 @@ onBeforeUnmount(() => {
   display: flex;
   align-items: center;
   gap: 8px;
-  min-height: 38px;
+  min-height: 32px;
   padding: 0 4px;
+  transition: opacity 0.18s ease;
 }
 
 .update-row__current-ver {
@@ -575,17 +510,23 @@ onBeforeUnmount(() => {
   box-shadow: 0 2px 8px rgba(16, 185, 129, 0.28), inset 0 1px 0 rgba(255, 255, 255, 0.22);
 }
 
-.update-row.is-running .update-row__target-ver,
-.update-row.is-done .update-row__target-ver {
+.update-row.is-running .update-row__target-ver {
   opacity: 1;
+}
+
+/* done 后版本对比让位给对勾徽章 */
+.update-row.is-done .update-row__target-ver,
+.update-row.is-done .update-row__arrow-sym,
+.update-row.is-done .update-row__current-ver,
+.update-row.is-done .update-row__arrow {
+  opacity: 0;
+  pointer-events: none;
 }
 
 /* --- 进度条 --- */
 .update-row__progress-bar {
-  position: absolute;
+  position: relative;
   left: 0;
-  top: 50%;
-  transform: translateY(-50%);
   z-index: 1;
   height: 0;
   pointer-events: none;
@@ -721,7 +662,7 @@ onBeforeUnmount(() => {
 .update-row__done {
   position: absolute;
   left: 4px;
-  top: 50%;
+  top: 16px;
   transform: translateY(-50%);
   z-index: 6;
   display: flex;
