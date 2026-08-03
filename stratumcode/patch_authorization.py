@@ -63,15 +63,56 @@ def create_authorization(plan: dict, workspace_dir: str) -> dict:
     return auth
 
 
+def _request_operation_fingerprints(request: dict) -> list[str]:
+    """对 request 中的文件操作生成指纹，用于区分"同 attempt_id 的重试"
+    与"同一步的后续分批操作"。"""
+    fingerprints = []
+    for file_patch in request.get("files") or []:
+        if not isinstance(file_patch, dict):
+            continue
+        path = str(file_patch.get("path") or "")
+        for op in file_patch.get("operations") or []:
+            if not isinstance(op, dict):
+                continue
+            op_type = str(op.get("op") or "")
+            old = str(op.get("old_text") or "")
+            new = str(op.get("new_text") or "")
+            digest = hashlib.sha256(f"{old}\u2192{new}".encode("utf-8")).hexdigest()[:16]
+            fingerprints.append(f"{path}|{op_type}|{digest}")
+    return fingerprints
+
+
+def _coerce_attempts(attempts) -> dict:
+    """applied_attempts_json 从旧格式 {step: [id,...]} 迁移为
+    {step: {id: [fingerprint,...]}}。"""
+    if not isinstance(attempts, dict):
+        return {}
+    coerced = {}
+    for step_id, value in attempts.items():
+        if isinstance(value, dict):
+            coerced[step_id] = value
+        elif isinstance(value, list):
+            coerced[step_id] = {str(item): [] for item in value}
+        else:
+            coerced[step_id] = {}
+    return coerced
+
+
 def validate_request(request: dict, root: Path, changed_bytes: int = 0) -> None:
     row, step_id, step = validate_step_reference(request, root)
     states = _loads(row.get("step_states_json"), {})
     if states.get(step_id) == "validation_required":
         raise AuthorizationError("STEP_ALREADY_APPLIED", step_id)
-    attempts = _loads(row.get("applied_attempts_json"), {})
+    attempts = _coerce_attempts(_loads(row.get("applied_attempts_json"), {}))
     attempt_id = str(request.get("attempt_id") or request.get("patch_id") or "").strip()
-    if attempt_id and attempt_id in set(attempts.get(step_id) or []):
-        raise AuthorizationError("PATCH_ATTEMPT_ALREADY_APPLIED", attempt_id)
+    if attempt_id and attempt_id in (attempts.get(step_id) or {}):
+        recorded = attempts[step_id].get(attempt_id) or []
+        incoming = _request_operation_fingerprints(request)
+        # 同 attempt_id：仅当操作与已应用内容完全重复时视为重试（拒绝幂等重复）。
+        # 同一尝试的后续分批操作（同一 step 的剩余改动）放行合并——
+        # 否则模型把一个步骤拆成多次 apply_patch 会被误判为重复尝试而卡死。
+        if incoming and all(fp in recorded for fp in incoming):
+            raise AuthorizationError("PATCH_ATTEMPT_ALREADY_APPLIED", attempt_id)
     requested_acceptance = set(_strings(request.get("acceptance_ids")))
     allowed_acceptance = set(step.get("acceptance_ids") or [])
     if requested_acceptance and not requested_acceptance <= allowed_acceptance:
@@ -135,13 +176,20 @@ def mark_step_satisfied(auth_id: str, step_id: str) -> None:
         )
 
 
-def mark_step_applied(auth_id: str, step_id: str, attempt_id: str = "", *, complete: bool = True) -> None:
+def mark_step_applied(
+    auth_id: str,
+    step_id: str,
+    attempt_id: str = "",
+    *,
+    complete: bool = True,
+    operation_fingerprints: list[str] | None = None,
+) -> None:
     row = _get(auth_id)
     if not row:
         raise AuthorizationError("AUTHORIZATION_NOT_FOUND", auth_id)
     consumed = set(_loads(row.get("consumed_steps_json"), []))
     states = _loads(row.get("step_states_json"), {})
-    attempts = _loads(row.get("applied_attempts_json"), {})
+    attempts = _coerce_attempts(_loads(row.get("applied_attempts_json"), {}))
     step_id = str(step_id)
     attempt_id = str(attempt_id or "")
     if complete:
@@ -150,9 +198,13 @@ def mark_step_applied(auth_id: str, step_id: str, attempt_id: str = "", *, compl
     else:
         states[step_id] = "applying"
     if attempt_id:
-        values = set(attempts.get(step_id) or [])
-        values.add(attempt_id)
-        attempts[step_id] = sorted(values)
+        step_map = attempts.setdefault(step_id, {})
+        if not isinstance(step_map, dict):
+            step_map = {str(item): [] for item in (step_map or [])}
+            attempts[step_id] = step_map
+        merged = set(step_map.get(attempt_id) or [])
+        merged.update(operation_fingerprints or [])
+        step_map[attempt_id] = sorted(merged)
     with db.db_session() as conn:
         conn.execute(
             "UPDATE patch_authorizations SET consumed_steps_json = ?, step_states_json = ?, applied_attempts_json = ? WHERE id = ?",
@@ -171,15 +223,15 @@ def mark_step_rolled_back(auth_id: str, step_id: str, attempt_id: str = "") -> N
         return
     consumed = set(_loads(row.get("consumed_steps_json"), []))
     states = _loads(row.get("step_states_json"), {})
-    attempts = _loads(row.get("applied_attempts_json"), {})
+    attempts = _coerce_attempts(_loads(row.get("applied_attempts_json"), {}))
     step_id = str(step_id)
     attempt_id = str(attempt_id or "")
     consumed.discard(step_id)
     states[step_id] = "rolled_back"
     if attempt_id:
-        values = set(attempts.get(step_id) or [])
-        values.discard(attempt_id)
-        attempts[step_id] = sorted(values)
+        step_map = attempts.get(step_id)
+        if isinstance(step_map, dict):
+            step_map.pop(attempt_id, None)
     with db.db_session() as conn:
         conn.execute(
             "UPDATE patch_authorizations SET consumed_steps_json = ?, step_states_json = ?, applied_attempts_json = ? WHERE id = ?",

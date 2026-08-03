@@ -115,6 +115,7 @@ def apply_patch_request(request: dict, root: Path) -> dict:
                 str(request.get("step_id") or ""),
                 str(request.get("attempt_id") or request.get("patch_id") or ""),
                 complete=bool(request.get("step_complete", True)),
+                operation_fingerprints=patch_authorization._request_operation_fingerprints(request),
             )
         except Exception as exc:
             _abort_transaction(tx, committed, exc)
