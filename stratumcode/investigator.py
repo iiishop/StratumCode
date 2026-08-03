@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import os
 import platform
 import re
 from collections.abc import Iterator
@@ -4745,19 +4746,45 @@ def _unsupported_grounding_literals(
     for belief in recorded.get("beliefs", []):
         if isinstance(belief, dict) and str(belief.get("id") or "") in belief_ids:
             evidence_ids.update(_reference_list(belief.get("evidence")))
-    evidence = "\n".join(
-        _grounding_observation_text(item)
+    evidence_obs = [
+        item
         for item in observations
         if isinstance(item, dict) and str(item.get("id") or "") in evidence_ids
-    )
+    ]
+    evidence = "\n".join(_grounding_observation_text(item) for item in evidence_obs)
     normalized_evidence = re.sub(r"\s+", "", evidence)
     literals = _grounding_code_literals(str(resolution.get("answer") or ""))
-    return _dedupe_strings([
-        literal
-        for literal in literals
-        if _is_grounding_code_literal(literal)
-        and re.sub(r"\s+", "", literal) not in normalized_evidence
-    ])
+    unsupported = []
+    for literal in literals:
+        if not _is_grounding_code_literal(literal):
+            continue
+        normalized_literal = re.sub(r"\s+", "", literal)
+        if normalized_literal in normalized_evidence:
+            continue
+        # 模块引用写法（useSessions.open / model_settings.resolve）豁免：
+        # 源码里是 `export async function open` / `def resolve`，点链字符串
+        # 本身不会出现在观察文本里。只要观察覆盖了对应源文件（path 命中
+        # 模块名），就认为该引用已 grounded——否则模型永远补不出这个字面量，
+        # REPAIR 死循环（useSessions.open 类根因）。
+        if "." in literal and _observation_covers_module(evidence_obs, literal.split(".")[0]):
+            continue
+        unsupported.append(literal)
+    return _dedupe_strings(unsupported)
+
+
+def _observation_covers_module(observations: list[dict], module: str) -> bool:
+    """观察的 path 是否覆盖了给定模块（useSessions -> useSessions.js）。"""
+    if not module:
+        return False
+    for item in observations:
+        path = str(item.get("path") or "")
+        if not path:
+            continue
+        base = os.path.basename(path)
+        stem = os.path.splitext(base)[0]
+        if module in (stem, base):
+            return True
+    return False
 
 
 def _semantic_repair_resolution_ids(recorded: dict) -> set[str]:
