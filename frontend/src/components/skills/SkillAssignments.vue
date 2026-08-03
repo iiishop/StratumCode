@@ -52,6 +52,13 @@ const placeTarget = computed(() => {
   return props.targets.find(item => item.id === id) || null
 })
 
+// 切换 skill 时清空上次的判断结果，避免旧建议串到新 skill 上
+watch(focusedId, () => {
+  placing.value = false
+  placeResult.value = null
+  placeError.value = ''
+})
+
 const active = computed(() => props.targets.find(item => item.id === activeId.value) || props.targets[0])
 const focused = computed(() => props.items.find(item => item.id === focusedId.value) || null)
 const explicitIds = computed(() => draftAssignments[active.value?.id] || [])
@@ -388,16 +395,19 @@ function targetColor(id) {
                   <span v-if="placeResult.fallback" class="sc__place-fallback">fallback</span>
                 </div>
                 <div class="sc__place-result-body">
-                  <span class="sc__place-target" :style="placeTarget ? { '--tag-color': targetColor(placeTarget.id).bg } : {}">
-                    {{ placeTarget ? placeTarget.label : placeResult.target_id }}
-                  </span>
-                  <span class="sc__place-confidence" :class="`is-${placeResult.confidence || 'low'}`">
-                    {{ placeResult.confidence || 'low' }} confidence
-                  </span>
-                  <p v-if="placeResult.rationale" class="sc__place-rationale">{{ placeResult.rationale }}</p>
-                  <p v-if="placeResult.alternatives?.length" class="sc__place-alt">
-                    Alternatives: {{ placeResult.alternatives.join(', ') }}
-                  </p>
+                  <template v-if="placeResult.ok !== false && placeResult.target_id">
+                    <span class="sc__place-target" :style="placeTarget ? { '--tag-color': targetColor(placeTarget.id).bg } : {}">
+                      {{ placeTarget ? placeTarget.label : placeResult.target_id }}
+                    </span>
+                    <span class="sc__place-confidence" :class="`is-${placeResult.confidence || 'low'}`">
+                      {{ placeResult.confidence || 'low' }} confidence
+                    </span>
+                    <p v-if="placeResult.rationale" class="sc__place-rationale">{{ placeResult.rationale }}</p>
+                    <p v-if="placeResult.alternatives?.length" class="sc__place-alt">
+                      Alternatives: {{ placeResult.alternatives.join(', ') }}
+                    </p>
+                  </template>
+                  <p v-else class="sc__place-error">{{ placeResult.error || 'No placement target returned.' }}</p>
                 </div>
               </template>
               <p v-else class="sc__place-error">{{ placeError }}</p>

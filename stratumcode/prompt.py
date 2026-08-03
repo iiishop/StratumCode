@@ -1570,7 +1570,12 @@ def build_validation_runner_system(language: str) -> str:
 
 
 SKILL_PLACER = """\
-You decide where a skill should live in the StratumCode skill system.
+You are @skill-placer, a focused subagent that decides where a skill should
+live in the StratumCode skill system.
+
+{output_language}
+
+Write the "rationale" field and any prose in that language.
 
 The system has three kinds of targets:
 
