@@ -1,0 +1,39 @@
+id: csharp
+extensions: [".cs"]
+semantic:
+  provider: lsp
+syntax:
+  provider: regex-query
+  symbols:
+    - pattern: "^\\s*(?P<signature>(?:(?:public|private|protected|internal|static|virtual|override|abstract|sealed|async|extern|unsafe|partial|new)\\s+)*(?:[A-Za-z_][A-Za-z0-9_<>,\\.\\?\\[\\]]*\\s+)+(?P<name>[A-Za-z_][A-Za-z0-9_]*)\\s*(?:<[^>\\n]+>)?\\s*\\([^\\n;{}]*\\)\\s*(?:where\\s+[^\\n{=>;]+\\s*)?(?:\\{|=>))"
+    - pattern: "^\\s*(?P<signature>(?:(?:public|private|protected|internal|extern|unsafe)\\s+)+(?P<name>[A-Za-z_][A-Za-z0-9_]*)\\s*\\([^\\n;{}]*\\)\\s*(?::\\s*[^\\n{]+)?\\s*\\{)"
+  calls:
+    - pattern: "(?<![A-Za-z0-9_$.])(?P<name>[A-Za-z_][A-Za-z0-9_]*(?:\\.[A-Za-z_][A-Za-z0-9_]*)*)\\s*(?:<[^>\\n;{}()]+>)?\\s*\\("
+builtin_symbols:
+  - Console.Write
+  - Console.WriteLine
+  - Task.Delay
+  - File.Exists
+  - File.OpenRead
+  - Path.Combine
+  - string.IsNullOrWhiteSpace
+ignored_calls:
+  - if
+  - for
+  - foreach
+  - while
+  - switch
+  - catch
+  - return
+  - using
+  - lock
+  - fixed
+  - checked
+  - unchecked
+  - typeof
+  - nameof
+  - sizeof
+  - default
+  - new
+dependency:
+  roots: ["bin", "obj", "packages"]

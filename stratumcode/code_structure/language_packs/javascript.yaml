@@ -1,0 +1,38 @@
+﻿id: javascript
+extensions: [".js", ".jsx", ".mjs", ".cjs"]
+semantic:
+  provider: lsp
+syntax:
+  provider: regex-query
+  symbols:
+    - pattern: "^\\s*(?P<signature>(?:export\\s+)?(?:async\\s+)?function\\s+(?P<name>[A-Za-z_$][A-Za-z0-9_$]*)\\s*\\([^\\n]*\\))"
+    - pattern: "^\\s*(?P<signature>(?:export\\s+)?(?:const|let|var)\\s+(?P<name>[A-Za-z_$][A-Za-z0-9_$]*)\\s*=\\s*(?:async\\s*)?\\([^\\n]*\\)\\s*=>)"
+    - pattern: "^\\s*(?P<signature>(?P<name>[A-Za-z_$][A-Za-z0-9_$]*)\\s*\\([^\\n]*\\)\\s*\\{)"
+  calls:
+    - pattern: "(?<![A-Za-z0-9_$.])(?P<name>[A-Za-z_$][A-Za-z0-9_$]*(?:\\.[A-Za-z_$][A-Za-z0-9_$]*)*)\\s*\\("
+builtin_symbols:
+  - console.log
+  - parseInt
+  - parseFloat
+  - setTimeout
+  - setInterval
+  - clearTimeout
+  - clearInterval
+  - fetch
+  - Promise
+ignored_symbols:
+  - if
+  - for
+  - while
+  - switch
+  - catch
+  - with
+ignored_calls:
+  - if
+  - for
+  - while
+  - switch
+  - catch
+  - function
+dependency:
+  roots: ["node_modules"]

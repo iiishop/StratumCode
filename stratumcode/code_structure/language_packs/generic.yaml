@@ -1,0 +1,25 @@
+id: generic
+extensions: [".go", ".rs", ".java", ".kt", ".kts", ".cpp", ".cc", ".cxx", ".c", ".h", ".hpp", ".php", ".rb", ".swift"]
+semantic:
+  provider: lsp
+syntax:
+  provider: regex-query
+  symbols:
+    - pattern: "^\\s*(?P<signature>(?:[A-Za-z_][A-Za-z0-9_<>:\\[\\]\\*&]+\\s+)+(?:\\*\\s*)?(?P<name>[A-Za-z_][A-Za-z0-9_]*)\\s*\\([^\\n;]*\\)\\s*(?:\\{|=>)?)"
+    - pattern: "^\\s*(?P<signature>(?:func|fn)\\s+(?P<name>[A-Za-z_][A-Za-z0-9_]*)\\s*\\([^\\n]*\\)[^\\n{]*)"
+  calls:
+    - pattern: "(?P<name>[A-Za-z_][A-Za-z0-9_]*(?:\\.[A-Za-z_][A-Za-z0-9_]*)*)\\s*\\("
+builtin_symbols:
+  - println
+  - print
+  - printf
+  - Console.WriteLine
+ignored_calls:
+  - if
+  - for
+  - while
+  - switch
+  - catch
+  - return
+dependency:
+  roots: ["target", "bin", "obj", "vendor"]

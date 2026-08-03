@@ -1,10 +1,9 @@
 <script setup>
-import { computed, ref, reactive, onMounted, onUnmounted, nextTick, watch } from 'vue'
+import { computed, defineAsyncComponent, ref, reactive, onMounted, onUnmounted, nextTick, watch } from 'vue'
 import { gsap } from 'gsap'
 import { animate, stagger as animeStagger } from 'animejs'
 import Sidebar from './components/Sidebar.vue'
 import HomePage from './components/HomePage.vue'
-import CodeStructurePanel from './components/CodeStructurePanel.vue'
 import StageModelSettings from './components/providers/StageModelSettings.vue'
 import McpPage from './components/mcp/McpPage.vue'
 import LspPage from './components/lsp/LspPage.vue'
@@ -18,6 +17,7 @@ import { useWorkspaces } from './composables/useWorkspaces'
 
 const currentView = ref('home')
 const workspacePanel = ref('work')
+const CodeStructurePanel = defineAsyncComponent(() => import('./components/CodeStructurePanel.vue'))
 const {
   items: workspaces,
   active: activeWorkspace,
@@ -788,6 +788,7 @@ watch(currentView, (v) => {
         <CodeStructurePanel
           v-show="workspacePanel === 'structure'"
           :workspace="activeWorkspace"
+          :active="workspacePanel === 'structure'"
         />
       </template>
       <McpPage

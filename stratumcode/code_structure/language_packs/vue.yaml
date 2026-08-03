@@ -1,0 +1,30 @@
+﻿id: vue
+extensions: [".vue"]
+semantic:
+  provider: lsp
+syntax:
+  provider: regex-query
+  symbols:
+    - pattern: "^\\s*(?P<signature>(?:async\\s+)?function\\s+(?P<name>[A-Za-z_$][A-Za-z0-9_$]*)\\s*\\([^\\n]*\\))"
+    - pattern: "^\\s*(?P<signature>(?:const|let|var)\\s+(?P<name>[A-Za-z_$][A-Za-z0-9_$]*)\\s*=\\s*(?:async\\s*)?\\([^\\n]*\\)\\s*=>)"
+  calls:
+    - pattern: "(?<![A-Za-z0-9_$.])(?P<name>[A-Za-z_$][A-Za-z0-9_$]*(?:\\.[A-Za-z_$][A-Za-z0-9_$]*)*)\\s*\\("
+builtin_symbols:
+  - defineProps
+  - defineEmits
+  - defineModel
+  - defineExpose
+  - ref
+  - reactive
+  - computed
+  - watch
+  - onMounted
+  - onUnmounted
+ignored_calls:
+  - if
+  - for
+  - while
+  - switch
+  - catch
+dependency:
+  roots: ["node_modules"]

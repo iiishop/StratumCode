@@ -5,7 +5,7 @@ from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-from . import app_settings, chat, clearify_runtime, git_panel, lsp, mcp, model_settings, providers, sessions, skill_runtime, skills, subagents, terminal_manager, updates, workspaces
+from . import app_settings, chat, clearify_runtime, code_structure, git_panel, lsp, mcp, model_settings, providers, sessions, skill_runtime, skills, subagents, terminal_manager, updates, workspaces
 from .tools import registry
 
 
@@ -21,7 +21,7 @@ _CLIENT_DISCONNECT_ERRORS = (BrokenPipeError, ConnectionResetError, ConnectionAb
 
 def _dispatch(handler, method, body=None):
     """统一路由分发。返回 True 表示已处理，False 表示未匹配。"""
-    path = handler.path
+    path = urlparse(handler.path).path
 
     # 1. 精确匹配
     fn = _ROUTES.get((method, path))
@@ -64,6 +64,14 @@ def _post_app_settings_save(handler, body):
     handler._json(app_settings.to_json())
 
 
+def _get_code_structure_functions(handler, body):
+    params = parse_qs(urlparse(handler.path).query)
+    semantic = params.get("semantic", ["fast"])[0]
+    if semantic not in {"fast", "lsp"}:
+        semantic = "fast"
+    handler._json(code_structure.analyze_workspace(handler._workspace_path(), semantic=semantic))
+
+
 _ROUTES: dict[tuple[str, str], object] = {
 
     # GET
@@ -84,6 +92,7 @@ _ROUTES: dict[tuple[str, str], object] = {
     ("GET", "/api/terminal/processes"): lambda h, b: h._json({"items": terminal_manager.list_sessions(background_only=True)}),
     ("GET", "/api/updates/status"): lambda h, b: h._json(updates.status()),
     ("GET", "/api/git/status"): lambda h, b: h._json(git_panel.snapshot(h._workspace_path())),
+    ("GET", "/api/code-structure/functions"): _get_code_structure_functions,
 
     # POST — 独立路由（不在前缀组里的）
     ("POST", "/api/model-settings/save"):   lambda h, b: (model_settings.save(b["stage"], int(b["provider_id"]), b["model_id"]), h._json({"ok": True})),

@@ -1,0 +1,43 @@
+﻿id: python
+extensions: [".py"]
+semantic:
+  provider: lsp
+syntax:
+  provider: regex-query
+  symbols:
+    - pattern: "^\\s*(?P<signature>(?:async\\s+)?def\\s+(?P<name>[A-Za-z_][A-Za-z0-9_]*)\\s*\\([^\\n]*\\)\\s*(?:->\\s*[^:]+)?\\s*:)"
+  calls:
+    - pattern: "(?<![A-Za-z0-9_$.])(?P<name>[A-Za-z_][A-Za-z0-9_]*(?:\\.[A-Za-z_][A-Za-z0-9_]*)*)\\s*\\("
+builtin_symbols:
+  - print
+  - len
+  - range
+  - enumerate
+  - zip
+  - map
+  - filter
+  - sorted
+  - sum
+  - min
+  - max
+  - abs
+  - isinstance
+  - hasattr
+  - getattr
+  - setattr
+  - open
+  - str
+  - int
+  - float
+  - bool
+  - list
+  - dict
+  - set
+  - tuple
+ignored_calls:
+  - if
+  - for
+  - while
+  - return
+dependency:
+  roots: [".venv", "site-packages"]
