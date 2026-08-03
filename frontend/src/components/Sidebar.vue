@@ -130,12 +130,12 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
           <span v-if="!collapsed">StratumCode</span>
         </Transition>
       </button>
-      <button class="sb__top-action" type="button" :data-tip="'Add workspace'" title="Add workspace" aria-label="Add workspace" @click="emit('add-workspace')">
+      <button class="sb__top-action btn-sheen" type="button" :data-tip="'Add workspace'" title="Add workspace" aria-label="Add workspace" @click="emit('add-workspace')">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round">
           <path d="M12 5v14M5 12h14" />
         </svg>
       </button>
-      <button class="sb__collapse-toggle" type="button" :data-tip="collapsed ? 'Expand sidebar' : 'Collapse sidebar'" :title="collapsed ? 'Expand sidebar' : 'Collapse sidebar'" :aria-label="collapsed ? 'Expand sidebar' : 'Collapse sidebar'" @click="toggleCollapsed">
+      <button class="sb__collapse-toggle btn-sheen" type="button" :data-tip="collapsed ? 'Expand sidebar' : 'Collapse sidebar'" :title="collapsed ? 'Expand sidebar' : 'Collapse sidebar'" :aria-label="collapsed ? 'Expand sidebar' : 'Collapse sidebar'" @click="toggleCollapsed">
         <svg width="14" height="14" class="sb__collapse-icon" :class="{ 'is-collapsed': collapsed }" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
           <path d="m9 6 6 6-6 6" />
         </svg>
@@ -143,7 +143,7 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
     </header>
 
     <div class="sb__new-wrap">
-      <button class="sb__new" type="button" :data-tip="'New session'" title="New session" @click="createSession">
+      <button class="sb__new btn-sheen" type="button" :data-tip="'New session'" title="New session" @click="createSession">
         <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round">
           <path d="M12 5v14M5 12h14" />
         </svg>
@@ -287,15 +287,6 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
 <style scoped>
 .sb {
   --sb-w: 286px;
-  --surface: #ffffff;
-  --hover: #e4e7ee;
-  --active: #dbeafe;
-  --text: #1e293b;
-  --muted: #64748b;
-  --faint: #94a3b8;
-  --blue: #2563eb;
-  --red: #dc2626;
-  --green: #16a34a;
 
   display: flex;
   width: var(--sb-w);
@@ -304,7 +295,7 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
   flex-direction: column;
   overflow: hidden;
   border-right: 1px solid rgba(15, 23, 42, .06);
-  background: var(--surface);
+  background: var(--bg-raised);
   color: var(--text);
   contain: layout paint;
   user-select: none;
@@ -397,7 +388,7 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
   border: 0;
   border-radius: 3px;
   background: transparent;
-  color: var(--faint);
+  color: var(--text-muted);
   cursor: pointer;
 }
 
@@ -407,14 +398,14 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
   height: 28px;
   flex-basis: 28px;
   border-radius: 7px;
-  background: var(--blue);
+  background: var(--accent);
   color: #ffffff;
   transition: background 120ms ease, color 120ms ease, transform 120ms ease;
 }
 
 .sb__top-action:hover,
 .sb__top-action:focus-visible {
-  background: #1d4ed8;
+  background: var(--accent-hover);
 }
 
 .sb__top-action:active {
@@ -446,7 +437,7 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
   border: 0;
   border-radius: 5px;
   background: transparent;
-  color: var(--muted);
+  color: var(--text-muted);
   cursor: pointer;
   font-size: 11.5px;
   font-weight: 500;
@@ -458,14 +449,14 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
 
 .sb__new:hover,
 .sb__new:focus-visible {
-  background: var(--hover);
+  background: var(--bg-overlay);
   color: var(--text);
   opacity: 1;
 }
 
 .sb__new kbd {
   margin-left: auto;
-  color: var(--faint);
+  color: var(--text-muted);
   font: 8.5px/1 ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
 }
 
@@ -486,7 +477,7 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
   border: 0;
   border-radius: 5px;
   background: transparent;
-  color: var(--muted);
+  color: var(--text-muted);
   cursor: pointer;
   font-size: 12px;
   font-weight: 500;
@@ -498,13 +489,13 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
 
 .sb__nav-item:hover,
 .sb__nav-item:focus-visible {
-  background: var(--hover);
+  background: var(--bg-overlay);
   color: var(--text);
 }
 
 .sb__nav-item.is-active {
   background: rgba(37, 99, 235, .08);
-  color: var(--blue);
+  color: var(--accent);
   font-weight: 550;
 }
 
@@ -544,7 +535,7 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
 
 .sb__workspace-row:hover,
 .sb__workspace-row:focus-within {
-  background: var(--hover);
+  background: var(--bg-overlay);
 }
 
 .sb__workspace {
@@ -557,7 +548,7 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
   padding: 0 8px;
   border: 0;
   background: transparent;
-  color: var(--muted);
+  color: var(--text-muted);
   cursor: pointer;
   font-size: 11.5px;
   font-weight: 550;
@@ -600,7 +591,7 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
 }
 
 .sb__avatar.is-blue {
-  background: var(--blue);
+  background: var(--accent);
 }
 
 .sb__avatar.is-red {
@@ -621,18 +612,18 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
 
 .sb__state {
   flex: 0 0 auto;
-  color: var(--faint);
+  color: var(--text-muted);
   font: 9px/1 ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
   text-transform: uppercase;
 }
 
 .sb__state.is-live {
-  color: var(--green);
+  color: var(--ok);
 }
 
 .sb__chev {
   flex: 0 0 auto;
-  color: var(--faint);
+  color: var(--text-muted);
   transition: transform 180ms ease;
 }
 
@@ -712,7 +703,7 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
 
 .sb__session-row:hover,
 .sb__session-row:focus-within {
-  background: var(--hover);
+  background: var(--bg-overlay);
 }
 
 .sb__session-row.is-active {
@@ -746,7 +737,7 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
   width: 12px;
   height: 12px;
   border: 2px solid rgba(15, 23, 42, .18);
-  border-top-color: var(--blue);
+  border-top-color: var(--accent);
   border-radius: 50%;
   animation: sb-spin .7s linear infinite;
 }
@@ -756,7 +747,7 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
 }
 
 .sb__session-row.is-active .sb__session-name {
-  color: var(--blue);
+  color: var(--accent);
   font-weight: 550;
 }
 
@@ -773,14 +764,14 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
   padding: 1px 6px;
   border-radius: 3px;
   background: rgba(15, 23, 42, .03);
-  color: var(--muted);
+  color: var(--text-muted);
   font-size: 9.5px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .sb__prop.is-tokens {
-  color: var(--faint);
+  color: var(--text-muted);
   font: 9px/1.3 ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
 }
 
@@ -807,7 +798,7 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
   border: 0;
   border-radius: 5px;
   background: rgba(37, 99, 235, .06);
-  color: var(--blue);
+  color: var(--accent);
   cursor: pointer;
   font-size: 11px;
   font-weight: 550;
@@ -848,14 +839,14 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
   border: 0;
   border-radius: 5px;
   background: transparent;
-  color: var(--muted);
+  color: var(--text-muted);
   cursor: pointer;
   text-align: left;
 }
 
 .sb__empty:hover,
 .sb__empty:focus-visible {
-  background: var(--hover);
+  background: var(--bg-overlay);
   color: var(--text);
 }
 
@@ -865,7 +856,7 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
 }
 
 .sb__empty small {
-  color: var(--faint);
+  color: var(--text-muted);
   font-size: 10px;
 }
 
@@ -889,7 +880,7 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
   gap: 8px;
   padding: 0 14px;
   border-top: 1px solid rgba(15, 23, 42, .04);
-  color: var(--faint);
+  color: var(--text-muted);
   font-size: 10.5px;
 }
 
@@ -898,7 +889,7 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
   height: 5px;
   flex: 0 0 5px;
   border-radius: 50%;
-  background: var(--green);
+  background: var(--ok);
 }
 
 /* 文字淡入淡出（收缩/展开时） */
@@ -976,12 +967,12 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
 }
 
 .sb.is-collapsed .sb__nav-item.is-active {
-  background: var(--blue);
+  background: var(--accent);
   color: #ffffff;
 }
 
 .sb.is-collapsed .sb__nav-item.is-active:hover {
-  background: var(--blue);
+  background: var(--accent);
 }
 
 /* 收缩态：New session 圆形 */
