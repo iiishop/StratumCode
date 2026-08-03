@@ -19,6 +19,7 @@ const targetQuery = ref('')
 const skillQuery = ref('')
 const filter = ref('all')
 const view = ref('configure')
+const targetsFolded = ref(false)
 const collapsed = reactive(new Set())
 const dirty = reactive(new Set())
 const draftAssignments = reactive({})
@@ -176,6 +177,13 @@ function formatValue(value) {
 function toggleGroup(kind) {
   collapsed.has(kind) ? collapsed.delete(kind) : collapsed.add(kind)
 }
+
+const focusedState = computed(() => {
+  if (!focused.value) return { label: '', cls: '' }
+  if (isExplicit(focused.value.id)) return { label: 'Explicit', cls: 'is-explicit' }
+  if (isInherited(focused.value.id)) return { label: 'Inherited', cls: 'is-inherited' }
+  return { label: 'Not assigned', cls: 'is-unassigned' }
+})
 </script>
 
 <template>
@@ -197,66 +205,77 @@ function toggleGroup(kind) {
     </header>
 
     <div v-if="view === 'configure'" class="sc__workspace">
-      <aside class="sc__targets">
-        <label class="sc__search">
-          <span>Configuration targets</span>
-          <input v-model="targetQuery" placeholder="Search targets" />
-        </label>
-        <section v-for="group in groups" :key="group.kind" class="sc__target-group">
-          <button type="button" class="sc__group-toggle" @click="toggleGroup(group.kind)">
-            <span>{{ collapsed.has(group.kind) ? '›' : '⌄' }} {{ group.label }}</span>
-            <small>{{ group.items.length }}</small>
+      <div class="sc__left">
+        <aside class="sc__targets" :class="{ 'is-folded': targetsFolded }">
+          <template v-if="!targetsFolded">
+            <label class="sc__search">
+              <span>Configuration targets</span>
+              <input v-model="targetQuery" placeholder="Search targets" />
+            </label>
+            <section v-for="group in groups" :key="group.kind" class="sc__target-group">
+              <button type="button" class="sc__group-toggle" @click="toggleGroup(group.kind)">
+                <span>{{ collapsed.has(group.kind) ? '›' : '⌄' }} {{ group.label }}</span>
+                <small>{{ group.items.length }}</small>
+              </button>
+              <div v-if="!collapsed.has(group.kind)">
+                <button
+                  v-for="target in group.items"
+                  :key="target.id"
+                  type="button"
+                  class="sc__target"
+                  :class="{ 'is-active': active?.id === target.id, 'is-dirty': dirty.has(target.id) }"
+                  @click="activeId = target.id"
+                >
+                  <span>{{ target.label }}</span>
+                  <small>{{ targetCount(target.id) }}</small>
+                </button>
+              </div>
+            </section>
+          </template>
+          <div v-else class="sc__targets-folded" @click="targetsFolded = false">
+            <span class="sc__targets-folded-label">Target</span>
+            <strong>{{ active?.label }}</strong>
+          </div>
+          <button type="button" class="sc__targets-fold-btn" @click="targetsFolded = !targetsFolded">
+            {{ targetsFolded ? '⌄ Show targets' : '› Hide targets' }}
           </button>
-          <div v-if="!collapsed.has(group.kind)">
-            <button
-              v-for="target in group.items"
-              :key="target.id"
-              type="button"
-              class="sc__target"
-              :class="{ 'is-active': active?.id === target.id, 'is-dirty': dirty.has(target.id) }"
-              @click="activeId = target.id"
-            >
-              <span>{{ target.label }}</span>
-              <small>{{ targetCount(target.id) }}</small>
-            </button>
-          </div>
-        </section>
-      </aside>
+        </aside>
 
-      <section class="sc__skills">
-        <label class="sc__search">
-          <span>Skills</span>
-          <input v-model="skillQuery" placeholder="Search installed skills" />
-        </label>
-        <div class="sc__filters" aria-label="Skill filters">
-          <button type="button" :class="{ 'is-active': filter === 'all' }" @click="filter = 'all'">All {{ items.length }}</button>
-          <button type="button" :class="{ 'is-active': filter === 'selected' }" @click="filter = 'selected'">Selected {{ effectiveIdSet.size }}</button>
-          <button type="button" :class="{ 'is-active': filter === 'issues' }" @click="filter = 'issues'">Issues {{ issueCount }}</button>
-        </div>
-        <div class="sc__skill-list">
-          <div
-            v-for="item in filteredItems"
-            :key="item.id"
-            class="sc__skill"
-            :class="{ 'is-focused': focused?.id === item.id, 'has-issue': hasIssue(item) }"
-          >
-            <input
-              type="checkbox"
-              :checked="isExplicit(item.id) || isInherited(item.id)"
-              :disabled="isInherited(item.id)"
-              :aria-label="`Use ${item.name} for ${active?.label}`"
-              @change="toggleSkill(item.id)"
-            />
-            <button type="button" class="sc__skill-info" @click="focus(item)">
-              <strong>{{ item.name }}</strong>
-              <span>{{ item.description || 'Missing description' }}</span>
-              <small>{{ item.source_label }}<template v-if="isInherited(item.id)"> · inherited</template><template v-else-if="isExplicit(item.id)"> · explicit</template></small>
-            </button>
+        <section class="sc__skills">
+          <label class="sc__search">
+            <span>Skills</span>
+            <input v-model="skillQuery" placeholder="Search installed skills" />
+          </label>
+          <div class="sc__filters" aria-label="Skill filters">
+            <button type="button" :class="{ 'is-active': filter === 'all' }" @click="filter = 'all'">All {{ items.length }}</button>
+            <button type="button" :class="{ 'is-active': filter === 'selected' }" @click="filter = 'selected'">Selected {{ effectiveIdSet.size }}</button>
+            <button type="button" :class="{ 'is-active': filter === 'issues' }" @click="filter = 'issues'">Issues {{ issueCount }}</button>
           </div>
-          <p v-if="!filteredItems.length">No matching installed skills.</p>
-        </div>
-        <footer class="sc__selection-count">Selected {{ effectiveIdSet.size }} skills</footer>
-      </section>
+          <div class="sc__skill-list">
+            <div
+              v-for="item in filteredItems"
+              :key="item.id"
+              class="sc__skill"
+              :class="{ 'is-focused': focused?.id === item.id, 'has-issue': hasIssue(item) }"
+            >
+              <input
+                type="checkbox"
+                :checked="isExplicit(item.id) || isInherited(item.id)"
+                :disabled="isInherited(item.id)"
+                :aria-label="`Use ${item.name} for ${active?.label}`"
+                @change="toggleSkill(item.id)"
+              />
+              <button type="button" class="sc__skill-info" @click="focus(item)">
+                <strong>{{ item.name }}</strong>
+                <span>{{ item.description || 'Missing description' }}</span>
+                <small>{{ item.source_label }}<template v-if="isInherited(item.id)"> · inherited</template><template v-else-if="isExplicit(item.id)"> · explicit</template></small>
+              </button>
+            </div>
+            <p v-if="!filteredItems.length">No matching installed skills.</p>
+          </div>
+          <footer class="sc__selection-count">Selected {{ effectiveIdSet.size }} skills</footer>
+        </section>
+      </div>
 
       <aside class="sc__detail">
         <template v-if="focused">
@@ -265,13 +284,16 @@ function toggleGroup(kind) {
               <small>{{ focused.source_label }}</small>
               <h2>{{ focused.name }}</h2>
             </div>
-            <button
-              v-if="focused.source_label === 'stratumcode'"
-              type="button"
-              class="sc__delete"
-              title="Delete skill"
-              @click="emit('delete', focused)"
-            >Delete</button>
+            <div class="sc__detail-actions">
+              <span v-if="focusedState.label" class="sc__detail-state" :class="focusedState.cls">{{ focusedState.label }}</span>
+              <button
+                v-if="focused.source_label === 'stratumcode'"
+                type="button"
+                class="sc__delete"
+                title="Delete skill"
+                @click="emit('delete', focused)"
+              >Delete</button>
+            </div>
           </div>
           <p class="sc__description">{{ focused.description || 'No description provided.' }}</p>
           <dl v-if="metadataRows.length" class="sc__meta">
@@ -339,9 +361,23 @@ function toggleGroup(kind) {
 .sc__view-tabs button.is-active, .sc__mode button.is-active { color: var(--text-h); background: var(--accent-bg); }
 .sc__save, .sc__footer-actions .is-primary { color: #fff; background: var(--accent); }
 .sc button:disabled { opacity: .35; cursor: default; }
-.sc__workspace { display: grid; grid-template-columns: minmax(160px, .72fr) minmax(260px, 1.25fr) minmax(260px, 1fr); height: 450px; }
-.sc__targets, .sc__skills, .sc__detail { min-width: 0; overflow: auto; }
-.sc__targets, .sc__skills { border-right: 1px solid var(--border); }
+.sc__workspace { display: grid; grid-template-columns: minmax(300px, 1fr) minmax(460px, 1.6fr); height: min(62vh, 560px); }
+.sc__left { display: grid; grid-template-rows: auto minmax(0, 1fr); min-width: 0; border-right: 1px solid var(--border); }
+.sc__targets { min-width: 0; max-height: 45%; overflow: auto; border-bottom: 1px solid var(--border); }
+.sc__targets.is-folded { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; }
+.sc__targets-folded { display: flex; min-width: 0; align-items: baseline; gap: 8px; padding: 9px 12px; cursor: pointer; }
+.sc__targets-folded:hover { background: var(--accent-bg); }
+.sc__targets-folded-label { color: var(--text-muted); font: 700 8px var(--mono); text-transform: uppercase; }
+.sc__targets-folded strong { overflow: hidden; color: var(--text-h); font: 10px var(--sans); text-overflow: ellipsis; white-space: nowrap; }
+.sc__targets-fold-btn { height: 26px; margin: 6px 10px; padding: 0 8px; border: 1px solid var(--border); border-radius: 4px; color: var(--text-muted); background: var(--bg); font: 9px var(--mono); cursor: pointer; white-space: nowrap; }
+.sc__targets-fold-btn:hover { border-color: var(--accent-border); color: var(--text-h); }
+.sc__skills { display: grid; grid-template-rows: auto auto minmax(0, 1fr) auto; min-width: 0; }
+.sc__detail { min-width: 0; overflow: auto; padding: 18px 20px; }
+.sc__detail-actions { display: flex; align-items: center; gap: 10px; }
+.sc__detail-state { padding: 3px 7px; border-radius: 4px; font: 700 8px var(--mono); text-transform: uppercase; letter-spacing: .03em; white-space: nowrap; }
+.sc__detail-state.is-explicit { color: #fff; background: var(--accent); }
+.sc__detail-state.is-inherited { color: var(--text-h); background: var(--accent-bg); }
+.sc__detail-state.is-unassigned { color: var(--text-muted); background: var(--bg); border: 1px solid var(--border); }
 .sc__search { display: grid; gap: 7px; padding: 13px 12px; border-bottom: 1px solid var(--border); color: var(--text-muted); font: 9px var(--mono); }
 .sc__search input { width: 100%; height: 31px; padding: 0 9px; border: 1px solid var(--border); border-radius: 5px; outline: 0; color: var(--text-h); background: var(--bg); font: 10px var(--mono); }
 .sc__search input:focus { border-color: var(--accent-border); }
@@ -381,18 +417,20 @@ function toggleGroup(kind) {
 .sc__usage button { padding: 3px 6px; border: 1px solid var(--border); border-radius: 4px; color: var(--text); background: var(--bg); font: 8px var(--mono); cursor: pointer; }
 .sc__usage span, .sc__instructions > span { color: var(--text-muted); font: 9px var(--mono); }
 .sc__instructions { margin-top: 18px; padding-top: 14px; border-top: 1px solid var(--border); }
-.sc__instructions :deep(.se) { font-size: 10px; }
+.sc__instructions :deep(.se) { font-size: 12px; }
+.sc__instructions :deep(.se) :deep(pre), .sc__instructions :deep(.se) :deep(code) { font-size: 11.5px; }
 .sc__footer { border-top: 1px solid var(--border); }
 @container (max-width: 850px) {
-  .sc__workspace { grid-template-columns: minmax(150px, .7fr) minmax(260px, 1.3fr); height: auto; }
-  .sc__detail { grid-column: 1 / -1; min-height: 260px; border-top: 1px solid var(--border); }
+  .sc__workspace { grid-template-columns: minmax(260px, 1fr) minmax(360px, 1.4fr); height: auto; }
+  .sc__detail { min-height: 320px; }
 }
-@container (max-width: 560px) {
+@container (max-width: 620px) {
   .sc__head, .sc__footer { align-items: stretch; flex-direction: column; }
   .sc__head-actions, .sc__footer-actions { flex-wrap: wrap; justify-content: space-between; }
   .sc__workspace { grid-template-columns: 1fr; }
-  .sc__targets, .sc__skills { border-right: 0; border-bottom: 1px solid var(--border); }
+  .sc__left { border-right: 0; border-bottom: 1px solid var(--border); }
   .sc__targets { max-height: 240px; }
-  .sc__skills { min-height: 420px; }
+  .sc__skills { min-height: 380px; }
+  .sc__detail { min-height: 320px; border-top: 1px solid var(--border); }
 }
 </style>
