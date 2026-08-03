@@ -83,6 +83,14 @@ CLEARIFY_RESOLUTION_REASON = "Answered by the user through clearify."
 CLEARIFY_UNRESOLVED_REASON = "User could not answer through clearify; continue project investigation."
 GROUNDING_LITERAL_REASON_PREFIX = "Cited observations do not contain the claimed code literal(s):"
 STATE_WRITE_REASON_PREFIX = "Cited observations contain state writes omitted from the resolution:"
+
+# 否定性结论（absence）特征词：答案声称"不存在/未找到/未定义"时，
+# grounding 检查降级（见 _resolution_is_absence_claim）。
+_NEGATIVE_CLAIM_RE = re.compile(
+    r"(未找到|未发现|未定义|未描述|未提供|未提及|未记录|没有找到|不存在|"
+    r"没有独立|无独立|没有任何|均未|"
+    r"not found|does not exist|absent|no evidence|undocumented)"
+)
 RECORD_RECOVERY_REASON = "Record pending observations and required resolutions."
 
 
@@ -4444,7 +4452,7 @@ def _apply_investigation_audit(
         reason = str(verdict.get("reason") or "").strip()
         if status == "grounded":
             unsupported = (
-                _unsupported_grounding_literals(
+                _grounding_unsupported_for_resolution(
                     resolution,
                     result,
                     observations or [],
@@ -4456,15 +4464,15 @@ def _apply_investigation_audit(
             # that cannot appear as literals in source code (e.g. .venv/Scripts/stratumcode,
             # python.exe). Skip unsupported-literal check for derived inferences — they are
             # by definition the model's synthesis, not direct source quotes.
-            if unsupported and str(resolution.get("kind") or "") == "derived_inference":
-                unsupported = []
+            # _grounding_unsupported_for_resolution 内部已同时豁免 derived_inference
+            # 与 absence（否定性结论）两类。
             supporting_ids = _supporting_observation_ids(unsupported, observations or [])
             if supporting_ids:
                 resolution["evidence"] = _dedupe_strings([
                     *_reference_list(resolution.get("evidence")),
                     *supporting_ids,
                 ])
-                unsupported = _unsupported_grounding_literals(
+                unsupported = _grounding_unsupported_for_resolution(
                     resolution,
                     result,
                     observations or [],
@@ -4597,6 +4605,43 @@ def _apply_direct_resolution_gate(
         allow_verification=False,
     )
     return gated
+
+
+def _resolution_is_absence_claim(resolution: dict, observations: list[dict]) -> bool:
+    """否定性结论（absence）判定：答案声称某物"不存在/未找到/未定义"，
+    且引用了至少一条观察（grep/glob 无命中、读取文件确认缺失等）。
+
+    absence 无法作为代码字面量被观察引用，质量门若仍要求字面量逐字命中，
+    这类结论会永远判缺、触发 REPAIR 死循环（见 U2 类"预期未定义"问题）。
+    """
+    answer = str(resolution.get("answer") or "")
+    if not _NEGATIVE_CLAIM_RE.search(answer):
+        return False
+    evidence_ids = set(_reference_list(resolution.get("evidence")))
+    return any(
+        isinstance(item, dict)
+        and str(item.get("id") or "") in evidence_ids
+        for item in observations or []
+    )
+
+
+def _grounding_unsupported_for_resolution(
+    resolution: dict,
+    recorded: dict,
+    observations: list[dict],
+) -> list[str]:
+    """计算 resolution 未获观察支撑的代码字面量，带两类豁免：
+
+    - derived_inference：推断本来就是模型的综合，不要求逐字引源码；
+    - absence（否定性结论）：声称"不存在"的字面量无法在源码里被观察到。
+    """
+    unsupported = _unsupported_grounding_literals(resolution, recorded, observations or [])
+    if unsupported and (
+        str(resolution.get("kind") or "") == "derived_inference"
+        or _resolution_is_absence_claim(resolution, observations or [])
+    ):
+        return []
+    return unsupported
 
 
 def _unsupported_grounding_literals(

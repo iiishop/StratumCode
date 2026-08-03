@@ -475,6 +475,14 @@ changes; they are not claims that their proposed identifiers already exist.
 Direct comparisons and absence findings grounded in cited code observations do
 not need a hypothesis-verifier. Use verify only for a material indirect inference
 that the cited observations cannot establish by inspection.
+An absence finding is grounded when its material claim is that something does
+not exist or was not found (e.g. "no document defines X", "the repository does
+not contain Y", "the expected behavior is not defined anywhere"), and the cited
+observations are consistent with that absence (search tools with no hits, or
+reads of the relevant files that lack the claimed content). Do not return
+investigate merely because the absence is stated as "no definition exists" — the
+absence IS the answer. Keep requiring cited observations for positive claims
+("the trigger is X", "the module defines Y"); only the negative claim is exempt.
 Do not treat library-style modules, public classes, or an empty entrypoint as
 dead code unless project metadata, tests, docs, or the user-requested runtime
 contract proves the repository must be directly executable. Without that proof,
