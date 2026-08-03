@@ -141,6 +141,8 @@ function onTextareaInput() {
 
 function onTextareaKeydown(e) {
   if (e.defaultPrevented) return
+  // IME 组合中（输入法选词/上屏）的 Enter 不是发送意图
+  if (e.isComposing || e.keyCode === 229) return
   if (mentionActive.value && (e.key === 'ArrowDown' || e.key === 'ArrowUp' || e.key === 'Enter' || e.key === 'Tab' || e.key === 'Escape')) {
     return
   }
