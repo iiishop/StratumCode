@@ -133,7 +133,7 @@ class InvestigatingUseCase:
                     (
                         item for item in unknowns
                         if self._unknown_tail(item.get("id")) == unknown_id
-                        and item.get("type") == "product_decision"
+                        and item.get("type") in ("product_decision", "engineering_decision")
                     ),
                     None,
                 )

@@ -7032,20 +7032,26 @@ def _step_result(final: dict, *, implementation_intent: bool = True) -> dict:
             "resolutions": final.get("resolutions", []),
             "unknowns": final.get("unknowns", []),
         }
-    if clearify:
-        item = _best_clearify_unknown(final) or clearify[0]
+    # 阻塞但不需要项目调查的 unknown（engineering/product/clearify 等决策类）：
+    # 状态机侧触发 clearify，等待用户回答，而不是把问题塞进 open_questions 死循环。
+    non_investigate = [
+        item for item in blockers
+        if item.get("resolution_strategy") != "investigate_project"
+    ]
+    if non_investigate:
+        item = _best_clearify_unknown(final) or non_investigate[0]
         question = _display_question_for_unknown(item, final)
         if _is_placeholder_question(question, item.get("id")):
             question = next(
                 (
                     str(candidate.get("question") or "").strip()
-                    for candidate in clearify
+                    for candidate in non_investigate
                     if not _is_placeholder_question(candidate.get("question"), candidate.get("id"))
                 ),
                 question,
             )
         return {
-            "next_step": "continue_investigation",
+            "next_step": "clearify",
             "continue_reason": question,
             "target_unknown_ids": [item["id"]],
             "unresolved_unknown_ids": unresolved_ids,
