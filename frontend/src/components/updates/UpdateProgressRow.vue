@@ -1061,8 +1061,34 @@ onBeforeUnmount(() => {
 }
 
 .update-row__notes-body-wrap > .update-row__notes-body {
-  overflow: hidden;
+  overflow: hidden; /* 折叠/动画期间隐藏溢出 */
   min-height: 0;
+}
+
+/* 展开后允许内部滚动（覆盖折叠时的 hidden） */
+.update-row__notes-body-wrap.is-open > .update-row__notes-body {
+  overflow-y: auto;
+}
+
+.update-row__notes-body::-webkit-scrollbar {
+  width: 8px;
+}
+
+.update-row__notes-body::-webkit-scrollbar-thumb {
+  border-radius: 999px;
+  background: var(--border-strong);
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+
+.update-row__notes-body::-webkit-scrollbar-thumb:hover {
+  background: var(--text-muted);
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+
+.update-row__notes-body::-webkit-scrollbar-track {
+  background: transparent;
 }
 
 .update-row__notes-body {
