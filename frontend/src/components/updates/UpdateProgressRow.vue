@@ -45,7 +45,7 @@ const relativeTime = computed(() => {
 
 const statusText = computed(() => {
   if (done.value) return 'Updated'
-  if (running.value) return 'Updating\u2026'
+  if (running.value) return 'Updating'
   return props.available ? 'Update available' : 'Current'
 })
 
@@ -245,57 +245,40 @@ onBeforeUnmount(() => {
     class="update-row"
     :class="[`track--${accentTrack}`, { 'is-running': running, 'is-done': done, 'is-error': failed, 'is-disabled': disabled }]"
   >
-    <div class="update-row__header">
+    <!-- 头部：渠道名 + 状态 -->
+    <div class="update-row__head">
       <div class="update-row__channel">
+        <span class="update-row__dot"></span>
         <h3>{{ title }}</h3>
-        <span class="update-row__badge" :class="{ 'is-alert': available && !failed, 'is-done': done }">
-          {{ statusText }}
-        </span>
       </div>
-      <a
-        v-if="releaseUrl"
-        class="update-row__gh-link"
-        :href="releaseUrl"
-        target="_blank"
-        rel="noopener"
-        title="View on GitHub"
-      >
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-          <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" /><polyline points="15 3 21 3 21 9" /><line x1="10" y1="14" x2="21" y2="3" />
-        </svg>
-      </a>
+      <span class="update-row__badge" :class="{ 'is-alert': available && !failed && !running, 'is-running': running, 'is-done': done, 'is-error': failed }">
+        {{ statusText }}
+      </span>
     </div>
 
-    <div v-if="releaseName" class="update-row__release-meta">
-      <span class="update-row__release-name">{{ releaseName }}</span>
-      <span v-if="relativeTime" class="update-row__release-date">{{ relativeTime }}</span>
-      <span v-if="accentTrack === 'dev' && commitsBehind" class="update-row__behind">{{ commitsBehind }} commits behind {{ branchName || 'main' }}</span>
-    </div>
-
+    <!-- 版本对比 + 进度动画舞台 -->
     <div class="update-row__stage">
-      <!-- Progress bar background -->
       <div
         ref="progressBar"
         class="update-row__progress-bar"
         :class="{ 'is-visible': running || done }"
         :style="barStyle"
       >
-        <!-- Edge shine element -->
         <span ref="edgeShine" class="update-row__edge-shine"></span>
-        <!-- Firework container (aligned with arrow end position) -->
         <span ref="fireworkContainer" class="update-row__fireworks"></span>
       </div>
 
-      <!-- Version display area -->
       <div class="update-row__version-row">
         <span ref="versionCurrent" class="update-row__current-ver">{{ currentLabel }}</span>
+        <span v-show="!running && !done" class="update-row__arrow-sym">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M13 6l6 6-6 6" /></svg>
+        </span>
         <span
           ref="versionTarget"
           class="update-row__target-ver"
           :style="{ '--reveal': `${Math.min(100, Math.max(0, props.progress))}%` }"
         >{{ targetLabel }}</span>
 
-        <!-- Arrow button -->
         <button
           ref="arrowBtn"
           class="update-row__arrow"
@@ -304,12 +287,11 @@ onBeforeUnmount(() => {
           aria-label="Start update"
           @click="emit('start')"
         >
-          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
             <path d="M12 19V5M5 12l7-7 7 7" />
           </svg>
         </button>
 
-        <!-- Restart button (revealed after done) -->
         <button
           v-if="done"
           ref="restartBtn"
@@ -318,6 +300,18 @@ onBeforeUnmount(() => {
           @click="emit('restart')"
         >Restart</button>
       </div>
+    </div>
+
+    <!-- 元信息 -->
+    <div v-if="releaseName || relativeTime || (accentTrack === 'dev' && commitsBehind)" class="update-row__meta">
+      <a v-if="releaseUrl" class="update-row__gh-link" :href="releaseUrl" target="_blank" rel="noopener" title="View on GitHub">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" /><polyline points="15 3 21 3 21 9" /><line x1="10" y1="14" x2="21" y2="3" />
+        </svg>
+      </a>
+      <span v-if="releaseName" class="update-row__release-name">{{ releaseName }}</span>
+      <span v-if="relativeTime" class="update-row__release-date">{{ relativeTime }}</span>
+      <span v-if="accentTrack === 'dev' && commitsBehind" class="update-row__behind">{{ commitsBehind }} commits behind {{ branchName || 'main' }}</span>
     </div>
 
     <p class="update-row__detail">{{ message || detail }}</p>
@@ -335,41 +329,51 @@ onBeforeUnmount(() => {
 </template>
 
 <style scoped>
-/* --- row base --- */
+/* --- 区块卡片 --- */
 .update-row {
   position: relative;
-  padding: 16px;
+  display: grid;
+  gap: 12px;
+  padding: 16px 18px;
   border: 1px solid var(--border);
-  border-radius: var(--radius);
-  background: var(--bg-raised);
-  overflow: hidden;
+  border-radius: var(--radius-lg);
+  background:
+    radial-gradient(140% 120% at 100% 0%, rgba(59, 130, 246, 0.05), transparent 60%),
+    linear-gradient(180deg, #ffffff, #fafbfd);
+  box-shadow: 0 1px 3px rgba(16, 42, 92, 0.05);
+  transition: transform 160ms ease, border-color 160ms ease, box-shadow 160ms ease;
+}
+
+.update-row:hover {
+  transform: translateY(-1px);
+  border-color: var(--accent-border);
+  box-shadow: 0 8px 24px rgba(16, 42, 92, 0.09);
 }
 
 .update-row::before {
   content: "";
   position: absolute;
   left: 0;
-  top: 0;
-  bottom: 0;
+  top: 14px;
+  bottom: 14px;
   width: 3px;
-  border-radius: 3px 0 0 3px;
+  border-radius: 3px;
   background: var(--border-strong);
 }
 
-.track--stable::before { background: #3b82f6; }
-.track--dev::before { background: #10b981; }
+.track--stable::before { background: linear-gradient(180deg, #3b82f6, #60a5fa); }
+.track--dev::before { background: linear-gradient(180deg, #10b981, #34d399); }
 
-.update-row.is-disabled { opacity: 0.5; }
+.update-row.is-disabled { opacity: 0.55; }
 .update-row.is-error { border-color: var(--err-border); }
 .update-row.is-error .update-row__detail { color: var(--err); }
 
-/* --- header --- */
-.update-row__header {
+/* --- 头部 --- */
+.update-row__head {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 10px;
-  margin-bottom: 8px;
 }
 
 .update-row__channel {
@@ -379,79 +383,142 @@ onBeforeUnmount(() => {
   min-width: 0;
 }
 
+.update-row__dot {
+  width: 8px;
+  height: 8px;
+  flex-shrink: 0;
+  border-radius: 50%;
+  background: var(--border-strong);
+}
+
+.track--stable .update-row__dot { background: #3b82f6; }
+.track--dev .update-row__dot { background: #10b981; }
+
+.update-row.is-running .update-row__dot {
+  animation: dot-pulse 1.1s ease-in-out infinite;
+}
+
+@keyframes dot-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(59, 130, 246, 0.35); }
+  50% { box-shadow: 0 0 0 5px rgba(59, 130, 246, 0); }
+}
+.track--dev.is-running .update-row__dot {
+  animation-name: dot-pulse-green;
+}
+@keyframes dot-pulse-green {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.35); }
+  50% { box-shadow: 0 0 0 5px rgba(16, 185, 129, 0); }
+}
+
 .update-row__channel h3 {
   margin: 0;
   color: var(--text-h);
-  font: 570 13px/1.2 var(--heading);
+  font: 600 13.5px/1.2 var(--heading);
+  letter-spacing: -0.01em;
 }
 
 .update-row__badge {
   flex-shrink: 0;
-  padding: 1px 7px;
+  padding: 3px 10px;
   border: 1px solid var(--border);
   border-radius: 999px;
   color: var(--text-muted);
-  font: 9.5px/1.3 var(--mono);
+  font: 600 9.5px/1 var(--mono);
+  letter-spacing: 0.03em;
   background: var(--code-bg);
+  transition: color 160ms, border-color 160ms, background 160ms;
 }
 
 .update-row__badge.is-alert {
-  border-color: rgba(245, 200, 66, 0.7);
+  border-color: rgba(245, 200, 66, 0.65);
   color: #8a6d14;
-  background: var(--yellow-bg);
+  background: linear-gradient(180deg, rgba(245, 200, 66, 0.22), rgba(245, 200, 66, 0.12));
+}
+
+.update-row__badge.is-running {
+  border-color: rgba(59, 130, 246, 0.4);
+  color: #1d4ed8;
+  background: rgba(59, 130, 246, 0.1);
+}
+
+.track--dev .update-row__badge.is-running {
+  border-color: rgba(16, 185, 129, 0.4);
+  color: #047857;
+  background: rgba(16, 185, 129, 0.1);
 }
 
 .update-row__badge.is-done {
   border-color: rgba(16, 185, 129, 0.4);
-  color: #065f46;
+  color: #047857;
   background: rgba(16, 185, 129, 0.1);
 }
 
-.update-row__gh-link {
-  flex-shrink: 0;
-  display: grid;
-  width: 28px;
-  height: 28px;
-  place-items: center;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  color: var(--text-muted);
-  transition: color 120ms, border-color 120ms, background 120ms;
+.update-row__badge.is-error {
+  border-color: rgba(239, 68, 68, 0.4);
+  color: #b91c1c;
+  background: rgba(239, 68, 68, 0.08);
 }
 
-.update-row__gh-link:hover {
-  color: #3b82f6;
-  border-color: rgba(59, 130, 246, 0.3);
-  background: rgba(59, 130, 246, 0.06);
+/* --- 版本对比舞台 --- */
+.update-row__stage {
+  position: relative;
+  min-height: 38px;
 }
 
-/* --- release meta --- */
-.update-row__release-meta {
+.update-row__version-row {
+  position: relative;
+  z-index: 2;
   display: flex;
   align-items: center;
-  flex-wrap: wrap;
-  gap: 6px 10px;
-  margin-bottom: 10px;
+  gap: 8px;
+  min-height: 38px;
+  padding: 0 4px;
 }
 
-.update-row__release-name { font: 500 12px/1.3 var(--heading); color: var(--text-h); }
-.update-row__release-date {
-  padding: 1px 6px;
+.update-row__current-ver {
+  padding: 3px 10px;
   border-radius: 999px;
-  font: 9.5px/1 var(--mono);
+  font: 12px/1 var(--mono);
   color: var(--text-muted);
   background: var(--code-bg);
   border: 1px solid var(--border);
-}
-.update-row__behind { font: 10px/1 var(--mono); color: var(--text-muted); }
-
-/* --- stage --- */
-.update-row__stage {
-  position: relative;
-  min-height: 34px;
+  white-space: nowrap;
+  transition: opacity 0.26s ease, transform 0.26s ease;
 }
 
-/* --- progress bar --- */
+.update-row__arrow-sym {
+  display: grid;
+  place-items: center;
+  color: var(--border-strong);
+  flex-shrink: 0;
+}
+
+.update-row__target-ver {
+  padding: 3px 10px;
+  border-radius: 999px;
+  font: 12px/1 var(--mono);
+  font-weight: 700;
+  color: #ffffff;
+  background: linear-gradient(135deg, #3b82f6, #2563eb);
+  box-shadow: 0 2px 8px rgba(59, 130, 246, 0.28), inset 0 1px 0 rgba(255, 255, 255, 0.22);
+  white-space: nowrap;
+  opacity: 0;
+  pointer-events: none;
+  clip-path: inset(0 calc(100% - var(--reveal, 0%)) 0 0);
+  transition: clip-path 0.26s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.track--dev .update-row__target-ver {
+  background: linear-gradient(135deg, #10b981, #059669);
+  box-shadow: 0 2px 8px rgba(16, 185, 129, 0.28), inset 0 1px 0 rgba(255, 255, 255, 0.22);
+}
+
+.update-row.is-running .update-row__target-ver,
+.update-row.is-done .update-row__target-ver {
+  opacity: 1;
+}
+
+/* --- 进度条 --- */
 .update-row__progress-bar {
   position: absolute;
   left: 0;
@@ -482,23 +549,71 @@ onBeforeUnmount(() => {
   width: var(--bar-pct, 0%);
   border-radius: 999px;
   background: linear-gradient(90deg,
-    rgba(59, 130, 246, 0.28),
-    rgba(59, 130, 246, 0.18) 60%,
-    rgba(255, 255, 255, 0.24) 100%
+    rgba(59, 130, 246, 0.32),
+    rgba(59, 130, 246, 0.2) 60%,
+    rgba(255, 255, 255, 0.26) 100%
   );
-  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.14);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.16);
   transition: width 0.26s cubic-bezier(0.16, 1, 0.3, 1);
 }
 
 .track--dev .update-row__progress-bar::after {
   background: linear-gradient(90deg,
-    rgba(16, 185, 129, 0.28),
-    rgba(16, 185, 129, 0.18) 60%,
-    rgba(255, 255, 255, 0.24) 100%
+    rgba(16, 185, 129, 0.32),
+    rgba(16, 185, 129, 0.2) 60%,
+    rgba(255, 255, 255, 0.26) 100%
   );
 }
 
-/* --- edge shine --- */
+/* running 时斜纹流动 */
+.is-running .update-row__progress-bar::after {
+  background-image:
+    linear-gradient(90deg,
+      rgba(59, 130, 246, 0.32),
+      rgba(59, 130, 246, 0.2) 60%,
+      rgba(255, 255, 255, 0.26) 100%),
+    repeating-linear-gradient(45deg, rgba(255, 255, 255, 0.18) 0 6px, transparent 6px 12px);
+  background-size: 100% 100%, 200% 100%;
+  animation: bar-stripes 1.1s linear infinite;
+}
+
+.track--dev.is-running .update-row__progress-bar::after {
+  background-image:
+    linear-gradient(90deg,
+      rgba(16, 185, 129, 0.32),
+      rgba(16, 185, 129, 0.2) 60%,
+      rgba(255, 255, 255, 0.26) 100%),
+    repeating-linear-gradient(45deg, rgba(255, 255, 255, 0.18) 0 6px, transparent 6px 12px);
+  background-size: 100% 100%, 200% 100%;
+  animation: bar-stripes 1.1s linear infinite;
+}
+
+@keyframes bar-stripes {
+  to { background-position: 0 0, 200% 0; }
+}
+
+.is-done .update-row__progress-bar.is-visible {
+  opacity: 1;
+  position: relative;
+  height: 0;
+  margin-bottom: 0;
+}
+
+/* done 时绿光脉冲 */
+.is-done .update-row__progress-bar.is-visible::after {
+  background: linear-gradient(90deg,
+    rgba(16, 185, 129, 0.36),
+    rgba(16, 185, 129, 0.2) 60%,
+    rgba(255, 255, 255, 0.24) 100%);
+  animation: done-glow 1.4s ease-out;
+}
+
+@keyframes done-glow {
+  0% { box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.55); }
+  100% { box-shadow: 0 0 0 14px rgba(16, 185, 129, 0); }
+}
+
+/* --- edge shine / fireworks --- */
 .update-row__edge-shine {
   position: absolute;
   z-index: 3;
@@ -513,89 +628,6 @@ onBeforeUnmount(() => {
   pointer-events: none;
 }
 
-/* --- version row --- */
-.update-row__version-row {
-  position: relative;
-  z-index: 2;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  min-height: 34px;
-  padding: 0 4px;
-}
-
-.update-row__current-ver {
-  font: 12px/1 var(--mono);
-  color: var(--text-h);
-  white-space: nowrap;
-  transition: opacity 0.26s ease, transform 0.26s ease;
-}
-
-.update-row__target-ver {
-  position: absolute;
-  left: 4px;
-  top: 50%;
-  transform: translateY(-50%);
-  font: 12px/1 var(--mono);
-  color: #ffffff;
-  white-space: nowrap;
-  opacity: 0;
-  pointer-events: none;
-  clip-path: inset(0 calc(100% - var(--reveal, 0%)) 0 0);
-  transition: clip-path 0.26s cubic-bezier(0.16, 1, 0.3, 1);
-}
-
-.update-row.is-running .update-row__target-ver,
-.update-row.is-done .update-row__target-ver {
-  opacity: 1;
-}
-
-/* --- arrow button --- */
-.update-row__arrow {
-  position: relative;
-  z-index: 4;
-  display: grid;
-  width: 27px;
-  height: 27px;
-  padding: 0;
-  place-items: center;
-  border: 1px solid rgba(59, 130, 246, 0.5);
-  border-radius: 50%;
-  color: #ffffff;
-  background: #3b82f6;
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.2), 0 2px 8px rgba(59, 130, 246, 0.25);
-  cursor: pointer;
-  flex-shrink: 0;
-  margin-left: auto;
-}
-
-.track--dev .update-row__arrow {
-  background: #10b981;
-  border-color: rgba(16, 185, 129, 0.5);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.2), 0 2px 8px rgba(16, 185, 129, 0.25);
-}
-
-.update-row__arrow:disabled {
-  cursor: default;
-  opacity: 0.38;
-}
-
-/* --- indicator glow (trail left of arrow during progress) --- */
-.is-running .update-row__arrow::after {
-  content: "";
-  position: absolute;
-  right: 100%;
-  top: 50%;
-  transform: translateY(-50%);
-  width: 40px;
-  height: 10px;
-  border-radius: 999px;
-  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.45));
-  filter: blur(4px);
-  pointer-events: none;
-}
-
-/* --- firework particles --- */
 .update-row__fireworks {
   position: absolute;
   right: 0;
@@ -630,56 +662,159 @@ onBeforeUnmount(() => {
   }
 }
 
-/* --- restart button --- */
-.update-row__restart {
-  height: 30px;
-  padding: 0 14px;
-  border: 1px solid #3b82f6;
-  border-radius: var(--radius-sm);
+/* --- 主操作按钮（箭头） --- */
+.update-row__arrow {
+  position: relative;
+  z-index: 4;
+  display: grid;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  place-items: center;
+  border: 1px solid rgba(59, 130, 246, 0.55);
+  border-radius: 50%;
   color: #ffffff;
-  background: #3b82f6;
-  font: 11px/1 var(--mono);
+  background: linear-gradient(135deg, #3b82f6, #2563eb);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.25), 0 2px 8px rgba(59, 130, 246, 0.3);
   cursor: pointer;
   flex-shrink: 0;
   margin-left: auto;
-  box-shadow: 0 1px 4px rgba(59, 130, 246, 0.25);
+  transition: transform 140ms ease, box-shadow 140ms ease;
+}
+
+.track--dev .update-row__arrow {
+  background: linear-gradient(135deg, #10b981, #059669);
+  border-color: rgba(16, 185, 129, 0.55);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.25), 0 2px 8px rgba(16, 185, 129, 0.3);
+}
+
+.update-row__arrow:not(:disabled):hover {
+  transform: scale(1.1);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.25), 0 4px 14px rgba(59, 130, 246, 0.42);
+}
+
+.track--dev .update-row__arrow:not(:disabled):hover {
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.25), 0 4px 14px rgba(16, 185, 129, 0.42);
+}
+
+.update-row__arrow:disabled {
+  cursor: default;
+  opacity: 0.38;
+}
+
+/* running 时箭头拖尾光 */
+.is-running .update-row__arrow::after {
+  content: "";
+  position: absolute;
+  right: 100%;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 40px;
+  height: 10px;
+  border-radius: 999px;
+  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.45));
+  filter: blur(4px);
+  pointer-events: none;
+}
+
+/* --- restart 按钮 --- */
+.update-row__restart {
+  height: 32px;
+  padding: 0 16px;
+  border: 1px solid #3b82f6;
+  border-radius: 999px;
+  color: #ffffff;
+  background: linear-gradient(135deg, #3b82f6, #2563eb);
+  font: 600 11px/1 var(--mono);
+  cursor: pointer;
+  flex-shrink: 0;
+  margin-left: auto;
+  box-shadow: 0 2px 8px rgba(59, 130, 246, 0.3);
+  transition: transform 140ms ease, box-shadow 140ms ease;
 }
 
 .track--dev .update-row__restart {
   border-color: #10b981;
-  background: #10b981;
-  box-shadow: 0 1px 4px rgba(16, 185, 129, 0.25);
+  background: linear-gradient(135deg, #10b981, #059669);
+  box-shadow: 0 2px 8px rgba(16, 185, 129, 0.3);
 }
 
-/* --- detail --- */
+.update-row__restart:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 4px 14px rgba(59, 130, 246, 0.4);
+}
+
+/* --- 元信息 --- */
+.update-row__meta {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px 10px;
+}
+
+.update-row__gh-link {
+  flex-shrink: 0;
+  display: grid;
+  width: 26px;
+  height: 26px;
+  place-items: center;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text-muted);
+  transition: color 120ms, border-color 120ms, background 120ms;
+}
+
+.update-row__gh-link:hover {
+  color: #3b82f6;
+  border-color: rgba(59, 130, 246, 0.3);
+  background: rgba(59, 130, 246, 0.06);
+}
+
+.update-row__release-name { font: 500 12px/1.3 var(--heading); color: var(--text-h); }
+.update-row__release-date {
+  padding: 2px 7px;
+  border-radius: 999px;
+  font: 9.5px/1 var(--mono);
+  color: var(--text-muted);
+  background: var(--code-bg);
+  border: 1px solid var(--border);
+}
+.update-row__behind {
+  font: 10px/1 var(--mono);
+  color: var(--text-muted);
+  padding: 2px 7px;
+  border-radius: 999px;
+  background: rgba(245, 200, 66, 0.12);
+  border: 1px solid rgba(245, 200, 66, 0.35);
+}
+
+/* --- 详情 --- */
 .update-row__detail {
-  margin: 10px 0 0;
+  margin: 0;
   color: var(--text-muted);
   font-size: 11px;
-  line-height: 1.5;
-  min-height: 18px;
+  line-height: 1.55;
+  min-height: 17px;
 }
 
 /* --- release notes --- */
-.update-row__notes { margin-top: 10px; }
+.update-row__notes { margin-top: 2px; }
 
 .update-row__notes-toggle {
   display: inline-flex;
   align-items: center;
   gap: 4px;
   padding: 3px 8px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
+  border: 0;
   color: var(--text-muted);
-  background: var(--code-bg);
-  font: 10px/1 var(--mono);
+  background: transparent;
+  font: 600 10px/1 var(--mono);
   cursor: pointer;
-  transition: color 120ms, border-color 120ms;
+  transition: color 120ms;
 }
 
 .update-row__notes-toggle:hover {
   color: var(--accent-text);
-  border-color: var(--accent-border);
 }
 
 .update-row__notes-toggle svg { transition: transform 180ms; }
@@ -687,10 +822,10 @@ onBeforeUnmount(() => {
 
 .update-row__notes-body {
   margin-top: 8px;
-  padding: 12px;
+  padding: 12px 14px;
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
-  background: rgba(248, 250, 253, 0.6);
+  background: rgba(248, 250, 253, 0.7);
   max-height: 260px;
   overflow-y: auto;
   font-size: 11px;
@@ -736,78 +871,6 @@ onBeforeUnmount(() => {
 
 .update-row__notes-body :deep(strong) { color: var(--text-h); }
 
-/* --- running/done states --- */
-.is-running .update-row__progress-bar.is-visible { opacity: 1; }
-
-/* running 时进度条斜纹流动 */
-.is-running .update-row__progress-bar::after {
-  background-image:
-    linear-gradient(90deg,
-      rgba(59, 130, 246, 0.28),
-      rgba(59, 130, 246, 0.18) 60%,
-      rgba(255, 255, 255, 0.24) 100%),
-    repeating-linear-gradient(45deg, rgba(255, 255, 255, 0.16) 0 6px, transparent 6px 12px);
-  background-size: 100% 100%, 200% 100%;
-  animation: bar-stripes 1.1s linear infinite;
-}
-
-.track--dev.is-running .update-row__progress-bar::after {
-  background-image:
-    linear-gradient(90deg,
-      rgba(16, 185, 129, 0.28),
-      rgba(16, 185, 129, 0.18) 60%,
-      rgba(255, 255, 255, 0.24) 100%),
-    repeating-linear-gradient(45deg, rgba(255, 255, 255, 0.16) 0 6px, transparent 6px 12px);
-  background-size: 100% 100%, 200% 100%;
-  animation: bar-stripes 1.1s linear infinite;
-}
-
-@keyframes bar-stripes {
-  to { background-position: 0 0, 200% 0; }
-}
-
-.is-done .update-row__progress-bar.is-visible {
-  opacity: 1;
-  position: relative;
-  height: 0;
-  margin-bottom: 0;
-}
-
-/* done 时进度条绿光脉冲 */
-.is-done .update-row__progress-bar.is-visible::after {
-  background: linear-gradient(90deg,
-    rgba(16, 185, 129, 0.34),
-    rgba(16, 185, 129, 0.18) 60%,
-    rgba(255, 255, 255, 0.22) 100%);
-  animation: done-glow 1.4s ease-out;
-}
-
-@keyframes done-glow {
-  0% { box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.55); }
-  100% { box-shadow: 0 0 0 14px rgba(16, 185, 129, 0); }
-}
-
-/* 行 hover 提升 */
-.update-row {
-  transition: transform 160ms ease, border-color 160ms ease, box-shadow 160ms ease;
-}
-
-.update-row:hover {
-  transform: translateY(-1px);
-  border-color: var(--accent-border);
-  box-shadow: 0 8px 22px rgba(16, 42, 92, 0.08);
-}
-
-/* 箭头 hover */
-.update-row__arrow:not(:disabled):hover {
-  transform: scale(1.12);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.25), 0 3px 12px rgba(59, 130, 246, 0.4);
-}
-
-.track--dev .update-row__arrow:not(:disabled):hover {
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.25), 0 3px 12px rgba(16, 185, 129, 0.4);
-}
-
 /* --- reduced motion --- */
 @media (prefers-reduced-motion: reduce) {
   .update-row__arrow,
@@ -815,7 +878,8 @@ onBeforeUnmount(() => {
   .update-row__target-ver,
   .update-row__progress-bar::after,
   .update-row__edge-shine,
-  .update-row__restart {
+  .update-row__restart,
+  .update-row__dot {
     animation: none !important;
     transition: none !important;
   }

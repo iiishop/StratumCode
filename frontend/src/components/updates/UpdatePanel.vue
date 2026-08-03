@@ -15,6 +15,16 @@ const rows = reactive({
   dev: { state: 'idle', progress: 0, message: '' },
 })
 
+const hasUpdate = computed(() => props.status.stable_available || props.status.dev_available)
+const overviewHint = computed(() => {
+  if (props.status.stable_available && props.status.dev_available) {
+    return `Stable v${props.status.latest_version} · dev +${props.status.commits_behind}`
+  }
+  if (props.status.stable_available) return `Stable v${props.status.latest_version} available`
+  if (props.status.dev_available) return `Dev +${props.status.commits_behind} commits`
+  return 'Up to date'
+})
+
 const release = computed(() => props.status.latest_release || {})
 const releaseNotes = computed(() => {
   if (!props.status.stable_available) return 'Your installation is current. No update needed.'
@@ -87,6 +97,20 @@ async function restart() {
               </button>
             </div>
           </header>
+
+          <div class="update-panel__overview" :class="{ 'has-update': hasUpdate }">
+            <div class="update-panel__overview-left">
+              <span class="update-panel__overview-label">Current version</span>
+              <div class="update-panel__overview-main">
+                <span class="update-panel__overview-ver">v{{ status.current_version }}</span>
+                <span class="update-panel__overview-commit">{{ status.short_commit || 'unknown' }}</span>
+              </div>
+            </div>
+            <div class="update-panel__overview-right">
+              <span class="update-panel__overview-dot" :class="{ 'is-update': hasUpdate }"></span>
+              <span class="update-panel__overview-hint" :class="{ 'is-update': hasUpdate }">{{ overviewHint }}</span>
+            </div>
+          </div>
 
           <div class="update-panel__body">
             <div v-if="showDiagnostics" class="update-panel__warnings">
@@ -320,6 +344,101 @@ async function restart() {
 
 .update-panel__close:active {
   transform: scale(0.92);
+}
+
+.update-panel__overview {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  margin: 14px 16px 0;
+  padding: 12px 16px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background:
+    radial-gradient(120% 120% at 0% 0%, rgba(16, 185, 129, 0.06), transparent 55%),
+    linear-gradient(180deg, #ffffff, #f6faf8);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.9), 0 1px 3px rgba(16, 42, 92, 0.05);
+}
+
+.update-panel__overview.has-update {
+  background:
+    radial-gradient(120% 120% at 0% 0%, rgba(245, 200, 66, 0.1), transparent 55%),
+    linear-gradient(180deg, #ffffff, #fbfaf4);
+}
+
+.update-panel__overview-left {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+}
+
+.update-panel__overview-label {
+  font: 600 9px/1 var(--mono);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.update-panel__overview-main {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  min-width: 0;
+}
+
+.update-panel__overview-ver {
+  font: 600 22px/1 var(--heading);
+  letter-spacing: -0.02em;
+  color: var(--text-h);
+}
+
+.update-panel__overview-commit {
+  overflow: hidden;
+  max-width: 140px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font: 9.5px/1 var(--mono);
+  color: var(--text-muted);
+  background: var(--code-bg);
+  border: 1px solid var(--border);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.update-panel__overview-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.update-panel__overview-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: #10b981;
+  box-shadow: 0 0 0 3px rgba(16, 185, 129, 0.15);
+}
+
+.update-panel__overview-dot.is-update {
+  background: var(--yellow);
+  box-shadow: 0 0 0 3px rgba(245, 200, 66, 0.2);
+  animation: overview-pulse 2.2s ease-in-out infinite;
+}
+
+@keyframes overview-pulse {
+  0%, 100% { box-shadow: 0 0 0 3px rgba(245, 200, 66, 0.2); }
+  50% { box-shadow: 0 0 0 7px rgba(245, 200, 66, 0.32); }
+}
+
+.update-panel__overview-hint {
+  font: 600 11px/1.3 var(--sans);
+  color: #047857;
+}
+
+.update-panel__overview-hint.is-update {
+  color: #8a6d14;
 }
 
 .update-panel__body {

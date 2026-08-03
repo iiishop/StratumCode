@@ -23,6 +23,7 @@ onUnmounted(() => window.clearInterval(timer))
 <template>
   <div class="update-status">
     <button class="update-status__button" :class="{ 'has-update': hasUpdate }" type="button" @click="open = true">
+      <span class="update-status__dot" :class="{ 'is-update': hasUpdate, 'is-checking': loading }"></span>
       <span class="update-status__version">
         v{{ status.current_version }}<span v-if="releaseSuffix" class="update-status__new">{{ releaseSuffix }}</span>
       </span>
@@ -106,6 +107,31 @@ onUnmounted(() => window.clearInterval(timer))
   background:
     linear-gradient(135deg, rgba(245, 200, 66, 0.34), transparent 46%),
     #0d347e;
+}
+
+.update-status__dot {
+  width: 7px;
+  height: 7px;
+  flex-shrink: 0;
+  border-radius: 50%;
+  background: #10b981;
+  box-shadow: 0 0 0 2px rgba(16, 185, 129, 0.18);
+}
+
+.update-status__dot.is-update {
+  background: var(--yellow);
+  box-shadow: 0 0 0 2px rgba(245, 200, 66, 0.22);
+  animation: status-pulse 2.4s ease-in-out infinite;
+}
+
+.update-status__dot.is-checking {
+  background: var(--border-strong);
+  box-shadow: none;
+}
+
+@keyframes status-pulse {
+  0%, 100% { box-shadow: 0 0 0 2px rgba(245, 200, 66, 0.22); }
+  50% { box-shadow: 0 0 0 5px rgba(245, 200, 66, 0.34); }
 }
 
 .update-status__version,
