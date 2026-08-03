@@ -2581,7 +2581,9 @@ def _audit_recorded_findings(
         }, ensure_ascii=False)
         cache_key = "audit:v2:" + hashlib.sha256(context.encode("utf-8")).hexdigest()
         if audit_cache is not None and cache_key in audit_cache:
-            verdicts.extend(audit_cache[cache_key].get("verdicts", []))
+            cached_verdicts = audit_cache[cache_key].get("verdicts", [])
+            verdicts.extend(cached_verdicts)
+            yield from _quality_gate_events(run_id, unknown_id, cached_verdicts, 0)
             continue
         audit_messages = [{"role": "system", "content": prompt.build_investigation_auditor(
             app_settings.get_output_language()
@@ -2641,9 +2643,33 @@ def _audit_recorded_findings(
         if audit_cache is not None:
             audit_cache[cache_key] = audit
         verdicts.extend(audit["verdicts"])
+        yield from _quality_gate_events(run_id, unknown_id, audit["verdicts"], attempt)
     for event in usage_events:
         yield event
     return {"verdicts": verdicts}
+
+
+def _quality_gate_events(
+    run_id: str,
+    unknown_id: str,
+    verdicts: list[dict],
+    index: int,
+):
+    """把语义质量门（audit）的判定结果作为事件发送给前端展示。"""
+    for i, verdict in enumerate(verdicts):
+        yield start_event(
+            f"{run_id}-quality-gate-{unknown_id}-{index}-{i}",
+            "quality_gate",
+            {
+                "unknown_id": str(verdict.get("unknown_id") or ""),
+                "status": str(verdict.get("status") or ""),
+                "reason": str(verdict.get("reason") or ""),
+                "missing": verdict.get("missing") or [],
+                "repair_mode": str(verdict.get("repair_mode") or ""),
+                "hypothesis": str(verdict.get("hypothesis") or ""),
+                "question": str(verdict.get("question") or ""),
+            },
+        )
 
 
 def _normalize_investigation_audit(value, resolved_ids: list[str]) -> dict:

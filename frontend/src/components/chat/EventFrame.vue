@@ -140,6 +140,11 @@ watch(() => props.status, (newStatus, oldStatus) => {
 .event-frame--verdict.event-frame--refuted     { --event: #c44747; }
 .event-frame--verdict.event-frame--inconclusive { --event: #c48b00; }
 .event-frame--step-result  { --event: #6658c7; }
+.event-frame--quality-gate { --event: #6658c7; }
+.event-frame--quality-gate.event-frame--grounded { --event: #0f7d65; }
+.event-frame--quality-gate.event-frame--investigate { --event: #c44747; }
+.event-frame--quality-gate.event-frame--verify { --event: #c48b00; }
+.event-frame--quality-gate.event-frame--clearify { --event: #1756d1; }
 .event-frame--safety-stop  { --event: #c44747; }
 .event-frame--user-question { --event: #c48b00; }
 .event-frame--accepted     { --event: #00a878; }

@@ -26,6 +26,7 @@ import UserQuestionEvent from './UserQuestionEvent.vue'
 import UsageEvent from './UsageEvent.vue'
 import ValidationChecklistEvent from './ValidationChecklistEvent.vue'
 import ValidationResultEvent from './ValidationResultEvent.vue'
+import QualityGateEvent from './QualityGateEvent.vue'
 
 const props = defineProps({
   event: { type: Object, required: true },
@@ -62,6 +63,7 @@ const eventComponents = {
   usage: UsageEvent,
   verification_checklist: ValidationChecklistEvent,
   validation_result: ValidationResultEvent,
+  quality_gate: QualityGateEvent,
 }
 </script>
 
