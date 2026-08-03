@@ -79,7 +79,15 @@ async function deleteSkill(item) {
         </div>
         <div class="sp__tools">
           <input v-model="query" placeholder="Find remote skills" @keydown.enter="doSearch" />
-          <button type="button" class="sp__btn sp__btn--pri btn-sheen" @click="doSearch">Search</button>
+          <button
+            type="button"
+            class="sp__btn sp__btn--pri btn-sheen"
+            :disabled="store.searching.value"
+            @click="doSearch"
+          >
+            <span v-if="store.searching.value" class="sp__spin" aria-hidden="true"></span>
+            {{ store.searching.value ? 'Searching' : 'Search' }}
+          </button>
           <input v-model="source" placeholder="Add URL, package, or path" @keydown.enter="addSource()" />
         </div>
       </section>
@@ -172,6 +180,18 @@ async function deleteSkill(item) {
 .sp__btn:hover { border-color: var(--accent-border); }
 .sp__btn--pri { border-color: var(--accent); color: #fff; background: var(--accent); }
 .sp__btn--pri:hover { background: var(--accent-hover); }
+.sp__spin {
+  display: inline-block;
+  width: 9px;
+  height: 9px;
+  margin-right: 6px;
+  border: 1.5px solid currentColor;
+  border-top-color: transparent;
+  border-radius: 50%;
+  animation: sp-spin 600ms linear infinite;
+  vertical-align: -1px;
+}
+@keyframes sp-spin { to { transform: rotate(360deg); } }
 .sp__btn--danger { border-color: var(--err-border); color: var(--err); background: var(--err-bg); }
 .sp__btn--danger:hover { border-color: var(--err); }
 .sp__btn:disabled { opacity: .4; cursor: default; }
