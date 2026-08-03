@@ -701,13 +701,32 @@ def _react_place(
 
     thinking_id = f"{run_id}-thinking"
     yield start_event(thinking_id, "thinking", {"text": "", "done": False, "open": True})
-    assistant = _call_model(provider, model, messages, tools=None)
-    if usage := _usage_delta(pricing_rules, assistant.pop("_usage", {})):
-        _add_usage(usage_total, usage)
-        yield start_event(f"{run_id}-usage", "usage", {"delta": usage, "total": usage_total})
-    text = _assistant_visible_text(assistant)
-    yield {"op": "update", "id": thinking_id, "patch": {"text": text, "done": True}}
-    return _parse_placement_json(text)
+    result = None
+    for attempt in range(3):
+        assistant = _call_model(provider, model, messages, tools=None)
+        if usage := _usage_delta(pricing_rules, assistant.pop("_usage", {})):
+            _add_usage(usage_total, usage)
+            yield start_event(f"{run_id}-usage-{attempt}", "usage", {"delta": usage, "total": usage_total})
+        text = _assistant_visible_text(assistant)
+        yield {"op": "update", "id": thinking_id, "patch": {"text": text, "done": True}}
+        result = _parse_placement_json(text)
+        if result.get("ok"):
+            return result
+        if attempt >= 2:
+            break
+        # content 为空（模型把答案放 reasoning）或格式不对：追加强指令重试。
+        # 注意：不带 tool_calls——未响应的工具调用会让 provider 400。
+        messages.append({"role": "assistant", "content": text or ""})
+        messages.append({
+            "role": "user",
+            "content": (
+                "Your previous reply was not a valid placement JSON. "
+                "Reply with ONLY a JSON object: {\"target_id\": ..., \"rationale\": ..., "
+                "\"confidence\": \"high|medium|low\", \"alternatives\": [...]}. "
+                "No prose, no markdown fences."
+            ),
+        })
+    return result
 
 
 def _parse_placement_json(text: str) -> dict:
@@ -719,27 +738,29 @@ def _parse_placement_json(text: str) -> dict:
     try:
         parsed = json.loads(raw)
     except (json.JSONDecodeError, TypeError):
-        match = re.search(r"\{.*\}", raw, re.DOTALL)
-        if not match:
+        # 整体不合法时，字段级兜底：捞 target_id / rationale / confidence
+        target_m = re.search(r'"target_id"\s*:\s*"([^"]+)"', raw)
+        rationale_m = re.search(r'"rationale"\s*:\s*"((?:[^"\\]|\\.)*)"', raw)
+        confidence_m = re.search(r'"confidence"\s*:\s*"([^"]+)"', raw)
+        if target_m:
+            target_id = target_m.group(1).strip()
+            valid = {item["id"] for item in skill_runtime.targets()}
             return {
-                "ok": False,
-                "error": "model did not return a placement JSON",
-                "target_id": None,
-                "rationale": _short(raw, 300),
-                "confidence": "low",
+                "ok": target_id in valid,
+                "error": None if target_id in valid else f"model suggested unknown target: {target_id}",
+                "target_id": target_id if target_id in valid else None,
+                "rationale": (rationale_m.group(1) if rationale_m else "").encode().decode("unicode_escape", errors="replace") if rationale_m else "",
+                "confidence": confidence_m.group(1) if confidence_m else "low",
                 "alternatives": [],
             }
-        try:
-            parsed = json.loads(match.group(0))
-        except (json.JSONDecodeError, TypeError):
-            return {
-                "ok": False,
-                "error": "model returned unparseable placement output",
-                "target_id": None,
-                "rationale": _short(raw, 300),
-                "confidence": "low",
-                "alternatives": [],
-            }
+        return {
+            "ok": False,
+            "error": "model did not return a placement JSON",
+            "target_id": None,
+            "rationale": _short(raw, 300),
+            "confidence": "low",
+            "alternatives": [],
+        }
     if not isinstance(parsed, dict):
         return {
             "ok": False,
