@@ -109,7 +109,6 @@ _ROUTES: dict[tuple[str, str], object] = {
     ("POST", "/api/git/action"):            lambda h, b: h._json(git_panel.run_action(h._workspace_path(), str(b.get("action") or ""), b)),
     ("POST", "/api/chat"):                  lambda h, b: h._handle_chat(b),
     ("POST", "/api/chat/answer"):           lambda h, b: h._handle_chat_answer(b),
-    ("POST", "/api/chat/resume"):           lambda h, b: h._handle_chat_resume(b),
     ("POST", "/api/subagents/mcp-install"): lambda h, b: h._handle_mcp_install(b),
     ("POST", "/api/skills/search"):         lambda h, b: h._json(skills.search(str(b.get("query") or ""))),
     ("POST", "/api/skills/add"):            lambda h, b: h._json(skills.add(str(b.get("source") or ""))),
@@ -320,37 +319,6 @@ class _Handler(SimpleHTTPRequestHandler):
             self._json({"error": "unknown clearify question"}, 404)
             return
         self._json({"ok": True})
-
-    def _handle_chat_resume(self, body: dict):
-        question_id = str(body.get("question_id") or "").strip()
-        if not question_id:
-            self._json({"error": "question_id is required"}, 400)
-            return
-        try:
-            events = chat.resume_stream(question_id, self._workspace_path())
-        except ValueError as exc:
-            self._json({"error": str(exc)}, 400)
-            return
-
-        self.send_response(200)
-        self.send_header("Content-Type", "application/x-ndjson; charset=utf-8")
-        self.send_header("Cache-Control", "no-cache, no-transform")
-        self.send_header("Connection", "close")
-        self.end_headers()
-        try:
-            for event in events:
-                self.wfile.write(json.dumps(event, ensure_ascii=False).encode() + b"\n")
-                self.wfile.flush()
-        except _CLIENT_DISCONNECT_ERRORS:
-            return
-        except Exception as exc:
-            _logger.exception("chat resume stream failed")
-            error = {"op": "error", "message": str(exc)}
-            try:
-                self.wfile.write(json.dumps(error, ensure_ascii=False).encode() + b"\n")
-                self.wfile.flush()
-            except _CLIENT_DISCONNECT_ERRORS:
-                pass
 
     def _handle_mcp_install(self, body: dict):
         hint = body.get("hint", "")

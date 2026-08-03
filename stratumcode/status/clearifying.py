@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from uuid import uuid4
 
+from .user_waiting import user_question_event
+
 
 def queue_clearify(
     run,
@@ -125,3 +127,43 @@ def apply_clearify_answer(run, *, resume_state: str, unknown_id: str, answer_pay
     investigation["resolutions"] = resolutions
     run.last_investigation = investigation
     run.findings.append(f"User answered {unknown_id}: {text}")
+
+
+def user_question_and_wait(
+    run,
+    *,
+    question: str,
+    reason: str = "",
+    unknown_id: str = "",
+    checkpoint_phase: str = "",
+    resume_state: str = "",
+    extra: dict | None = None,
+):
+    """在当前执行点同步等待用户回答 clearify（不切换状态机状态）。
+
+    yield user_question 事件（id = question_id，前端 answer 用它提交），然后阻塞在
+    clearify_runtime.wait()。回答到达后注入 run（continuation + investigation resolution）
+    并返回回答 dict。调用方在 yield from 之后从断点继续自己的逻辑。
+    """
+    from .. import clearify_runtime
+
+    question_id = clearify_runtime.create_pending()
+    event = user_question_event(
+        run,
+        question=question,
+        reason=reason,
+        unknown_id=unknown_id,
+        checkpoint_phase=checkpoint_phase,
+        resume_state=resume_state,
+        extra=extra,
+    )
+    event["data"]["id"] = question_id  # 前端 answer 提交的 question_id 必须匹配 slot
+    yield event
+    answer = clearify_runtime.wait(question_id)
+    apply_clearify_answer(
+        run,
+        resume_state=resume_state,
+        unknown_id=unknown_id,
+        answer_payload=answer,
+    )
+    return answer

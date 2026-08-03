@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from uuid import uuid4
 
-from . import clearify_runtime, model_settings, skill_runtime
+from . import model_settings, skill_runtime
 from .agent_runtime import finish_initial_skill_selection, start_event
 
 
@@ -13,7 +13,6 @@ class ChatState(StrEnum):
     INITIALIZING = "initializing"
     ANALYZING = "analyzing"
     INVESTIGATING = "investigating"
-    WAITING_FOR_USER = "waiting_for_user"
     DESIGNING = "designing"
     PATCH_PLANNING = "patch_planning"
     IMPLEMENTING = "implementing"
@@ -28,15 +27,14 @@ _CHAT_TRANSITIONS = {
     ChatState.ANALYZING: {ChatState.INVESTIGATING, ChatState.FAILED},
     ChatState.INVESTIGATING: {
         ChatState.INVESTIGATING,
-        ChatState.WAITING_FOR_USER,
         ChatState.DESIGNING,
         ChatState.SAVING_SESSION,
         ChatState.COMPLETED,
         ChatState.FAILED,
     },
     ChatState.DESIGNING: {
+        ChatState.DESIGNING,
         ChatState.INVESTIGATING,
-        ChatState.WAITING_FOR_USER,
         ChatState.PATCH_PLANNING,
         ChatState.SAVING_SESSION,
         ChatState.COMPLETED,
@@ -53,7 +51,6 @@ _CHAT_TRANSITIONS = {
     },
     ChatState.IMPLEMENTING: {
         ChatState.INVESTIGATING,
-        ChatState.WAITING_FOR_USER,
         ChatState.VALIDATING,
         ChatState.SAVING_SESSION,
         ChatState.COMPLETED,
@@ -63,20 +60,13 @@ _CHAT_TRANSITIONS = {
         ChatState.VALIDATING,
         ChatState.DESIGNING,
         ChatState.INVESTIGATING,
-        ChatState.WAITING_FOR_USER,
         ChatState.SAVING_SESSION,
         ChatState.COMPLETED,
         ChatState.FAILED,
     },
     ChatState.SAVING_SESSION: {ChatState.COMPLETED, ChatState.FAILED},
-    ChatState.WAITING_FOR_USER: {
-        ChatState.INVESTIGATING,
-        ChatState.PATCH_PLANNING,
-        ChatState.IMPLEMENTING,
-        ChatState.VALIDATING,
-    },
 }
-_TERMINAL_CHAT_STATES = {ChatState.WAITING_FOR_USER, ChatState.COMPLETED, ChatState.FAILED}
+_TERMINAL_CHAT_STATES = {ChatState.COMPLETED, ChatState.FAILED}
 
 
 @dataclass
@@ -104,6 +94,7 @@ class ChatRun:
     continuation_context: list[str] = field(default_factory=list)
     investigation_passes: int = 0
     validation_inconclusive_count: int = 0
+    validation_clearify_rounds: int = 0
     patch_plan: dict | None = None
     implementation_result: dict | None = None
     changed_files: list[str] = field(default_factory=list)
@@ -129,11 +120,6 @@ class ChatRun:
         events = self.transition_events
         self.transition_events = []
         return events
-
-
-# clearify 等待恢复注册表：question_id -> (run, resume_state, unknown_id)
-# WAITING_FOR_USER 是 terminal 状态，主循环会退出；回答到达后 resume_stream 靠它找回 run。
-_PENDING_RUNS: dict[str, tuple[ChatRun, str, str]] = {}
 
 
 def analyzed_stream(
@@ -175,7 +161,6 @@ def _chat_loop(run: ChatRun) -> Iterator[dict]:
                 if events is not None:
                     for event in events:
                         yield from skill_runtime.pop_events()
-                        _register_pending_question(run, event)
                         yield event
                 yield from skill_runtime.pop_events()
             yield from run.pop_transition_events()
@@ -189,62 +174,6 @@ def _chat_loop(run: ChatRun) -> Iterator[dict]:
                 run.transition(ChatState.FAILED, run.error)
                 yield from run.pop_transition_events()
             break
-    _cleanup_pending_runs(run)
-
-
-def _register_pending_question(run: ChatRun, event: dict) -> None:
-    """user_question 事件出现时注册 run，供回答后的 resume 找回。"""
-    if event.get("op") != "start" or event.get("event") != "user_question":
-        return
-    data = event.get("data") or {}
-    qid = str(data.get("id") or "").strip()
-    if not qid:
-        return
-    _PENDING_RUNS.setdefault(
-        qid,
-        (
-            run,
-            str(data.get("resume_state") or "investigating"),
-            str(data.get("unknown_id") or "").strip(),
-        ),
-    )
-
-
-def _cleanup_pending_runs(run: ChatRun) -> None:
-    """run 真正结束（completed/failed）时清理注册；WAITING_FOR_USER 保留待 resume。"""
-    if run.state not in {ChatState.COMPLETED, ChatState.FAILED}:
-        return
-    stale = [qid for qid, entry in _PENDING_RUNS.items() if entry[0] is run]
-    for qid in stale:
-        _PENDING_RUNS.pop(qid, None)
-
-
-def resume_stream(question_id: str, workspace_dir: str) -> Iterator[dict]:
-    """回答 clearify 后恢复挂起的 run：注入回答 -> 切回 resume_state -> 继续主循环。"""
-    from .status.clearifying import apply_clearify_answer
-
-    entry = _PENDING_RUNS.get(question_id)
-    if entry is None:
-        raise ValueError("unknown or expired clearify question; start a new chat")
-    run, resume_state, unknown_id = entry
-    if run.state != ChatState.WAITING_FOR_USER:
-        raise ValueError(f"cannot resume: run is in state {run.state.value}")
-    payload = clearify_runtime.peek(question_id)
-    if not payload:
-        raise ValueError("clearify question has no answer yet")
-    apply_clearify_answer(
-        run,
-        resume_state=resume_state,
-        unknown_id=unknown_id,
-        answer_payload=payload,
-    )
-    _PENDING_RUNS.pop(question_id, None)
-    try:
-        target = ChatState(resume_state)
-    except ValueError:
-        target = ChatState.INVESTIGATING
-    run.transition(target, "User answered clearify; resuming.")
-    yield from _chat_loop(run)
 
 
 def _chat_finish_state(run: ChatRun) -> ChatState:

@@ -26,16 +26,6 @@ def answer(question_id: str, payload: dict) -> bool:
         return True
 
 
-def peek(question_id: str) -> dict:
-    """Read the submitted answer without consuming the pending slot (resume path)."""
-    with _LOCK:
-        item = _PENDING.get(question_id)
-    if item is None:
-        raise ValueError("unknown clearify question")
-    _, slot = item
-    return dict(slot)
-
-
 def wait(question_id: str) -> dict:
     with _LOCK:
         item = _PENDING.get(question_id)

@@ -35,11 +35,11 @@ class InvestigationEventConsumer:
         ):
             if event.get("event") == "task_update":
                 self._apply_task_update_event(run, event)
-            if event.get("op") == "start" and event.get("event") == "user_question" and event.get("data", {}).get("clearify_tool"):
-                result.pending_question = event
-                return result
             if event.get("op") == "start" and event.get("event") == "user_question":
-                result.pending_question = event
+                # clearify 是 investigation_stream 内部的同步等待点：yield 给前端后
+                # 继续迭代，流会在 wait() 上阻塞直到用户回答，然后自然继续。
+                # 不 return、不设 pending_question——断点续跑由流自己完成。
+                yield event
                 continue
             if (
                 event.get("op") == "start"

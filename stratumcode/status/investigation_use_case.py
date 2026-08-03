@@ -1,14 +1,14 @@
 from __future__ import annotations
 
 from ..agent_runtime import start_event
-from .clearifying import queue_clearify
+from .clearifying import queue_clearify, user_question_and_wait
 from .investigation_context import InvestigationContextBuilder
 from .investigation_contracts import MemoryContextPort
 from .investigation_events import InvestigationEventConsumer
 from .investigation_summary import InvestigationSummaryService
 from .investigation_transitions import InvestigationTransitionPolicy
 from .memory_context import LegacyRunMemoryPort
-from .user_waiting import prepared_user_question_event, user_question_event
+from .user_waiting import user_question_event
 
 
 class InvestigatingUseCase:
@@ -37,7 +37,7 @@ class InvestigatingUseCase:
         input_data = self.context_builder.build(run, memory_snapshot)
         result = yield from self.event_consumer.consume(run, input_data)
 
-        if result.investigation is None and result.pending_question is None:
+        if result.investigation is None:
             run.transition(chat.ChatState.FAILED, "Investigation failed.")
             return
 
@@ -49,22 +49,14 @@ class InvestigatingUseCase:
         if br_state:
             run.bugfix_readiness = br_state
 
-        if result.pending_question:
-            yield self._prepare_pending_question(run, result.pending_question)
-            self._queue_pending_question(run, result.pending_question)
-            run.transition(chat.ChatState.WAITING_FOR_USER, "Investigation queued a clearify decision.")
-            return
-
         step_question = self._step_clearify_question(run)
         if step_question:
-            yield step_question
-            run.transition(chat.ChatState.WAITING_FOR_USER, "Investigation queued a clearify decision.")
+            yield from self._ask_and_continue(run, step_question)
             return
 
         blocked_question = self._blocked_task_question(run)
         if blocked_question:
-            yield blocked_question
-            run.transition(chat.ChatState.WAITING_FOR_USER, "Investigation queued a clearify decision.")
+            yield from self._ask_and_continue(run, blocked_question)
             return
 
         decision = self.transition_policy.decide(run, result)
@@ -74,18 +66,16 @@ class InvestigatingUseCase:
             result.pending_output["data"]["content"] = self.summary.final_summary_text(run)
             yield result.pending_output
 
-    def _queue_pending_question(self, run, pending_question: dict) -> None:
-        data = pending_question.get("data") or {}
-        queue_clearify(
-            run,
-            data.get("question") or "Which behavior should be used?",
-            reason=data.get("reason") or "Investigation requires a product decision.",
-            unknown_id=str(data.get("unknown_id") or ""),
-        )
+    def _ask_and_continue(self, run, question_event: dict):
+        """同步等待用户回答 clearify，回答注入后重跑调查（断点续跑，不切状态）。"""
+        from .. import chat
 
-    def _prepare_pending_question(self, run, pending_question: dict) -> dict:
-        return prepared_user_question_event(
-            pending_question,
+        data = question_event.get("data") or {}
+        yield from user_question_and_wait(
+            run,
+            question=str(data.get("question") or "Which behavior should be used?"),
+            reason=str(data.get("reason") or "Investigation requires a product decision."),
+            unknown_id=str(data.get("unknown_id") or ""),
             checkpoint_phase="investigation_checkpoint",
             resume_state="investigating",
             extra={
@@ -93,6 +83,7 @@ class InvestigatingUseCase:
                 "investigation": run.last_investigation or {},
             },
         )
+        run.transition(chat.ChatState.INVESTIGATING, "User answered clearify; continuing investigation.")
 
     def _blocked_task_question(self, run) -> dict | None:
         for item in (run.last_investigation or {}).get("task_updates", []):

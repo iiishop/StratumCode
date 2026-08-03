@@ -1,9 +1,7 @@
 from __future__ import annotations
 
 from .. import implementation_runner
-from .clearifying import queue_clearify
 from .task_contract import run_request
-from .user_waiting import prepared_user_question_event
 
 
 def handle(run):
@@ -19,22 +17,6 @@ def handle(run):
         patch_plan=run.patch_plan,
         workspace_dir=run.workspace_dir,
     ):
-        if event.get("op") == "start" and event.get("event") == "user_question":
-            data = event.get("data") or {}
-            queue_clearify(
-                run,
-                data.get("question") or "Which implementation behavior should be used?",
-                reason=data.get("reason") or "Implementation requires a product decision.",
-                unknown_id=str(data.get("unknown_id") or ""),
-            )
-            yield prepared_user_question_event(
-                event,
-                checkpoint_phase="implementation_checkpoint",
-                resume_state="implementing",
-                extra={"patch_plan": run.patch_plan or {}},
-            )
-            run.transition(chat.ChatState.WAITING_FOR_USER, "Implementation queued a clearify decision.")
-            return
         if event.get("op") == "done" and isinstance(event.get("implementation"), dict):
             run.implementation_result = event["implementation"]
             run.changed_files = [str(path) for path in run.implementation_result.get("changed_files", [])]
