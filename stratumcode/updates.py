@@ -60,11 +60,11 @@ def apply_events(channel: str):
 def restart() -> dict:
     """Restart the current StratumCode process after the HTTP response returns.
 
-    跨平台：Windows venv 用 Scripts/，macOS/Linux 用 bin/，不硬编码路径。
-    用当前解释器直接调入口函数，不依赖 console script wrapper（git pull 不会重建它）。
+    用 uv run 重启（项目统一 uv 管理）：自动 sync 依赖，跨平台，不依赖 console script wrapper。
+    按当前进程 argv 判断 dev 还是生产模式，重启后保持一致。
     """
-    entry = "main_dev" if "dev" in os.path.basename(sys.argv[0]) else "main"
-    command = [sys.executable, "-c", f"from stratumcode.main import {entry}; {entry}()"]
+    entry = "stratumcode-dev" if "dev" in os.path.basename(sys.argv[0]) else "stratumcode"
+    command = ["uv", "run", entry]
 
     def relaunch() -> None:
         subprocess.Popen(command, cwd=str(ROOT), close_fds=True)
