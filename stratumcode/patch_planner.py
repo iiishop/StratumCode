@@ -509,6 +509,25 @@ def patch_planning_stream(
         yield {"op": "update", "id": stage_id, "patch": {"state": "error", "phase": "patch_planning_failed"}}
         return
     issues = validate_patch_plan(plan, analysis, design_plan, workspace_dir, investigation)
+    if not issues:
+        # 结构验证通过后再做完成条件交叉一致性审计：IS 间同一输入/调用被断言为
+        # 互斥结果（如 x=2x 既是"任意实数"又是"a=-1,b=0"）属于 plan 级矛盾，
+        # 应在规划阶段发现并 repair，而不是拖到 implementing 才被 plan_conflict 撞上。
+        conflicts = yield from _plan_consistency_audit(
+            provider,
+            model,
+            pricing_rules,
+            usage_total,
+            run_id,
+            stage_id,
+            progress,
+            message,
+            analysis,
+            plan,
+            workspace_dir,
+        )
+        if conflicts:
+            issues = [f"plan consistency conflict: {item}" for item in conflicts]
     if issues:
         fatal = any(
             "runtime_revision_decision_ids" in item
@@ -540,6 +559,77 @@ def patch_planning_stream(
     yield start_event(f"{run_id}-plan", "patch_plan", plan)
     yield {"op": "update", "id": stage_id, "patch": {"state": "done", "phase": "patch_planned"}}
     yield {"op": "done", "patch_plan": plan}
+
+
+def _plan_consistency_audit(
+    provider: dict,
+    model: str,
+    pricing_rules: dict,
+    usage_total: dict,
+    run_id: str,
+    stage_id: str,
+    progress: list,
+    message: str,
+    analysis: dict,
+    plan: dict,
+    workspace_dir: str,
+) -> Iterator[list[str]]:
+    """Audit cross-step completion-condition contradictions via the model.
+
+    只在结构验证通过后调用。审计失败时保守放行（返回空列表）——
+    最后防线仍是 implementing 的 plan_conflict 回规划兜底。
+    """
+    if not (plan.get("implementation_steps") or []):
+        return []
+    audit_messages = [
+        {
+            "role": "system",
+            "content": prompt.build_patch_plan_consistency_auditor_system(
+                app_settings.get_output_language()
+            ),
+        },
+        {
+            "role": "user",
+            "content": prompt.build_patch_plan_consistency_user(
+                message,
+                analysis,
+                plan,
+                workspace_dir,
+            ),
+        },
+    ]
+    yield stage_progress(
+        stage_id,
+        progress,
+        "plan-consistency-audit",
+        "Completion condition consistency audit",
+        description="Detect cross-step contradictions in completion conditions.",
+    )
+    try:
+        audited = yield from _content_json_stream(
+            provider,
+            model,
+            audit_messages,
+            pricing_rules,
+            usage_total,
+            run_id,
+            "plan-consistency-audit",
+        )
+    except Exception:
+        return []
+    conflicts = audited.get("conflicts") if isinstance(audited, dict) else None
+    if not isinstance(conflicts, list):
+        return []
+    result = []
+    for item in conflicts:
+        if not isinstance(item, dict):
+            continue
+        conflict = str(item.get("conflict") or "").strip()
+        if not conflict:
+            continue
+        step_ids = [str(value) for value in item.get("step_ids") or [] if str(value or "").strip()]
+        result.append(f"{'/'.join(step_ids) or 'steps'}: {conflict}")
+    return result
 
 
 def _patch_planning_prerequisite(

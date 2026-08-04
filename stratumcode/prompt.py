@@ -807,6 +807,36 @@ Return the complete patch_verification shape requested by output_shape. Preserve
 only claims that survive this audit. The runtime validates slot references and
 coverage after you respond."""
 
+PATCH_PLAN_CONSISTENCY_AUDITOR = """\
+You are StratumCode's patch-plan consistency auditor. Write content in {language}.
+Return one compact JSON object only. Do not use Markdown.
+
+The patch plan's implementation steps are untrusted. Your only job is to find
+CONTRADICTIONS among the steps' completion_conditions and actions. A contradiction
+is a plan-level defect that will make implementation impossible or self-defeating.
+
+Detect at least these classes of conflict:
+1. Same input/target/call asserted with mutually exclusive expected outcomes
+   across different steps (e.g. step IS2 requires CalcBase(\"x=2x\") to return
+   \"x=any real\" while step IS3 requires CalcBase(\"x=2x\") to parse to a=-1, b=0).
+2. A completion condition that is mathematically or logically impossible on its
+   own (e.g. treating \"x=2x\" as an identity that has infinitely many solutions,
+   when it simplifies to x=0).
+3. Completion conditions that depend on behavior another step explicitly forbids
+   or removes.
+4. Completion conditions referencing a target/file that another step deletes or
+   replaces in an incompatible way.
+
+Do NOT report: style preferences, missing evidence, minor wording differences,
+or anything that only weakens verification strength. Only report contradictions
+that make the plan itself inconsistent. Be conservative: when in doubt, do not
+report.
+
+Return exactly this shape:
+{{"conflicts": [{{"step_ids": ["IS2", "IS3"], "conflict": "concise description of the contradiction"}}]}}
+Return an empty conflicts list when the plan is internally consistent.
+"""
+
 IMPLEMENTATION_RUNNER = """\
 You are StratumCode's implementation runner. Write user-visible text in {language}.
 
@@ -1354,6 +1384,47 @@ def build_patch_planner_system(language: str) -> str:
 
 def build_patch_verification_auditor_system(language: str) -> str:
     return PATCH_VERIFICATION_AUDITOR.format(language=language) + "\n"
+
+
+def build_patch_plan_consistency_auditor_system(language: str) -> str:
+    return PATCH_PLAN_CONSISTENCY_AUDITOR.format(language=language) + "\n"
+
+
+def build_patch_plan_consistency_user(
+    message: str,
+    analysis: dict,
+    plan: dict,
+    workspace_dir: str,
+) -> str:
+    steps = []
+    for item in plan.get("implementation_steps") or []:
+        if not isinstance(item, dict):
+            continue
+        steps.append({
+            "id": item.get("id"),
+            "file": item.get("file"),
+            "mode": item.get("mode"),
+            "target": item.get("target"),
+            "action": item.get("action"),
+            "completion_conditions": item.get("completion_conditions", []),
+        })
+    return json.dumps({
+        "platform": platform.system(),
+        "workspace_root": workspace_dir,
+        "user_request": message,
+        "output_contract": "patch_plan_consistency_audit",
+        "task": {
+            "intent": analysis.get("intent", {}),
+            "acceptance_criteria": analysis.get("acceptance_criteria", []),
+        },
+        "implementation_steps": steps,
+        "output_shape": {
+            "conflicts": [{
+                "step_ids": ["IS2", "IS3"],
+                "conflict": "concise description of the contradiction",
+            }],
+        },
+    }, ensure_ascii=False, indent=2)
 
 
 def build_patch_step_slot_user(
