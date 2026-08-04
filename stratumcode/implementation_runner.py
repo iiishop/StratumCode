@@ -92,6 +92,8 @@ def implementation_stream(
     rollback_ids: list[str] = []
     satisfied_steps: list[dict] = []
     tool_error_limit = app_settings.get_round_limit("implementation_tool_error_rounds")
+    failed_tool_cache: dict[str, str] = {}
+    failed_tool_error_count = 0
     for round_index in _round_indexes(app_settings.get_round_limit("implementation_rounds")):
         assistant = _call_model(provider, model, messages, tools=tools)
         if usage := _usage_delta(pricing_rules, assistant.pop("_usage", {})):
@@ -280,10 +282,38 @@ def implementation_stream(
             except Exception as exc:
                 if name == "apply_patch":
                     round_had_patch_failure = True
+                # 相同参数失败去重：同一 (name, arguments) 连续失败时模型倾向原样重试
+                # （尤其 invalid tool JSON——模型重生成同样的坏 JSON）。第二次起升级
+                # 错误消息强制换参数；连续 3 次相同失败直接 checkpoint，避免死循环。
+                try:
+                    duplicate_key = json.dumps({
+                        "name": name or "",
+                        "arguments": _raw_arguments_parsed(function.get("arguments")),
+                    }, ensure_ascii=False, sort_keys=True)[:2000]
+                except Exception:
+                    duplicate_key = ""
+                if duplicate_key:
+                    if duplicate_key in failed_tool_cache:
+                        failed_tool_error_count += 1
+                    else:
+                        failed_tool_cache[duplicate_key] = str(exc)
+                        failed_tool_error_count = 1
+                else:
+                    failed_tool_error_count = 1
+                same_failed = failed_tool_error_count if duplicate_key else 1
+                hint = _tool_retry_hint(name, str(exc), patch_plan)
+                if same_failed >= 2:
+                    hint = (
+                        f"The identical tool call has now failed {same_failed} times with: {exc}. "
+                        "Change the arguments substantially (fix the JSON/diff syntax, split the "
+                        "patch into smaller apply_patch calls, or pick a different file/step). "
+                        "Do NOT retry the identical call again."
+                    )
                 output = json.dumps({
                     "error": str(exc),
-                    "retryable": True,
-                    "hint": _tool_retry_hint(name, str(exc), patch_plan),
+                    "retryable": same_failed < 3,
+                    "hint": hint,
+                    "same_failed_count": same_failed,
                 }, ensure_ascii=False)
                 yield start_event(call_id, "tool", {
                     "name": name or "invalid",
@@ -293,6 +323,20 @@ def implementation_stream(
                     "input": function.get("arguments") or "{}",
                     "output": output,
                 })
+                if same_failed >= 3:
+                    checkpoint_reason = (
+                        "Implementation repeated the same failing tool call 3 times "
+                        f"({name or 'invalid'}: {exc}). The arguments need a fundamental "
+                        "correction, not a retry."
+                    )
+                    reason = _rollback_checkpoint_reason(
+                        checkpoint_reason, rollback_ids, workspace_dir, _authorization_id(patch_plan)
+                    )
+                    yield start_event(f"{run_id}-tool-error-checkpoint", "output", _checkpoint_output(reason))
+                    yield {"op": "update", "id": stage_id, "patch": {
+                        "state": "failed", "phase": "implementation_tool_error_checkpoint",
+                    }}
+                    return
             messages.append({"role": "tool", "tool_call_id": call_id, "content": output})
         if _output_truncated(assistant):
             messages.append({"role": "user", "content": (
@@ -931,6 +975,14 @@ def _tool_arguments(raw: str | None) -> dict:
     if not isinstance(data, dict):
         raise ValueError("tool arguments must be an object")
     return data
+
+
+def _raw_arguments_parsed(raw: str | None):
+    """容错解析原始 arguments（失败时返回原始字符串），用于相同参数失败去重。"""
+    try:
+        return json.loads(raw or "{}")
+    except Exception:
+        return raw or ""
 
 
 def _tool_retry_hint(name: str, error: str, patch_plan: dict) -> str:
