@@ -130,6 +130,7 @@ def patch_planning_stream(
                 workspace_dir,
                 slot_index=index,
                 decision=decision,
+                planned_steps=step_content,
             )},
         ]
         slot = None

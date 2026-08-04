@@ -714,6 +714,11 @@ Rules:
 - Set responsibility_key to the smallest behavior/state boundary that must be
   complete as one unit. Steps with the same file, mode, and responsibility_key
   should be merged instead of emitted separately.
+- planned_steps_so_far lists the steps already emitted for earlier design
+  decisions in this plan. Do not emit a new step that duplicates one there
+  (same file, mode, and responsibility_key or target). If the current design
+  decision is already covered by an earlier planned step, return needed=false
+  with a concrete skip_reason naming that step.
 - Include one runnable check or the smallest manual check when no test framework exists.
 - Never invent constructors, helper methods, classes, commands, or test files in
   tests_or_checks. Use only identifiers grounded in project facts, the approved
@@ -1418,6 +1423,7 @@ def build_patch_step_slot_user(
     *,
     slot_index: int,
     decision: dict,
+    planned_steps: list[dict] | None = None,
 ) -> str:
     facts = _numbered_project_facts(investigation)
     criteria = analysis.get("acceptance_criteria", []) if isinstance(analysis.get("acceptance_criteria"), list) else []
@@ -1431,6 +1437,17 @@ def build_patch_step_slot_user(
             "decision": str(decision.get("decision") or ""),
             "because": decision.get("because", []),
         },
+        "planned_steps_so_far": [
+            {
+                "file": str(item.get("file") or ""),
+                "mode": str(item.get("mode") or "modify"),
+                "target": str(item.get("target") or ""),
+                "responsibility_key": str(item.get("responsibility_key") or ""),
+                "purpose": str(item.get("purpose") or "")[:200],
+            }
+            for item in (planned_steps or [])
+            if isinstance(item, dict)
+        ],
         "runtime_skeleton": {
             "acceptance_slots": [
                 {"index": index, "text": str(item.get("text") or "")}
