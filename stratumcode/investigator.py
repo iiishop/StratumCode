@@ -568,12 +568,21 @@ def investigation_stream(
         # rounds_per_unknown × blocking_unknown 轮）。结束类 phase
         # （FINISH/READ_ONLY_FINISH/SYNTHESIZE）强制降级为 DISCOVERY_REQUIRED，
         # 且原 directive（如"调用 finish_investigation"）不再下发。
+        # 例外：所有 unknowns 已 resolved 时不再降级——调查内容已完成，
+        # 凑轮数没有可查的东西，降级只会让模型陷入
+        # "finish 被 blocked（不在 allowed）+ resolve 被 blocked（already_resolved）"
+        # 的死循环（实测 6 轮空转）。
         budget_floor_active = (
             round_index < min_rounds
             and current_phase in (
                 InvestigationPhase.FINISH,
                 InvestigationPhase.READ_ONLY_FINISH,
                 InvestigationPhase.SYNTHESIZE,
+            )
+            and not _recorded_resolves_initial_unknowns(
+                recorded_findings,
+                analysis,
+                repair_ids=semantic_repair_required_ids,
             )
         )
         if directive_prompt and not budget_floor_active:
