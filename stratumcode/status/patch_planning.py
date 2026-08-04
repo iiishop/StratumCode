@@ -26,6 +26,7 @@ def handle(run):
         investigation=run.last_investigation,
         design_plan=run.design_plan,
         workspace_dir=run.workspace_dir,
+        revision_context=run.continuation_context,
     ):
         if event.get("op") == "done" and isinstance(event.get("patch_plan"), dict):
             run.patch_plan = event["patch_plan"]

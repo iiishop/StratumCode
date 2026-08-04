@@ -204,7 +204,11 @@ def implementation_stream(
                             _authorization_id(patch_plan),
                         )
                         yield start_event(f"{run_id}-finish-step-checkpoint", "output", _checkpoint_output(reason))
-                        yield {"op": "update", "id": stage_id, "patch": {"state": "failed", "phase": f"implementation_{verdict or 'blocked'}_checkpoint"}}
+                        yield {"op": "update", "id": stage_id, "patch": {
+                            "state": "failed",
+                            "phase": f"implementation_{verdict or 'blocked'}_checkpoint",
+                            "reason": reason,
+                        }}
                         return
             except Exception as exc:
                 if name == "apply_patch":

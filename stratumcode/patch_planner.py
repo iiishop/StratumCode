@@ -49,6 +49,7 @@ def patch_planning_stream(
     investigation: dict,
     design_plan: dict,
     workspace_dir: str,
+    revision_context: list[str] | None = None,
 ) -> Iterator[dict]:
     prerequisite = _patch_planning_prerequisite(analysis, investigation)
     if prerequisite:
@@ -84,6 +85,18 @@ def patch_planning_stream(
     })
 
     system = {"role": "system", "content": prompt.build_patch_planner_system(app_settings.get_output_language())}
+    feedback = "\n".join(f"- {line}" for line in (revision_context or []) if str(line or "").strip())
+    if feedback:
+        system = {
+            "role": "system",
+            "content": (
+                system["content"]
+                + "\n\nPLAN REVISION FEEDBACK\n"
+                + "The previous patch plan conflicted during implementation. Fix the plan accordingly "
+                + "(correct wrong completion conditions, resolve contradictions, and keep the rest stable).\n"
+                + feedback
+            ),
+        }
     step_content = []
     tests_or_checks = []
     risks = []
