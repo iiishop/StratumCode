@@ -362,6 +362,9 @@ Principles:
   requirements. Call resolve_unknowns only when an unknown has a real answer or
   a meaningful partial answer; call record_investigation_findings only for
   material beliefs/new unknowns, not as an unlock button.
+- Do not call finish_investigation before every blocking unknown is resolved
+  with evidence. Finishing early is blocked and wastes rounds; before finishing,
+  re-check the task contract unknowns and resolve each one.
 - When requested behavior is attached to a state transition, search the state
   identifier and account for every writer or producer, including event handlers,
   watchers, callbacks, and programmatic updates, plus the shared consumer.
