@@ -1283,8 +1283,10 @@ def _verification_slot_issues(
             facts,
         )
     )
-    _, merge_issues = _step_merge_groups(slot.get("step_merge_groups"), steps)
-    issues.extend(merge_issues)
+    # step_merge_groups 是可选优化（合并同文件步骤）：校验失败由
+    # _merge_verified_step_groups 安全忽略（不合并），不阻塞 verification——
+    # 否则模型 repair 多次仍重复时整个 patch_planning 失败（曾实测挂掉）。
+    _step_merge_groups(slot.get("step_merge_groups"), steps)
     _, revision_issues = _step_revision_updates(slot.get("step_revisions"), len(steps))
     issues.extend(revision_issues)
     return issues
