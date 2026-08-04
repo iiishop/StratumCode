@@ -812,6 +812,12 @@ def investigation_stream(
                         "content": output,
                     })
                     messages.append({"role": "user", "content": (
+                        "The semantic quality gate rejected some resolutions; you are in "
+                        "resolution-repair state. resolve_unknowns is unavailable here — "
+                        "submit corrected, evidence-backed conclusions with "
+                        "record_investigation_findings instead, then call "
+                        "finish_investigation when every unknown is resolved."
+                    ) if semantic_repair_required_ids and name == "resolve_unknowns" else (
                         "The tool was blocked by the current investigation state. "
                         "Choose one of the allowed tools from the tool result; do not retry "
                         "the blocked discovery call with the same arguments."
