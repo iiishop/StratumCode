@@ -144,6 +144,36 @@ def _with_skill_tool(tools: list[dict] | None) -> list[dict] | None:
     return current
 
 
+def _sanitize_tool_call_balance(messages: list[dict]) -> list[dict]:
+    """OpenAI 兼容 API 拒绝 'assistant 带 tool_calls 但缺少对应 tool 消息' 的请求。
+
+    防御：扫描最后一条 assistant tool_calls 消息，如果其后没有覆盖全部
+    tool_call_id 的 tool 响应（investigation 某些分支可能漏 append），剥离
+    tool_calls（保留 content）——宁可丢一次工具意图，也不让整个请求 400。
+    正常路径（平衡）不做任何改动。
+    """
+    for index in range(len(messages) - 1, -1, -1):
+        message = messages[index]
+        if not isinstance(message, dict) or message.get("role") != "assistant":
+            continue
+        calls = message.get("tool_calls") or []
+        call_ids = {str(call.get("id")) for call in calls if call.get("id")}
+        if not call_ids:
+            continue
+        covered: set[str] = set()
+        for later in messages[index + 1:]:
+            if isinstance(later, dict) and later.get("role") == "tool":
+                tool_id = later.get("tool_call_id")
+                if tool_id is not None and str(tool_id) in call_ids:
+                    covered.add(str(tool_id))
+        if covered != call_ids:
+            sanitized = dict(message)
+            sanitized.pop("tool_calls", None)
+            messages[index] = sanitized
+        break  # 只检查最后一条 assistant（更早的历史已平衡）
+    return messages
+
+
 def _call_model_once(
     provider: dict,
     model: str,
@@ -152,6 +182,7 @@ def _call_model_once(
     tools: list[dict] | None = None,
     tool_choice=None,
 ) -> dict:
+    _sanitize_tool_call_balance(messages)
     output_tokens = _effective_output_tokens(provider)
     if provider.get("auth_type") == "codex_oauth":
         return _call_codex_responses(provider, model, messages, tools, tool_choice)
