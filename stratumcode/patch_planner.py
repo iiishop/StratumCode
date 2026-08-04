@@ -478,10 +478,6 @@ def patch_planning_stream(
                 step_content,
                 verification.get("step_revisions"),
             )
-            _merge_verified_step_groups(
-                step_content,
-                verification.get("step_merge_groups"),
-            )
             tests_or_checks = _canonical_verification_checks(
                 verification,
                 step_content,
@@ -1283,10 +1279,6 @@ def _verification_slot_issues(
             facts,
         )
     )
-    # step_merge_groups 是可选优化（合并同文件步骤）：校验失败由
-    # _merge_verified_step_groups 安全忽略（不合并），不阻塞 verification——
-    # 否则模型 repair 多次仍重复时整个 patch_planning 失败（曾实测挂掉）。
-    _step_merge_groups(slot.get("step_merge_groups"), steps)
     _, revision_issues = _step_revision_updates(slot.get("step_revisions"), len(steps))
     issues.extend(revision_issues)
     return issues
@@ -1418,63 +1410,6 @@ def _canonical_verification_checks(slot: dict, steps: list[dict], facts: list[di
         )
     return _unique_strings(result)
 
-
-def _step_merge_groups(value, steps: int | list[dict]) -> tuple[list[dict], list[str]]:
-    if value is None:
-        return [], []
-    if not isinstance(value, list):
-        return [], ["step_merge_groups must be an array"]
-    step_count = steps if isinstance(steps, int) else len(steps)
-    groups = []
-    used = set()
-    issues = []
-    for item in value:
-        if not isinstance(item, dict):
-            issues.append("step_merge_groups contains a non-object item")
-            continue
-        slots = _numbered_slots(item.get("step_slots"), step_count)
-        if len(slots) < 2:
-            issues.append("step_merge_groups item requires at least two valid step slots")
-            continue
-        overlap = used & set(slots)
-        if overlap:
-            issues.append("step_merge_groups repeats step slots: " + ", ".join(map(str, sorted(overlap))))
-            continue
-        if isinstance(steps, list):
-            files = {
-                str(steps[slot - 1].get("file") or "").replace("\\", "/").casefold()
-                for slot in slots
-            }
-            modes = {
-                str(steps[slot - 1].get("mode") or "modify").strip().casefold()
-                for slot in slots
-            }
-            if len(files) != 1:
-                issues.append("step_merge_groups cannot merge steps from different files")
-                continue
-            if len(modes) != 1:
-                issues.append("step_merge_groups cannot merge steps with different modes")
-                continue
-        if not str(item.get("reason") or "").strip():
-            issues.append("step_merge_groups item has no reason")
-            continue
-        issue_count = len(issues)
-        merged = item.get("merged_content")
-        if not isinstance(merged, dict):
-            issues.append("step_merge_groups item has no merged_content")
-            continue
-        for field in ("purpose", "target", "action", "required_behavior_if_removed", "minimality_check"):
-            if not str(merged.get(field) or "").strip():
-                issues.append(f"step_merge_groups merged_content has no {field}")
-        if not _strings(merged.get("completion_conditions")):
-            issues.append("step_merge_groups merged_content has no completion_conditions")
-        if len(issues) > issue_count:
-            continue
-        used.update(slots)
-        groups.append({"slots": slots, "content": merged})
-    return groups, issues
-
-
 def _step_revision_updates(value, step_count: int) -> tuple[dict[int, dict], list[str]]:
     if value is None:
         return {}, []
@@ -1528,33 +1463,6 @@ def _apply_verified_step_revisions(steps: list[dict], value) -> None:
             step["responsibility_key"] = str(revised.get("responsibility_key") or "").strip()
         step["completion_conditions"] = _strings(revised.get("completion_conditions"))
         step["out_of_scope"] = _strings(revised.get("out_of_scope"))
-
-
-def _merge_verified_step_groups(steps: list[dict], value) -> None:
-    groups, _ = _step_merge_groups(value, steps)
-    remove = set()
-    for group in groups:
-        slots = group["slots"]
-        destination = steps[slots[0] - 1]
-        for slot in slots[1:]:
-            source = steps[slot - 1]
-            for field in ("decision_slots", "acceptance_slots", "project_fact_slots"):
-                destination[field] = sorted(set(destination.get(field) or []) | set(source.get(field) or []))
-            remove.add(slot - 1)
-        merged = group["content"]
-        for field in (
-            "purpose",
-            "target",
-            "action",
-            "required_behavior_if_removed",
-            "minimality_check",
-        ):
-            destination[field] = str(merged.get(field) or "").strip()
-        if merged.get("responsibility_key"):
-            destination["responsibility_key"] = str(merged.get("responsibility_key") or "").strip()
-        destination["completion_conditions"] = _strings(merged.get("completion_conditions"))
-        destination["out_of_scope"] = _strings(merged.get("out_of_scope"))
-    steps[:] = [step for index, step in enumerate(steps) if index not in remove]
 
 
 def _merge_step_acceptance_coverage(

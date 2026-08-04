@@ -670,21 +670,6 @@ For patch_verification:
   "step_acceptance_coverage": [
     {{"step_slot": 1, "acceptance_slots": [1, 2]}}
   ],
-  "step_merge_groups": [
-    {{
-      "step_slots": [1, 2],
-      "reason": "why these steps have the same normalized file, mode, implementation responsibility, and outcome",
-      "merged_content": {{
-        "purpose": "one consolidated behavior-level purpose",
-        "target": "one canonical target description",
-        "action": "one complete non-conflicting action",
-        "required_behavior_if_removed": "what breaks if the merged step is removed",
-        "completion_conditions": ["conditions covering every merged decision"],
-        "out_of_scope": ["only boundaries compatible with every merged decision"],
-        "minimality_check": "what the merged responsibility deliberately avoids"
-      }}
-    }}
-  ],
   "step_revisions": [
     {{
       "step_slot": 1,
@@ -741,15 +726,6 @@ Rules:
 - The runtime replaces manual prose with a canonical check built from the final
   audited steps' file, target, and completion conditions. For a no-patch plan,
   it builds the check from cited project facts.
-- Compare all planned steps semantically. Put steps into one step_merge_groups
-  item only when normalized file path, mode, affected responsibility, and
-  behavioral outcome are all the same. Do not merge steps across files or modes,
-  even when they implement the same user-facing behavior. Do not group steps
-  merely because they share a file. Leave distinct responsibilities ungrouped.
-  For each group, write one
-  complete merged_content object. Resolve contradictions among the source
-  purpose, action, completion conditions, and out-of-scope claims; do not
-  concatenate their prose.
 - Review every runtime skip candidate against its cited facts. Set approved=true
   only when the facts directly prove the design decision already needs no code
   change. Set approved=false with a concrete reason otherwise; do not silently
@@ -1591,20 +1567,6 @@ def build_patch_verification_slot_user(
             "step_acceptance_coverage": [{
                 "step_slot": 1,
                 "acceptance_slots": [1],
-            }],
-            "step_merge_groups": [{
-                "step_slots": [1, 2],
-                "reason": "why these have the same normalized file, mode, implementation responsibility, and outcome",
-                "merged_content": {
-                    "purpose": "consolidated behavior-level purpose",
-                    "responsibility_key": "canonical shared behavior or state boundary",
-                    "target": "canonical target",
-                    "action": "complete non-conflicting action",
-                    "required_behavior_if_removed": "what breaks if removed",
-                    "completion_conditions": ["condition covering the merged decisions"],
-                    "out_of_scope": ["compatible boundary only"],
-                    "minimality_check": "what the merged responsibility avoids",
-                },
             }],
             "step_revisions": [{
                 "step_slot": 1,
