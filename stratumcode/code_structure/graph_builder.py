@@ -4,7 +4,7 @@ import hashlib
 
 from .contracts import CallEdge, CallSite, CodeStructureGraph, Diagnostic, GraphNode, Symbol
 from .language_packs import LanguagePack
-from .providers import ProviderRegistry
+from .providers import LspDefinitionSemanticProvider, NameIndexSemanticProvider, ProviderRegistry
 
 
 class CallGraphBuilder:
@@ -37,9 +37,20 @@ class CallGraphBuilder:
             for symbol in symbols
         ]
         nodes_by_id = {node.id: node for node in symbol_nodes}
+        # 批量语义解析：LSP 优先（semantic="lsp" 语义不变——所有调用先尝试 LSP），
+        # 复用 client + 并发（lsp.query_batch）；name-index 在 _resolve_call 中兜底。
+        resolved_map: dict[str, str] = {}
+        lsp_provider = next(
+            (p for p in self.providers.semantic if isinstance(p, LspDefinitionSemanticProvider)),
+            None,
+        )
+        if lsp_provider:
+            resolved_map = lsp_provider.resolve_many(calls, symbols, workspace_dir)
         edges: list[CallEdge] = []
         for call in calls:
-            target, kind, confidence, provenance = self._resolve_call(call, symbols, packs.get(call.language), workspace_dir)
+            target, kind, confidence, provenance = self._resolve_call(
+                call, symbols, packs.get(call.language), workspace_dir, resolved_map
+            )
             if target is None:
                 target = self._external_node_id(call, kind)
                 nodes_by_id.setdefault(target, GraphNode(
@@ -86,8 +97,13 @@ class CallGraphBuilder:
         symbols: list[Symbol],
         pack: LanguagePack | None,
         workspace_dir: str,
+        resolved_map: dict[str, str] | None = None,
     ) -> tuple[str | None, str, float, list[str]]:
+        if resolved_map and call.id in resolved_map:
+            return resolved_map[call.id], "static_resolved", 0.9, call.provenance + ["lsp-definition"]
         for provider in self.providers.semantic:
+            if isinstance(provider, LspDefinitionSemanticProvider):
+                continue  # 已批量解析（resolve_many）
             target = provider.resolve(call, symbols, workspace_dir)
             if target:
                 return target, "static_resolved", 0.9, call.provenance + [provider.name]

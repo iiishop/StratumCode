@@ -10,6 +10,7 @@ import shlex
 import subprocess
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from shutil import which
 from urllib.parse import quote
@@ -889,36 +890,96 @@ def query(params: dict, workspace_dir: str) -> dict:
     root = _server_root(path, workspace_dir)
     client = _client(server, str(root), init_options, timeout)
     try:
-        client.open_document(path)
-        if operation == "document_symbols":
-            result = client.request("textDocument/documentSymbol", {
-                "textDocument": {"uri": _path_uri(path)},
-            })
-        else:
-            method = {
-                "definition": "textDocument/definition",
-                "references": "textDocument/references",
-                "hover": "textDocument/hover",
-            }[operation]
-            result = None
-            used_position = None
-            candidates = _position_candidates(
-                path,
-                max(0, int(params.get("line") or 1) - 1),
-                max(0, int(params.get("character") or params.get("column") or 1) - 1),
-            )
-            for position in candidates:
-                payload = {"textDocument": {"uri": _path_uri(path)}, "position": position}
-                if operation == "references":
-                    payload["context"] = {"includeDeclaration": bool(params.get("include_declaration", True))}
-                result = client.request(method, payload)
-                used_position = position
-                if _has_lsp_result(result):
-                    break
+        return _query_once(client, params, path, workspace_dir)
     except Exception:
         _drop_client(server["name"], str(root))
         raise
-    response = {"server": server["name"], "operation": operation, "path": str(path), "result": result}
+
+
+def query_batch(
+    params_list: list[dict],
+    workspace_dir: str,
+    concurrency: int = 8,
+    timeout: float = 30,
+) -> list[dict]:
+    """批量 LSP 查询：按 (server, root) 分组复用同一个 client，线程池并发执行。
+
+    _LspClient 的 reader 线程按 message_id 分发响应，request_lock 只保护 id
+    分配——多线程并发 request 天然安全。返回与 params_list 等长的结果列表；
+    单条失败返回 {"error": ...}（不影响其他项）。
+    """
+    if not params_list:
+        return []
+    results: list[dict] = [None] * len(params_list)
+    groups: dict[tuple[str, str], list[tuple[int, dict, dict, str]]] = {}
+    for index, params in enumerate(params_list):
+        try:
+            path = _workspace_path(str(params.get("path") or ""), workspace_dir)
+            server = _server_for_query(params, path)
+            root = str(_server_root(path, workspace_dir))
+        except Exception as exc:
+            results[index] = {"error": str(exc)}
+            continue
+        groups.setdefault((server["name"], root), []).append((index, params, server, path))
+    for (server_name, root), items in groups.items():
+        server = items[0][2]
+        client = _client(server, root, _initialization_options(server, {}), timeout)
+        try:
+            documents = {_workspace_path(str(item[1].get("path") or ""), workspace_dir) for item in items}
+            for document in documents:
+                try:
+                    client.open_document(document)
+                except Exception:
+                    pass
+            with ThreadPoolExecutor(max_workers=min(concurrency, len(items))) as pool:
+                futures = {
+                    pool.submit(_query_once, client, params, path, workspace_dir): (index, params)
+                    for index, params, _, path in items
+                }
+                for future in futures:
+                    index = futures[future][0]
+                    try:
+                        results[index] = future.result()
+                    except Exception as exc:
+                        results[index] = {"error": str(exc)}
+        except Exception as exc:
+            _drop_client(server_name, root)
+            for index, params, _, _ in items:
+                if results[index] is None:
+                    results[index] = {"error": str(exc)}
+    return results
+
+
+def _query_once(client, params: dict, path: Path, workspace_dir: str) -> dict:
+    """在已连接的 client 上执行单次查询（query 与 query_batch 共用）。"""
+    operation = str(params.get("operation") or "").strip()
+    client.open_document(path)
+    if operation == "document_symbols":
+        result = client.request("textDocument/documentSymbol", {
+            "textDocument": {"uri": _path_uri(path)},
+        })
+    else:
+        method = {
+            "definition": "textDocument/definition",
+            "references": "textDocument/references",
+            "hover": "textDocument/hover",
+        }[operation]
+        result = None
+        used_position = None
+        candidates = _position_candidates(
+            path,
+            max(0, int(params.get("line") or 1) - 1),
+            max(0, int(params.get("character") or params.get("column") or 1) - 1),
+        )
+        for position in candidates:
+            payload = {"textDocument": {"uri": _path_uri(path)}, "position": position}
+            if operation == "references":
+                payload["context"] = {"includeDeclaration": bool(params.get("include_declaration", True))}
+            result = client.request(method, payload)
+            used_position = position
+            if _has_lsp_result(result):
+                break
+    response = {"server": client.server["name"], "operation": operation, "path": str(path), "result": result}
     if operation != "document_symbols" and used_position is not None:
         response["position"] = {
             "line": used_position["line"] + 1,

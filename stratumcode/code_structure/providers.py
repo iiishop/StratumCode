@@ -180,6 +180,56 @@ class LspDefinitionSemanticProvider:
         self._cache[key] = target
         return target
 
+    def resolve_many(
+        self,
+        calls: list[CallSite],
+        symbols: list[Symbol],
+        workspace_dir: str,
+        concurrency: int = 8,
+    ) -> dict[str, str]:
+        """批量解析调用目标：复用 LSP client + 线程池并发（lsp.query_batch）。
+
+        返回 {call_id: target_symbol_id}。只处理配额内且未缓存的调用；
+        语言被禁用/配额耗尽/缓存命中的调用跳过。
+        """
+        if self._disabled or not calls:
+            return {}
+        params_list: list[dict] = []
+        valid: list[CallSite] = []
+        for call in calls:
+            if self._requests >= self.max_requests:
+                break
+            key = (call.file, call.range.start_line, call.range.start_col)
+            if key in self._cache:
+                continue
+            params_list.append({
+                "operation": "definition",
+                "path": str(Path(workspace_dir, call.file)),
+                "line": call.range.start_line,
+                "character": call.range.start_col,
+            })
+            valid.append(call)
+        if not params_list:
+            return {}
+        responses = lsp.query_batch(params_list, workspace_dir, concurrency=concurrency)
+        resolved: dict[str, str] = {}
+        for call, raw in zip(valid, responses):
+            key = (call.file, call.range.start_line, call.range.start_col)
+            self._requests += 1
+            if "error" in raw:
+                self._disabled_languages.add(call.language)
+                self._error = str(raw.get("error") or self._error)
+                self._cache[key] = None
+                continue
+            self._responses += 1
+            self._server = str(raw.get("server") or self._server)
+            target = _symbol_from_lsp_definition(raw.get("result"), symbols, workspace_dir)
+            if target:
+                self._resolved += 1
+                resolved[call.id] = target
+            self._cache[key] = target
+        return resolved
+
     def status(self) -> dict:
         return {
             "provider": self.name,
