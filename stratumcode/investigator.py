@@ -478,6 +478,7 @@ def investigation_stream(
     if prior_lines:
         messages.insert(2, {"role": "user", "content": "\n".join(prior_lines)})
     tools = _investigation_tools()
+    read_file_cache: dict[str, str] = {}
     final = None
     observations = [
         dict(item)
@@ -1297,6 +1298,24 @@ def investigation_stream(
                     })
                     continue
                 cache_key = _tool_cache_key(name, arguments)
+                if name == "read":
+                    cached_output = _read_from_file_cache(arguments, read_file_cache)
+                    if cached_output is not None:
+                        output = cached_output
+                        yield start_event(call_id, registry.event_type(name), {
+                            "name": name,
+                            "description": "Investigation tool",
+                            "status": "cached",
+                            "open": False,
+                            "input": json.dumps(arguments, ensure_ascii=False, indent=2),
+                            "output": output,
+                        })
+                        messages.append({
+                            "role": "tool",
+                            "tool_call_id": call_id,
+                            "content": output,
+                        })
+                        continue
                 if cache_key in tool_cache:
                     cached_observation_id = tool_cache_observation_ids.get(cache_key, "")
                     duplicate_no_progress_total += 1
@@ -1365,6 +1384,8 @@ def investigation_stream(
                         and name in _REPAIR_ALLOWED_TOOL_NAMES - {"record_investigation_findings"}
                     ),
                 )
+                if name == "read":
+                    _cache_read_full_text(arguments, output, read_file_cache)
                 repeated_tool_error_name = ""
                 repeated_tool_error_count = 0
                 tool_cache[cache_key] = output
@@ -1548,6 +1569,49 @@ def _investigation_tools() -> list[dict]:
 def _round_indexes(limit: int, start: int = 0):
     limit = int(limit or 0)
     return count(start) if limit <= 0 else range(start, start + limit)
+
+
+def _read_path_norm(path: str) -> str:
+    return str(path or "").replace("\\", "/")
+
+
+def _read_from_file_cache(arguments: dict, file_cache: dict[str, str]) -> str | None:
+    """read 文件级缓存命中：同文件不同行范围直接切行返回，跳过读盘与 LSP。
+
+    注意：完全相同参数的重复调用仍走 cache_key 的 no_progress 分支（防死循环），
+    这里只处理"文件已读过、但请求的行范围不同"的场景——这是真正省执行的地方。
+    """
+    if not arguments.get("paths"):
+        path = arguments.get("path")
+        if not isinstance(path, str) or not path.strip():
+            return None
+        full = file_cache.get(_read_path_norm(path))
+        if full is None:
+            return None
+        lines = full.splitlines()
+        start = max(0, int(arguments.get("start_line") or 1) - 1)
+        end = int(arguments.get("end_line") or len(lines))
+        selection = lines[start:end]
+        return json.dumps({
+            "title": f"read {path} L{start+1}-{min(end, len(lines))} (cached)",
+            "output": "\n".join(selection),
+            "metadata": {"cached": True},
+        }, ensure_ascii=False)
+    return None
+
+
+def _cache_read_full_text(arguments: dict, output: str, file_cache: dict[str, str]) -> None:
+    """执行成功后缓存 read 的完整文件内容（文件级缓存，供后续不同行范围命中）。"""
+    if arguments.get("paths"):
+        return
+    try:
+        data = json.loads(output or "{}")
+        full = (data.get("metadata") or {}).get("full_text")
+    except Exception:
+        return
+    path = arguments.get("path")
+    if isinstance(path, str) and path.strip() and isinstance(full, str):
+        file_cache[_read_path_norm(path)] = full
 
 
 def _blocking_investigable_count(analysis: dict | None) -> int:

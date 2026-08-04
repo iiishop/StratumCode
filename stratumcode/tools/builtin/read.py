@@ -9,6 +9,46 @@ from .common import _ignored, _resolve
 
 
 async def _read(params: dict, ctx: dict) -> ToolResult:
+    paths = params.get("paths")
+    if isinstance(paths, list) and paths:
+        return await _read_many(paths, params, ctx)
+    return await _read_one(params, ctx)
+
+
+async def _read_many(paths: list, params: dict, ctx: dict) -> ToolResult:
+    root = _resolve(".", ctx)
+    blocks = []
+    total_files = 0
+    for raw_path in paths:
+        if not isinstance(raw_path, str) or not raw_path.strip():
+            continue
+        one_params = {
+            **params,
+            "path": raw_path.strip(),
+            "paths": None,
+        }
+        result = await _read_one(one_params, ctx)
+        if result.title.startswith("[error]"):
+            blocks.append(f"==== {raw_path.strip()} ====\n[read error] {result.output}")
+        else:
+            blocks.append(f"==== {raw_path.strip()} ====\n{result.output}")
+            total_files += 1
+    if not blocks:
+        return ToolResult.err(
+            "read",
+            "paths must contain at least one non-empty file path",
+            error_code="INVALID_PATHS",
+        )
+    return ToolResult.ok(
+        f"read {total_files} file(s)",
+        "\n\n".join(blocks),
+        path=str(root),
+        total_files=total_files,
+        batched=True,
+    )
+
+
+async def _read_one(params: dict, ctx: dict) -> ToolResult:
     root = _resolve(".", ctx)
     p = _resolve(params["path"], ctx)
     if p.is_dir():
@@ -63,6 +103,7 @@ async def _read(params: dict, ctx: dict) -> ToolResult:
         mtime_ns=stat.st_mtime_ns,
         size=stat.st_size,
         total_lines=len(lines),
+        full_text=text,
         diagnostics=diagnostic_count,
         lsp_checked=bool(lsp_status.get("checked")),
         lsp_server=lsp_status.get("server", ""),
@@ -120,15 +161,23 @@ def _format_diagnostics(path, diagnostics: list[dict]) -> str:
 read_tool = ToolDef(
     name="read",
     description=(
-        "Read a file from the local filesystem. Path is relative to the workspace root. "
-        "During investigation, discovery tool calls also require reason and "
-        "target_unknown_ids (exact ids from the task contract unknowns list); "
+        "Read one or more files from the local filesystem. Paths are relative to the workspace root. "
+        "To read several files in one call, pass paths (array); the results are concatenated with "
+        "==== path ==== separators. During investigation, discovery tool calls also require reason "
+        "and target_unknown_ids (exact ids from the task contract unknowns list); "
         "do not pass those fields outside investigation."
     ),
     parameters={
         "type": "object",
         "properties": {
-            "path": {"type": "string", "description": "File path relative to workspace root"},
+            "path": {"type": "string", "description": "Single file path relative to workspace root (ignored when paths is set)"},
+            "paths": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Multiple file paths to read in one call (1-8). Results are concatenated with ==== path ==== separators.",
+                "minItems": 1,
+                "maxItems": 8,
+            },
             "start_line": {"type": "integer", "description": "First line to read (1-based, default 1)"},
             "end_line": {"type": "integer", "description": "Last line to read (inclusive, default EOF)"},
         },

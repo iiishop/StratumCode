@@ -423,6 +423,11 @@ Initial unknowns:
 User request:
 {message}
 
+## Tool usage
+- read accepts a single path, or a paths array (1-8 files) to read several files
+  in one call. When multiple files need inspection, prefer paths over repeated
+  single-path read calls; results are separated by ==== path ==== markers.
+
 {round_limit_text}"""
 
 INVESTIGATION_FINALIZE = """\
