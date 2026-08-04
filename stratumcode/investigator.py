@@ -2007,7 +2007,7 @@ def _unknown_blocks_finish(unknown_id: str | None, analysis: dict | None, record
 
 
 def _analysis_with_recorded_unknowns(analysis: dict, recorded: dict) -> dict:
-    return {
+    merged = {
         **analysis,
         "unknowns": _merge_unknowns(
             _initial_unknowns(analysis)
@@ -2015,6 +2015,13 @@ def _analysis_with_recorded_unknowns(analysis: dict, recorded: dict) -> dict:
             + _unknowns(recorded.get("new_unknowns"))
         ),
     }
+    # 已 resolve 的 unknown 会被 _open_analysis_unknowns 从 unknowns 移除，
+    # 但它们仍是任务契约的一部分——保留 resolutions 让校验层能识别（模型
+    # 可能继续为已解决的 unknown 补充证据，这不应当作"不在契约中"拒绝）。
+    recorded_resolutions = recorded.get("resolutions") if isinstance(recorded, dict) else None
+    if recorded_resolutions:
+        merged["resolutions"] = _resolutions(analysis.get("resolutions")) + _resolutions(recorded_resolutions)
+    return merged
 
 
 def _clearify_required_prompt(unknown: dict) -> str:
@@ -3959,11 +3966,21 @@ def _validate_tool_contract(
 
 
 def _known_unknowns_by_canonical_id(analysis: dict | None) -> dict[str, dict]:
-    return {
+    known: dict[str, dict] = {
         _normalize_unknown_id(item.get("id")): item
         for item in (analysis or {}).get("unknowns", [])
         if isinstance(item, dict) and _normalize_unknown_id(item.get("id"))
     }
+    # 已 resolved/deferred 的 unknown 可能被从 analysis["unknowns"] 移除
+    # （见 investigation_context._open_analysis_unknowns），但模型仍可能合法地
+    # 引用它们补充证据——从 resolutions 补回 known 表，避免误报"不在契约中"。
+    for item in (analysis or {}).get("resolutions", []):
+        if not isinstance(item, dict):
+            continue
+        known_id = _normalize_unknown_id(item.get("unknown_id"))
+        if known_id and known_id not in known:
+            known[known_id] = {"id": known_id, "resolved": True}
+    return known
 
 
 def _canonicalize_resolution_unknown_ids(
