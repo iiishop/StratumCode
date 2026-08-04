@@ -121,6 +121,8 @@ class InvestigatingUseCase:
                 for item in step.get("target_unknown_ids", [])
                 if self._unknown_tail(item)
             ]
+            # 已通过 clearify 得到答案的 unknown 不重复弹（与 _pending_product_decision_question 一致）
+            resolved_ids = self._recorded_resolved_ids(investigation)
             unknowns = [
                 item for item in (run.analysis or {}).get("unknowns", [])
                 if isinstance(item, dict)
@@ -129,6 +131,8 @@ class InvestigatingUseCase:
                 if isinstance(item, dict)
             ]
             for unknown_id in target_ids:
+                if unknown_id in resolved_ids:
+                    continue
                 unknown = next(
                     (
                         item for item in unknowns

@@ -7051,9 +7051,18 @@ def _step_result(final: dict, *, implementation_intent: bool = True) -> dict:
         }
     # 阻塞但不需要项目调查的 unknown（engineering/product/clearify 等决策类）：
     # 状态机侧触发 clearify，等待用户回答，而不是把问题塞进 open_questions 死循环。
+    # 已通过 clearify 得到答案的（resolutions 有记录）不重复触发。
+    resolved_ids = {
+        str(item.get("unknown_id") or "").strip()
+        for item in final.get("resolutions", [])
+        if isinstance(item, dict)
+        and str(item.get("status") or "") in ("resolved", "partially_resolved", "deferred")
+        and str(item.get("unknown_id") or "").strip()
+    }
     non_investigate = [
         item for item in blockers
         if item.get("resolution_strategy") != "investigate_project"
+        and not any(_same_unknown_id(item.get("id"), rid) for rid in resolved_ids)
     ]
     if non_investigate:
         item = _best_clearify_unknown(final) or non_investigate[0]
