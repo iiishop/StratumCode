@@ -1369,6 +1369,7 @@ def investigation_stream(
                     ))
                     verification_queue.pop(0)
             except Exception as exc:
+                finish_evidence_blocked = False
                 if (
                     name == "finish_investigation"
                     and isinstance(exc, ValueError)
@@ -1425,6 +1426,13 @@ def investigation_stream(
                     "input": raw_arguments,
                     "output": output,
                 })
+                if error_name == "finish_investigation" and not finish_evidence_blocked:
+                    # finish 参数错误（requires reason 等）后模型倾向停止，而停止会走自动
+                    # finalize 吞掉失败（不完整的 investigation 流向下游导致
+                    # patch_planning_failed）。hard-lock：参数类失败第一次就强制模型
+                    # 补参数重试 finish。evidence 类失败（references file/claims behavior）
+                    # 不强制——模型需要 read 补证据，锁定 finish 会死锁。
+                    current_tool_choice = {"type": "function", "function": {"name": "finish_investigation"}}
                 if repeated_tool_error_count >= MAX_REPEATED_TOOL_ERRORS:
                     finalization_reason = (
                         "Runtime recovered after repeated tool argument errors: "
@@ -1710,6 +1718,18 @@ def _tool_repair_error_json(
                 "validation_scenario_defined": True,
                 "reason": "Evidence-backed reason for each readiness field.",
             }
+        }
+    if tool_name == "finish_investigation" and "requires reason" in str(exc):
+        error["repair_instruction"] = (
+            "finish_investigation requires the 'reason' argument. Add a concise "
+            "reason (why the investigation is complete, e.g. every blocking "
+            "unknown is resolved with evidence) to partial_arguments and call "
+            "finish_investigation again. Do not stop the investigation or call "
+            "other tools."
+        )
+        error["required_argument_shape"] = {
+            "reason": "Concise completion reason (non-empty).",
+            "summary": "Optional final summary text.",
         }
     if tool_name == "clearify" and "requires product_decision or engineering_decision targets" in str(exc):
         error["retryable"] = False

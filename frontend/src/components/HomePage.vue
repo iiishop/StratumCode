@@ -409,6 +409,73 @@ function plain(value) {
   return JSON.parse(JSON.stringify(value))
 }
 
+function parseJsonField(value) {
+  if (typeof value === 'string') {
+    try { return JSON.parse(value) } catch { return value }
+  }
+  return value
+}
+
+function summarizeArgs(args) {
+  if (!args || typeof args !== 'object') return {}
+  const keys = ['operation', 'symbol', 'path', 'name', 'action', 'pattern', 'limit', 'line', 'character', 'target_unknown_ids', 'question', 'reason', 'status']
+  const out = {}
+  for (const k of keys) {
+    if (args[k] !== undefined && args[k] !== null) {
+      out[k] = typeof args[k] === 'object' ? JSON.stringify(args[k]).slice(0, 120) : String(args[k]).slice(0, 120)
+    }
+  }
+  return out
+}
+
+// AI 友好的扁平轨迹视图：摊平 messages/events，统一工具字段，解析 input 为对象。
+// 供外部分析（如 AI 审查 investigation 行为）直接读取，避免深嵌套/类型混乱。
+function buildTrace(messages) {
+  const trace = []
+  for (const msg of messages) {
+    if (!msg || typeof msg !== 'object') continue
+    const role = msg.role || ''
+    const time = msg.time || ''
+    if (role === 'user' || role === 'system') {
+      const content = typeof msg.content === 'string' ? msg.content : ''
+      if (content.trim()) {
+        trace.push({ t: time, role, stage: '', tool: '', status: '', args: { content: content.slice(0, 200) }, error: '' })
+      }
+      continue
+    }
+    const events = Array.isArray(msg.events) ? msg.events : []
+    for (const ev of events) {
+      if (!ev || typeof ev !== 'object') continue
+      const type = ev.type || ''
+      const d = ev.data && typeof ev.data === 'object' ? ev.data : {}
+      const name = d.name || ''
+      const status = d.status || ''
+      const parsed = parseJsonField(d.input)
+      const args = parsed && typeof parsed === 'object' ? parsed : { raw: String(parsed ?? '').slice(0, 200) }
+      const out = parseJsonField(d.output)
+      let error = ''
+      if (out && typeof out === 'object' && out.error) {
+        error = typeof out.error === 'string' ? out.error : JSON.stringify(out.error).slice(0, 250)
+      } else if (typeof out === 'string') {
+        error = ''
+      }
+      const t = ev.createdAt
+        ? String(ev.createdAt).length > 12 ? new Date(Number(ev.createdAt)).toISOString().slice(11, 19) : String(ev.createdAt)
+        : time
+      trace.push({
+        t,
+        role,
+        stage: type === 'stage' ? (d.phase || '') : '',
+        tool: name || (type === 'stage' || type === 'skill' ? '' : type),
+        status,
+        args: summarizeArgs(args),
+        error: error.slice(0, 250),
+      })
+    }
+  }
+  return trace
+}
+
 function snapshotState() {
   return {
     messages: plain(messages),
@@ -430,6 +497,7 @@ function sessionExport() {
     draft: input.value,
     agentStatus: plain(agentStatus),
     state: snapshotState(),
+    trace: buildTrace(messages),
   }
 }
 
