@@ -2612,6 +2612,15 @@ def _audit_recorded_findings(
                 if isinstance(item, dict)
                 and str(item.get("id") or "").strip() in target_observation_ids
             ],
+            "authorized_user_decisions": [
+                {
+                    "unknown_id": str(resolution.get("unknown_id") or "").strip(),
+                    "answer": str(resolution.get("answer") or ""),
+                }
+                for resolution in target_resolutions
+                if str(resolution.get("reason") or "") == CLEARIFY_RESOLUTION_REASON
+                and str(resolution.get("answer") or "").strip()
+            ],
             "required_unknown_ids": [unknown_id],
         }, ensure_ascii=False)
         cache_key = "audit:v2:" + hashlib.sha256(context.encode("utf-8")).hexdigest()
@@ -6657,7 +6666,7 @@ def _is_user_product_decision(
     unknown_id = str(resolution.get("unknown_id") or "").strip()
     return any(
         _same_unknown_id(item.get("id"), unknown_id)
-        and item.get("type") == "product_decision"
+        and item.get("type") in ("product_decision", "engineering_decision")
         for item in unknowns
         if isinstance(item, dict)
     )

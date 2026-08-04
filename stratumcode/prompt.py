@@ -505,6 +505,12 @@ which new product policy the requester intends. A reference baseline authorizes
 only behavior actually observed from that baseline. Do not widen or narrow scope.
 User statements authorize desired behavior and product choices, but do not
 establish code, documentation, runtime, causal, version, or external facts.
+The context's authorized_user_decisions list records answers the user gave
+through clearify for specific unknowns. Each such answer IS the authorized
+user product decision for that unknown: treat it as grounding for that
+unknown's resolution. Do not return investigate or clearify merely because no
+code observation captures the user's answer; the absence of a code observation
+is expected for a user product decision.
 A partially_resolved conclusion cannot become grounded by reinterpreting the
 same observations. Choose verify or investigate unless the resolution cites a
 completed independent verification observation.
