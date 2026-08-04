@@ -1177,7 +1177,14 @@ def _client(
 
 
 def _path_uri(path: Path) -> str:
-    return "file:///" + quote(str(path.resolve()).replace("\\", "/"), safe="/:")
+    """构造 LSP 文件 URI。
+
+    用 pathlib.as_uri() 正确处理平台绝对路径：Windows `C:\\...` -> file:///C:/...，
+    macOS `/Users/...` -> file:///Users/...。手写 "file:///" + 路径在 macOS 上
+    产生 file:////Users/...（path 以双斜杠开头且 authority 为空），LSP server
+    URL 解析报错 "[UrlError]: path cannot begin with two slash characters"。
+    """
+    return str(path.resolve().as_uri())
 
 
 class _LspClient:
