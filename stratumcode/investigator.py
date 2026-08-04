@@ -6282,6 +6282,7 @@ _DEF_READ_NOISE_SYMBOLS = frozenset({
     "subprocess", "uuid", "collections", "defaultdict", "Counter", "deque",
     "functools", "itertools", "typing", "Optional", "Any", "List", "Dict", "Set",
     "Tuple", "Union", "Callable", "Iterator", "Generator", "Iterable", "Mapping",
+    "math", "cmath", "numpy", "np",
     "startswith", "endswith", "strip", "split", "join", "replace", "lower",
     "upper", "capitalize", "title", "find", "index", "count", "append", "extend",
     "insert", "remove", "pop", "clear", "sort", "reverse", "copy", "setdefault",
@@ -6353,6 +6354,21 @@ def _require_lsp_definition_reads(
             definition_file = _lsp_definition_file(ref, symbol, workspace_dir)
             queried += 1
             if not definition_file:
+                continue
+            # 标准库/typeshed/第三方依赖的定义文件不在工作区内——这类符号
+            # （math、numpy、PyPI 包…）不可能也不应该被 read 过，直接跳过。
+            ws_files, _ = _workspace_file_catalog(workspace_dir)
+            if not ws_files:
+                continue
+            try:
+                rel_def = _normalize_path(
+                    Path(definition_file).resolve().relative_to(
+                        Path(workspace_dir).resolve()
+                    ).as_posix()
+                )
+            except (ValueError, OSError):
+                continue  # 不在工作区内
+            if rel_def not in ws_files:
                 continue
             norm_def = _normalize_path(definition_file)
             matched = any(
