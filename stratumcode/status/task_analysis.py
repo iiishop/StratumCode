@@ -428,10 +428,10 @@ def _task_slot_json(
             last_invalid_key = invalid_key
             messages.extend([
                 {"role": "assistant", "content": raw[:4000]},
-                {"role": "user", "content": (
-                    "The previous response was not valid slot JSON: "
-                    f"{exc}. Return only the requested output_contract JSON. "
-                    "Do not write final task-analysis ids, schema wrappers, or Markdown."
+                {"role": "user", "content": prompt.retry_json_instruction(
+                    exc,
+                    kind="output_contract",
+                    forbidden="final task-analysis ids, schema wrappers, or Markdown",
                 )},
             ])
             if repeated_invalid >= DEFAULT_TASK_SLOT_ATTEMPTS:

@@ -955,10 +955,10 @@ def _content_json_stream(
             last_invalid_key = invalid_key
             messages.extend([
                 {"role": "assistant", "content": text[:4000]},
-                {"role": "user", "content": (
-                    "The previous response was not valid content JSON: "
-                    f"{exc}. Return only the requested slot content JSON. "
-                    "Do not write ids, final plan fields, or Markdown."
+                {"role": "user", "content": prompt.retry_json_instruction(
+                    exc,
+                    kind="slot content",
+                    forbidden="ids, final plan fields, or Markdown",
                 )},
             ])
             if repeated_invalid >= DEFAULT_PATCH_JSON_ATTEMPTS:

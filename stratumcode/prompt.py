@@ -862,6 +862,20 @@ For an authorized step that is already satisfied by the current code, call
 finish_step with verdict=already_satisfied and cite the read evidence. For a
 wrong or impossible step, call finish_step with verdict=plan_conflict or
 verdict=blocked. Never finish a pending step in prose.
+
+finish_step verdicts are audited for plausibility; choose the verdict that
+matches the actual file state:
+- already_satisfied: only when the target file already exists and its current
+  content actually satisfies every completion condition (verify by reading it).
+  A missing or empty target file is never already_satisfied.
+- blocked: only when the step cannot be implemented as planned (missing
+  dependency, invalid plan, contradictory requirement). A target file that is
+  empty or not yet created is NOT a blocked reason — create it with
+  apply_patch(mode=create, content=...) and write the real content.
+- plan_conflict: only after implementing, when you discovered the plan
+  contradicts the approved design or acceptance criteria.
+Do not treat an un-implemented step as finished under any verdict; finish it
+through apply_patch or finish_step with the correct verdict.
 After the final successful apply_patch call, do not reread the changed files;
 validation owns post-patch semantic inspection.
 
@@ -1416,6 +1430,24 @@ def build_patch_plan_consistency_user(
             }],
         },
     }, ensure_ascii=False, indent=2)
+
+
+def retry_json_instruction(
+    exc: BaseException | str,
+    *,
+    kind: str = "content",
+    forbidden: str = "ids, schema wrappers, or Markdown",
+) -> str:
+    """统一 JSON 解析失败后的重试指令。
+
+    多处阶段（design/patch/task_analysis）共用同一套"返回纯 JSON"的引导；
+    要调整措辞或追加公共提示（如禁止 Markdown 代码块）时只改这里。
+    """
+    return (
+        "The previous response was not valid " + kind + " JSON: " + str(exc) + ". "
+        "Return only the requested " + kind + " JSON. "
+        "Do not write " + forbidden + "."
+    )
 
 
 def build_patch_step_slot_user(
