@@ -104,10 +104,6 @@ _RUNTIME_EVIDENCE_RE = re.compile(
 )
 RECORD_RECOVERY_REASON = "Record pending observations and required resolutions."
 
-# 方案 A：investigation_rounds 不再作为总轮数上限（effort 档位只决定
-# 每个 blocking unknown 的最少轮数）；max_rounds 仅作防死循环的绝对安全阀。
-MAX_INVESTIGATION_ROUNDS = 30
-
 
 class InvestigationPhase(StrEnum):
     """互斥的调查阶段：一个时刻只能处于一个 phase。
@@ -434,14 +430,11 @@ def investigation_stream(
     if rounds_per_unknown <= 0:
         rounds_per_unknown = 2
     min_rounds = _minimum_investigation_rounds(analysis, rounds_per_unknown)
-    max_rounds = (
-        int(max_rounds or 0)
-        if max_rounds is not None
-        else MAX_INVESTIGATION_ROUNDS
-    )
-    if max_rounds <= 0:
-        max_rounds = MAX_INVESTIGATION_ROUNDS
-    max_rounds = max(max_rounds, min_rounds)
+    # 方案 A：不设总轮数上限——调查由收敛条件（blocking unknown 全部解决 +
+    # ready for patch planning）驱动结束；min_rounds 只是"至少跑 N×unknowns 轮"
+    # 的深度底线。防死循环由 pass 级保护（_MAX_INVESTIGATION_PASSES）、
+    # record 无进展检测与状态机 phase 强制推进承担。
+    max_rounds = int(max_rounds or 0) if max_rounds is not None else 0
     run_id = uuid4().hex[:10]
     stage_id = f"{run_id}-stage"
     yield start_event(stage_id, "stage", {
