@@ -183,6 +183,13 @@ const availableSubagents = reactive([
     status: 'ready',
     result: 'Runs after task analysis and is available through the subagent tool.',
   },
+  {
+    id: 'available-skill-placer',
+    name: '@skill-placer',
+    task: 'Decide which skill target (global, state, or subagent) best fits a skill.',
+    status: 'ready',
+    result: 'Available from the Skills page and the subagent tool.',
+  },
 ])
 const evidenceRun = computed(() => evidenceRuns.find(run => run.id === activeRunId.value) || emptyEvidenceRun)
 const activeTaskAnalysis = computed(() => taskAnalyses[taskAnalyses.length - 1] || null)
