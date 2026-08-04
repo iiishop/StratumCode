@@ -377,30 +377,41 @@ def normalize_design_plan(plan: dict, analysis: dict, investigation: dict) -> di
     if not _analysis_authorizes_behavior_preserving_refactor(analysis):
         return plan
     allowed_refactor_symbols = set(_structured_refactor_symbols(investigation))
+    removal_authority = _structured_removal_tokens(investigation)
+    refactor_authority = set(_structured_refactor_symbols(investigation))
+    authority_available = bool(removal_authority or refactor_authority)
+    if not authority_available:
+        plan["runtime_warnings"].append(
+            "Runtime skipped structured refactor authorization because the investigation "
+            "produced no structured_findings (refactor/dead-code/duplicate candidates). "
+            "Trusting the model's design decisions; quality gate and patch planning "
+            "validation still apply."
+        )
     filtered_decisions = []
     for decision in plan["design_decisions"]:
-        unauthorized_removal = _unauthorized_removal_reason(decision, investigation)
-        if unauthorized_removal:
-            plan["runtime_warnings"].append(
-                f"Runtime removed design decision {decision.get('id') or '?'} because {unauthorized_removal}: "
-                + str(decision.get("decision") or "")[:160]
-            )
-            continue
-        unauthorized_public = _unauthorized_public_identifier_reason(decision, allowed_refactor_symbols, investigation)
-        if unauthorized_public:
-            plan["runtime_warnings"].append(
-                f"Runtime removed design decision {decision.get('id') or '?'} because {unauthorized_public}: "
-                + str(decision.get("decision") or "")[:160]
-            )
-            continue
-        unauthorized = _unauthorized_extracted_symbols(decision, allowed_refactor_symbols)
-        if unauthorized:
-            plan["runtime_warnings"].append(
-                "Runtime removed design decision "
-                f"{decision.get('id') or '?'} because it extracts symbols outside structured investigation candidates: "
-                + ", ".join(unauthorized)
-            )
-            continue
+        if authority_available:
+            unauthorized_removal = _unauthorized_removal_reason(decision, investigation)
+            if unauthorized_removal:
+                plan["runtime_warnings"].append(
+                    f"Runtime removed design decision {decision.get('id') or '?'} because {unauthorized_removal}: "
+                    + str(decision.get("decision") or "")[:160]
+                )
+                continue
+            unauthorized_public = _unauthorized_public_identifier_reason(decision, allowed_refactor_symbols, investigation)
+            if unauthorized_public:
+                plan["runtime_warnings"].append(
+                    f"Runtime removed design decision {decision.get('id') or '?'} because {unauthorized_public}: "
+                    + str(decision.get("decision") or "")[:160]
+                )
+                continue
+            unauthorized = _unauthorized_extracted_symbols(decision, allowed_refactor_symbols)
+            if unauthorized:
+                plan["runtime_warnings"].append(
+                    "Runtime removed design decision "
+                    f"{decision.get('id') or '?'} because it extracts symbols outside structured investigation candidates: "
+                    + ", ".join(unauthorized)
+                )
+                continue
         filtered_decisions.append(decision)
     plan["design_decisions"] = filtered_decisions
     existing_decisions = " ".join(
