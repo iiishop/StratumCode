@@ -573,9 +573,13 @@ function onRowLeave(el) {
         <div v-for="(task, taskIdx) in taskAnalyses" :key="task.id || taskIdx" class="task-block">
           <button class="task-block__summary" @click="toggleTask(task)">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="6"/><circle cx="12" cy="12" r="2"/></svg>
-            <span>{{ task.intent?.summary || 'Task ' + (taskIdx + 1) }}</span>
+            <span class="task-block__title">{{ task.intent?.summary || 'Task ' + (taskIdx + 1) }}</span>
             <span class="task-block__meta">
-              <small>{{ task.intent?.type || 'other' }} / {{ task.provider || 'model' }} / {{ task.model || 'unknown' }}</small>
+              <span v-if="taskProgressFor(task).total" class="task-block__progress" :title="`${taskProgressFor(task).completed}/${taskProgressFor(task).total} unknowns resolved`">
+                <i :style="{ width: taskProgressFor(task).percent + '%' }"></i>
+              </span>
+              <small class="task-block__count">{{ taskProgressFor(task).completed }}/{{ taskProgressFor(task).total }}</small>
+              <small class="task-block__type">{{ task.intent?.type || 'other' }}</small>
               <i class="task-block__chevron"></i>
             </span>
           </button>
@@ -584,7 +588,7 @@ function onRowLeave(el) {
             <div v-show="task.open" class="task-block__body">
             <div v-if="taskProgressFor(task).total" class="tk-progress">
               <div class="tk-progress-bar"><i :style="{ width: taskProgressFor(task).percent + '%' }"></i></div>
-              <span>{{ taskProgressFor(task).completed }}/{{ taskProgressFor(task).total }} unknowns resolved</span>
+              <span>{{ taskProgressFor(task).completed }}/{{ taskProgressFor(task).total }} unknowns resolved · {{ taskProgressFor(task).percent }}%</span>
             </div>
 
             <template v-if="analysisRowsFor(task).length">
@@ -635,7 +639,7 @@ function onRowLeave(el) {
                         </div>
                       </div>
 
-                      <span class="tk-item-badge">{{ item.status }}</span>
+                      <span class="tk-item-badge" :class="`is-${taskStatusIcon(item.status)}`">{{ item.status }}</span>
                     </div>
                   </div>
                 </div>
@@ -829,6 +833,39 @@ function onRowLeave(el) {
   color: #7188a3;
   font: 8.5px/1.35 var(--mono);
 }
+.task-block__title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+}
+.task-block__progress {
+  display: block;
+  width: 52px;
+  height: 4px;
+  overflow: hidden;
+  border-radius: 4px;
+  background: #e2ebf7;
+}
+.task-block__progress i {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, #1756d1, #5b8def);
+  transition: width .4s cubic-bezier(.22, 1, .36, 1);
+}
+.task-block__count {
+  color: #1756d1 !important;
+  font-weight: 700;
+}
+.task-block__type {
+  padding: 2px 5px;
+  border-radius: 4px;
+  background: rgba(23, 86, 209, .08);
+  color: #1756d1 !important;
+  font: 700 8px/1.2 var(--mono);
+  text-transform: uppercase;
+}
 .task-block__chevron {
   display: inline-block;
   width: 7px;
@@ -932,10 +969,82 @@ function onRowLeave(el) {
 .tk-item-text {
   margin: 0;
   color: #37516f;
-  font-size: 10px;
-  line-height: 1.45;
+  font-size: 11px;
+  line-height: 1.5;
   overflow-wrap: anywhere;
 }
+.tk-item-reason {
+  display: block;
+  margin-top: 2px;
+  padding: 5px 7px;
+  border-radius: 5px;
+  color: #5a7392;
+  background: rgba(124, 139, 160, .08);
+  font: 9px/1.5 var(--mono);
+  overflow-wrap: anywhere;
+}
+.tk-item-answers {
+  display: grid;
+  gap: 3px;
+  margin: 4px 0 0;
+  padding: 0;
+  list-style: none;
+}
+.tk-item-answers li {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 6px;
+  align-items: baseline;
+  padding: 4px 7px;
+  border: 1px solid #dfe8f3;
+  border-radius: 5px;
+  background: #fbfdff;
+  font-size: 10px;
+  line-height: 1.45;
+}
+.tk-item-answers b {
+  color: #1756d1;
+  font: 700 8px/1 var(--mono);
+  text-transform: uppercase;
+}
+.tk-item-answers span {
+  min-width: 0;
+  color: #4a607d;
+  overflow-wrap: anywhere;
+}
+.tk-item-trace {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 5px;
+}
+.tk-trace-step {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 6px;
+  border: 1px solid #dce6f2;
+  border-radius: 5px;
+  color: #5a7392;
+  background: #f5f8fd;
+  font: 8.5px/1.4 var(--mono);
+}
+.tk-trace-arrow {
+  color: #9fb1c8;
+}
+.tk-item-badge {
+  padding: 2px 5px;
+  border-radius: 4px;
+  color: #7c8ba0;
+  background: rgba(124, 139, 160, .1);
+  font: 700 8px/1.2 var(--mono);
+  text-transform: uppercase;
+}
+.tk-item-badge.is-check    { color: #11866f; background: rgba(17, 134, 111, .1); }
+.tk-item-badge.is-blocked  { color: #a06c00; background: rgba(196, 139, 0, .12); }
+.tk-item-badge.is-deferred { color: #7c8ba0; background: rgba(124, 139, 160, .1); }
+.tk-item-badge.is-unknown  { color: #1756d1; background: rgba(23, 86, 209, .08); }
+.tk-item-badge.is-pending  { color: #94a8c2; background: rgba(148, 168, 194, .1); }
 
 .tk-item--known .tk-item-text,
 .tk-item--added .tk-item-text,
