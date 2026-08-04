@@ -68,6 +68,30 @@ const contractItems = computed(() => {
     ['Stop', contract.stop_condition],
   ].filter(([, value]) => String(value || '').trim())
 })
+
+// 结论类工具（resolve/record/finish）像质量门一样直接显示成功/失败原因，
+// 不用展开 RESULT 才能看到。成功取 input.reason（模型的原因），失败取 output.error。
+const verdictTools = ['resolve_unknowns', 'record_investigation_findings', 'finish_investigation']
+const verdict = computed(() => {
+  if (!verdictTools.includes(props.event.name)) return null
+  let out = null
+  try { out = JSON.parse(props.event.output || '{}') } catch { /* keep null */ }
+  let inp = null
+  try { inp = JSON.parse(props.event.input || '{}') } catch { /* keep null */ }
+  if (props.event.status === 'error' || (out && out.error)) {
+    const err = out && (out.error || out.message)
+    const text = typeof err === 'string' ? err : (err && (err.message || JSON.stringify(err))) || 'Tool failed'
+    return { ok: false, text: String(text).slice(0, 600) }
+  }
+  if (inp && String(inp.reason || '').trim()) {
+    return { ok: true, text: String(inp.reason).slice(0, 600) }
+  }
+  if (props.event.name === 'resolve_unknowns' && Array.isArray(out && out.unknown_ids)) {
+    return { ok: true, text: `Resolved ${out.unknown_ids.join(', ')}` }
+  }
+  if (out && out.recorded) return { ok: true, text: 'Findings recorded' }
+  return null
+})
 </script>
 
 <template>
@@ -82,6 +106,10 @@ const contractItems = computed(() => {
     @toggle="event.open = !event.open"
   >
     <div class="tool-io">
+      <div v-if="verdict" class="tool-io__verdict" :class="verdict.ok ? 'is-ok' : 'is-error'">
+        <span>{{ verdict.ok ? 'SUCCESS' : 'FAILED' }}</span>
+        <p><HighlightedText :text="verdict.text" /></p>
+      </div>
       <div v-if="contractItems.length" class="tool-io__contract">
         <span>CONTRACT</span>
         <dl>
@@ -119,6 +147,25 @@ const contractItems = computed(() => {
   gap: 8px;
   align-items: start;
   min-width: 0;
+}
+
+.tool-io__verdict p {
+  min-width: 0;
+  margin: 0;
+  padding: 8px 12px;
+  border: 1px solid rgba(17, 134, 111, .16);
+  border-radius: 8px;
+  color: #0d6f5c;
+  background: rgba(17, 134, 111, .055);
+  font: var(--font-code, 12px)/1.55 var(--mono, monospace);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.tool-io__verdict.is-error p {
+  border-color: rgba(196, 71, 71, .18);
+  color: #7b2e2e;
+  background: rgba(196, 71, 71, .055);
 }
 
 .tool-io span {
