@@ -192,9 +192,36 @@ def implementation_stream(
                     verdict = str(finish.get("verdict") or arguments.get("verdict") or "")
                     step_id = str(finish.get("step_id") or arguments.get("step_id") or "").strip()
                     if verdict == "already_satisfied":
-                        applied_steps.add(step_id)
-                        satisfied_steps.append(finish or dict(arguments))
-                        round_made_progress = True
+                        # already_satisfied 必须真实满足完成条件——空文件/未实现的内容
+                        # 不能声明已满足（否则 step 被关闭后无法重试，死局）。
+                        # 文件缺失/空直接拒绝（不依赖反引号字面量）；文件非空时再用
+                        # completion_condition_issues 做字面量校验。
+                        implausible = _finish_step_blocked_implausible(patch_plan, step_id, workspace_dir)
+                        condition_issues = _completion_condition_issues(
+                            patch_plan, workspace_dir, {*applied_steps, step_id}
+                        )
+                        if implausible or condition_issues:
+                            detail = implausible or "\n".join(f"- {item}" for item in condition_issues[:5])
+                            output = json.dumps({
+                                "error": (
+                                    f"finish_step verdict 'already_satisfied' is rejected: {detail}. "
+                                    "Implement the step with apply_patch before finishing."
+                                ),
+                                "retryable": True,
+                            }, ensure_ascii=False)
+                            yield start_event(call_id, "tool", {
+                                "name": "finish_step",
+                                "description": "Finish an authorized implementation step",
+                                "status": "error",
+                                "open": False,
+                                "input": function.get("arguments") or "{}",
+                                "output": output,
+                            })
+                            round_had_patch_failure = True
+                        else:
+                            applied_steps.add(step_id)
+                            satisfied_steps.append(finish or dict(arguments))
+                            round_made_progress = True
                     else:
                         # blocked/plan_conflict 只有在步骤确实被实现过（目标文件非空）时才成立。
                         # 目标文件缺失/为空说明步骤从未被实现——拒绝并引导 apply_patch，

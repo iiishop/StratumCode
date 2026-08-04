@@ -328,6 +328,10 @@ def _prepare_create(file_patch: dict, path: Path, root: Path) -> dict:
     if path.exists():
         raise PatchError("FILE_ALREADY_EXISTS", str(path.relative_to(root)))
     content = str(file_patch.get("content") or "")
+    if not content.strip():
+        # 空 content 创建 = 空文件占位，完成条件永远无法满足，且 mark_step_applied
+        # 会把该 step 标记为已应用，后续无法重试 → 死局（MyCAS IS1 实测）。
+        raise PatchError("INVALID_REQUEST", f"create mode requires non-empty content for {str(path.relative_to(root))}")
     after = content.encode("utf-8")
     return {
         "path": path,
