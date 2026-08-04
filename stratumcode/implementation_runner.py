@@ -196,20 +196,43 @@ def implementation_stream(
                         satisfied_steps.append(finish or dict(arguments))
                         round_made_progress = True
                     else:
-                        reason = _rollback_checkpoint_reason(
-                            f"Implementation step {step_id or '?'} reported {verdict or 'blocked'}: "
-                            f"{finish.get('summary') or arguments.get('summary') or ''}",
-                            rollback_ids,
-                            workspace_dir,
-                            _authorization_id(patch_plan),
-                        )
-                        yield start_event(f"{run_id}-finish-step-checkpoint", "output", _checkpoint_output(reason))
-                        yield {"op": "update", "id": stage_id, "patch": {
-                            "state": "failed",
-                            "phase": f"implementation_{verdict or 'blocked'}_checkpoint",
-                            "reason": reason,
-                        }}
-                        return
+                        # blocked/plan_conflict 只有在步骤确实被实现过（目标文件非空）时才成立。
+                        # 目标文件缺失/为空说明步骤从未被实现——拒绝并引导 apply_patch，
+                        # 否则模型 read 到空文件就误报 blocked，整个任务失败（MyCAS IS1 实测）。
+                        implausible = _finish_step_blocked_implausible(patch_plan, step_id, workspace_dir)
+                        if implausible and verdict in ("blocked", "plan_conflict"):
+                            output = json.dumps({
+                                "error": (
+                                    f"finish_step verdict '{verdict}' is rejected: {implausible}. "
+                                    "The step was never implemented. Use apply_patch to create/modify "
+                                    "the target file with real content before finishing the step."
+                                ),
+                                "retryable": True,
+                            }, ensure_ascii=False)
+                            yield start_event(call_id, "tool", {
+                                "name": "finish_step",
+                                "description": "Finish an authorized implementation step",
+                                "status": "error",
+                                "open": False,
+                                "input": function.get("arguments") or "{}",
+                                "output": output,
+                            })
+                            round_had_patch_failure = True
+                        else:
+                            reason = _rollback_checkpoint_reason(
+                                f"Implementation step {step_id or '?'} reported {verdict or 'blocked'}: "
+                                f"{finish.get('summary') or arguments.get('summary') or ''}",
+                                rollback_ids,
+                                workspace_dir,
+                                _authorization_id(patch_plan),
+                            )
+                            yield start_event(f"{run_id}-finish-step-checkpoint", "output", _checkpoint_output(reason))
+                            yield {"op": "update", "id": stage_id, "patch": {
+                                "state": "failed",
+                                "phase": f"implementation_{verdict or 'blocked'}_checkpoint",
+                                "reason": reason,
+                            }}
+                            return
             except Exception as exc:
                 if name == "apply_patch":
                     round_had_patch_failure = True
@@ -444,6 +467,33 @@ def _rollback_patch_ids(rollback_ids: list[str], workspace_dir: str, authorizati
             issues.append(f"{rollback_id}: {exc.code}: {exc.message}")
             break
     return issues
+
+
+def _finish_step_blocked_implausible(patch_plan: dict, step_id: str, workspace_dir: str) -> str | None:
+    """Return a reason when a blocked/plan_conflict verdict is implausible.
+
+    A step that was never implemented (target file missing or empty) cannot be
+    legitimately blocked: blocking/conflict verdicts only make sense after real
+    content exists. None means the verdict is plausible (file exists non-empty).
+    """
+    if not step_id:
+        return None
+    root = Path(workspace_dir or ".").resolve()
+    for step in patch_plan.get("implementation_steps") or []:
+        if not isinstance(step, dict):
+            continue
+        if str(step.get("id") or "").strip() != step_id:
+            continue
+        rel = str(step.get("file") or "").strip()
+        if not rel:
+            return None
+        path = (root / rel).resolve()
+        if not path.exists():
+            return f"target file does not exist: {rel}"
+        if path.stat().st_size == 0:
+            return f"target file is empty (0 bytes): {rel}"
+        return None
+    return None
 
 
 def _completion_condition_issues(patch_plan: dict, workspace_dir: str, applied_steps: set[str]) -> list[str]:
