@@ -896,35 +896,6 @@ def investigation_stream(
                             current_tool_choice = {"type": "function", "function": {"name": "finish_investigation"}}
                         continue
                     if (
-                        pending_observation_ids
-                        and not resolution_required_ids
-                        and not _has_finding_fields(arguments)
-                    ):
-                        output = json.dumps({
-                            "recorded": False,
-                            "code": "no_material_findings",
-                            "pending_observation_ids": pending_observation_ids,
-                            "next_action": "continue_discovery",
-                        }, ensure_ascii=False)
-                        yield start_event(call_id, "tool", {
-                            "name": name,
-                            "description": "Record investigation findings",
-                            "status": "done",
-                            "open": False,
-                            "input": json.dumps(arguments, ensure_ascii=False, indent=2),
-                            "output": output,
-                        })
-                        messages.append({
-                            "role": "tool",
-                            "tool_call_id": call_id,
-                            "content": output,
-                        })
-                        already_resolved_error_count += 1
-                        if already_resolved_error_count >= 2:
-                            # Hard-lock: force the model to call finish_investigation
-                            current_tool_choice = {"type": "function", "function": {"name": "finish_investigation"}}
-                        continue
-                    if (
                         not _has_finding_fields(arguments)
                         or (
                             analysis.get("_canonicalized")
