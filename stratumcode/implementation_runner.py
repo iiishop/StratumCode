@@ -23,6 +23,10 @@ from .agent_runtime import (
 )
 from .tools import registry
 
+# 模型以 prose 结束但仍有待办步骤时的最大连续重试次数（半途而废挽救），
+# 超过后才判定实现失败。
+MAX_PROSE_ENDINGS = 2
+
 TERMINAL_TOOLS = ("terminal", "process", "read_terminal")
 IMPLEMENTATION_TOOLS = ("read", *TERMINAL_TOOLS, "apply_patch", "finish_step")
 VALIDATION_TOOLS = ("read", "code_nav", *TERMINAL_TOOLS)
@@ -76,6 +80,7 @@ def implementation_stream(
     consecutive_error_rounds = 0
     consecutive_patch_error_rounds = 0
     no_progress_rounds = 0
+    prose_endings_without_progress = 0
     inspected_ranges: set[tuple[str, str, str]] = set()
     applied_steps: set[str] = set()
     changed_files: list[str] = []
@@ -107,6 +112,18 @@ def implementation_stream(
             final_text = text.strip()
             missing_steps = _missing_steps(required_steps, applied_steps)
             if missing_steps:
+                # 模型输出 prose 但仍有步骤未完成——这通常是"半途而废"（例如
+                # apply_patch 时 step_complete=false 后忘了回来补完）。给重试机会
+                # 让模型继续完成，而不是直接失败；连续 prose 结束才判定失败。
+                prose_endings_without_progress += 1
+                if prose_endings_without_progress <= MAX_PROSE_ENDINGS:
+                    messages.append({"role": "user", "content": (
+                        "You ended with prose, but these authorized steps are still pending: "
+                        + ", ".join(missing_steps)
+                        + ". Continue by calling apply_patch (or finish_step) to complete them; "
+                        "do not end with prose while they are pending."
+                    )})
+                    continue
                 reason = _rollback_checkpoint_reason(
                     "Implementation returned prose while authorized steps were still pending. "
                     "Each pending step must finish through apply_patch or finish_step, not by assistant text. "
