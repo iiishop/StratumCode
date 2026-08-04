@@ -666,7 +666,11 @@ def validate_patch_plan(plan: dict, analysis: dict, design_plan: dict, workspace
     }
     unknown_skipped_decisions = sorted(skipped_decision_ids - decision_ids)
     if unknown_skipped_decisions:
-        issues.append("runtime_skipped_decisions references unknown design decisions: " + ", ".join(unknown_skipped_decisions))
+        issues.append(
+            "runtime_skipped_decisions references unknown design decisions: "
+            + ", ".join(unknown_skipped_decisions)
+            + f". Available design decision ids: {sorted(decision_ids)}"
+        )
     if "runtime_revision_decision_ids" in design_plan:
         revision_decision_ids = set(_strings(design_plan.get("runtime_revision_decision_ids")))
         unknown_revision_decisions = sorted(revision_decision_ids - decision_ids)
@@ -674,6 +678,7 @@ def validate_patch_plan(plan: dict, analysis: dict, design_plan: dict, workspace
             issues.append(
                 "runtime_revision_decision_ids references unknown design decisions: "
                 + ", ".join(unknown_revision_decisions)
+                + f". Available design decision ids: {sorted(decision_ids)}"
             )
         required_decision_ids = decision_ids & revision_decision_ids
     else:
@@ -703,6 +708,7 @@ def validate_patch_plan(plan: dict, analysis: dict, design_plan: dict, workspace
             issues.append(
                 f"runtime_skipped_decisions {decision_id} references unknown project facts: "
                 + ", ".join(unknown_refs)
+                + f". Available project fact ids: {sorted(fact_ids)}"
             )
     steps = plan.get("implementation_steps") or []
     no_patch_plan = not steps and bool(skipped_decision_ids)
@@ -738,7 +744,14 @@ def validate_patch_plan(plan: dict, analysis: dict, design_plan: dict, workspace
     step_files = {item.get("file") for item in steps if item.get("file")}
     files = set(plan.get("files_to_change") or [])
     if files != step_files:
-        issues.append("files_to_change must match implementation step files")
+        missing_from_steps = sorted(files - step_files)
+        missing_from_files = sorted(step_files - files)
+        detail = (
+            f"files_to_change must match implementation step files. "
+            f"In files_to_change but not in steps: {missing_from_steps}. "
+            f"In steps but not in files_to_change: {missing_from_files}."
+        )
+        issues.append(detail)
     missing_ac = sorted(criteria_ids - {
         item.get("acceptance_id")
         for item in plan.get("acceptance_mapping", [])
@@ -770,7 +783,7 @@ def validate_patch_plan(plan: dict, analysis: dict, design_plan: dict, workspace
             continue
         mode = str(step.get("mode") or "modify").strip()
         if mode not in {"modify", "create"}:
-            issues.append(f"step {step_id} has invalid mode: {mode}")
+            issues.append(f"step {step_id} has invalid mode: {mode} (valid modes: modify, create)")
         if not step.get("target"):
             issues.append(f"step {step_id} has no target")
         if file_issue := _planned_file_issue(step["file"], mode, workspace):
@@ -796,6 +809,7 @@ def validate_patch_plan(plan: dict, analysis: dict, design_plan: dict, workspace
             issues.append(
                 f"step {step_id} references files outside its structured file: "
                 + ", ".join(unlisted_files)
+                + f". Allowed files for this step: {sorted({structured_file, *reference_files, *boundary_files})}"
             )
         if not step.get("action"):
             issues.append(f"step {step_id} has no action")
@@ -807,18 +821,21 @@ def validate_patch_plan(plan: dict, analysis: dict, design_plan: dict, workspace
             issues.append(f"step {step_id} has no minimality_check")
         if criteria_ids or decision_ids:
             if not (set(step.get("acceptance_ids") or []) & criteria_ids or set(step.get("decision_ids") or []) & decision_ids):
-                issues.append(f"step {step_id} does not cite a valid AC or design decision")
+                issues.append(
+                    f"step {step_id} does not cite a valid AC or design decision. "
+                    f"Available AC ids: {sorted(criteria_ids)}. Available design decision ids: {sorted(decision_ids)}"
+                )
         if fact_ids and not step.get("project_fact_ids"):
             issues.append(f"step {step_id} has no project_fact_ids")
         for ref in step.get("acceptance_ids") or []:
             if ref not in criteria_ids:
-                issues.append(f"step {step_id} references unknown acceptance id: {ref}")
+                issues.append(f"step {step_id} references unknown acceptance id: {ref}. Available AC ids: {sorted(criteria_ids)}")
         for ref in step.get("decision_ids") or []:
             if ref not in decision_ids:
-                issues.append(f"step {step_id} references unknown design decision: {ref}")
+                issues.append(f"step {step_id} references unknown design decision: {ref}. Available design decision ids: {sorted(decision_ids)}")
         for ref in step.get("project_fact_ids") or []:
             if fact_ids and ref not in fact_ids:
-                issues.append(f"step {step_id} references unknown project fact id: {ref}")
+                issues.append(f"step {step_id} references unknown project fact id: {ref}. Available project fact ids: {sorted(fact_ids)}")
         for symbol in _structured_skip_symbols(investigation or {}):
             text = " ".join([
                 str(step.get("purpose") or ""),
@@ -853,20 +870,23 @@ def validate_patch_plan(plan: dict, analysis: dict, design_plan: dict, workspace
         issues.append("design decisions missing implementation step coverage: " + ", ".join(missing_decisions))
     for item in plan.get("responsibility_chain", []):
         if item.get("step_id") not in step_ids:
-            issues.append(f"responsibility_chain references unknown step: {item.get('step_id')}")
+            issues.append(f"responsibility_chain references unknown step: {item.get('step_id')}. Available step ids: {sorted(step_ids)}")
         if not item.get("removal_breaks"):
             issues.append(f"responsibility_chain {item.get('step_id') or '?'} has no removal_breaks")
         if fact_ids and not item.get("project_fact_ids"):
             issues.append(f"responsibility_chain {item.get('step_id') or '?'} has no project_fact_ids")
         for req in item.get("requirement_ids", []):
             if req not in criteria_ids and req not in requirement_ids:
-                issues.append(f"responsibility_chain references unknown requirement or acceptance id: {req}")
+                issues.append(
+                    f"responsibility_chain references unknown requirement or acceptance id: {req}. "
+                    f"Available AC ids: {sorted(criteria_ids)}. Available requirement ids: {sorted(requirement_ids)}"
+                )
         for decision in item.get("decision_ids", []):
             if decision not in decision_ids:
-                issues.append(f"responsibility_chain references unknown design decision: {decision}")
+                issues.append(f"responsibility_chain references unknown design decision: {decision}. Available design decision ids: {sorted(decision_ids)}")
         for ref in item.get("project_fact_ids") or []:
             if fact_ids and ref not in fact_ids:
-                issues.append(f"responsibility_chain references unknown project fact id: {ref}")
+                issues.append(f"responsibility_chain references unknown project fact id: {ref}. Available project fact ids: {sorted(fact_ids)}")
     if analysis.get("intent", {}).get("type") in {"feature", "bugfix"} and not plan.get("tests_or_checks"):
         issues.append("feature/bugfix patch plan requires at least one test or check")
     return issues
