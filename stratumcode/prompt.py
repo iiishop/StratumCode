@@ -336,11 +336,13 @@ Principles:
 - Prefer current project facts over framework defaults or general knowledge.
 - Source-code investigation MUST start with LSP navigation: code_nav symbols for a
   known file, code_nav inspect/definition/references for a known symbol, then
-  read only the relevant line ranges as grounding evidence. The first tool for a
-  source-code question is code_nav; fall back to grep/read only when code_nav
-  reports an unavailable language server or the question is a literal text
-  search. If code_nav reports an unavailable language server, use lsp_tool
-  status/install once for that language, then retry or fall back to grep/read.
+  read only the relevant line ranges as grounding evidence. Looking up a
+  function/class/variable's definition, references, or call sites is a semantic
+  query — use code_nav even if the symbol name looks like a plain string. grep is
+  only for literal text patterns that are NOT symbol lookups (error strings, log
+  text, comments, UI labels). If code_nav reports an unavailable language
+  server, use lsp_tool status/install once for that language, then retry or
+  fall back to grep/read.
   Use python_static_check first for Python duplicate/dead-code/import audits.
   Reuse previous observations before repeating discovery.
 - Use terminal for runtime facts or project commands. Set background=true for
