@@ -1365,7 +1365,10 @@ def _check_grounding_issues(
                 for command in _strings(facts[fact_slot - 1].get("verification_commands"))
             }
             if checks[check_slot - 1] not in allowed_commands:
-                issues.append(f"check_grounding check {check_slot} command is not authorized by project facts")
+                issues.append(
+                    f"check_grounding check {check_slot} command is not authorized by project facts. "
+                    f"Authorized commands for fact slot {fact_slots}: {sorted(allowed_commands)}"
+                )
         if not str(item.get("reason") or "").strip():
             issues.append(f"check_grounding check {check_slot} has no reason")
     missing = sorted(set(range(1, check_count + 1)) - covered)
