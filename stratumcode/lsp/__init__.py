@@ -291,11 +291,39 @@ def _run_checked(command: list[str], timeout: int) -> subprocess.CompletedProces
     return result
 
 
+def _parse_nvim_version(first_line: str) -> tuple[int, int] | None:
+    """从 `nvim --version` 首行解析 (major, minor)。如 "NVIM v0.9.4" -> (0, 9)。"""
+    m = re.match(r".*NVIM\s+v?(\d+)\.(\d+)", first_line or "")
+    if not m:
+        return None
+    return (int(m.group(1)), int(m.group(2)))
+
+
+def _nvim_supports_mason() -> tuple[bool, str]:
+    """检查 nvim 是否 >= 0.10（mason.nvim 最低要求）。返回 (是否满足, 版本描述)。"""
+    nvim = _tool_command("nvim")
+    if not nvim:
+        return False, "no nvim"
+    try:
+        result = subprocess.run([nvim, "--version"], capture_output=True, text=True, timeout=10)
+    except (subprocess.TimeoutExpired, OSError) as exc:
+        return False, f"cannot read nvim version: {exc}"
+    first = (result.stdout or "").strip().splitlines()[0] if (result.stdout or "").strip() else ""
+    parsed = _parse_nvim_version(first)
+    if parsed is None:
+        return False, first or "unknown nvim version"
+    return (parsed >= (0, 10)), first.strip()
+
+
 def install_mason() -> dict:
     if not _tool_command("git"):
         raise ValueError("git is required to install mason.nvim")
-    if not _tool_command("nvim"):
-        raise ValueError("Neovim (nvim >= 0.10) is required to run mason.nvim")
+    nvim_ok, nvim_version = _nvim_supports_mason()
+    if not nvim_ok:
+        raise ValueError(
+            "Neovim (nvim >= 0.10) is required to run mason.nvim; "
+            f"found {nvim_version or 'no nvim'}. Please upgrade Neovim and retry."
+        )
     plugin = LSP_ROOT / "mason.nvim"
     if not plugin.exists():
         try:
@@ -324,6 +352,12 @@ def _write_mason_shim(plugin: Path) -> None:
     nvim = _tool_command("nvim")
     if not nvim:
         raise ValueError("Neovim (nvim >= 0.10) is required to run mason.nvim")
+    nvim_ok, nvim_version = _nvim_supports_mason()
+    if not nvim_ok:
+        raise ValueError(
+            "Neovim (nvim >= 0.10) is required to run mason.nvim; "
+            f"found {nvim_version or 'no nvim'}. Please upgrade Neovim and retry."
+        )
     nvim_arg = nvim.replace("\\", "/")
     if os.name == "nt":
         bin_path.write_text(
