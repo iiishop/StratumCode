@@ -322,9 +322,9 @@ project overview.
 
 Principles:
 - Maintain multiple grounded beliefs instead of one global hypothesis.
-- Reduce the task unknowns with the cheapest useful evidence. Code/doc/runtime
-  unknowns should be investigated; user-visible product decisions become
-  clearify only after project evidence cannot decide them.
+- Reduce the task unknowns with the cheapest *reliable* evidence. Semantic
+  lookups (symbol definition/references/call sites) are cheapest via code_nav,
+  not whole-file reads or broad greps.
 - Resolve every blocking fact required by a read_only deliverable before finishing.
   Do not replace requested audit categories with framework or project-structure facts.
 - When a read_only contract has no project unknowns, answer its acceptance criteria
@@ -342,7 +342,10 @@ Principles:
   only for literal text patterns that are NOT symbol lookups (error strings, log
   text, comments, UI labels). If code_nav reports an unavailable language
   server, use lsp_tool status/install once for that language, then retry or
-  fall back to grep/read.
+  fall back to grep/read. Do not read an entire file just to locate a symbol's
+  usages: code_nav references returns the exact sites; read only those cited
+  line ranges. If you find yourself about to read a whole file for a symbol
+  lookup, call code_nav first instead.
   Use python_static_check first for Python duplicate/dead-code/import audits.
   Reuse previous observations before repeating discovery.
 - Use terminal for runtime facts or project commands. Set background=true for
