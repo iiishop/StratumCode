@@ -1688,11 +1688,11 @@ def _tool_repair_error_json(
                 "reason": "Evidence-backed reason for each readiness field.",
             }
         }
-    if tool_name == "clearify" and "requires product_decision targets" in str(exc):
+    if tool_name == "clearify" and "requires product_decision or engineering_decision targets" in str(exc):
         error["retryable"] = False
         error["required_action"] = "resolve_or_investigate_contract_unknown"
         error["repair_instruction"] = (
-            "Do not retry clearify for non-product-decision unknowns. "
+            "Do not retry clearify for non-decision unknowns. "
             "Resolve the contract unknown from project evidence or continue discovery."
         )
     else:
@@ -3962,13 +3962,15 @@ def _validate_tool_contract(
     if unknown:
         raise ValueError(f"{name} target_unknown_ids not in task contract: {', '.join(unknown)}")
     if name == "clearify":
+        # engineering_decision（如 CLI 输入格式约定）同样是用户偏好型决策，
+        # _pending_clearify_unknown 已允许它们进入 CLEARIFY 阶段——工具校验必须同步放宽。
         invalid = [
             item for item in target_unknown_ids
-            if known.get(_normalize_unknown_id(item), {}).get("type") != "product_decision"
+            if known.get(_normalize_unknown_id(item), {}).get("type") not in ("product_decision", "engineering_decision")
         ]
         if invalid:
             raise ValueError(
-                "clearify requires product_decision targets: " + ", ".join(invalid)
+                "clearify requires product_decision or engineering_decision targets: " + ", ".join(invalid)
             )
 
 
