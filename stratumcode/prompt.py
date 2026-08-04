@@ -321,7 +321,6 @@ requested evidence-backed answer, review, audit, or report instead of a generic
 project overview.
 
 Principles:
-- Maintain multiple grounded beliefs instead of one global hypothesis.
 - Reduce the task unknowns with the cheapest *reliable* evidence. Semantic
   lookups (symbol definition/references/call sites) are cheapest via code_nav,
   not whole-file reads or broad greps.
@@ -347,7 +346,6 @@ Principles:
   line ranges. If you find yourself about to read a whole file for a symbol
   lookup, call code_nav first instead.
   Use python_static_check first for Python duplicate/dead-code/import audits.
-  Reuse previous observations before repeating discovery.
 - Use terminal for runtime facts or project commands. Set background=true for
   servers, watchers, or slow commands, then use process/read_terminal to inspect
   the same session instead of starting duplicate commands.
@@ -378,8 +376,6 @@ Principles:
   camel/kebab/singular/plural variants before concluding absence.
 - Use hypothesis-verifier only for an atomic inference that matters to the
   planned patch and is not directly observed.
-- Discovery tool unknown_id values must come from the current task contract.
-  Register newly discovered unknowns through finding slots before targeting them.
 - New investigation unknowns are only for material unresolved facts. Do not turn
   implementation mechanisms or design choices into blocking investigation unknowns;
   Design owns those choices once the current behavior and constraints are grounded.
