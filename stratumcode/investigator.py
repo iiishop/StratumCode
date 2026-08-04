@@ -3940,7 +3940,12 @@ def _validate_tool_contract(
         if known and _normalize_unknown_id(item) not in known
     ]
     if unknown:
-        raise ValueError(f"{name} target_unknown_ids not in task contract: {', '.join(unknown)}")
+        valid_ids = sorted(known) if known else []
+        raise ValueError(
+            f"{name} target_unknown_ids not in task contract: {', '.join(unknown)}. "
+            "Use exact unknown ids from the task contract unknowns list"
+            + (f": {', '.join(valid_ids[:12])}" + ("..." if len(valid_ids) > 12 else "") if valid_ids else "")
+        )
     if name == "clearify":
         # engineering_decision（如 CLI 输入格式约定）同样是用户偏好型决策，
         # _pending_clearify_unknown 已允许它们进入 CLEARIFY 阶段——工具校验必须同步放宽。
@@ -5893,9 +5898,13 @@ def _validate_resolution_refs(resolutions: list[dict], beliefs: list[dict], obse
     for resolution in resolutions:
         missing_evidence = _normalize_evidence_refs(resolution, evidence_ids, observation_refs)
         if missing_evidence:
+            sample_ids = sorted(evidence_ids)[:8]
             raise ValueError(
                 f"resolution {resolution['unknown_id']} references unknown evidence ids: "
                 + ", ".join(missing_evidence)
+                + ". Evidence ids must be observation ids returned by read/glob/grep "
+                "(not tool call ids)"
+                + (f"; current observations: {', '.join(sample_ids)}" + ("..." if len(evidence_ids) > 8 else "") if sample_ids else "")
             )
         missing_beliefs = [item for item in resolution.get("belief_ids", []) if item not in belief_by_id]
         if missing_beliefs:

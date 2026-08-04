@@ -119,7 +119,12 @@ def _format_diagnostics(path, diagnostics: list[dict]) -> str:
 
 read_tool = ToolDef(
     name="read",
-    description="Read a file from the local filesystem. Path is relative to the workspace root.",
+    description=(
+        "Read a file from the local filesystem. Path is relative to the workspace root. "
+        "During investigation, discovery tool calls also require reason and "
+        "target_unknown_ids (exact ids from the task contract unknowns list); "
+        "do not pass those fields outside investigation."
+    ),
     parameters={
         "type": "object",
         "properties": {

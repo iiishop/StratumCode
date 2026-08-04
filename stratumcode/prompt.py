@@ -350,6 +350,10 @@ Principles:
   hypothesis must be falsifiable, the expected observation must name what the tool
   result can show, and the decision impact must say which unknown/belief/branch
   will change. "Learn more" or "inspect related code" is not a valid reason.
+- target_unknown_ids must use the exact unknown ids from the task contract unknowns
+  list (for example U1, U2). Copy them exactly; do not invent, renumber, or guess ids.
+- For resolve_unknowns, evidence ids must be observation ids returned by
+  read/glob/grep tools; never use tool call ids like call_... as evidence.
 - Continue discovery while the current hypothesis still has uncovered evidence
   requirements. Call resolve_unknowns only when an unknown has a real answer or
   a meaningful partial answer; call record_investigation_findings only for
