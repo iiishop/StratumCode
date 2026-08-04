@@ -1208,7 +1208,13 @@ def investigation_stream(
                         str(item.get("unknown_id") or "").strip()
                         for item in recorded_findings.get("resolutions", [])
                         if isinstance(item, dict)
-                        and item.get("reason") == CLEARIFY_RESOLUTION_REASON
+                        and (
+                            item.get("reason") in (CLEARIFY_RESOLUTION_REASON, CLEARIFY_UNRESOLVED_REASON)
+                            or (
+                                str(item.get("status") or "") in ("resolved", "partially_resolved")
+                                and str(item.get("answer") or "").strip()
+                            )
+                        )
                     }
                     target_ids = [
                         item for item in target_ids
@@ -1973,12 +1979,13 @@ def _pending_clearify_unknown(
     for item in candidates:
         if (
             item.get("blocking")
-            and item.get("type") == "product_decision"
+            and item.get("type") in ("product_decision", "engineering_decision")
             and not any(_same_unknown_id(item["id"], completed_id) for completed_id in completed)
             and not any(_same_unknown_id(item["id"], delegated_id) for delegated_id in delegated)
             and (
                 item.get("resolution_strategy") == "clearify"
                 or any(_same_unknown_id(item["id"], pending_id) for pending_id in needs_clearify)
+                or item.get("type") == "engineering_decision"
             )
         ):
             result = dict(item)
@@ -7015,7 +7022,19 @@ def _investigation_task_updates(value, unknowns: list[dict], resolutions: list[d
 
 def _step_result(final: dict, *, implementation_intent: bool = True) -> dict:
     blockers = [item for item in final.get("unknowns", []) if item.get("blocking")]
-    investigate = [item for item in blockers if item.get("resolution_strategy") == "investigate_project"]
+    # 已通过 clearify/调查得到答案的（resolutions 有记录）不再要求继续调查或重复弹窗
+    resolved_ids = {
+        str(item.get("unknown_id") or "").strip()
+        for item in final.get("resolutions", [])
+        if isinstance(item, dict)
+        and str(item.get("status") or "") in ("resolved", "partially_resolved", "deferred")
+        and str(item.get("unknown_id") or "").strip()
+    }
+    investigate = [
+        item for item in blockers
+        if item.get("resolution_strategy") == "investigate_project"
+        and not any(_same_unknown_id(item.get("id"), rid) for rid in resolved_ids)
+    ]
     clearify = [item for item in blockers if item.get("resolution_strategy") == "clearify"]
     unresolved_ids = [item["id"] for item in blockers if item.get("id")]
     if final.get("runtime_failure") and (not blockers or _runtime_failure_blocks_continue(final)):
@@ -7050,36 +7069,19 @@ def _step_result(final: dict, *, implementation_intent: bool = True) -> dict:
             "unknowns": final.get("unknowns", []),
         }
     # 阻塞但不需要项目调查的 unknown（engineering/product/clearify 等决策类）：
-    # 状态机侧触发 clearify，等待用户回答，而不是把问题塞进 open_questions 死循环。
-    # 已通过 clearify 得到答案的（resolutions 有记录）不重复触发。
-    resolved_ids = {
-        str(item.get("unknown_id") or "").strip()
-        for item in final.get("resolutions", [])
-        if isinstance(item, dict)
-        and str(item.get("status") or "") in ("resolved", "partially_resolved", "deferred")
-        and str(item.get("unknown_id") or "").strip()
-    }
+    # 继续调查，由 _pending_clearify_unknown 在 investigation_stream 内部强制
+    # 进入 CLEARIFY 阶段（模型调 clearify 工具）——clearify 只有内部这一条路径。
     non_investigate = [
         item for item in blockers
         if item.get("resolution_strategy") != "investigate_project"
         and not any(_same_unknown_id(item.get("id"), rid) for rid in resolved_ids)
     ]
     if non_investigate:
-        item = _best_clearify_unknown(final) or non_investigate[0]
-        question = _display_question_for_unknown(item, final)
-        if _is_placeholder_question(question, item.get("id")):
-            question = next(
-                (
-                    str(candidate.get("question") or "").strip()
-                    for candidate in non_investigate
-                    if not _is_placeholder_question(candidate.get("question"), candidate.get("id"))
-                ),
-                question,
-            )
+        question = "; ".join(str(item.get("question") or "").strip() for item in non_investigate[:3])
         return {
-            "next_step": "clearify",
-            "continue_reason": question,
-            "target_unknown_ids": [item["id"]],
+            "next_step": "continue_investigation",
+            "continue_reason": question or "Blocking decision unknowns require user input.",
+            "target_unknown_ids": [item["id"] for item in non_investigate],
             "unresolved_unknown_ids": unresolved_ids,
             "summary": final.get("summary", ""),
             "beliefs": final.get("beliefs", []),

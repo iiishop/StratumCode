@@ -49,16 +49,9 @@ class InvestigatingUseCase:
         if br_state:
             run.bugfix_readiness = br_state
 
-        step_question = self._step_clearify_question(run)
-        if step_question:
-            yield from self._ask_and_continue(run, step_question)
-            return
-
-        blocked_question = self._blocked_task_question(run)
-        if blocked_question:
-            yield from self._ask_and_continue(run, blocked_question)
-            return
-
+        # clearify 只在 investigation_stream 内部发生（模型调 clearify 工具，
+        # _investigation_directive 的 CLEARIFY 阶段强制）。状态机层面不再主动弹窗，
+        # 避免同问题在 pass 边界重复出现。
         decision = self.transition_policy.decide(run, result)
         run.transition(decision.next_state, decision.reason)
         if result.pending_output and run.state not in {chat.ChatState.INVESTIGATING, chat.ChatState.FAILED}:
@@ -164,9 +157,10 @@ class InvestigatingUseCase:
                         "investigation": run.last_investigation or {},
                     },
                 )
-        # 系统兜底：调查结束后仍有 blocking 的 product_decision 未解决 → 直接 clearify。
-        # product_decision 没有"代码证据"可查，模型死磕调查只会无限 continue（曾因此死循环）。
-        return self._pending_product_decision_question(run)
+        # clearify 统一走 investigation_stream 内部（模型调 clearify 工具）。
+        # 状态机不兜底弹窗；blocking 决策类 unknown 由 _pending_clearify_unknown
+        # 在内部强制进入 CLEARIFY 阶段。
+        return None
 
     def _pending_product_decision_question(self, run) -> dict | None:
         investigation = run.last_investigation or {}
