@@ -104,6 +104,10 @@ _RUNTIME_EVIDENCE_RE = re.compile(
 )
 RECORD_RECOVERY_REASON = "Record pending observations and required resolutions."
 
+# 方案 A：investigation_rounds 不再作为总轮数上限（effort 档位只决定
+# 每个 blocking unknown 的最少轮数）；max_rounds 仅作防死循环的绝对安全阀。
+MAX_INVESTIGATION_ROUNDS = 30
+
 
 class InvestigationPhase(StrEnum):
     """互斥的调查阶段：一个时刻只能处于一个 phase。
@@ -422,20 +426,22 @@ def investigation_stream(
     quality_gate = str(analysis.get("quality_gate") or effort_profile["quality_gate"]).strip().casefold()
     semantic_gate_enabled = quality_gate != "basic"
     subagent_enabled = bool(effort_profile["subagent_enabled"])
-    max_rounds = (
-        effort_profile["investigation_rounds"]
-        if max_rounds is None and analysis.get("effort")
-        else app_settings.get_round_limit("investigation_rounds")
-        if max_rounds is None
-        else int(max_rounds or 0)
+    rounds_per_unknown = (
+        int(effort_profile["investigation_rounds"] or 0)
+        if analysis.get("effort") and effort_profile["investigation_rounds"]
+        else int(app_settings.get_round_limit("investigation_rounds") or 0)
     )
-    if max_rounds:
-        _investigable_count = sum(
-            1 for item in _initial_unknowns(analysis)
-            if item.get("resolution_strategy") == "investigate_project" and item.get("blocking")
-        )
-        _min_for_unknowns = _investigable_count * 2 + 2
-        max_rounds = max(max_rounds, _min_for_unknowns)
+    if rounds_per_unknown <= 0:
+        rounds_per_unknown = 2
+    min_rounds = _minimum_investigation_rounds(analysis, rounds_per_unknown)
+    max_rounds = (
+        int(max_rounds or 0)
+        if max_rounds is not None
+        else MAX_INVESTIGATION_ROUNDS
+    )
+    if max_rounds <= 0:
+        max_rounds = MAX_INVESTIGATION_ROUNDS
+    max_rounds = max(max_rounds, min_rounds)
     run_id = uuid4().hex[:10]
     stage_id = f"{run_id}-stage"
     yield start_event(stage_id, "stage", {
@@ -557,8 +563,28 @@ def investigation_stream(
                 and not analysis.get("unknowns")
             ),
         )
-        if directive_prompt:
+        # 方案 A：最少调查轮数未达到时，禁止提前结束（fast 也要跑
+        # rounds_per_unknown × blocking_unknown 轮）。结束类 phase
+        # （FINISH/READ_ONLY_FINISH/SYNTHESIZE）强制降级为 DISCOVERY_REQUIRED，
+        # 且原 directive（如"调用 finish_investigation"）不再下发。
+        budget_floor_active = (
+            round_index < min_rounds
+            and current_phase in (
+                InvestigationPhase.FINISH,
+                InvestigationPhase.READ_ONLY_FINISH,
+                InvestigationPhase.SYNTHESIZE,
+            )
+        )
+        if directive_prompt and not budget_floor_active:
             messages.append({"role": "user", "content": directive_prompt})
+        if budget_floor_active:
+            current_phase = InvestigationPhase.DISCOVERY_REQUIRED
+            current_tools = _phase_tools(current_phase, tools=tools)
+            current_tool_choice = "required"
+            messages.append({
+                "role": "user",
+                "content": _minimum_rounds_prompt(min_rounds - round_index),
+            })
         allowed_tool_names = {
             str(((tool.get("function") or {}).get("name")) or "")
             for tool in current_tools
@@ -1498,6 +1524,31 @@ def _investigation_tools() -> list[dict]:
 def _round_indexes(limit: int, start: int = 0):
     limit = int(limit or 0)
     return count(start) if limit <= 0 else range(start, start + limit)
+
+
+def _blocking_investigable_count(analysis: dict | None) -> int:
+    """初始任务契约中需调查的 blocking unknown 数（调查深度基准）。"""
+    if not isinstance(analysis, dict):
+        return 0
+    return sum(
+        1
+        for item in _initial_unknowns(analysis)
+        if item.get("resolution_strategy") == "investigate_project" and item.get("blocking")
+    )
+
+
+def _minimum_investigation_rounds(analysis: dict | None, rounds_per_unknown: int) -> int:
+    """方案 A：最少调查轮数 = rounds_per_unknown × blocking unknown 数。"""
+    return _blocking_investigable_count(analysis) * max(1, rounds_per_unknown)
+
+
+def _minimum_rounds_prompt(remaining_rounds: int) -> str:
+    return (
+        f"Investigation budget: at least {remaining_rounds} more round(s) remain "
+        "before you may finish. Keep gathering evidence: cross-check every task "
+        "unknown against project observations, verify each resolution, and confirm "
+        "the acceptance criteria are grounded. Do not finish yet."
+    )
 
 
 def _tool_call_summary(tool_calls: list[dict]) -> str:

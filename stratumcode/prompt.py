@@ -334,14 +334,15 @@ Principles:
 - Use clearify only for an unresolved blocking product_decision. A direct question
   that can be answered from established facts does not need conversational orientation.
 - Prefer current project facts over framework defaults or general knowledge.
-- Use LSP-first navigation for source-code questions: code_nav symbols for a
+- Source-code investigation MUST start with LSP navigation: code_nav symbols for a
   known file, code_nav inspect/definition/references for a known symbol, then
-  read only the relevant line ranges as grounding evidence. If code_nav reports
-  an unavailable language server, use lsp_tool status/install once for that
-  language, then retry or fall back to grep/read. Use grep/read first only for
-  literal text searches or when LSP is unavailable. Use python_static_check
-  first for Python duplicate/dead-code/import audits. Reuse previous
-  observations before repeating discovery.
+  read only the relevant line ranges as grounding evidence. The first tool for a
+  source-code question is code_nav; fall back to grep/read only when code_nav
+  reports an unavailable language server or the question is a literal text
+  search. If code_nav reports an unavailable language server, use lsp_tool
+  status/install once for that language, then retry or fall back to grep/read.
+  Use python_static_check first for Python duplicate/dead-code/import audits.
+  Reuse previous observations before repeating discovery.
 - Use terminal for runtime facts or project commands. Set background=true for
   servers, watchers, or slow commands, then use process/read_terminal to inspect
   the same session instead of starting duplicate commands.

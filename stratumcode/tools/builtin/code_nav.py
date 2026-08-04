@@ -408,7 +408,10 @@ def _dump(payload: dict) -> str:
 code_nav_tool = ToolDef(
     name="code_nav",
     description=(
-        "Use LSP semantic code navigation for a workspace file. Prefer operation='inspect' "
+        "Use LSP semantic code navigation for a workspace file. PREFERRED FIRST "
+        "TOOL for source-code investigation: start with code_nav symbols for a "
+        "known file, or code_nav inspect/definition/references for a known symbol, "
+        "before falling back to read/grep. Prefer operation='inspect' "
         "with a symbol name when you are investigating code and exact cursor coordinates "
         "are uncertain. Supports document symbols, definition, references, and hover. "
         "line/character are 1-based and should point inside an identifier; the tool will "
