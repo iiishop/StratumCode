@@ -88,6 +88,8 @@ class RegexSyntaxProvider:
             body_start = _offset_for_line(line_offsets, symbol.range.start_line + 1)
             body_end = _offset_for_line(line_offsets, symbol.range.end_line + 1) if symbol.range.end_line < len(line_offsets) else len(source)
             body = source[body_start:body_end]
+            # 屏蔽注释和字符串字面量，避免注释/docstring 里的伪调用（如 \\sqrt(...)）被正则误抓
+            body = _mask_comments_and_strings(body, language.id)
             ordered = []
             for query in language.call_queries:
                 ordered.extend(_iter_matches(query, body))
@@ -311,6 +313,63 @@ def _iter_matches(query: RegexQuery, source: str):
         return []
     regex = re.compile(query.pattern, re.MULTILINE)
     return [(match, query) for match in regex.finditer(source)]
+
+
+def _mask_comments_and_strings(source: str, language: str) -> str:
+    """把注释和字符串字面量替换为空格（保留换行与长度），避免注释/字符串内容被误当调用。
+
+    输出与输入等长：非换行字符替换为 ' '，'\\n' 保留，保证偏移量与行列号不变。
+    覆盖：行注释（# / //）、块注释（/* */）、单引号/双引号/反引号字符串、Python 三引号。
+    """
+    if not source:
+        return source
+    chars = list(source)
+    n = len(source)
+    i = 0
+    line_comment = "#" if language == "python" else "//"
+    while i < n:
+        ch = source[i]
+        if ch in ("'", '"', "`"):
+            quote = ch
+            triple = source.startswith(quote * 3, i)
+            end = i + (3 if triple else 1)
+            while end < n:
+                if source[end] == "\\":
+                    end += 2
+                    continue
+                if triple:
+                    if source.startswith(quote * 3, end):
+                        end += 3
+                        break
+                elif source[end] == quote:
+                    end += 1
+                    break
+                end += 1
+            for j in range(i, min(end, n)):
+                if chars[j] != "\n":
+                    chars[j] = " "
+            i = end
+            continue
+        is_hash_comment = ch == "#" and line_comment == "#"
+        is_slash_comment = ch == "/" and line_comment == "//" and i + 1 < n and source[i + 1] == "/"
+        if is_hash_comment or is_slash_comment:
+            end = source.find("\n", i)
+            if end == -1:
+                end = n
+            for j in range(i, end):
+                chars[j] = " "
+            i = end
+            continue
+        if ch == "/" and i + 1 < n and source[i + 1] == "*":
+            end = source.find("*/", i + 2)
+            end = n if end == -1 else end + 2
+            for j in range(i, min(end, n)):
+                if chars[j] != "\n":
+                    chars[j] = " "
+            i = end
+            continue
+        i += 1
+    return "".join(chars)
 
 
 def _extract_doc(language: LanguagePack, source: str, line_offsets: list[int], match: re.Match, signature: str) -> FunctionDoc:
