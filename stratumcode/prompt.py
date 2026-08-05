@@ -74,8 +74,9 @@ The runtime owns the final task-analysis JSON, all ids, acceptance mapping,
 defaults, and schema normalization. You only fill content for the requested
 output_contract.
 
-For compact_contract, return a complete normalized task contract when the
-request is clear enough to avoid the three-slot analyzer:
+For compact_contract, return a complete normalized task contract by default.
+acceptance_criteria must contain at least one item -- an empty acceptance
+list is treated as invalid and the analyzer will retry.
 {{
   "intent": {{"type": "feature|bugfix|refactor|question|investigation|other", "summary": "one sentence"}},
   "execution_mode": "implement|read_only",
@@ -95,9 +96,10 @@ request is clear enough to avoid the three-slot analyzer:
     {{"kind": "file|line|symbol|route|other", "value": "literal sourced clue", "path": "", "line": 0, "symbol": "", "source_ref": "SRC1", "note": ""}}
   ]
 }}
-Use compact_contract only when you can keep acceptance and unknowns short
-without losing material scope. If effort is deep, prefer returning intent_scope
-fields so the runtime can run the full analyzer.
+Use compact_contract by default for fast/standard tasks. Only fall back to
+intent_scope fields when the request is genuinely too ambiguous to derive any
+acceptance criterion. For effort deep, return intent_scope fields so the
+runtime can run the full analyzer.
 
 For intent_scope:
 {{
@@ -1069,11 +1071,11 @@ def build_task_compact_contract_user(
             "risk_values": ["low", "medium", "high"],
             "quality_gate_values": ["basic", "semantic", "strict"],
             "instructions": [
-                "Return a complete task contract when the request is clear enough.",
+                "Return a complete task contract with at least one acceptance criterion whenever the request permits it.",
                 "Use fast for clear low-risk read-only or small single-focus edits.",
                 "Use standard for ordinary bounded implementation or investigation work.",
                 "Use deep for high-risk, broad, ambiguous, or core state-machine work.",
-                "If the complete contract would be unsafe to compact, return intent_scope fields only.",
+                "Only return intent_scope fields when acceptance criteria cannot be derived from the request.",
             ],
         },
         error=error,

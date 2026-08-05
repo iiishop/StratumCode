@@ -169,6 +169,15 @@ def analyze_task_stream(
     canonical_intent = _canonical_analysis(
         message, selected_context, source_catalog, intent_slot or {}, {}, {}
     )
+    # 部分恢复：compact 输出可能含 acceptance/unknowns（即使整体不 ready）——
+    # 提取出来避免重跑完整 slot 流程（compact data 本身是合法 slot 结构）
+    partial_acceptance = None
+    partial_unknowns = None
+    if intent_slot:
+        if isinstance(intent_slot.get("acceptance_criteria"), list) and intent_slot["acceptance_criteria"]:
+            partial_acceptance = intent_slot
+        if isinstance(intent_slot.get("unknowns"), list) and intent_slot["unknowns"]:
+            partial_unknowns = intent_slot
     if progress_event_id:
         yield stage_progress(
             progress_event_id,
@@ -189,7 +198,7 @@ def analyze_task_stream(
             "Acceptance contract",
             description=str(canonical_intent.get("intent", {}).get("summary") or message),
         )
-    if acceptance_slot is None:
+    if acceptance_slot is None and partial_acceptance is None:
         acceptance_slot, errors = _task_slot_json(
             provider=provider,
             model=model,
@@ -223,7 +232,7 @@ def analyze_task_stream(
         if acceptance_recovered:
             acceptance_slot = _requirement_acceptance_fallback(canonical_intent)
     canonical_acceptance = _canonical_analysis(
-        message, selected_context, source_catalog, intent_slot or {}, acceptance_slot or {}, {}
+        message, selected_context, source_catalog, intent_slot or {}, partial_acceptance or acceptance_slot or {}, {}
     )
     acceptance_slots = canonical_acceptance["acceptance_criteria"]
     if progress_event_id:
@@ -243,25 +252,30 @@ def analyze_task_stream(
             "Investigation unknowns",
             description="Identify facts and decisions that still require verification.",
         )
-    unknowns_slot, errors = _task_slot_json(
-        provider,
-        model,
-        tracked_call_model,
-        content_text,
-        [
-            system,
-            {"role": "user", "content": prompt.build_task_unknowns_slot_user(
-                message=message,
-                directory=workspace_dir,
-                context=slot_context,
-                intent_slot=_contract_slot_payload(canonical_acceptance),
-                acceptance_slots=acceptance_slots,
-                source_catalog=source_catalog,
-            )},
-        ],
-        "unknowns",
-    )
-    analyzer_errors.extend(errors)
+    if partial_unknowns is not None:
+        unknowns_slot = partial_unknowns
+        unknowns_errors: list[str] = []
+    else:
+        unknowns_slot, errors = _task_slot_json(
+            provider,
+            model,
+            tracked_call_model,
+            content_text,
+            [
+                system,
+                {"role": "user", "content": prompt.build_task_unknowns_slot_user(
+                    message=message,
+                    directory=workspace_dir,
+                    context=slot_context,
+                    intent_slot=_contract_slot_payload(canonical_acceptance),
+                    acceptance_slots=acceptance_slots,
+                    source_catalog=source_catalog,
+                )},
+            ],
+            "unknowns",
+        )
+        unknowns_errors = errors
+    analyzer_errors.extend(unknowns_errors)
     minimal_recovery_error = ""
     try:
         analysis = _canonical_analysis(
