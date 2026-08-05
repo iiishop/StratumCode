@@ -1335,7 +1335,7 @@ def investigation_stream(
                         cached_observation_id=cached_observation_id,
                         required_next_action=next_action,
                     )
-                    if duplicate_no_progress_total >= MAX_DUPLICATE_NO_PROGRESS:
+                    if duplicate_no_progress_count >= MAX_DUPLICATE_NO_PROGRESS:
                         force_synthesis_reason = _duplicate_no_progress_prompt(
                             name,
                             cached_observation_id,
@@ -1721,7 +1721,11 @@ def _duplicate_no_progress_json(
         "required_next_action": required_next_action,
         "message": (
             "The same successful tool arguments were already observed. "
-            "This call produced no new investigation progress."
+            "This call produced no new investigation progress. "
+            "If you already obtained the needed information through code_nav, "
+            "lsp_tool, grep, or an earlier read, cite those observations in your "
+            "resolution instead of re-reading the same path. Otherwise call with "
+            "different arguments (other files or line ranges)."
         ),
     }, ensure_ascii=False)
 
@@ -6279,29 +6283,32 @@ def _require_file_reads(
     workspace_dir: str = "",
 ) -> list[str]:
     """Return issues when a resolution claims a project file's behavior without
-    ever reading it.
+    any observation covering it.
 
     The answer text is scanned for references that resolve to real project
     files (sessions.py, frontend/.../HomePage.vue, config schemas, etc.).
     References that carry a symbol or a
     behavioral claim ("sessions.py's generate_title writes the name field")
-    require a ``read`` observation of that file. A bare existential mention
-    ("App.vue is the root component") only requires the file to be known --
-    grep/glob hits are sufficient evidence the file exists and contains the
-    searched symbol. Candidate paths are filtered through observed paths and
-    the workspace file catalog, so dotted identifiers such as ``props.sessions``
-    are not treated as files.
+    require an observation of that file: a ``read``, or a ``code_nav`` /
+    ``lsp_tool`` query whose result locates the file, or a grep/glob hit.
+    A bare existential mention ("App.vue is the root component") only requires
+    the file to be known -- grep/glob hits are sufficient evidence the file
+    exists and contains the searched symbol. Candidate paths are filtered
+    through observed paths and the workspace file catalog, so dotted
+    identifiers such as ``props.sessions`` are not treated as files.
     """
-    read_files: set[str] = set()
+    observed_files: set[str] = set()
     for item in observations:
-        if not isinstance(item, dict) or str(item.get("tool") or "") != "read":
+        if not isinstance(item, dict):
+            continue
+        if str(item.get("tool") or "") not in {"read", "code_nav", "lsp_tool", "grep", "glob"}:
             continue
         path = _normalize_path(item.get("path") or "")
         if path:
-            read_files.add(path)
-    if not read_files:
+            observed_files.add(path)
+    if not observed_files:
         return []
-    hit_files = read_files | _hit_files_from_observations(observations)
+    hit_files = observed_files | _hit_files_from_observations(observations)
     issues: list[str] = []
     for resolution in resolutions:
         if not isinstance(resolution, dict):
@@ -6313,11 +6320,11 @@ def _require_file_reads(
             ref = _project_file_ref(ref_raw, observations, workspace_dir)
             if not ref:
                 continue
-            read_matched = any(
+            observed_matched = any(
                 _file_ref_matches(rf, ref)
-                for rf in read_files
+                for rf in observed_files
             )
-            if read_matched:
+            if observed_matched:
                 continue
             if _ref_is_existential(answer, match) and any(
                 _file_ref_matches(rf, ref)
