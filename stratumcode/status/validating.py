@@ -118,6 +118,10 @@ def _state_after_validation(run):
                 return chat.ChatState.VALIDATING
             return chat.ChatState.FAILED
         if reason_code == "insufficient_evidence":
+            # 第一次证据不足回 VALIDATING 带上下文重试（让模型补验证调用）；
+            # 超过一次说明模型确实无法产出验证——回 INVESTIGATING 重新调查
+            if run.validation_inconclusive_count <= 1:
+                return chat.ChatState.VALIDATING
             return chat.ChatState.INVESTIGATING
         return chat.ChatState.DESIGNING
     if verdict == "missing_evidence":

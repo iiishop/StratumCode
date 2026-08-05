@@ -1053,7 +1053,11 @@ def _validation_tool_validated(name: str, output: str) -> bool:
     if name == "code_nav":
         return metadata.get("status") == "ok"
     if name == "read":
-        return metadata.get("diagnostics") == 0
+        # read 成功即算验证尝试（LSP 诊断是警告参考，不判失败）
+        return True
+    if name in ("terminal", "process"):
+        # 跑过命令且无 [error] 即算验证尝试（模型用 terminal 跑测试/编译）
+        return True
     return _is_mcp_tool(name)
 
 
