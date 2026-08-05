@@ -786,47 +786,6 @@ function onNodeDrag(payload) {
       </div>
       <div class="structure-panel__actions">
         <span class="structure-panel__workspace">{{ workspace?.name || workspace?.path || 'No workspace' }}</span>
-        <div class="structure-panel__lsp" :class="{ 'is-on': semanticMode === 'lsp' }">
-          <button
-            type="button"
-            class="structure-panel__lsp-switch"
-            role="switch"
-            :aria-checked="semanticMode === 'lsp'"
-            :disabled="loading"
-            :title="semanticMode === 'lsp' ? 'LSP semantic analysis on' : 'LSP semantic analysis off'"
-            @click="toggleLsp"
-          >
-            <span class="structure-panel__lsp-knob"></span>
-          </button>
-          <span class="structure-panel__lsp-text">
-            <span class="structure-panel__lsp-title">LSP</span>
-            <span
-              v-if="semanticMode === 'lsp' && semanticBadge"
-              class="structure-panel__lsp-state"
-              :class="`is-${semanticBadge.kind}`"
-              :title="semanticBadge.detail"
-            >
-              <span class="structure-panel__lsp-dot"></span>
-              <span>{{ semanticBadge.label }}</span>
-              <button
-                v-if="semanticBadge.kind === 'warn'"
-                type="button"
-                class="structure-panel__lsp-open"
-                @click="emit('open-lsp')"
-              >
-                Open LSP
-              </button>
-            </span>
-            <span v-else-if="semanticMode === 'lsp' && !loading" class="structure-panel__lsp-state is-idle">
-              <span class="structure-panel__lsp-dot"></span>
-              <span>Waiting</span>
-            </span>
-            <span v-else class="structure-panel__lsp-state is-fast">
-              <span class="structure-panel__lsp-dot"></span>
-              <span>Fast</span>
-            </span>
-          </span>
-        </div>
         <button type="button" :disabled="loading" @click="refresh">
           {{ loading ? 'Scanning' : 'Refresh' }}
         </button>
@@ -835,6 +794,48 @@ function onNodeDrag(payload) {
 
     <div class="structure-panel__toolbar">
       <input v-model="search" type="search" placeholder="Search function, file, language..." />
+      <div class="structure-panel__lsp" :class="{ 'is-on': semanticMode === 'lsp' }">
+        <button
+          type="button"
+          class="structure-panel__lsp-switch"
+          role="switch"
+          :aria-checked="semanticMode === 'lsp'"
+          :disabled="loading"
+          :title="semanticMode === 'lsp' ? 'LSP semantic analysis on' : 'LSP semantic analysis off'"
+          @click="toggleLsp"
+        >
+          <span class="structure-panel__lsp-knob"></span>
+        </button>
+        <span class="structure-panel__lsp-text">
+          <span class="structure-panel__lsp-title">LSP</span>
+          <span
+            v-if="semanticMode === 'lsp' && semanticBadge"
+            class="structure-panel__lsp-state"
+            :class="`is-${semanticBadge.kind}`"
+            :title="semanticBadge.detail"
+          >
+            <span class="structure-panel__lsp-dot"></span>
+            <span>{{ semanticBadge.label }}</span>
+            <button
+              v-if="semanticBadge.kind === 'warn'"
+              type="button"
+              class="structure-panel__lsp-open"
+              @click="emit('open-lsp')"
+            >
+              Open LSP
+            </button>
+          </span>
+          <span v-else-if="semanticMode === 'lsp' && !loading" class="structure-panel__lsp-state is-idle">
+            <span class="structure-panel__lsp-dot"></span>
+            <span>Waiting</span>
+          </span>
+          <span v-else class="structure-panel__lsp-state is-fast">
+            <span class="structure-panel__lsp-dot"></span>
+            <span>Fast</span>
+          </span>
+        </span>
+      </div>
+      <span class="structure-panel__toolbar-divider"></span>
       <label>
         <input v-model="showBuiltin" type="checkbox" />
         Builtins
@@ -1138,62 +1139,93 @@ function onNodeDrag(payload) {
 .structure-panel__lsp {
   display: inline-flex;
   align-items: center;
-  gap: 8px;
-  margin: 0 8px;
+  gap: 7px;
+  margin-left: 12px;
+  padding-right: 14px;
+  border-right: 1px solid #e3eaf2;
 }
 
 .structure-panel__lsp-switch {
   position: relative;
   flex: 0 0 auto;
-  width: 34px;
-  height: 20px;
+  width: 40px;
+  height: 24px;
   padding: 0;
-  border: 1px solid #c9d6e4;
+  border: none;
   border-radius: 999px;
-  background: #e3eaf2;
+  background: #d5dee9;
+  box-shadow: inset 0 1px 2px rgba(31, 47, 70, 0.16);
   cursor: pointer;
-  transition: background 0.16s ease, border-color 0.16s ease, box-shadow 0.16s ease;
+  transition: background 0.2s ease, box-shadow 0.2s ease;
 }
 
 .structure-panel__lsp-switch:disabled {
   cursor: wait;
-  opacity: 0.6;
+  opacity: 0.55;
 }
 
 .structure-panel__lsp-switch .structure-panel__lsp-knob {
   position: absolute;
-  top: 2px;
-  left: 2px;
-  width: 14px;
-  height: 14px;
+  top: 3px;
+  left: 3px;
+  width: 18px;
+  height: 18px;
   border-radius: 50%;
   background: #ffffff;
-  box-shadow: 0 1px 2px rgba(31, 47, 70, 0.35);
-  transition: transform 0.16s ease;
+  box-shadow: 0 1px 3px rgba(31, 47, 70, 0.35), 0 0 0 0.5px rgba(31, 47, 70, 0.05);
+  transition: transform 0.22s cubic-bezier(0.34, 1.4, 0.64, 1);
 }
 
 .structure-panel__lsp.is-on .structure-panel__lsp-switch {
-  border-color: #315f9c;
-  background: #315f9c;
-  box-shadow: 0 0 0 3px rgba(49, 95, 156, 0.12);
+  background: linear-gradient(180deg, #4b82c9, #2f5f9e);
+  box-shadow: inset 0 1px 2px rgba(15, 30, 55, 0.28), 0 0 0 3px rgba(49, 95, 156, 0.16);
 }
 
 .structure-panel__lsp.is-on .structure-panel__lsp-switch .structure-panel__lsp-knob {
-  transform: translateX(14px);
+  transform: translateX(16px);
+}
+
+.structure-panel__lsp-switch:hover {
+  background: #c6d2e0;
+}
+
+.structure-panel__lsp.is-on .structure-panel__lsp-switch:hover {
+  background: linear-gradient(180deg, #568cd2, #3568a8);
+}
+
+.structure-panel__lsp-switch:active .structure-panel__lsp-knob {
+  transform: scale(0.9);
+}
+
+.structure-panel__lsp.is-on .structure-panel__lsp-switch:active .structure-panel__lsp-knob {
+  transform: translateX(16px) scale(0.9);
+}
+
+.structure-panel__lsp-switch:focus-visible {
+  outline: 2px solid rgba(49, 95, 156, 0.55);
+  outline-offset: 2px;
+}
+
+.structure-panel__toolbar-divider {
+  display: inline-block;
+  width: 1px;
+  height: 20px;
+  margin: 0 4px 0 2px;
+  background: #e3eaf2;
 }
 
 .structure-panel__lsp-text {
   display: inline-flex;
   align-items: center;
-  gap: 7px;
+  gap: 6px;
   font: 10px/1 var(--mono);
   white-space: nowrap;
 }
 
 .structure-panel__lsp-title {
   color: #526a84;
-  font-weight: 600;
-  letter-spacing: 0.04em;
+  font-weight: 700;
+  letter-spacing: 0.05em;
 }
 
 .structure-panel__lsp.is-on .structure-panel__lsp-title {
