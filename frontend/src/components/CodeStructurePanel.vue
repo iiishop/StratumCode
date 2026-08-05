@@ -19,6 +19,8 @@ const semanticMode = ref('fast')
 const showBuiltin = ref(false)
 const showUnresolved = ref(true)
 const showExternal = ref(false)
+// 用户是否手动切过 LSP 开关：手动后不再被自动检测覆盖
+let lspUserTouched = false
 const selected = ref(null)
 const nodePositions = ref({})
 
@@ -144,38 +146,66 @@ const semanticBadge = computed(() => {
     const languages = status.disabled_languages?.length ? ` Disabled: ${status.disabled_languages.join(', ')}.` : ''
     return {
       kind: 'warn',
-      label: status.server ? `LSP partial ${status.server}` : 'LSP partial',
+      label: status.server ? `Partial ${status.server}` : 'Partial',
       detail: `${status.resolved || 0} definitions resolved from ${status.requests || 0} requests. ${status.error}.${languages} Using fallback where needed.`,
     }
   }
   if (status.used) {
     return {
       kind: 'ok',
-      label: status.server ? `LSP ${status.server}` : 'LSP active',
+      label: status.server || 'Active',
       detail: `${status.resolved || 0} definitions resolved from ${status.requests || 0} requests.`,
     }
   }
   if (!status.attempted) {
     return {
       kind: 'idle',
-      label: 'LSP idle',
+      label: 'Waiting',
       detail: 'No visible call site required semantic definition lookup.',
     }
   }
   return {
     kind: 'warn',
-    label: 'LSP fallback',
+    label: 'Fallback',
     detail: `${status.error || 'No matching enabled LSP server responded.'} Using name-index fallback. Open the LSP page to install or enable a server for this language.`,
   }
 })
 
-watch(() => props.active, (active) => {
-  if (active && !loaded.value && !loading.value) loadGraph()
+watch(() => props.active, async (active) => {
+  if (!active) return
+  if (!lspUserTouched) await detectLsp()
+  if (!loaded.value && !loading.value) loadGraph()
 }, { immediate: true })
 
 watch(semanticMode, () => {
   if (props.active && loaded.value) refresh()
 })
+
+// 检测 LSP 模式：优先用用户保存的偏好，否则自动检测启用的 server。
+// 用户手动切过开关后不再自动覆盖。
+async function detectLsp() {
+  const saved = localStorage.getItem('structure-lsp-mode')
+  if (saved === 'lsp' || saved === 'fast') {
+    lspUserTouched = true
+    semanticMode.value = saved
+    return
+  }
+  try {
+    const res = await fetch('/api/lsp')
+    if (!res.ok) return
+    const data = await res.json()
+    const hasEnabled = (data.items || []).some(server => server.enabled)
+    semanticMode.value = hasEnabled ? 'lsp' : 'fast'
+  } catch {
+    // 网络/后端不可用时保持 fast
+  }
+}
+
+function toggleLsp() {
+  lspUserTouched = true
+  semanticMode.value = semanticMode.value === 'lsp' ? 'fast' : 'lsp'
+  localStorage.setItem('structure-lsp-mode', semanticMode.value)
+}
 
 async function loadGraph() {
   loading.value = true
@@ -764,7 +794,7 @@ function onNodeDrag(payload) {
             :aria-checked="semanticMode === 'lsp'"
             :disabled="loading"
             :title="semanticMode === 'lsp' ? 'LSP semantic analysis on' : 'LSP semantic analysis off'"
-            @click="semanticMode = semanticMode === 'lsp' ? 'fast' : 'lsp'"
+            @click="toggleLsp"
           >
             <span class="structure-panel__lsp-knob"></span>
           </button>
@@ -1108,57 +1138,48 @@ function onNodeDrag(payload) {
 .structure-panel__lsp {
   display: inline-flex;
   align-items: center;
-  gap: 9px;
-  margin: 0 6px;
-  padding: 4px 10px;
-  border: 1px solid transparent;
-  border-radius: 999px;
-  transition: border-color 0.18s ease, background 0.18s ease;
-}
-
-.structure-panel__lsp.is-on {
-  border-color: #c9d8ea;
-  background: #f4f8fd;
+  gap: 8px;
+  margin: 0 8px;
 }
 
 .structure-panel__lsp-switch {
   position: relative;
   flex: 0 0 auto;
-  width: 38px;
-  height: 21px;
+  width: 34px;
+  height: 20px;
   padding: 0;
   border: 1px solid #c9d6e4;
   border-radius: 999px;
-  background: #dfe8f2;
+  background: #e3eaf2;
   cursor: pointer;
-  transition: background 0.18s ease, border-color 0.18s ease, box-shadow 0.18s ease;
+  transition: background 0.16s ease, border-color 0.16s ease, box-shadow 0.16s ease;
 }
 
 .structure-panel__lsp-switch:disabled {
   cursor: wait;
-  opacity: 0.65;
+  opacity: 0.6;
 }
 
 .structure-panel__lsp-switch .structure-panel__lsp-knob {
   position: absolute;
   top: 2px;
   left: 2px;
-  width: 15px;
-  height: 15px;
+  width: 14px;
+  height: 14px;
   border-radius: 50%;
   background: #ffffff;
-  box-shadow: 0 1px 3px rgba(31, 47, 70, 0.35);
-  transition: transform 0.18s ease;
+  box-shadow: 0 1px 2px rgba(31, 47, 70, 0.35);
+  transition: transform 0.16s ease;
 }
 
 .structure-panel__lsp.is-on .structure-panel__lsp-switch {
   border-color: #315f9c;
   background: #315f9c;
-  box-shadow: 0 0 0 3px rgba(49, 95, 156, 0.14);
+  box-shadow: 0 0 0 3px rgba(49, 95, 156, 0.12);
 }
 
 .structure-panel__lsp.is-on .structure-panel__lsp-switch .structure-panel__lsp-knob {
-  transform: translateX(17px);
+  transform: translateX(14px);
 }
 
 .structure-panel__lsp-text {
