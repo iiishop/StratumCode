@@ -41,7 +41,7 @@ const filteredGraphNodes = computed(() => {
   let nodes = graph.value?.nodes || []
   nodes = nodes.filter(node => {
     if (!showBuiltin.value && node.kind === 'builtin_call') return false
-    if (!showExternal.value && node.kind === 'external_member_call') return false
+    if (!showExternal.value && (node.kind === 'external_member_call' || node.kind === 'external')) return false
     if (!showUnresolved.value && node.kind === 'unresolved') return false
     if (!q) return true
     return [
@@ -643,7 +643,7 @@ function blend(a, b, ratio) {
 }
 
 function compareLayoutNodes(a, b) {
-  const kindOrder = { project: 0, static_resolved: 0, builtin_call: 1, external_member_call: 2, unresolved: 3 }
+  const kindOrder = { project: 0, static_resolved: 0, builtin_call: 1, external_member_call: 2, external: 2, unresolved: 3 }
   return (kindOrder[a.kind] ?? 4) - (kindOrder[b.kind] ?? 4)
     || (nodeDegree.value.get(b.id) || 0) - (nodeDegree.value.get(a.id) || 0)
     || String(a.file || '').localeCompare(String(b.file || ''))
@@ -1597,6 +1597,18 @@ function onNodeDrag(payload) {
   background: #74859b;
 }
 
+:deep(.structure-flow-node--external) .function-node {
+  border-color: #c9c2ea;
+  background: #f6f4fd;
+  opacity: 0.85;
+}
+
+:deep(.structure-flow-node--external) .function-node__stripe,
+:deep(.structure-flow-node--external) .function-node__shape {
+  border-color: #6f5fa5;
+  background: #6f5fa5;
+}
+
 :deep(.structure-flow-node--unresolved) .function-node {
   border-style: dashed;
   color: var(--text-muted);
@@ -1656,6 +1668,11 @@ function onNodeDrag(payload) {
 :deep(.structure-flow-edge--external_member_call .vue-flow__edge-path) {
   stroke: #74859b;
   stroke-dasharray: 3 5;
+}
+
+:deep(.structure-flow-edge--external .vue-flow__edge-path) {
+  stroke: #6f5fa5;
+  stroke-dasharray: 4 4;
 }
 
 :deep(.structure-flow-edge--unresolved .vue-flow__edge-path) {

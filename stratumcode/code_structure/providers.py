@@ -9,7 +9,7 @@ from typing import Protocol
 from urllib.parse import unquote, urlparse
 
 from .. import lsp
-from .contracts import CallSite, DocParam, DocReturn, FunctionDoc, SourceRange, Symbol
+from .contracts import CallSite, DocParam, DocReturn, FunctionDoc, LspResolution, SourceRange, Symbol
 from .language_packs import LanguagePack, RegexQuery
 
 
@@ -142,7 +142,7 @@ class NameIndexSemanticProvider:
 class LspDefinitionSemanticProvider:
     name = "lsp-definition"
 
-    def __init__(self, max_requests: int = 120) -> None:
+    def __init__(self, max_requests: int | None = None) -> None:
         self.max_requests = max_requests
         self._requests = 0
         self._responses = 0
@@ -151,14 +151,17 @@ class LspDefinitionSemanticProvider:
         self._disabled_languages: set[str] = set()
         self._server = ""
         self._error = ""
-        self._cache: dict[tuple[str, int, int], str | None] = {}
+        self._cache: dict[tuple[str, int, int], LspResolution | None] = {}
 
     def resolve(self, call: CallSite, symbols: list[Symbol], workspace_dir: str) -> str | None:
-        if self._disabled or call.language in self._disabled_languages or self._requests >= self.max_requests:
+        if self._disabled or call.language in self._disabled_languages:
+            return None
+        if self.max_requests is not None and self._requests >= self.max_requests:
             return None
         key = (call.file, call.range.start_line, call.range.start_col)
         if key in self._cache:
-            return self._cache[key]
+            cached = self._cache[key]
+            return cached.target if cached else None
         self._requests += 1
         try:
             raw = lsp.query({
@@ -174,11 +177,11 @@ class LspDefinitionSemanticProvider:
             return None
         self._responses += 1
         self._server = str(raw.get("server") or self._server)
-        target = _symbol_from_lsp_definition(raw.get("result"), symbols, workspace_dir)
-        if target:
+        result = _lsp_definition_result(raw.get("result"), symbols, workspace_dir)
+        if result and result.target:
             self._resolved += 1
-        self._cache[key] = target
-        return target
+        self._cache[key] = result
+        return result.target if result else None
 
     def resolve_many(
         self,
@@ -186,18 +189,19 @@ class LspDefinitionSemanticProvider:
         symbols: list[Symbol],
         workspace_dir: str,
         concurrency: int = 8,
-    ) -> dict[str, str]:
+    ) -> dict[str, LspResolution]:
         """批量解析调用目标：复用 LSP client + 线程池并发（lsp.query_batch）。
 
-        返回 {call_id: target_symbol_id}。只处理配额内且未缓存的调用；
-        语言被禁用/配额耗尽/缓存命中的调用跳过。
+        返回 {call_id: LspResolution}。LSP 确认的外部定义（target=None,
+        external=True）也会进结果，由调用方决定分类（external / builtin）。
+        只处理未缓存的调用；语言被禁用的调用跳过。无配额上限。
         """
         if self._disabled or not calls:
             return {}
         params_list: list[dict] = []
         valid: list[CallSite] = []
         for call in calls:
-            if self._requests >= self.max_requests:
+            if self.max_requests is not None and self._requests >= self.max_requests:
                 break
             key = (call.file, call.range.start_line, call.range.start_col)
             if key in self._cache:
@@ -212,7 +216,7 @@ class LspDefinitionSemanticProvider:
         if not params_list:
             return {}
         responses = lsp.query_batch(params_list, workspace_dir, concurrency=concurrency)
-        resolved: dict[str, str] = {}
+        resolved: dict[str, LspResolution] = {}
         for call, raw in zip(valid, responses):
             key = (call.file, call.range.start_line, call.range.start_col)
             self._requests += 1
@@ -223,11 +227,12 @@ class LspDefinitionSemanticProvider:
                 continue
             self._responses += 1
             self._server = str(raw.get("server") or self._server)
-            target = _symbol_from_lsp_definition(raw.get("result"), symbols, workspace_dir)
-            if target:
+            result = _lsp_definition_result(raw.get("result"), symbols, workspace_dir)
+            if result and result.target:
                 self._resolved += 1
-                resolved[call.id] = target
-            self._cache[key] = target
+            self._cache[key] = result
+            if result is not None:
+                resolved[call.id] = result
         return resolved
 
     def status(self) -> dict:
@@ -256,7 +261,7 @@ class ProviderRegistry:
         self.semantic = list(semantic or [NameIndexSemanticProvider()])
 
     @classmethod
-    def with_lsp(cls, max_requests: int = 120) -> "ProviderRegistry":
+    def with_lsp(cls, max_requests: int | None = None) -> "ProviderRegistry":
         return cls(semantic=[
             LspDefinitionSemanticProvider(max_requests=max_requests),
             NameIndexSemanticProvider(),
@@ -617,7 +622,14 @@ def _stable_id(*parts: str) -> str:
     return parts[0] + ":" + hashlib.sha1(raw.encode("utf-8")).hexdigest()[:16]
 
 
-def _symbol_from_lsp_definition(value, symbols: list[Symbol], workspace_dir: str) -> str | None:
+def _lsp_definition_result(value, symbols: list[Symbol], workspace_dir: str) -> LspResolution | None:
+    """把 LSP definition 返回映射为解析结果。
+
+    定义在 workspace 内 → LspResolution(target=symbol_id)。
+    定义在 workspace 外（内置函数 typeshed、标准库、第三方包）→
+    LspResolution(external=True) —— LSP 确认了符号存在，只是不在项目内。
+    无有效位置 → None。
+    """
     locations = value if isinstance(value, list) else ([value] if isinstance(value, dict) else [])
     root = Path(workspace_dir).resolve()
     for item in locations:
@@ -635,9 +647,10 @@ def _symbol_from_lsp_definition(value, symbols: list[Symbol], workspace_dir: str
         try:
             rel = Path(path_text).resolve().relative_to(root).as_posix()
         except (OSError, ValueError):
-            continue
+            # 定义位置无法映射到 workspace —— 外部符号（typeshed / 标准库 / 第三方）
+            return LspResolution(target=None, external=True)
         line = int(start.get("line", 0)) + 1
         for symbol in symbols:
             if symbol.file == rel and symbol.range.start_line <= line <= symbol.range.end_line:
-                return symbol.id
+                return LspResolution(target=symbol.id)
     return None

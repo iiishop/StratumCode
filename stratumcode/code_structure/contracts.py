@@ -72,6 +72,14 @@ class CallSite:
 
 
 @dataclass(frozen=True, slots=True)
+class LspResolution:
+    """LSP definition 查询结果：项目内 symbol、确认的外部定义、或未找到。"""
+
+    target: str | None = None
+    external: bool = False
+
+
+@dataclass(frozen=True, slots=True)
 class CallEdge:
     id: str
     source: str

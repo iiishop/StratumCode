@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import hashlib
 
-from .contracts import CallEdge, CallSite, CodeStructureGraph, Diagnostic, GraphNode, Symbol
+from .contracts import CallEdge, CallSite, CodeStructureGraph, Diagnostic, GraphNode, LspResolution, Symbol
 from .language_packs import LanguagePack
 from .providers import LspDefinitionSemanticProvider, NameIndexSemanticProvider, ProviderRegistry
 
@@ -39,7 +39,7 @@ class CallGraphBuilder:
         nodes_by_id = {node.id: node for node in symbol_nodes}
         # 批量语义解析：LSP 优先（semantic="lsp" 语义不变——所有调用先尝试 LSP），
         # 复用 client + 并发（lsp.query_batch）；name-index 在 _resolve_call 中兜底。
-        resolved_map: dict[str, str] = {}
+        resolved_map: dict[str, LspResolution] = {}
         lsp_provider = next(
             (p for p in self.providers.semantic if isinstance(p, LspDefinitionSemanticProvider)),
             None,
@@ -97,10 +97,21 @@ class CallGraphBuilder:
         symbols: list[Symbol],
         pack: LanguagePack | None,
         workspace_dir: str,
-        resolved_map: dict[str, str] | None = None,
+        resolved_map: dict[str, LspResolution] | None = None,
     ) -> tuple[str | None, str, float, list[str]]:
         if resolved_map and call.id in resolved_map:
-            return resolved_map[call.id], "static_resolved", 0.9, call.provenance + ["lsp-definition"]
+            resolution = resolved_map[call.id]
+            if resolution.external:
+                # LSP 确认定义在项目外（typeshed / 标准库 / 第三方包）。
+                # 带点调用是外部对象成员；裸调用若是语言内置则归 builtin，
+                # 否则是外部库导入的裸函数，归 external。
+                if "." in call.name or "::" in call.name:
+                    return None, "external_member_call", 0.8, call.provenance + ["lsp-definition:external"]
+                leaf = call.name.rsplit(".", 1)[-1].rsplit("::", 1)[-1]
+                if pack and leaf in pack.builtin_symbols:
+                    return None, "builtin_call", 0.8, call.provenance + ["lsp-definition:builtin"]
+                return None, "external", 0.8, call.provenance + ["lsp-definition:external"]
+            return resolution.target, "static_resolved", 0.9, call.provenance + ["lsp-definition"]
         for provider in self.providers.semantic:
             if isinstance(provider, LspDefinitionSemanticProvider):
                 continue  # 已批量解析（resolve_many）

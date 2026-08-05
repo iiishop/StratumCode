@@ -1,10 +1,19 @@
 from __future__ import annotations
 
+import builtins as _builtins_module
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Self
 
 import yaml
+
+# 运行时内置符号来源：yaml 里声明 runtime_builtins，加载时动态获取，
+# 免去手写白名单。目前支持 Python（dir(builtins)），其他语言可扩展。
+_RUNTIME_BUILTIN_PROVIDERS: dict[str, callable] = {
+    "python.builtins": lambda: frozenset(
+        name for name in dir(_builtins_module) if not name.startswith("_")
+    ),
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -40,6 +49,11 @@ class LanguagePack:
         syntax = data.get("syntax") if isinstance(data.get("syntax"), dict) else {}
         semantic = data.get("semantic") if isinstance(data.get("semantic"), dict) else {}
         dependency = data.get("dependency") if isinstance(data.get("dependency"), dict) else {}
+        builtin_symbols = frozenset(str(item) for item in data.get("builtin_symbols", []))
+        for runtime_source in data.get("runtime_builtins", []):
+            provider = _RUNTIME_BUILTIN_PROVIDERS.get(str(runtime_source))
+            if provider:
+                builtin_symbols = builtin_symbols | provider()
         return cls(
             id=str(data["id"]),
             extensions=tuple(str(item).casefold() for item in data.get("extensions", [])),
@@ -53,7 +67,7 @@ class LanguagePack:
                 for item in syntax.get("calls", [])
                 if isinstance(item, dict)
             ),
-            builtin_symbols=frozenset(str(item) for item in data.get("builtin_symbols", [])),
+            builtin_symbols=builtin_symbols,
             dependency_roots=tuple(str(item) for item in dependency.get("roots", [])),
             ignored_symbols=frozenset(str(item) for item in data.get("ignored_symbols", [])),
             ignored_calls=frozenset(str(item) for item in data.get("ignored_calls", [])),
