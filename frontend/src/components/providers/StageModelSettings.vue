@@ -113,9 +113,9 @@ onMounted(async () => {
 
     <p v-if="error" class="stage-models__error">{{ error }}</p>
 
-    <div v-for="stage in stageOrder" :key="stage" class="stage-row" :class="`is-${stage}`">
+    <div v-for="(stage, stageIndex) in stageOrder" :key="stage" class="stage-row" :class="`is-${stage}`">
       <div class="stage-row__identity">
-        <span>{{ stageMeta[stage].index }}</span>
+        <span>{{ String(stageIndex).padStart(2, '0') }}</span>
         <div>
           <strong>{{ stageMeta[stage].title }}</strong>
           <small v-if="stage !== 'default' && !rows[stage].provider_id">Inherits {{ defaultLabel }}</small>
