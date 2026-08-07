@@ -87,6 +87,7 @@ _ROUTES: dict[tuple[str, str], object] = {
     # GET
     ("GET", "/api/providers"):       lambda h, b: h._json(providers.list_saved()),
     ("GET", "/api/model-settings"):  lambda h, b: h._json(model_settings.list_all()),
+    ("GET", "/api/model-stages"):    lambda h, b: h._json(model_settings.stage_meta()),
     ("GET", "/api/app-settings"):    lambda h, b: h._json(app_settings.to_json()),
     ("GET", "/api/workspaces"):      lambda h, b: h._json({
         "items": workspaces.list_all(h.workspace_dir),

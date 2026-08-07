@@ -3,24 +3,15 @@ import { computed, onMounted, reactive, ref } from 'vue'
 import { animate } from 'animejs'
 
 const props = defineProps({ providers: { type: Array, required: true } })
-const stageOrder = ['default', 'evidence', 'git_commit', 'title']
-const stageMeta = {
-  default: { index: '00', title: 'Global default', detail: 'Fallback for every stage', empty: 'Select provider' },
-  evidence: { index: '01', title: 'Gather evidence', detail: 'Hypothesis verification loop', empty: 'Use global default' },
-  git_commit: { index: '02', title: 'Git commit message', detail: 'Generate commit title and description', empty: 'Use global default' },
-  title: { index: '03', title: 'Session title', detail: 'Generate session title from conversation', empty: 'Use global default' },
-}
-const rows = reactive({
-  default: { provider_id: '', model_id: '', models: [], loading: false, saved: false },
-  evidence: { provider_id: '', model_id: '', models: [], loading: false, saved: false },
-  git_commit: { provider_id: '', model_id: '', models: [], loading: false, saved: false },
-  title: { provider_id: '', model_id: '', models: [], loading: false, saved: false },
-})
+// stage 列表与文案由后端 /api/model-stages 下发，加 stage 只需改后端 model_settings.STAGE_META
+const stageOrder = ref([])
+const stageMeta = ref({})
+const rows = reactive({})
 const error = ref('')
 
 const providerName = id => props.providers.find(provider => provider.id === Number(id))?.name || ''
 const defaultLabel = computed(() => {
-  const row = rows.default
+  const row = rows.default || {}
   return row.provider_id && row.model_id ? `${providerName(row.provider_id)} / ${row.model_id}` : 'Not configured'
 })
 
@@ -92,7 +83,21 @@ async function clearStage(stage) {
   }
 }
 
-onMounted(load)
+onMounted(async () => {
+  try {
+    const stages = await request('/model-stages')
+    stageOrder.value = stages.map(item => item.id)
+    const meta = {}
+    for (const item of stages) {
+      meta[item.id] = item
+      if (!rows[item.id]) rows[item.id] = { provider_id: '', model_id: '', models: [], loading: false, saved: false }
+    }
+    stageMeta.value = meta
+    await load()
+  } catch (reason) {
+    error.value = reason.message
+  }
+})
 </script>
 
 <template>

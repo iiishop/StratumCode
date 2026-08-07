@@ -6,7 +6,21 @@ EVIDENCE_STAGE = "evidence"
 GIT_COMMIT_STAGE = "git_commit"
 TITLE_STAGE = "title"
 SUMMARY_STAGE = "summary"
-VALID_STAGES = {DEFAULT_STAGE, EVIDENCE_STAGE, GIT_COMMIT_STAGE, TITLE_STAGE, SUMMARY_STAGE}
+
+# 单一事实来源：前端 stage 列表、顺序与文案都由这里下发，加 stage 只改这一份。
+STAGE_META = [
+    {"id": DEFAULT_STAGE,     "index": "00", "title": "Global default",        "detail": "Fallback for every stage",                         "empty": "Select provider"},
+    {"id": EVIDENCE_STAGE,    "index": "01", "title": "Gather evidence",       "detail": "Hypothesis verification loop",                    "empty": "Use global default"},
+    {"id": GIT_COMMIT_STAGE,  "index": "02", "title": "Git commit message",    "detail": "Generate commit title and description",           "empty": "Use global default"},
+    {"id": TITLE_STAGE,       "index": "03", "title": "Session title",         "detail": "Generate session title from conversation",        "empty": "Use global default"},
+    {"id": SUMMARY_STAGE,     "index": "04", "title": "Investigation summary", "detail": "Summarize investigation findings",                 "empty": "Use global default"},
+]
+VALID_STAGES = {item["id"] for item in STAGE_META}
+
+
+def stage_meta() -> list[dict]:
+    """Stage list and display metadata for the frontend providers page."""
+    return [dict(item) for item in STAGE_META]
 
 
 def _ensure_table() -> None:
