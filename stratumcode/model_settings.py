@@ -9,11 +9,11 @@ SUMMARY_STAGE = "summary"
 
 # 单一事实来源：前端 stage 列表、顺序与文案都由这里下发，加 stage 只改这一份。
 STAGE_META = [
-    {"id": DEFAULT_STAGE,     "index": "00", "title": "Global default",        "detail": "Fallback for every stage",                         "empty": "Select provider"},
-    {"id": EVIDENCE_STAGE,    "index": "01", "title": "Gather evidence",       "detail": "Hypothesis verification loop",                    "empty": "Use global default"},
-    {"id": GIT_COMMIT_STAGE,  "index": "02", "title": "Git commit message",    "detail": "Generate commit title and description",           "empty": "Use global default"},
-    {"id": TITLE_STAGE,       "index": "03", "title": "Session title",         "detail": "Generate session title from conversation",        "empty": "Use global default"},
-    {"id": SUMMARY_STAGE,     "index": "04", "title": "Investigation summary", "detail": "Summarize investigation findings",                 "empty": "Use global default"},
+    {"id": DEFAULT_STAGE,     "index": "00", "title": "Global default",        "detail": "Fallback for every stage"},
+    {"id": EVIDENCE_STAGE,    "index": "01", "title": "Gather evidence",       "detail": "Hypothesis verification loop"},
+    {"id": GIT_COMMIT_STAGE,  "index": "02", "title": "Git commit message",    "detail": "Generate commit title and description"},
+    {"id": TITLE_STAGE,       "index": "03", "title": "Session title",         "detail": "Generate session title from conversation"},
+    {"id": SUMMARY_STAGE,     "index": "04", "title": "Investigation summary", "detail": "Summarize investigation findings"},
 ]
 VALID_STAGES = {item["id"] for item in STAGE_META}
 

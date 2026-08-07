@@ -126,7 +126,7 @@ onMounted(async () => {
       <label>
         <span>Provider</span>
         <select v-model="rows[stage].provider_id" @change="loadModels(stage)">
-          <option value="">{{ stageMeta[stage].empty }}</option>
+          <option value="">{{ stage === 'default' ? 'Select provider' : 'Use global default' }}</option>
           <option v-for="provider in providers" :key="provider.id" :value="String(provider.id)">{{ provider.name }}</option>
         </select>
       </label>
