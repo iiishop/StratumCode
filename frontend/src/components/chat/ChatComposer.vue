@@ -177,23 +177,21 @@ const reducedMotion = () => window.matchMedia('(prefers-reduced-motion: reduce)'
 function onAskEnter(el, done) {
   if (reducedMotion()) { done(); return }
   gsap.fromTo(el,
-    { height: 0, autoAlpha: 0, y: -8 },
+    { autoAlpha: 0, y: 6 },
     {
-      height: el.scrollHeight,
       autoAlpha: 1,
       y: 0,
-      duration: 0.38,
-      ease: 'power3.out',
-      clearProps: 'height,autoAlpha,y',
+      duration: 0.24,
+      ease: 'power2.out',
       onComplete: () => {
         spawnAskParticles(el)
         done()
       },
     },
   )
-  gsap.fromTo(el.querySelectorAll('.chat__ask-badge, .chat__ask-question, .chat__ask-reason, .chat__ask-option, .chat__ask-hint'),
-    { autoAlpha: 0, y: 6 },
-    { autoAlpha: 1, y: 0, duration: 0.3, stagger: 0.045, ease: 'power2.out', delay: 0.08 },
+  gsap.fromTo(el.querySelectorAll('.chat__ask-option, .chat__ask-hint'),
+    { autoAlpha: 0, y: 4 },
+    { autoAlpha: 1, y: 0, duration: 0.22, stagger: 0.03, ease: 'power2.out', delay: 0.06 },
   )
 }
 
@@ -201,10 +199,9 @@ function onAskLeave(el, done) {
   if (reducedMotion()) { done(); return }
   gsap.to(el,
     {
-      height: 0,
       autoAlpha: 0,
-      y: -8,
-      duration: 0.28,
+      y: 4,
+      duration: 0.16,
       ease: 'power2.in',
       onComplete: done,
     },
@@ -215,24 +212,24 @@ function spawnAskParticles(el) {
   if (reducedMotion()) return
   const rect = el.getBoundingClientRect()
   const cx = rect.left + rect.width / 2
-  const baseY = rect.top + rect.height * 0.85
-  const colors = ['#4f8af7', '#f5c842', '#ffffff', '#a8c6ff']
-  for (let i = 0; i < 12; i += 1) {
+  const baseY = rect.top + rect.height * 0.9
+  const colors = ['#4f8af7', '#f5c842', '#ffffff']
+  for (let i = 0; i < 8; i += 1) {
     const p = document.createElement('span')
     p.className = 'chat__ask-particle'
-    const size = 3 + Math.random() * 4
+    const size = 2.5 + Math.random() * 3
     p.style.width = `${size}px`
     p.style.height = `${size}px`
     p.style.background = colors[i % colors.length]
-    p.style.left = `${cx + (Math.random() - 0.5) * 220}px`
+    p.style.left = `${cx + (Math.random() - 0.5) * 160}px`
     p.style.top = `${baseY}px`
     el.appendChild(p)
     gsap.to(p, {
-      y: -(26 + Math.random() * 56),
-      x: (Math.random() - 0.5) * 46,
+      y: -(18 + Math.random() * 32),
+      x: (Math.random() - 0.5) * 30,
       autoAlpha: 0,
       scale: 0.4,
-      duration: 0.7 + Math.random() * 0.5,
+      duration: 0.55 + Math.random() * 0.35,
       ease: 'power1.out',
       onComplete: () => p.remove(),
     })
@@ -291,21 +288,21 @@ onMounted(() => {
             type="button"
             title="Why this is asked"
           >{{ props.activeQuestion.reason }}</button>
+          <div v-if="questionOptions.length" class="chat__ask-options">
+            <button
+              v-for="option in questionOptions"
+              :key="option.id"
+              class="chat__ask-option"
+              :class="{ 'is-recommended': option.recommended }"
+              type="button"
+              @click="submitOption(option)"
+            >
+              <span class="chat__ask-option-label">{{ option.label }}</span>
+              <span v-if="option.recommended" class="chat__ask-option-rec">recommended</span>
+            </button>
+          </div>
+          <div v-else class="chat__ask-hint">Type your answer above and press Enter.</div>
         </div>
-        <div v-if="questionOptions.length" class="chat__ask-options">
-          <button
-            v-for="option in questionOptions"
-            :key="option.id"
-            class="chat__ask-option"
-            :class="{ 'is-recommended': option.recommended }"
-            type="button"
-            @click="submitOption(option)"
-          >
-            <span class="chat__ask-option-label">{{ option.label }}</span>
-            <span v-if="option.recommended" class="chat__ask-option-rec">recommended</span>
-          </button>
-        </div>
-        <div v-else class="chat__ask-hint">Type your answer above and press Enter.</div>
       </div>
     </Transition>
     <div class="chat__input-row">
@@ -708,13 +705,13 @@ onMounted(() => {
 .chat__ask {
   position: relative;
   display: flex;
-  flex-direction: column;
-  gap: 9px;
+  align-items: flex-start;
+  gap: 10px;
   margin: 0 11px;
-  padding: 12px 13px 11px;
-  border: 1px solid var(--accent-border);
-  border-radius: var(--radius);
-  background: linear-gradient(180deg, #f6f9ff, #eef4ff);
+  padding: 9px 11px;
+  border-left: 2px solid var(--accent);
+  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+  background: rgba(23, 86, 209, 0.035);
   overflow: hidden;
 }
 
@@ -727,27 +724,27 @@ onMounted(() => {
 
 .chat__ask-head {
   display: flex;
-  align-items: center;
-  gap: 9px;
+  flex-direction: column;
+  gap: 3px;
+  flex: 1;
   min-width: 0;
 }
 
 .chat__ask-badge {
-  flex-shrink: 0;
-  padding: 2px 7px;
+  align-self: flex-start;
+  padding: 1px 6px;
   border-radius: 99px;
-  color: #fff;
-  background: var(--accent);
-  font: 700 8px/1.4 var(--mono);
-  letter-spacing: 0.04em;
+  color: var(--accent-text);
+  background: var(--accent-bg);
+  font: 700 7.5px/1.5 var(--mono);
+  letter-spacing: 0.06em;
   text-transform: uppercase;
 }
 
 .chat__ask-question {
-  flex: 1;
   min-width: 0;
   color: var(--text-h);
-  font: 600 12px/1.45 var(--sans);
+  font: 500 11.5px/1.5 var(--sans);
   overflow: hidden;
   text-overflow: ellipsis;
   display: -webkit-box;
@@ -757,13 +754,12 @@ onMounted(() => {
 
 .chat__ask-reason {
   flex-shrink: 0;
-  max-width: 260px;
-  padding: 2px 8px;
-  border: 1px solid var(--border);
-  border-radius: 6px;
+  max-width: 220px;
+  padding: 0;
+  border: 0;
   color: var(--text-muted);
-  background: #fff;
-  font: 9px/1.5 var(--sans);
+  background: transparent;
+  font: 9.5px/1.5 var(--sans);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -773,19 +769,19 @@ onMounted(() => {
 .chat__ask-options {
   display: flex;
   flex-wrap: wrap;
-  gap: 6px;
+  gap: 5px;
 }
 
 .chat__ask-option {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
-  padding: 6px 11px;
+  gap: 5px;
+  padding: 4.5px 10px;
   border: 1px solid var(--border);
-  border-radius: 8px;
+  border-radius: 99px;
   color: var(--text);
   background: #fff;
-  font: 600 11px/1.2 var(--sans);
+  font: 600 10.5px/1.2 var(--sans);
   cursor: pointer;
   transition: border-color .12s, color .12s, background .12s, transform .1s;
 }
@@ -806,18 +802,18 @@ onMounted(() => {
 }
 
 .chat__ask-option-rec {
-  padding: 1px 5px;
+  padding: 0.5px 4px;
   border-radius: 99px;
-  color: #fff;
-  background: var(--accent);
-  font: 700 7.5px/1.3 var(--mono);
+  color: var(--accent-text);
+  background: var(--accent-bg);
+  font: 700 7px/1.4 var(--mono);
   text-transform: uppercase;
   letter-spacing: 0.03em;
 }
 
 .chat__ask-hint {
   color: var(--text-muted);
-  font: 9.5px/1.4 var(--sans);
+  font: 9px/1.4 var(--sans);
 }
 
 @keyframes status-pulse { 50% { transform: scale(1.45); opacity: .58; } }
