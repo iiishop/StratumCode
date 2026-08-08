@@ -1247,15 +1247,6 @@ watch(() => props.session?.id, (id, oldId) => {
 .chat__todo.is-done .chat__todo-check { border-color: var(--ok-border); background: var(--ok-bg); }
 .chat__todo-text { font-size: 12px; color: var(--text-h); line-height: 1.4; }
 
-/* ---- foot ---- */
-.chat__foot {
-  position: relative;
-  z-index: 1;
-  flex-shrink: 0;
-  border-top: 1px solid var(--border);
-  background: var(--bg);
-}
-
 /* ---- code ---- */
 .chat__code-block { margin: 8px 0; border-radius: var(--radius-sm); overflow: hidden; font-size: 12px; line-height: 1.55; }
 .chat__code-block code { display: block; padding: 12px 14px; overflow-x: auto; font-family: var(--mono); background: var(--code-bg) !important; }
@@ -1706,6 +1697,7 @@ watch(() => props.session?.id, (id, oldId) => {
 .chat__foot {
   position: relative;
   z-index: 1;
+  flex-shrink: 0;
   padding: 12px 24px 18px;
   border-top: 0;
   background: linear-gradient(transparent, var(--bg) 28%);

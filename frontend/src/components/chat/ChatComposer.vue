@@ -412,8 +412,12 @@ onMounted(() => {
 }
 
 .chat__files {
-  padding: 7px 11px 0;
+  display: flex;
+  align-items: center;
   gap: 6px;
+  flex-wrap: wrap;
+  flex-shrink: 0;
+  padding: 7px 11px 0;
 }
 
 .chat__files-label {
@@ -425,6 +429,9 @@ onMounted(() => {
 }
 
 .chat__file-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
   height: 23px;
   padding: 0 6px;
   border-color: var(--border);
@@ -445,18 +452,25 @@ onMounted(() => {
 }
 
 .chat__input-row {
+  display: flex;
+  align-items: flex-end;
   gap: 10px;
   padding: 9px 10px 5px 14px;
 }
 
 .chat__input {
+  flex: 1;
   min-height: 42px;
+  max-height: 120px;
   padding: 9px 0;
   border: 0;
   border-radius: 0;
   color: var(--text-h);
   background: transparent;
   font-size: var(--font-body);
+  resize: none;
+  outline: none;
+  transition: border-color 0.12s;
 }
 
 .chat__input:focus {
@@ -468,7 +482,15 @@ onMounted(() => {
   color: #91a0ba;
 }
 
+.chat__input:disabled {
+  opacity: 0.5;
+}
+
 .chat__send {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
   width: 34px;
   height: 34px;
   align-self: flex-end;
@@ -476,6 +498,8 @@ onMounted(() => {
   border-radius: 9px;
   color: #ffffff;
   background: var(--accent);
+  cursor: pointer;
+  transition: background 0.12s, transform 0.1s;
 }
 
 .chat__copy-session {
@@ -507,6 +531,10 @@ onMounted(() => {
   background: var(--accent-hover);
 }
 
+.chat__send:active {
+  transform: scale(.95);
+}
+
 .chat__send.is-stop {
   border-color: var(--err);
   background: var(--err);
@@ -514,6 +542,12 @@ onMounted(() => {
 
 .chat__send.is-stop:hover {
   background: #b91c1c;
+}
+
+.chat__send:disabled {
+  opacity: 0.35;
+  cursor: default;
+  transform: none;
 }
 
 .chat__composer-meta {
