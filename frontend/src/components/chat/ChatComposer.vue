@@ -171,6 +171,74 @@ function formatNumber(value) {
   return typeof value === 'number' ? value.toLocaleString() : (value ?? 0)
 }
 
+/* ── clearify panel transition ── */
+const reducedMotion = () => window.matchMedia('(prefers-reduced-motion: reduce)').matches
+
+function onAskEnter(el, done) {
+  if (reducedMotion()) { done(); return }
+  gsap.fromTo(el,
+    { height: 0, autoAlpha: 0, y: -8 },
+    {
+      height: el.scrollHeight,
+      autoAlpha: 1,
+      y: 0,
+      duration: 0.38,
+      ease: 'power3.out',
+      clearProps: 'height,autoAlpha,y',
+      onComplete: () => {
+        spawnAskParticles(el)
+        done()
+      },
+    },
+  )
+  gsap.fromTo(el.querySelectorAll('.chat__ask-badge, .chat__ask-question, .chat__ask-reason, .chat__ask-option, .chat__ask-hint'),
+    { autoAlpha: 0, y: 6 },
+    { autoAlpha: 1, y: 0, duration: 0.3, stagger: 0.045, ease: 'power2.out', delay: 0.08 },
+  )
+}
+
+function onAskLeave(el, done) {
+  if (reducedMotion()) { done(); return }
+  gsap.to(el,
+    {
+      height: 0,
+      autoAlpha: 0,
+      y: -8,
+      duration: 0.28,
+      ease: 'power2.in',
+      onComplete: done,
+    },
+  )
+}
+
+function spawnAskParticles(el) {
+  if (reducedMotion()) return
+  const rect = el.getBoundingClientRect()
+  const cx = rect.left + rect.width / 2
+  const baseY = rect.top + rect.height * 0.85
+  const colors = ['#4f8af7', '#f5c842', '#ffffff', '#a8c6ff']
+  for (let i = 0; i < 12; i += 1) {
+    const p = document.createElement('span')
+    p.className = 'chat__ask-particle'
+    const size = 3 + Math.random() * 4
+    p.style.width = `${size}px`
+    p.style.height = `${size}px`
+    p.style.background = colors[i % colors.length]
+    p.style.left = `${cx + (Math.random() - 0.5) * 220}px`
+    p.style.top = `${baseY}px`
+    el.appendChild(p)
+    gsap.to(p, {
+      y: -(26 + Math.random() * 56),
+      x: (Math.random() - 0.5) * 46,
+      autoAlpha: 0,
+      scale: 0.4,
+      duration: 0.7 + Math.random() * 0.5,
+      ease: 'power1.out',
+      onComplete: () => p.remove(),
+    })
+  }
+}
+
 onMounted(() => {
   if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) return
   if (rootRef.value) {
@@ -212,32 +280,34 @@ onMounted(() => {
         @remove="emit('remove-file', f.path)"
       />
     </div>
-    <div v-if="isAsking" class="chat__ask">
-      <div class="chat__ask-head">
-        <span class="chat__ask-badge">Question</span>
-        <span class="chat__ask-question">{{ props.activeQuestion?.question || 'Agent needs your input' }}</span>
-        <button
-          v-if="props.activeQuestion?.reason"
-          class="chat__ask-reason"
-          type="button"
-          title="Why this is asked"
-        >{{ props.activeQuestion.reason }}</button>
+    <Transition :css="false" @enter="onAskEnter" @leave="onAskLeave">
+      <div v-if="isAsking" class="chat__ask">
+        <div class="chat__ask-head">
+          <span class="chat__ask-badge">Question</span>
+          <span class="chat__ask-question">{{ props.activeQuestion?.question || 'Agent needs your input' }}</span>
+          <button
+            v-if="props.activeQuestion?.reason"
+            class="chat__ask-reason"
+            type="button"
+            title="Why this is asked"
+          >{{ props.activeQuestion.reason }}</button>
+        </div>
+        <div v-if="questionOptions.length" class="chat__ask-options">
+          <button
+            v-for="option in questionOptions"
+            :key="option.id"
+            class="chat__ask-option"
+            :class="{ 'is-recommended': option.recommended }"
+            type="button"
+            @click="submitOption(option)"
+          >
+            <span class="chat__ask-option-label">{{ option.label }}</span>
+            <span v-if="option.recommended" class="chat__ask-option-rec">recommended</span>
+          </button>
+        </div>
+        <div v-else class="chat__ask-hint">Type your answer above and press Enter.</div>
       </div>
-      <div v-if="questionOptions.length" class="chat__ask-options">
-        <button
-          v-for="option in questionOptions"
-          :key="option.id"
-          class="chat__ask-option"
-          :class="{ 'is-recommended': option.recommended }"
-          type="button"
-          @click="submitOption(option)"
-        >
-          <span class="chat__ask-option-label">{{ option.label }}</span>
-          <span v-if="option.recommended" class="chat__ask-option-rec">recommended</span>
-        </button>
-      </div>
-      <div v-else class="chat__ask-hint">Type your answer above and press Enter.</div>
-    </div>
+    </Transition>
     <div class="chat__input-row">
       <textarea
         ref="textareaRef"
@@ -298,6 +368,7 @@ onMounted(() => {
 
 <style scoped>
 .chat__composer {
+  position: relative;
   width: min(880px, 100%);
   margin: 0 auto;
   overflow: hidden;
@@ -635,6 +706,7 @@ onMounted(() => {
 
 /* ---- clearify question panel ---- */
 .chat__ask {
+  position: relative;
   display: flex;
   flex-direction: column;
   gap: 9px;
@@ -643,6 +715,14 @@ onMounted(() => {
   border: 1px solid var(--accent-border);
   border-radius: var(--radius);
   background: linear-gradient(180deg, #f6f9ff, #eef4ff);
+  overflow: hidden;
+}
+
+.chat__ask-particle {
+  position: absolute;
+  border-radius: 50%;
+  pointer-events: none;
+  will-change: transform, opacity;
 }
 
 .chat__ask-head {
