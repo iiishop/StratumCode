@@ -176,22 +176,30 @@ const reducedMotion = () => window.matchMedia('(prefers-reduced-motion: reduce)'
 
 function onAskEnter(el, done) {
   if (reducedMotion()) { done(); return }
+  const finalH = el.scrollHeight
   gsap.fromTo(el,
-    { autoAlpha: 0, y: 6 },
+    { height: 0, autoAlpha: 0 },
     {
-      autoAlpha: 1,
-      y: 0,
-      duration: 0.24,
-      ease: 'power2.out',
+      height: finalH + 15,
+      duration: 0.3,
+      ease: 'power3.out',
       onComplete: () => {
-        spawnAskParticles(el)
-        done()
+        gsap.to(el, {
+          height: finalH,
+          duration: 0.2,
+          ease: 'power2.out',
+          clearProps: 'height',
+          onComplete: () => {
+            spawnAskParticles(el)
+            done()
+          },
+        })
       },
     },
   )
   gsap.fromTo(el.querySelectorAll('.chat__ask-option, .chat__ask-hint'),
     { autoAlpha: 0, y: 4 },
-    { autoAlpha: 1, y: 0, duration: 0.22, stagger: 0.03, ease: 'power2.out', delay: 0.06 },
+    { autoAlpha: 1, y: 0, duration: 0.22, stagger: 0.04, ease: 'power2.out', delay: 0.1 },
   )
 }
 
@@ -199,9 +207,9 @@ function onAskLeave(el, done) {
   if (reducedMotion()) { done(); return }
   gsap.to(el,
     {
+      height: 0,
       autoAlpha: 0,
-      y: 4,
-      duration: 0.16,
+      duration: 0.2,
       ease: 'power2.in',
       onComplete: done,
     },
@@ -210,9 +218,10 @@ function onAskLeave(el, done) {
 
 function spawnAskParticles(el) {
   if (reducedMotion()) return
-  const rect = el.getBoundingClientRect()
-  const cx = rect.left + rect.width / 2
-  const baseY = rect.top + rect.height * 0.9
+  const w = el.clientWidth
+  const h = el.clientHeight
+  const cx = w / 2
+  const baseY = h * 0.92
   const colors = ['#4f8af7', '#f5c842', '#ffffff']
   for (let i = 0; i < 8; i += 1) {
     const p = document.createElement('span')
