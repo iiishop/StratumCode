@@ -288,21 +288,24 @@ onMounted(() => {
             type="button"
             title="Why this is asked"
           >{{ props.activeQuestion.reason }}</button>
-          <div v-if="questionOptions.length" class="chat__ask-options">
-            <button
-              v-for="option in questionOptions"
-              :key="option.id"
-              class="chat__ask-option"
-              :class="{ 'is-recommended': option.recommended }"
-              type="button"
-              @click="submitOption(option)"
-            >
-              <span class="chat__ask-option-label">{{ option.label }}</span>
-              <span v-if="option.recommended" class="chat__ask-option-rec">recommended</span>
-            </button>
-          </div>
-          <div v-else class="chat__ask-hint">Type your answer above and press Enter.</div>
         </div>
+        <div v-if="questionOptions.length" class="chat__ask-options">
+          <button
+            v-for="option in questionOptions"
+            :key="option.id"
+            class="chat__ask-option"
+            :class="{ 'is-recommended': option.recommended }"
+            type="button"
+            @click="submitOption(option)"
+          >
+            <span class="chat__ask-option-label">{{ option.label }}</span>
+            <span class="chat__ask-option-side">
+              <span v-if="option.recommended" class="chat__ask-option-rec">recommended</span>
+              <svg class="chat__ask-option-arrow" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14M13 6l6 6-6 6"/></svg>
+            </span>
+          </button>
+        </div>
+        <div v-else class="chat__ask-hint">Type your answer above and press Enter.</div>
       </div>
     </Transition>
     <div class="chat__input-row">
@@ -705,13 +708,15 @@ onMounted(() => {
 .chat__ask {
   position: relative;
   display: flex;
-  align-items: flex-start;
+  flex-direction: column;
   gap: 10px;
   margin: 0 11px;
-  padding: 9px 11px;
+  padding: 12px 14px 13px;
+  border: 1px solid var(--border);
   border-left: 2px solid var(--accent);
-  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
-  background: rgba(23, 86, 209, 0.035);
+  border-radius: var(--radius-sm);
+  background: #fff;
+  box-shadow: 0 1px 2px rgba(23, 72, 150, 0.04);
   overflow: hidden;
 }
 
@@ -725,26 +730,36 @@ onMounted(() => {
 .chat__ask-head {
   display: flex;
   flex-direction: column;
-  gap: 3px;
-  flex: 1;
+  gap: 5px;
   min-width: 0;
 }
 
 .chat__ask-badge {
   align-self: flex-start;
-  padding: 1px 6px;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 8px;
   border-radius: 99px;
   color: var(--accent-text);
   background: var(--accent-bg);
-  font: 700 7.5px/1.5 var(--mono);
-  letter-spacing: 0.06em;
+  font: 700 8px/1.5 var(--mono);
+  letter-spacing: 0.08em;
   text-transform: uppercase;
+}
+
+.chat__ask-badge::before {
+  content: '';
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--accent);
 }
 
 .chat__ask-question {
   min-width: 0;
   color: var(--text-h);
-  font: 500 11.5px/1.5 var(--sans);
+  font: 600 13px/1.5 var(--sans);
   overflow: hidden;
   text-overflow: ellipsis;
   display: -webkit-box;
@@ -753,13 +768,13 @@ onMounted(() => {
 }
 
 .chat__ask-reason {
-  flex-shrink: 0;
-  max-width: 220px;
+  align-self: flex-start;
+  max-width: 100%;
   padding: 0;
   border: 0;
   color: var(--text-muted);
   background: transparent;
-  font: 9.5px/1.5 var(--sans);
+  font: 10px/1.5 var(--sans);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -768,32 +783,36 @@ onMounted(() => {
 
 .chat__ask-options {
   display: flex;
-  flex-wrap: wrap;
-  gap: 5px;
+  flex-direction: column;
+  gap: 6px;
 }
 
 .chat__ask-option {
-  display: inline-flex;
+  display: flex;
   align-items: center;
-  gap: 5px;
-  padding: 4.5px 10px;
+  justify-content: space-between;
+  gap: 10px;
+  width: 100%;
+  padding: 9px 12px;
   border: 1px solid var(--border);
-  border-radius: 99px;
+  border-radius: 9px;
   color: var(--text);
   background: #fff;
-  font: 600 10.5px/1.2 var(--sans);
+  font: 600 11.5px/1.35 var(--sans);
+  text-align: left;
   cursor: pointer;
-  transition: border-color .12s, color .12s, background .12s, transform .1s;
+  transition: border-color .14s, color .14s, background .14s, transform .1s, box-shadow .14s;
 }
 
 .chat__ask-option:hover {
   border-color: var(--accent-border);
   color: var(--accent-text);
   background: var(--accent-bg);
+  box-shadow: 0 2px 8px rgba(23, 86, 209, 0.08);
 }
 
 .chat__ask-option:active {
-  transform: scale(.97);
+  transform: scale(.985);
 }
 
 .chat__ask-option.is-recommended {
@@ -801,19 +820,40 @@ onMounted(() => {
   background: var(--accent-bg);
 }
 
+.chat__ask-option-side {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
 .chat__ask-option-rec {
-  padding: 0.5px 4px;
+  padding: 2px 7px;
   border-radius: 99px;
   color: var(--accent-text);
   background: var(--accent-bg);
-  font: 700 7px/1.4 var(--mono);
+  border: 1px solid var(--accent-border);
+  font: 700 7.5px/1.4 var(--mono);
   text-transform: uppercase;
-  letter-spacing: 0.03em;
+  letter-spacing: 0.04em;
+}
+
+.chat__ask-option-arrow {
+  color: var(--text-muted);
+  opacity: 0;
+  transform: translateX(-4px);
+  transition: opacity .14s, transform .14s, color .14s;
+}
+
+.chat__ask-option:hover .chat__ask-option-arrow {
+  opacity: 1;
+  transform: translateX(0);
+  color: var(--accent-text);
 }
 
 .chat__ask-hint {
   color: var(--text-muted);
-  font: 9px/1.4 var(--sans);
+  font: 10px/1.4 var(--sans);
 }
 
 @keyframes status-pulse { 50% { transform: scale(1.45); opacity: .58; } }
