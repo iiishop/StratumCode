@@ -1,5 +1,5 @@
 <script setup>
-import { nextTick, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, ref, watch } from 'vue'
 import { gsap } from 'gsap'
 import FileReference from '../FileReference.vue'
 import FileMentionDropdown from '../FileMentionDropdown.vue'
