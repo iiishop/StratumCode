@@ -239,7 +239,7 @@ def _merge_model_usage(total: dict, usage: dict) -> None:
             total[key] = value
 
 
-def _tool_arguments(value) -> dict:
+def tool_arguments(value) -> dict:
     if isinstance(value, dict):
         return value
     try:
