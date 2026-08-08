@@ -174,80 +174,75 @@ function formatNumber(value) {
 /* ── clearify panel transition ── */
 const reducedMotion = () => window.matchMedia('(prefers-reduced-motion: reduce)').matches
 
-const ASK_EASE = 'back.out(1.4)'
-const ASK_EASE_IN = 'power2.in'
-
 function onAskEnter(el, done) {
   if (reducedMotion()) { done(); return }
   const finalH = el.scrollHeight
-  const tl = gsap.timeline({
-    defaults: { ease: 'power2.out' },
-    onComplete: () => {
-      gsap.set(el, { clearProps: 'height,opacity,visibility' })
-      spawnAskParticles(el)
-      done()
+  gsap.fromTo(el,
+    { height: 0, autoAlpha: 0 },
+    {
+      height: finalH + 15,
+      autoAlpha: 1,
+      duration: 0.3,
+      ease: 'power3.out',
+      onComplete: () => {
+        gsap.to(el, {
+          height: finalH,
+          duration: 0.2,
+          ease: 'power2.out',
+          clearProps: 'height',
+          onComplete: () => {
+            spawnAskParticles(el)
+            done()
+          },
+        })
+      },
     },
-  })
-  tl.fromTo(el,
-    { height: 0, opacity: 0 },
-    { height: finalH, opacity: 1, duration: 0.34, ease: ASK_EASE },
   )
-    .fromTo(el.querySelector('.chat__ask-badge'),
-      { opacity: 0, y: 5 },
-      { opacity: 1, y: 0, duration: 0.2 },
-      '-=0.24')
-    .fromTo(el.querySelector('.chat__ask-question'),
-      { opacity: 0, y: 5 },
-      { opacity: 1, y: 0, duration: 0.22 },
-      '<0.05')
-    .fromTo(el.querySelectorAll('.chat__ask-option, .chat__ask-hint'),
-      { opacity: 0, y: 7 },
-      { opacity: 1, y: 0, duration: 0.2, stagger: 0.045 },
-      '<0.08')
+  gsap.fromTo(el.querySelectorAll('.chat__ask-option, .chat__ask-hint'),
+    { autoAlpha: 0, y: 4 },
+    { autoAlpha: 1, y: 0, duration: 0.22, stagger: 0.04, ease: 'power2.out', delay: 0.1 },
+  )
 }
 
 function onAskLeave(el, done) {
   if (reducedMotion()) { done(); return }
-  const tl = gsap.timeline({
-    defaults: { ease: 'power2.in' },
-    onComplete: done,
-  })
-  tl.to(el.querySelectorAll('.chat__ask-option, .chat__ask-hint'),
-    { opacity: 0, y: -5, duration: 0.12, stagger: 0.02 },
+  gsap.to(el,
+    {
+      height: 0,
+      autoAlpha: 0,
+      duration: 0.2,
+      ease: 'power2.in',
+      onComplete: done,
+    },
   )
-    .to(el,
-      { height: 0, opacity: 0, duration: 0.18, ease: ASK_EASE_IN },
-      '-=0.08')
 }
 
 function spawnAskParticles(el) {
-  if (reducedMotion() || !el.isConnected) return
+  if (reducedMotion()) return
   const w = el.clientWidth
   const h = el.clientHeight
   const cx = w / 2
-  const baseY = h * 0.9
+  const baseY = h * 0.92
   const colors = ['#4f8af7', '#f5c842', '#ffffff']
-  for (let i = 0; i < 10; i += 1) {
+  for (let i = 0; i < 8; i += 1) {
     const p = document.createElement('span')
     p.className = 'chat__ask-particle'
-    const size = 2 + Math.random() * 3
+    const size = 2.5 + Math.random() * 3
     p.style.width = `${size}px`
     p.style.height = `${size}px`
     p.style.background = colors[i % colors.length]
-    p.style.left = `${cx + (Math.random() - 0.5) * 180}px`
+    p.style.left = `${cx + (Math.random() - 0.5) * 160}px`
     p.style.top = `${baseY}px`
     el.appendChild(p)
-    const dx = (Math.random() - 0.5) * 44
-    const dy = -(20 + Math.random() * 38)
-    const dur = 500 + Math.random() * 400
-    p.animate(
-      [
-        { transform: 'translate(0, 0) scale(1)', opacity: 1 },
-        { transform: `translate(${dx}px, ${dy}px) scale(0.35)`, opacity: 0 },
-      ],
-      { duration: dur, easing: 'cubic-bezier(0.22, 0.61, 0.36, 1)', fill: 'forwards' },
-    )
-    setTimeout(() => p.remove(), dur + 60)
+    gsap.to(p, {
+      y: -(18 + Math.random() * 32),
+      x: (Math.random() - 0.5) * 30,
+      autoAlpha: 0,
+      scale: 0.4,
+      duration: 0.55 + Math.random() * 0.35,
+      ease: 'power1.out',
+      onComplete: () => p.remove(),
+    })
   }
 }
 
