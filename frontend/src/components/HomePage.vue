@@ -491,8 +491,6 @@ async function restoreState(state = {}) {
   await nextTick()
 
   const rawMessages = state.messages || []
-  // NOTE(IS1): answer_status is preserved — event.data is wrapped via reactive()
-  // and ChatEvent passes event.data as :event to UserQuestionEvent.
   const CHUNK = 30
 
   for (let i = 0; i < rawMessages.length; i += CHUNK) {
@@ -555,6 +553,15 @@ function questionEventFor(answer) {
   }
   return { message: null, event: null }
 }
+
+const activeQuestion = computed(() => {
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    const message = messages[i]
+    const event = message.events?.find(item => item.type === 'user_question' && item.data?.answer_status !== 'submitted')
+    if (event) return event.data
+  }
+  return null
+})
 
 async function send(answer = null) {
   if (answer) {
@@ -1024,11 +1031,13 @@ watch(() => props.session?.id, (id, oldId) => {
         :file-context="fileContext"
         :copy-session-status="copySessionStatus"
         :active-workspace-id="props.activeWorkspace?.id"
+        :active-question="activeQuestion"
         @send="send"
         @stop="stopChat"
         @copy-session="copyCurrentSession"
         @remove-file="removeContextFile"
         @add-file="addToFileContext"
+        @answer="answerQuestion"
       />
     </div>
 

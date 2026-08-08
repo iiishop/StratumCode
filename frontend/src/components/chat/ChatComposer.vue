@@ -16,11 +16,57 @@ const props = defineProps({
   fileContext: { type: Array, default: () => [] },
   copySessionStatus: { type: String, default: '' },
   activeWorkspaceId: { type: [Number, String], default: null },
+  activeQuestion: { type: Object, default: null },
 })
 
-const emit = defineEmits(['send', 'stop', 'copy-session', 'remove-file', 'add-file'])
+const emit = defineEmits(['send', 'stop', 'copy-session', 'remove-file', 'add-file', 'answer'])
 
 const textareaRef = ref(null)
+
+/* ── clearify question state ── */
+const isAsking = computed(() => !!props.activeQuestion)
+const questionOptions = computed(() => (props.activeQuestion?.options || []).filter(o => o && o.id))
+const canSubmitAnswer = computed(() => {
+  if (!isAsking.value) return true
+  return input.value.trim().length > 0
+})
+
+function buildAnswerPayload(extra) {
+  const q = props.activeQuestion || {}
+  return {
+    question_id: q.id,
+    analysis_id: q.analysis_id || '',
+    unknown_id: q.unknown_id || '',
+    origin_message: q.origin_message || '',
+    question: q.question || '',
+    send: true,
+    ...extra,
+  }
+}
+
+function submitOption(option) {
+  if (!isAsking.value) return
+  emit('answer', buildAnswerPayload({
+    selected_option_id: option.id,
+    selected_option_label: option.label,
+    response: option.value || option.label,
+  }))
+}
+
+function submitCustomAnswer() {
+  const text = input.value.trim()
+  if (!isAsking.value || !text) return
+  emit('answer', buildAnswerPayload({ response: text, custom: true }))
+  input.value = ''
+}
+
+function onComposerAction() {
+  if (isAsking.value) {
+    submitCustomAnswer()
+    return
+  }
+  emit('send')
+}
 
 /* ── mention state ── */
 const mentionFiles = ref([])
@@ -104,7 +150,10 @@ function onTextareaKeydown(e) {
   if (mentionActive.value && (e.key === 'ArrowDown' || e.key === 'ArrowUp' || e.key === 'Enter' || e.key === 'Tab' || e.key === 'Escape')) {
     return
   }
-  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); emit('send') }
+  if (e.key === 'Enter' && !e.shiftKey) {
+    e.preventDefault()
+    onComposerAction()
+  }
 }
 
 function closeMention() {
@@ -163,16 +212,42 @@ onMounted(() => {
         @remove="emit('remove-file', f.path)"
       />
     </div>
+    <div v-if="isAsking" class="chat__ask">
+      <div class="chat__ask-head">
+        <span class="chat__ask-badge">Question</span>
+        <span class="chat__ask-question">{{ props.activeQuestion?.question || 'Agent needs your input' }}</span>
+        <button
+          v-if="props.activeQuestion?.reason"
+          class="chat__ask-reason"
+          type="button"
+          title="Why this is asked"
+        >{{ props.activeQuestion.reason }}</button>
+      </div>
+      <div v-if="questionOptions.length" class="chat__ask-options">
+        <button
+          v-for="option in questionOptions"
+          :key="option.id"
+          class="chat__ask-option"
+          :class="{ 'is-recommended': option.recommended }"
+          type="button"
+          @click="submitOption(option)"
+        >
+          <span class="chat__ask-option-label">{{ option.label }}</span>
+          <span v-if="option.recommended" class="chat__ask-option-rec">recommended</span>
+        </button>
+      </div>
+      <div v-else class="chat__ask-hint">Type your answer above and press Enter.</div>
+    </div>
     <div class="chat__input-row">
       <textarea
         ref="textareaRef"
         v-model="input"
         class="chat__input"
-        placeholder="Ask StratumCode to inspect or change the project"
+        :placeholder="isAsking ? 'Type your answer…' : 'Ask StratumCode to inspect or change the project'"
         rows="1"
         @keydown="onTextareaKeydown"
         @input="onTextareaInput"
-        :disabled="isStreaming"
+        :disabled="isStreaming && !isAsking"
       ></textarea>
       <button
         class="chat__copy-session"
@@ -190,10 +265,10 @@ onMounted(() => {
         class="chat__send"
         :class="{ 'is-stop': isStreaming }"
         type="button"
-        @click="isStreaming ? emit('stop') : emit('send')"
-        :disabled="!isStreaming && !input.trim()"
-        :aria-label="isStreaming ? 'Stop run' : 'Send message'"
-        :title="isStreaming ? 'Stop run' : 'Send message'"
+        @click="isStreaming ? emit('stop') : onComposerAction()"
+        :disabled="!isStreaming && !canSubmitAnswer"
+        :aria-label="isStreaming ? 'Stop run' : (isAsking ? 'Submit answer' : 'Send message')"
+        :title="isStreaming ? 'Stop run' : (isAsking ? 'Submit answer' : 'Send message')"
       >
         <svg v-if="isStreaming" width="13" height="13" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
           <rect x="6" y="6" width="12" height="12" rx="2"/>
@@ -205,7 +280,7 @@ onMounted(() => {
     </div>
 
     <div class="chat__composer-meta">
-      <span>Enter to send</span>
+      <span>{{ isAsking ? 'Enter to submit answer' : 'Enter to send' }}</span>
       <span v-if="copySessionStatus">{{ copySessionStatus }}</span>
     </div>
 
@@ -556,6 +631,113 @@ onMounted(() => {
   padding: 0 13px 9px;
   color: var(--text-muted);
   font: 8.5px/1 var(--mono);
+}
+
+/* ---- clearify question panel ---- */
+.chat__ask {
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+  margin: 0 11px;
+  padding: 12px 13px 11px;
+  border: 1px solid var(--accent-border);
+  border-radius: var(--radius);
+  background: linear-gradient(180deg, #f6f9ff, #eef4ff);
+}
+
+.chat__ask-head {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-width: 0;
+}
+
+.chat__ask-badge {
+  flex-shrink: 0;
+  padding: 2px 7px;
+  border-radius: 99px;
+  color: #fff;
+  background: var(--accent);
+  font: 700 8px/1.4 var(--mono);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.chat__ask-question {
+  flex: 1;
+  min-width: 0;
+  color: var(--text-h);
+  font: 600 12px/1.45 var(--sans);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
+
+.chat__ask-reason {
+  flex-shrink: 0;
+  max-width: 260px;
+  padding: 2px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text-muted);
+  background: #fff;
+  font: 9px/1.5 var(--sans);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: help;
+}
+
+.chat__ask-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.chat__ask-option {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 11px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text);
+  background: #fff;
+  font: 600 11px/1.2 var(--sans);
+  cursor: pointer;
+  transition: border-color .12s, color .12s, background .12s, transform .1s;
+}
+
+.chat__ask-option:hover {
+  border-color: var(--accent-border);
+  color: var(--accent-text);
+  background: var(--accent-bg);
+}
+
+.chat__ask-option:active {
+  transform: scale(.97);
+}
+
+.chat__ask-option.is-recommended {
+  border-color: var(--accent-border);
+  background: var(--accent-bg);
+}
+
+.chat__ask-option-rec {
+  padding: 1px 5px;
+  border-radius: 99px;
+  color: #fff;
+  background: var(--accent);
+  font: 700 7.5px/1.3 var(--mono);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.chat__ask-hint {
+  color: var(--text-muted);
+  font: 9.5px/1.4 var(--sans);
 }
 
 @keyframes status-pulse { 50% { transform: scale(1.45); opacity: .58; } }
