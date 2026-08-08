@@ -181,6 +181,7 @@ function onAskEnter(el, done) {
     { height: 0, autoAlpha: 0 },
     {
       height: finalH + 15,
+      autoAlpha: 1,
       duration: 0.3,
       ease: 'power3.out',
       onComplete: () => {
