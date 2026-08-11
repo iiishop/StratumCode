@@ -11,7 +11,6 @@ import time
 from collections.abc import Iterator
 from enum import StrEnum
 from functools import lru_cache
-from itertools import count
 from pathlib import Path
 from uuid import uuid4
 
@@ -66,7 +65,6 @@ from .constants import (
     SEMANTIC_AUDIT_KINDS,
     STATE_WRITE_REASON_PREFIX,
     _DEF_READ_NOISE_SYMBOLS,
-    _EXTENSION_LANGUAGE,
     _FILE_REF_RE,
     _FILE_SYMBOL_RE,
     _FRAMEWORK_ROOTS,
@@ -74,6 +72,15 @@ from .constants import (
     _PYTHON_STDLIB_MODULES,
     _REPAIR_ALLOWED_TOOL_NAMES,
     _RUNTIME_EVIDENCE_RE,
+)
+from .util import (
+    _dedupe_strings,
+    _extension_language,
+    _normalize_path,
+    _read_path_norm,
+    _round_indexes,
+    _skip_ws,
+    _string_list,
 )
 # Compatibility hook for integrations that patched this set before tool capabilities existed.
 PROJECT_EVIDENCE_TOOLS: set[str] = set()
@@ -1540,15 +1547,6 @@ def _investigation_tools() -> list[dict]:
     return tools
 
 
-def _round_indexes(limit: int, start: int = 0):
-    limit = int(limit or 0)
-    return count(start) if limit <= 0 else range(start, start + limit)
-
-
-def _read_path_norm(path: str) -> str:
-    return str(path or "").replace("\\", "/")
-
-
 def _read_from_file_cache(arguments: dict, file_cache: dict[str, str]) -> str | None:
     """read 文件级缓存命中：同文件不同行范围直接切行返回，跳过读盘与 LSP。
 
@@ -1864,12 +1862,6 @@ def _partial_json_object(text: str) -> dict:
         if text[index] != ",":
             return result
         index += 1
-
-
-def _skip_ws(text: str, index: int) -> int:
-    while index < len(text) and text[index].isspace():
-        index += 1
-    return index
 
 
 def _has_finding_fields(arguments: dict) -> bool:
@@ -3786,18 +3778,6 @@ def _runtime_patch_facts(observations: list[dict], recorded_findings: dict) -> l
         if isinstance(item, dict) and item.get("summary"):
             facts.append(f"{item.get('tool') or 'tool'}: {item['summary']}")
     return _dedupe_strings(facts)[:20]
-
-
-def _dedupe_strings(values: list[str]) -> list[str]:
-    result = []
-    seen = set()
-    for value in values:
-        text = " ".join(str(value or "").split())
-        if not text or text in seen:
-            continue
-        seen.add(text)
-        result.append(text)
-    return result
 
 
 def _clearify_question(
@@ -5784,12 +5764,6 @@ def _clean_questions(value: list) -> list[str]:
     return [text for item in value if (text := str(item).strip())]
 
 
-def _string_list(value) -> list[str]:
-    if not isinstance(value, list):
-        return []
-    return [item for raw in value if (item := str(raw).strip())]
-
-
 def _reference_list(value) -> list[str]:
     if isinstance(value, str):
         text = value.strip()
@@ -6084,12 +6058,6 @@ def _drop_invalid_belief_refs(
     if changed:
         repairs.append("Dropped invalid belief evidence references during finalization repair")
     return beliefs
-
-
-def _normalize_path(p: str) -> str:
-    p = str(p).replace("\\", "/").strip()
-    p = re.sub(r"^[A-Za-z]:/", "", p)
-    return p.lstrip("./").lower()
 
 
 @lru_cache(maxsize=8)
@@ -6418,11 +6386,6 @@ def _try_install_lsp_for_path(path: str, workspace_dir: str) -> bool:
         return bool(isinstance(result, dict) and result.get("ok"))
     except Exception:
         return False
-
-
-def _extension_language(path: str) -> str:
-    ext = os.path.splitext(str(path).lower())[1]
-    return _EXTENSION_LANGUAGE.get(ext, "")
 
 
 def _lsp_definition_file_once(path: str, symbol: str, workspace_dir: str) -> str:
