@@ -33,7 +33,7 @@ from ..status.task_contract import (
     LEGACY_ASK_USER_STRATEGY,
     LEGACY_NEEDS_USER_STATUS,
 )
-from ..status.task_analysis import _analysis_requests_implementation, _json_candidates
+from ..status.task_analysis import _analysis_requests_implementation
 from ..status.task_updates import _unknown_task_status
 from ..tools import registry
 from .constants import (
@@ -71,6 +71,15 @@ from .constants import (
     _PYTHON_STDLIB_MODULES,
     _REPAIR_ALLOWED_TOOL_NAMES,
     _RUNTIME_EVIDENCE_RE,
+)
+from .findings import (
+    _empty_recorded_findings,
+    _has_finding_fields,
+    _normalize_record_slot_answer,
+    _nothing_to_record_result,
+    _record_slot_contract,
+    _record_slot_template,
+    _required_resolution_slot,
 )
 from .util import (
     _dedupe_strings,
@@ -1876,18 +1885,6 @@ def _partial_json_object(text: str) -> dict:
         index += 1
 
 
-def _has_finding_fields(arguments: dict) -> bool:
-    return any(isinstance(arguments.get(field), list) and arguments.get(field) for field in FINDING_FIELDS)
-
-
-def _nothing_to_record_result(next_action: str = "finish_investigation") -> dict:
-    return {
-        "recorded": False,
-        "code": "nothing_to_record",
-        "next_action": next_action,
-    }
-
-
 def _record_consumes_observations(arguments: dict, observation_ids: list[str]) -> bool:
     pending = {str(item).strip() for item in observation_ids if str(item).strip()}
     if not pending:
@@ -2907,17 +2904,6 @@ def _semantic_missing_items(value) -> list[dict]:
     return items
 
 
-def _record_slot_template(
-    belief_observation_ids: list[str] | None = None,
-    resolution_ids: list[str] | None = None,
-) -> dict[str, JSONValue]:
-    return {
-        "beliefs": ["____" for _ in belief_observation_ids or []],
-        "resolutions": ["____" for _ in resolution_ids or []],
-        "new_unknowns": "____",
-    }
-
-
 def _record_slot_context(
     reason: str,
     analysis: dict,
@@ -3045,39 +3031,6 @@ def _record_slot_prompt(
     return json.dumps(payload, ensure_ascii=False, sort_keys=True)
 
 
-def _record_slot_contract(path: str) -> str:
-    if path.startswith("beliefs["):
-        return (
-            "Return null when this observation has no material finding. Otherwise return one "
-            "JSON object with statement and status. Runtime supplies id and evidence."
-        )
-    if path.startswith("resolutions["):
-        return (
-            "Return null when the bound unknown is not reduced by available evidence. Otherwise "
-            "return one JSON object with status, answer, and reason. Runtime supplies unknown_id, "
-            "observation_ids, and belief_ids. status is resolved, partially_resolved, needs_clearify, or deferred. "
-            "For append-only semantic repairs, include repair_mode=append_missing_only."
-        )
-    contracts = {
-        "beliefs": (
-            "Return a JSON array of objects with statement, status, observation_ids. "
-            "status is one of unverified, plausible, supported, strongly_supported, runtime_confirmed, contradicted, invalidated. "
-            "observation_ids must use runtime refs such as obs_1 or exact observation ids."
-        ),
-        "resolutions": (
-            "Return a JSON array of objects with unknown_id, status, answer, observation_ids, belief_ids, reason. "
-            "status is resolved, partially_resolved, needs_clearify, or deferred."
-        ),
-        "new_unknowns": (
-            "Return a JSON array of new unknown objects with id, question, blocking, resolution_strategy. "
-            "resolution_strategy is investigate_project, clearify, or deferred. Add only material facts "
-            "that must be resolved before design; do not add implementation-mechanism or design-choice questions."
-        ),
-        "user_decisions_required": "Return a JSON array of user decision question strings.",
-    }
-    return contracts.get(path, "Return the JSON value for this slot only.")
-
-
 def _record_resolution_slot_ids(
     analysis: dict,
     observations: list[dict],
@@ -3112,21 +3065,6 @@ def _record_resolution_slot_ids(
         for index, item in enumerate(candidates)
         if item in investigable and item not in candidates[:index]
     ]
-
-
-def _required_resolution_slot(
-    path: str,
-    resolution_slot_ids: list[str],
-    required_resolution_ids: list[str],
-) -> bool:
-    match = re.fullmatch(r"resolutions\[(\d+)\]", path)
-    if not match:
-        return False
-    index = int(match.group(1))
-    return (
-        index < len(resolution_slot_ids)
-        and resolution_slot_ids[index] in set(required_resolution_ids)
-    )
 
 
 def _required_state_write_literals(
@@ -3181,30 +3119,6 @@ def _valid_record_slot_value(value: str, path: str, *, required: bool) -> bool:
             and bool(str(parsed.get("answer") or parsed.get("reason") or "").strip())
         )
     return True
-
-
-def _normalize_record_slot_answer(value: str, path: str) -> str:
-    text = str(value or "").strip()
-    if text.startswith("```"):
-        text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text, flags=re.IGNORECASE).strip()
-    parsed: JSONValue = None
-    for candidate in _json_candidates(text):
-        try:
-            parsed, _ = json.JSONDecoder().raw_decode(candidate)
-            break
-        except json.JSONDecodeError:
-            continue
-    else:
-        return text
-    field = path.split("[", 1)[0]
-    if isinstance(parsed, dict) and field in parsed:
-        parsed = parsed[field]
-    if path.startswith(("beliefs[", "resolutions[")) and isinstance(parsed, list):
-        if not parsed:
-            parsed = None
-        elif len(parsed) == 1:
-            parsed = parsed[0]
-    return json.dumps(parsed, ensure_ascii=False)
 
 
 def _runtime_slot_beliefs(
@@ -4544,10 +4458,6 @@ def _investigation_project_facts(
         })
         seen.add(normalized)
     return facts
-
-
-def _empty_recorded_findings() -> dict:
-    return {field: [] for field in FINDING_FIELDS}
 
 
 def _continued_recorded_findings(previous: dict | None, observations: list[dict]) -> dict:
