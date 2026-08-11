@@ -47,9 +47,18 @@ function buildAnswerPayload(extra) {
 function submitOption(option) {
   if (!isAsking.value) return
   emit('answer', buildAnswerPayload({
+    action: 'select_option',
     selected_option_id: option.id,
     selected_option_label: option.label,
     response: option.value || option.label,
+  }))
+}
+
+function submitDefer() {
+  if (!isAsking.value) return
+  emit('answer', buildAnswerPayload({
+    action: 'defer',
+    response: 'I do not know, please continue investigating.',
   }))
 }
 
@@ -313,6 +322,9 @@ onMounted(() => {
               <span v-if="option.recommended" class="chat__ask-option-rec">recommended</span>
               <svg class="chat__ask-option-arrow" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14M13 6l6 6-6 6"/></svg>
             </span>
+          </button>
+          <button class="chat__ask-defer" type="button" @click="submitDefer">
+            <span class="chat__ask-option-label">我不知道 / 请继续调查</span>
           </button>
         </div>
         <div v-else class="chat__ask-hint">Type your answer above and press Enter.</div>

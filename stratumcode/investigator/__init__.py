@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import platform
+import re
 import sys
 from collections.abc import Iterator
 from enum import Enum, StrEnum
@@ -1023,7 +1024,7 @@ def _handle_clearify(
     ))
     answer = runtime.clearify_runtime.wait(question_id)
     output = _clearify_tool_result(answer)
-    resolution_records = _clearify_resolution_records(arguments, answer)
+    resolution_records = _clearify_resolution_records(arguments, answer, state, runtime)
     state.progress.repeated_tool_error_name = ""
     state.progress.repeated_tool_error_count = 0
     if resolution_records:
@@ -3242,30 +3243,29 @@ def _clearify_tool_result(answer: dict | None) -> str:
     }, ensure_ascii=False)
 
 
-def _clearify_resolution(arguments: dict, answer: dict | None) -> dict | None:
-    resolutions = _clearify_resolutions(arguments, answer)
+def _clearify_resolution(arguments: dict, answer: dict | None, state: InvestigationState, runtime: InvestigationRuntime) -> dict | None:
+    resolutions = _clearify_resolutions(arguments, answer, state, runtime)
     return resolutions[0] if resolutions else None
 
 
-def _clearify_resolutions(arguments: dict, answer: dict | None) -> list[dict]:
+def _clearify_resolutions(arguments: dict, answer: dict | None, state: InvestigationState, runtime: InvestigationRuntime) -> list[dict]:
     return [
-        item for item in _clearify_resolution_records(arguments, answer)
+        item for item in _clearify_resolution_records(arguments, answer, state, runtime)
         if item.get("status") == "resolved"
     ]
 
 
-def _clearify_resolution_records(arguments: dict, answer: dict | None) -> list[dict]:
+def _clearify_resolution_records(arguments: dict, answer: dict | None, state: InvestigationState, runtime: InvestigationRuntime) -> list[dict]:
     answer = answer or {}
-    text = _clearify_answer_text(answer)
-    if not text:
-        raise ValueError("clearify answer is empty")
     target_ids = _target_unknown_ids(arguments)
     if not target_ids:
         if arguments.get("orientation"):
             return []
         raise ValueError("clearify answer has no target unknown")
-    status = "partially_resolved" if _clearify_answer_is_non_answer(text) else "resolved"
+    classification = _classify_clearify_answer(arguments, answer, state, runtime)
+    status = "resolved" if classification == "valid_answer" else "partially_resolved"
     reason = CLEARIFY_UNRESOLVED_REASON if status == "partially_resolved" else CLEARIFY_RESOLUTION_REASON
+    text = _clearify_answer_text(answer)
     return [
         {
             "unknown_id": unknown_id,
@@ -3279,6 +3279,79 @@ def _clearify_resolution_records(arguments: dict, answer: dict | None) -> list[d
     ]
 
 
+def _classify_clearify_answer(arguments: dict, answer: dict, state: InvestigationState, runtime: InvestigationRuntime) -> str:
+    """判定 clearify 用户答案是否为有效答案。
+
+    优先级（结构化事件优先，零 NLP 判定）：
+    1. 空文本 → non_answer（纯逻辑）
+    2. action == select_option 或存在 selected_option_id（无 custom 标记）→ valid_answer（点选候选选项=明确答案）
+    3. action == defer → non_answer（用户显式"我不知道/继续调查"）
+    4. 自由文本（custom 或纯 response）→ LLM 语义判定；失败降级 non_answer（fail closed，不重试）
+    """
+    text = _clearify_answer_text(answer)
+    if not text:
+        return "non_answer"
+    action = str(answer.get("action") or "").strip()
+    if action == "select_option" or (answer.get("selected_option_id") and not answer.get("custom")):
+        return "valid_answer"
+    if action == "defer":
+        return "non_answer"
+    try:
+        return _classify_clearify_answer_llm(arguments, answer, state, runtime)
+    except Exception:
+        return "non_answer"
+
+
+def _classify_clearify_answer_llm(arguments: dict, answer: dict, state: InvestigationState, runtime: InvestigationRuntime) -> str:
+    question = str(arguments.get("question") or "")
+    options = arguments.get("candidate_answers") or arguments.get("options") or []
+    text = _clearify_answer_text(answer)
+    options_text = "\n".join(
+        f"- {str(o.get('label') or o.get('value') or o) if isinstance(o, dict) else o}"
+        for o in options
+    ) or "(none)"
+    prompt = (
+        "Classify whether the user's message contains actionable information "
+        "that can resolve or materially narrow the specific clarification question.\n\n"
+        "valid_answer:\n"
+        "- directly answers the question; or\n"
+        "- provides concrete facts, constraints, preferences, corrections, "
+        "partial information, or uncertainty that still materially narrows it.\n\n"
+        "non_answer:\n"
+        "- says they do not know / have no preference / cannot answer;\n"
+        "- delegates the decision or investigation back to the agent without "
+        "providing useful information;\n"
+        "- is empty, irrelevant, purely conversational, or only asks a question;\n"
+        "- expresses uncertainty without adding any concrete information.\n\n"
+        "Important: do not classify based on trigger words such as \"don't know\", "
+        "\"not sure\", \"maybe\", or \"investigate\". Consider the full semantic content. "
+        "If the message both expresses uncertainty and provides useful concrete "
+        "information, classify as valid_answer.\n\n"
+        f"Question: {question}\n"
+        f"Candidate options:\n{options_text}\n"
+        f"User answer: {text}\n\n"
+        "Output JSON: {\"classification\": \"valid_answer\" or \"non_answer\", \"reason\": \"<one short sentence>\"}"
+    )
+    messages = [{"role": "user", "content": prompt}]
+    assistant = _call_model(
+        runtime.provider,
+        runtime.model,
+        messages,
+        tools=[],
+    )
+    usage = _usage_delta(runtime.pricing_rules, assistant.pop("_usage", {}))
+    if usage:
+        _add_usage(state.usage.total, usage)
+    raw = _content_text(assistant.get("content"))
+    match = re.search(r'"classification"\s*:\s*"([^"]+)"', raw or "")
+    if not match:
+        raise ValueError(f"malformed classification output: {raw!r}")
+    classification = match.group(1)
+    if classification not in ("valid_answer", "non_answer"):
+        raise ValueError(f"unknown classification: {classification!r}")
+    return classification
+
+
 def _clearify_answer_text(answer: dict) -> str:
     return str(
         answer.get("response")
@@ -3286,41 +3359,6 @@ def _clearify_answer_text(answer: dict) -> str:
         or answer.get("selected_option_label")
         or ""
     ).strip()
-
-
-def _clearify_answer_is_non_answer(text: str) -> bool:
-    normalized = " ".join(text.casefold().split())
-    if not normalized:
-        return True
-    if any(marker in normalized for marker in ("but", "但是", "但")) and any(
-        marker in normalized
-        for marker in ("choose", "select", "use ", "option", "方案", "选择", "用")
-    ):
-        return False
-    return any(
-        marker in normalized
-        for marker in (
-            "don't know",
-            "do not know",
-            "not sure",
-            "no idea",
-            "cannot answer",
-            "can't answer",
-            "you check",
-            "you investigate",
-            "please investigate",
-            "不知道",
-            "不清楚",
-            "不确定",
-            "无法确定",
-            "无法回答",
-            "没法回答",
-            "你再查",
-            "你再检查",
-            "你查一下",
-            "你继续查",
-        )
-    )
 
 
 def _investigation_tool_arguments(
