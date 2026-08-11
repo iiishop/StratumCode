@@ -537,7 +537,6 @@ def _collect_tool_calls(
     run_id: str,
     round_index: int,
     tools: list[dict],
-    current_tool_choice: object,
     analysis: dict,
     context: list[str],
     workspace_dir: str,
@@ -554,7 +553,7 @@ def _collect_tool_calls(
 
     thinking_id = f"{run_id}-thinking-{round_index}"
     try:
-        assistant = _call_model(provider, model, state.messages, tools=tools, tool_choice=current_tool_choice)
+        assistant = _call_model(provider, model, state.messages, tools=tools, tool_choice=state.control.current_tool_choice)
     except ValueError as exc:
         reason = str(exc)
         yield {"op": "update", "id": thinking_id, "patch": {
@@ -598,14 +597,12 @@ def _handle_resolve(
     call_id: str,
     name: str,
     arguments: dict,
+    runtime: InvestigationRuntime,
     *,
-    analysis: dict,
-    observations: list[dict],
-    pending_observation_ids: list[str],
     resolution_required_ids: list[str],
     semantic_repair_required_ids: set[str],
 ) -> Iterator[DispatchAction]:
-    del pending_observation_ids, resolution_required_ids, semantic_repair_required_ids
+    del resolution_required_ids, semantic_repair_required_ids
 
     arguments = _resolve_unknown_arguments(arguments)
     _require_control_reason(arguments, name)
@@ -615,14 +612,14 @@ def _handle_resolve(
     resolutions = _canonicalize_resolution_unknown_ids(
         resolutions,
         _analysis_with_recorded_unknowns(
-            analysis,
+            runtime.analysis,
             state.findings.recorded,
         ),
     )
     _validate_resolution_refs(
         resolutions,
         _beliefs(state.findings.recorded.get("beliefs")),
-        observations,
+        state.observations.items,
     )
     state.findings.recorded = _merge_recorded_findings(
         state.findings.recorded,
@@ -630,7 +627,7 @@ def _handle_resolve(
     )
     state.findings.recorded = _bind_grounding_evidence(
         state.findings.recorded,
-        observations,
+        state.observations.items,
     )
     resolved_observation_ids = {
         evidence_id
@@ -650,7 +647,7 @@ def _handle_resolve(
     )
     task_updates = _investigation_task_updates(
         None,
-        _initial_unknowns(_analysis_with_recorded_unknowns(analysis, state.findings.recorded)),
+        _initial_unknowns(_analysis_with_recorded_unknowns(runtime.analysis, state.findings.recorded)),
         resolutions,
     )
     output = json.dumps({
@@ -667,7 +664,7 @@ def _handle_resolve(
     ))
     if task_updates:
         yield start_event(f"{call_id}-task-update", "task_update", {
-            "analysis_id": analysis.get("id", ""),
+            "analysis_id": runtime.analysis.get("id", ""),
             "items": task_updates,
         })
     state.messages.append(_tool_message(call_id, output))
@@ -1637,8 +1634,6 @@ def _dispatch_tool_calls(
                     name,
                     arguments,
                     analysis=analysis,
-                    observations=state.observations.items,
-                    pending_observation_ids=state.observations.pending_ids,
                     resolution_required_ids=resolution_required_ids,
                     semantic_repair_required_ids=semantic_repair_required_ids,
                 )
@@ -2043,7 +2038,6 @@ def _run_investigation_round(
         run_id=run_id,
         round_index=round_index,
         tools=current_tools,
-        current_tool_choice=state.control.current_tool_choice,
         analysis=analysis,
         context=context,
         workspace_dir=workspace_dir,
