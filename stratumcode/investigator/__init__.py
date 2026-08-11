@@ -197,12 +197,995 @@ class InvestigationPhase(StrEnum):
     DISCOVER = "discover"
 
 
+class DispatchAction(StrEnum):
+    """Local control signal for the tool dispatch layer; not cross-round state."""
+    CONTINUE_TOOLS = "continue_tools"
+    BREAK_TOOLS = "break_tools"
+    NEXT_ROUND = "next_round"
+    TERMINATE = "terminate"
+
+
+def _get_investigation_phase(state: InvestigationState) -> InvestigationPhase:
+    """Derive the current phase from state without persisting a field."""
+    if _semantic_repair_resolution_ids(state.findings.recorded):
+        return InvestigationPhase.REPAIR
+    return InvestigationPhase.DISCOVER
+
+
 def _bump_hardlock(state: InvestigationState) -> None:
     """Increment the already-resolved error counter; >=2 hard-locks finish_investigation."""
     state.progress.already_resolved_error_count += 1
     if state.progress.already_resolved_error_count >= 2:
         # Hard-lock: force the model to call finish_investigation
         state.control.current_tool_choice = {"type": "function", "function": {"name": "finish_investigation"}}
+
+
+def _investigation_directive(
+    *,
+    recorded_findings: dict,
+    analysis: dict,
+    tools: list[dict],
+    observations: list[dict],
+    semantic_repair_required_ids: set[str],
+    resolution_required_ids: list[str],
+    discovery_required_ids: list[str],
+    clearify_unknown: dict | None,
+    verification_request: dict | None,
+    finish_evidence_blocked: bool,
+    force_synthesis_reason: str,
+    semantic_gate_enabled: bool,
+    read_only_no_unknowns: bool,
+) -> tuple[InvestigationPhase, list[dict], str | dict, str | None]:
+    """集中计算当前调查阶段与对应工具集（唯一决策入口）。
+
+    等价性：映射旧主循环 L192-302 的五个 if/elif 分支——
+      clearify -> CLEARIFY
+      verification -> VERIFY
+      semantic_repair_required_ids -> REPAIR
+      _recorded_resolves_initial_unknowns -> FINISH / FINISH_WITH_EVIDENCE_GAP
+      force_synthesis / read_only -> SYNTHESIZE / READ_ONLY_FINISH
+      resolution_required_ids -> RESOLVE
+      默认 -> DISCOVER
+    行为不变，仅决策集中。互斥由 InvestigationPhase 枚举结构性保证。
+    返回 (phase, current_tools, current_tool_choice, prompt)
+    """
+    prompt: str | None = None
+    if clearify_unknown:
+        prompt = _clearify_required_prompt(clearify_unknown)
+        return (
+            InvestigationPhase.CLEARIFY,
+            _phase_tools(InvestigationPhase.CLEARIFY, tools=tools),
+            _phase_tool_choice(InvestigationPhase.CLEARIFY),
+            prompt,
+        )
+    pending_evidence = _clearify_pending_evidence_unknowns(recorded_findings)
+    if pending_evidence:
+        prompt = (
+            "The user has already answered the pending product decision(s), but "
+            "those clearify answers have no code evidence yet. Use "
+            "read/grep/glob/code_nav to locate the actual implementation sites, "
+            "record the evidence, then call finish_investigation again. "
+            "Pending evidence: "
+            f"{json.dumps(pending_evidence, ensure_ascii=False)}"
+        )
+        return (
+            InvestigationPhase.FINISH_WITH_EVIDENCE_GAP,
+            _phase_tools(
+                InvestigationPhase.FINISH_WITH_EVIDENCE_GAP,
+                tools=tools,
+                finish_evidence_blocked=True,
+            ),
+            _phase_tool_choice(InvestigationPhase.FINISH_WITH_EVIDENCE_GAP),
+            prompt,
+        )
+    if verification_request:
+        prompt = (
+            "The semantic quality gate requires independent verification before this "
+            "resolution can reach Design. Call subagent with agent hypothesis-verifier "
+            f"for unknown {verification_request['unknown_id']} and the exact atomic "
+            f"hypothesis: {verification_request['hypothesis']}"
+        )
+        return (
+            InvestigationPhase.VERIFY,
+            _phase_tools(InvestigationPhase.VERIFY, tools=tools),
+            _phase_tool_choice(InvestigationPhase.VERIFY),
+            prompt,
+        )
+    if semantic_repair_required_ids:
+        repair = _semantic_repair_payload(recorded_findings, semantic_repair_required_ids)
+        prompt = (
+            "The semantic quality gate accepted the existing recorded findings except "
+            "for the listed missing requirements. Do not regenerate, restate, or replace "
+            "already recorded ids. If you need more evidence, use read/grep/glob/code_nav "
+            "first to obtain the missing observations, then call record_investigation_findings "
+            "to append only the missing belief(s), then add a minimal resolution patch with "
+            "repair_mode=append_missing_only and only the new belief_ids/evidence. "
+            "After the missing list is addressed, call finish_investigation to let the "
+            "quality gate re-audit the resolutions. The missing list: "
+            f"{json.dumps(repair, ensure_ascii=False)}"
+        )
+        return (
+            InvestigationPhase.REPAIR,
+            _phase_tools(InvestigationPhase.REPAIR, tools=tools),
+            _phase_tool_choice(InvestigationPhase.REPAIR),
+            prompt,
+        )
+    if _recorded_resolves_initial_unknowns(
+        recorded_findings,
+        analysis,
+        repair_ids=semantic_repair_required_ids,
+    ):
+        if finish_evidence_blocked:
+            prompt = (
+                "The previous finish attempt was rejected because a resolution "
+                "references a file that was never read. Use read/grep/glob/code_nav "
+                "to obtain the missing observations, then call finish_investigation again."
+            )
+            return (
+                InvestigationPhase.FINISH_WITH_EVIDENCE_GAP,
+                _phase_tools(
+                    InvestigationPhase.FINISH_WITH_EVIDENCE_GAP,
+                    tools=tools,
+                    finish_evidence_blocked=True,
+                ),
+                _phase_tool_choice(InvestigationPhase.FINISH_WITH_EVIDENCE_GAP),
+                prompt,
+            )
+        return (
+            InvestigationPhase.FINISH,
+            _phase_tools(InvestigationPhase.FINISH, tools=tools),
+            _phase_tool_choice(InvestigationPhase.FINISH),
+            None,
+        )
+    if force_synthesis_reason and not discovery_required_ids:
+        prompt = force_synthesis_reason
+        return (
+            InvestigationPhase.SYNTHESIZE,
+            _phase_tools(InvestigationPhase.SYNTHESIZE, tools=tools),
+            _phase_tool_choice(InvestigationPhase.SYNTHESIZE),
+            prompt,
+        )
+    if read_only_no_unknowns:
+        prompt = (
+            "The task contract has no project facts to investigate. Answer the user's "
+            "request directly in finish_investigation.summary. The summary must satisfy "
+            "the acceptance criteria; do not merely classify, restate, or explain why "
+            "the request does not require project inspection. Do not mention the current "
+            "workspace, speculate about its code, or offer additional project work unless "
+            "the user requested it."
+        )
+        return (
+            InvestigationPhase.READ_ONLY_FINISH,
+            _phase_tools(InvestigationPhase.READ_ONLY_FINISH, tools=tools),
+            _phase_tool_choice(InvestigationPhase.READ_ONLY_FINISH),
+            prompt,
+        )
+    if resolution_required_ids:
+        prompt = _resolution_required_prompt(
+            resolution_required_ids,
+            recorded_findings,
+            observations=observations,
+            analysis=analysis,
+        )
+        return (
+            InvestigationPhase.RESOLVE,
+            _phase_tools(InvestigationPhase.RESOLVE, tools=tools),
+            _phase_tool_choice(InvestigationPhase.RESOLVE),
+            prompt,
+        )
+    if discovery_required_ids:
+        prompt = (
+            "These blocking project unknowns still lack enough project evidence: "
+            + ", ".join(discovery_required_ids)
+            + ". Continue discovery with read/grep/glob/code_nav/lsp_tool. "
+            "Do not call record_investigation_findings, resolve_unknowns, or "
+            "finish_investigation until a new observation materially narrows one "
+            "of these unknowns."
+        )
+        return (
+            InvestigationPhase.DISCOVERY_REQUIRED,
+            _phase_tools(InvestigationPhase.DISCOVERY_REQUIRED, tools=tools),
+            _phase_tool_choice(InvestigationPhase.DISCOVERY_REQUIRED),
+            prompt,
+        )
+    return (
+        InvestigationPhase.DISCOVER,
+        _phase_tools(InvestigationPhase.DISCOVER, tools=tools),
+        _phase_tool_choice(InvestigationPhase.DISCOVER),
+        _discover_lsp_first_prompt(analysis),
+    )
+
+
+def _prepare_round(
+    state: InvestigationState,
+    *,
+    analysis: dict,
+    effort_profile: dict,
+    quality_gate: str,
+    semantic_gate_enabled: bool,
+    subagent_enabled: bool,
+    rounds_per_unknown: int,
+    min_rounds: int,
+    max_rounds: int,
+    run_id: str,
+    workspace_dir: str,
+    tools: list[dict],
+    current_round_index: int,
+    previous_rounds_usage: dict,
+    context: list[str],
+    model: str,
+) -> tuple[str | None, InvestigationPhase, list[dict], set[str], list[str], dict | None, dict | None, set[str]]:
+    del effort_profile, quality_gate, subagent_enabled, rounds_per_unknown
+    del max_rounds, run_id, workspace_dir, previous_rounds_usage, context, model
+
+    current_tools = tools
+    state.control.current_tool_choice = "required"
+    clearify_unknown = _pending_clearify_unknown(
+        state.findings.recorded,
+        analysis,
+        state.verification.clearify_questions,
+    )
+    verification_request = state.verification.queue[0] if state.verification.queue else None
+    semantic_repair_required_ids = (
+        _semantic_repair_resolution_ids(state.findings.recorded)
+        if semantic_gate_enabled
+        else set()
+    )
+    resolution_required_ids = _unknowns_needing_resolution(state.findings.recorded, state.observations.items, analysis)
+    resolution_required_ids = _dedupe_strings([
+        *resolution_required_ids,
+        *sorted(semantic_repair_required_ids),
+        *(
+            _pending_observation_unknown_ids(
+                state.observations.items,
+                state.observations.pending_ids,
+                analysis,
+                state.findings.recorded,
+            )
+            if len(state.observations.pending_ids) >= MAX_PENDING_DISCOVERY_OBSERVATIONS
+            else []
+        ),
+    ])
+    discovery_required_ids = list(state.control.force_discovery_ids)
+    if state.control.force_synthesis_reason and not discovery_required_ids:
+        discovery_required_ids = _unknowns_missing_project_evidence(
+            state.findings.recorded,
+            state.observations.items,
+            analysis,
+        )
+    current_phase, current_tools, state.control.current_tool_choice, directive_prompt = _investigation_directive(
+        recorded_findings=state.findings.recorded,
+        analysis=analysis,
+        tools=tools,
+        observations=state.observations.items,
+        semantic_repair_required_ids=semantic_repair_required_ids,
+        resolution_required_ids=resolution_required_ids,
+        discovery_required_ids=discovery_required_ids,
+        clearify_unknown=clearify_unknown,
+        verification_request=verification_request,
+        finish_evidence_blocked=state.control.finish_evidence_blocked,
+        force_synthesis_reason=state.control.force_synthesis_reason,
+        semantic_gate_enabled=semantic_gate_enabled,
+        read_only_no_unknowns=(
+            analysis.get("execution_mode") == "read_only"
+            and not analysis.get("unknowns")
+        ),
+    )
+    # 方案 A：最少调查轮数未达到时，禁止提前结束（fast 也要跑
+    # rounds_per_unknown × blocking_unknown 轮）。结束类 phase
+    # （FINISH/READ_ONLY_FINISH/SYNTHESIZE）强制降级为 DISCOVERY_REQUIRED，
+    # 且原 directive（如"调用 finish_investigation"）不再下发。
+    # 例外：所有 unknowns 已 resolved 时不再降级——调查内容已完成，
+    # 凑轮数没有可查的东西，降级只会让模型陷入
+    # "finish 被 blocked（不在 allowed）+ resolve 被 blocked（already_resolved）"
+    # 的死循环（实测 6 轮空转）。
+    budget_floor_active = (
+        current_round_index < min_rounds
+        and current_phase in (
+            InvestigationPhase.FINISH,
+            InvestigationPhase.READ_ONLY_FINISH,
+            InvestigationPhase.SYNTHESIZE,
+        )
+        and not _recorded_resolves_initial_unknowns(
+            state.findings.recorded,
+            analysis,
+            repair_ids=semantic_repair_required_ids,
+        )
+    )
+    if directive_prompt and not budget_floor_active:
+        state.messages.append({"role": "user", "content": directive_prompt})
+    if budget_floor_active:
+        current_phase = InvestigationPhase.DISCOVERY_REQUIRED
+        current_tools = _phase_tools(current_phase, tools=tools)
+        state.control.current_tool_choice = "required"
+        state.messages.append({
+            "role": "user",
+            "content": _minimum_rounds_prompt(min_rounds - current_round_index),
+        })
+    allowed_tool_names = {
+        str(((tool.get("function") or {}).get("name")) or "")
+        for tool in current_tools
+        if isinstance(tool, dict)
+    }
+    return (
+        directive_prompt,
+        current_phase,
+        current_tools,
+        allowed_tool_names,
+        resolution_required_ids,
+        clearify_unknown,
+        verification_request,
+        semantic_repair_required_ids,
+    )
+
+
+def _collect_tool_calls(
+    state: InvestigationState,
+    directive: str | None,
+    *,
+    provider: dict,
+    model: str,
+    pricing_rules: dict | None,
+    run_id: str,
+    round_index: int,
+    tools: list[dict],
+    current_tool_choice: object,
+    analysis: dict,
+    context: list[str],
+    workspace_dir: str,
+    max_rounds: int,
+    semantic_gate_enabled: bool,
+    subagent_enabled: bool,
+    preserve_grounding_evidence: bool,
+    previous_observations: list[dict] | None,
+    previous_knowledge: list[dict] | None,
+) -> Iterator[list[dict] | None]:
+    del directive, analysis, context, workspace_dir, max_rounds
+    del semantic_gate_enabled, subagent_enabled, preserve_grounding_evidence
+    del previous_observations, previous_knowledge
+
+    thinking_id = f"{run_id}-thinking-{round_index}"
+    try:
+        assistant = _call_model(provider, model, state.messages, tools=tools, tool_choice=current_tool_choice)
+    except ValueError as exc:
+        reason = str(exc)
+        yield {"op": "update", "id": thinking_id, "patch": {
+            "text": reason,
+            "done": True,
+            "open": False,
+        }}
+        yield start_event(f"{run_id}-provider-error", "output", {
+            "content": f"Provider request failed: {reason}",
+            "streaming": False,
+        })
+        yield {"op": "update", "id": f"{run_id}-stage", "patch": {"state": "failed", "phase": "provider_error"}}
+        return None
+    if usage := _usage_delta(pricing_rules, assistant.pop("_usage", {})):
+        _add_usage(state.usage.total, usage)
+        yield start_event(f"{run_id}-usage-{round_index}", "usage", {
+            "delta": usage,
+            "total": state.usage.total,
+        })
+
+    tool_calls = assistant.get("tool_calls") or []
+    content = _assistant_visible_text(assistant) or _tool_call_summary(tool_calls)
+    state.messages.append(_assistant_message(assistant))
+    yield {"op": "update", "id": thinking_id, "patch": {
+        "text": content,
+        "done": True,
+        "open": bool(tool_calls),
+    }}
+
+    if not tool_calls:
+        state.messages.append({"role": "user", "content": (
+            "You did not call a tool. Continue by making an actual tool call, "
+            "or call finish_investigation if the investigation is complete. "
+            "Do not describe intended tool use in prose."
+        )})
+    return tool_calls
+
+
+def _handle_resolve(
+    state: InvestigationState,
+    call_id: str,
+    name: str,
+    arguments: dict,
+    *,
+    analysis: dict,
+    observations: list[dict],
+    pending_observation_ids: list[str],
+    resolution_required_ids: list[str],
+    semantic_repair_required_ids: set[str],
+) -> Iterator[DispatchAction]:
+    del pending_observation_ids, resolution_required_ids, semantic_repair_required_ids
+
+    arguments = _resolve_unknown_arguments(arguments)
+    _require_control_reason(arguments, name)
+    resolutions = _resolutions(arguments.get("resolutions"))
+    if not resolutions:
+        raise ValueError("resolve_unknowns requires at least one valid resolution")
+    resolutions = _canonicalize_resolution_unknown_ids(
+        resolutions,
+        _analysis_with_recorded_unknowns(
+            analysis,
+            state.findings.recorded,
+        ),
+    )
+    _validate_resolution_refs(
+        resolutions,
+        _beliefs(state.findings.recorded.get("beliefs")),
+        observations,
+    )
+    state.findings.recorded = _merge_recorded_findings(
+        state.findings.recorded,
+        {"resolutions": resolutions},
+    )
+    state.findings.recorded = _bind_grounding_evidence(
+        state.findings.recorded,
+        observations,
+    )
+    resolved_observation_ids = {
+        evidence_id
+        for resolution in resolutions
+        for evidence_id in resolution.get("evidence", [])
+    }
+    state.observations.pending_ids = [
+        item for item in state.observations.pending_ids
+        if item not in resolved_observation_ids
+    ]
+    state.progress.duplicate_no_progress_signature = ""
+    state.progress.duplicate_no_progress_count = 0
+    state.progress.duplicate_no_progress_total = 0
+    state.control.force_synthesis_reason = ""
+    _semantic_repair_resolution_ids(
+        state.findings.recorded,
+    )
+    task_updates = _investigation_task_updates(
+        None,
+        _initial_unknowns(_analysis_with_recorded_unknowns(analysis, state.findings.recorded)),
+        resolutions,
+    )
+    output = json.dumps({
+        "resolved": True,
+        "counts": {"resolutions": len(resolutions)},
+        "unknown_ids": [item["unknown_id"] for item in resolutions],
+    }, ensure_ascii=False)
+    yield start_event(call_id, "tool", _tool_event(
+        name,
+        arguments,
+        output,
+        description="Resolve investigation unknowns",
+        symbol="R",
+    ))
+    if task_updates:
+        yield start_event(f"{call_id}-task-update", "task_update", {
+            "analysis_id": analysis.get("id", ""),
+            "items": task_updates,
+        })
+    state.messages.append(_tool_message(call_id, output))
+    return DispatchAction.CONTINUE_TOOLS
+
+
+def _handle_record(
+    state: InvestigationState,
+    call_id: str,
+    name: str,
+    arguments: dict,
+    *,
+    analysis: dict,
+    provider: dict,
+    model: str,
+    pricing_rules: dict | None,
+    run_id: str,
+    workspace_dir: str,
+    semantic_gate_enabled: bool,
+    subagent_enabled: bool,
+    resolution_required_ids: list[str],
+    semantic_repair_required_ids: set[str],
+    verification_request: dict | None,
+    clearify_unknown: dict | None,
+) -> Iterator[DispatchAction]:
+    del workspace_dir, semantic_gate_enabled, subagent_enabled, verification_request, clearify_unknown
+
+    _require_control_reason(arguments, name)
+    if semantic_repair_required_ids and isinstance(arguments.get("resolutions"), list) and arguments["resolutions"]:
+        _require_repair_resolutions(arguments, semantic_repair_required_ids)
+    if (
+        not state.observations.pending_ids
+        and not resolution_required_ids
+        and not _has_finding_fields(arguments)
+    ):
+        output = json.dumps({
+            "recorded": False,
+            "code": "nothing_to_record",
+            "next_action": "finish_investigation",
+            "message": "No pending observations or unresolved evidence-backed resolutions are available to record.",
+        }, ensure_ascii=False)
+        yield start_event(call_id, "tool", _tool_event(
+            name,
+            arguments,
+            output,
+            description="Record investigation findings",
+        ))
+        state.messages.append(_tool_message(call_id, output))
+        _bump_hardlock(state)
+        return DispatchAction.CONTINUE_TOOLS
+    if (
+        not _has_finding_fields(arguments)
+        or (
+            analysis.get("_canonicalized")
+            and state.observations.pending_ids
+            and not _record_consumes_observations(arguments, state.observations.pending_ids)
+        )
+    ):
+        arguments = yield from _record_findings_by_slots(
+            state,
+            provider=provider,
+            model=model,
+            pricing_rules=pricing_rules,
+            run_id=run_id,
+            reason=str(arguments.get("reason") or "").strip(),
+            analysis=analysis,
+            required_resolution_ids=resolution_required_ids,
+        )
+    if _empty_discovery_recording(
+        arguments,
+        state.observations.pending_ids,
+        resolution_required_ids,
+    ):
+        output = json.dumps({
+            "recorded": False,
+            "code": "no_material_findings",
+            "pending_observation_ids": state.observations.pending_ids,
+            "next_action": "continue_discovery",
+        }, ensure_ascii=False)
+        yield start_event(call_id, "tool", _tool_event(
+            name,
+            arguments,
+            output,
+            description="Record investigation findings",
+        ))
+        state.messages.append(_tool_message(call_id, output))
+        _bump_hardlock(state)
+        return DispatchAction.CONTINUE_TOOLS
+    _require_finding_fields(arguments)
+    _reject_empty_repair(arguments, state.findings.recorded)
+    # 剥离模型提交的 repair 诊断字段：repair_mode/semantic_missing
+    # 只能由 audit 质量门打标。REPAIR 阶段模型会从上下文把上一轮
+    # missing 原样抄进提交的 resolution，不清理则 merge 后
+    # _semantic_repair_resolution_ids 永远判该 unknown 待修，
+    # 即使证据已补齐也无限 REPAIR（U4 类死循环根因）。
+    arguments = _strip_submitted_repair_diagnostics(arguments)
+    state.findings.recorded = _merge_recorded_findings(state.findings.recorded, arguments)
+    state.findings.recorded = _bind_grounding_evidence(
+        state.findings.recorded,
+        state.observations.items,
+    )
+    state.observations.pending_ids.clear()
+    record_signature = _recorded_findings_signature(state.findings.recorded)
+    if record_signature == state.findings.last_record_signature:
+        state.progress.repeated_record_no_progress += 1
+    else:
+        state.progress.repeated_record_no_progress = 0
+        state.progress.duplicate_no_progress_signature = ""
+        state.progress.duplicate_no_progress_count = 0
+        state.progress.duplicate_no_progress_total = 0
+        state.control.force_synthesis_reason = ""
+        state.control.force_discovery_ids = []
+    state.findings.last_record_signature = record_signature
+    if state.progress.repeated_record_no_progress:
+        state.control.force_discovery_ids = _unknowns_missing_project_evidence(
+            state.findings.recorded,
+            state.observations.items,
+            analysis,
+        )
+    if state.progress.repeated_record_no_progress >= MAX_REPEATED_RECORD_NO_PROGRESS:
+        state.control.finalization_reason = (
+            "Runtime stopped after repeated record_investigation_findings "
+            "calls produced no semantic progress."
+        )
+        state.control.stop_investigation = True
+    task_updates = _record_task_updates(state.findings.recorded)
+    output = json.dumps({
+        "recorded": True,
+        "counts": {field: len(state.findings.recorded.get(field, [])) for field in FINDING_FIELDS},
+        **({"stalled": True} if state.control.stop_investigation else {}),
+    }, ensure_ascii=False)
+    yield start_event(call_id, "tool", _tool_event(
+        name,
+        arguments,
+        output,
+        description="Record investigation findings",
+    ))
+    if task_updates:
+        yield start_event(f"{call_id}-task-update", "task_update", {
+            "analysis_id": analysis.get("id", ""),
+            "items": task_updates,
+        })
+    state.messages.append(_tool_message(call_id, output))
+    if state.control.stop_investigation:
+        yield start_event(f"{run_id}-safety-record-no-progress", "safety_stop", {
+            "reason": "record_no_progress",
+            "message": state.control.finalization_reason,
+            "tool": name,
+        })
+        return DispatchAction.BREAK_TOOLS
+    return DispatchAction.CONTINUE_TOOLS
+
+
+def _handle_finish(
+    state: InvestigationState,
+    call_id: str,
+    name: str,
+    arguments: dict,
+    *,
+    analysis: dict,
+    observations: list[dict],
+    workspace_dir: str,
+    semantic_gate_enabled: bool,
+    subagent_enabled: bool,
+    resolution_required_ids: list[str],
+    semantic_repair_required_ids: set[str],
+    verification_request: dict | None,
+    provider: dict,
+    model: str,
+    pricing_rules: dict | None,
+    run_id: str,
+) -> Iterator[DispatchAction]:
+    del resolution_required_ids, semantic_repair_required_ids, verification_request
+
+    _require_control_reason(arguments, name)
+    state.findings.recorded = _apply_direct_resolution_gate(
+        state.findings.recorded,
+        observations,
+        strict_grounding=semantic_gate_enabled and _analysis_requests_implementation(analysis),
+    )
+    if semantic_gate_enabled:
+        _semantic_repair_resolution_ids(state.findings.recorded)
+    if (
+        semantic_gate_enabled
+        and
+        analysis.get("_canonicalized")
+        and not _audit_covers_resolutions(
+            state.findings.last_quality_audit,
+            state.findings.recorded,
+            analysis,
+        )
+    ):
+        state.findings.last_quality_audit = yield from _audit_recorded_findings(
+            state,
+            provider=provider,
+            model=model,
+            pricing_rules=pricing_rules,
+            run_id=run_id,
+            analysis=analysis,
+        )
+        state.findings.recorded, requests, questions = _apply_investigation_audit(
+            state.findings.recorded,
+            state.findings.last_quality_audit,
+            observations=observations,
+            strict_grounding=_analysis_requests_implementation(analysis),
+            allow_verification=subagent_enabled and _analysis_requests_implementation(analysis),
+            analysis=analysis,
+        )
+        _semantic_repair_resolution_ids(
+            state.findings.recorded,
+        )
+        attempted = state.verification.attempted | {
+            (item.get("unknown_id"), item.get("hypothesis"))
+            for item in state.verification.queue
+        }
+        state.verification.queue.extend(
+            item for item in requests
+            if (item.get("unknown_id"), item.get("hypothesis")) not in attempted
+            and _unknown_blocks_finish(item.get("unknown_id"), analysis, state.findings.recorded)
+        )
+        state.verification.clearify_questions.update({
+            unknown_id: question
+            for unknown_id, question in questions.items()
+            if _unknown_blocks_finish(unknown_id, analysis, state.findings.recorded)
+        })
+    pending_resolution_statuses = {
+        str(item.get("status") or "")
+        for item in state.findings.recorded.get("resolutions", [])
+        if isinstance(item, dict)
+        and _unknown_blocks_finish(item.get("unknown_id"), analysis, state.findings.recorded)
+    }
+    if (
+        state.verification.queue
+        or state.verification.clearify_questions
+        or pending_resolution_statuses & {"partially_resolved", "needs_clearify"}
+    ):
+        repair_payload = _semantic_repair_payload(
+            state.findings.recorded,
+            _semantic_repair_resolution_ids(state.findings.recorded),
+        )
+        output = json.dumps({
+            "finished": False,
+            "reason": "semantic_quality_gate",
+            "repair": repair_payload,
+            "next_action": (
+                "clearify"
+                if "needs_clearify" in pending_resolution_statuses or state.verification.clearify_questions
+                else "verify_hypothesis"
+                if state.verification.queue
+                else "continue_investigation"
+            ),
+        }, ensure_ascii=False)
+        state.messages.append({
+            "role": "tool",
+            "tool_call_id": call_id,
+            "content": output,
+        })
+        state.messages.append({"role": "user", "content": (
+            "The semantic quality gate did not authorize every resolution. "
+            "Follow its next action; do not finish or reuse the rejected conclusion."
+        )})
+        return DispatchAction.BREAK_TOOLS
+    state.control.final = _finish_payload(
+        _finish_arguments(
+            state.findings.recorded,
+            arguments,
+            prefer_finish_summary=not _analysis_requests_implementation(analysis),
+        ),
+        analysis=analysis,
+        observations=observations,
+        repair_conflicts=True,
+        workspace_dir=workspace_dir,
+    )
+    state.messages.append({
+        "role": "tool",
+        "tool_call_id": call_id,
+        "content": json.dumps(state.control.final, ensure_ascii=False),
+    })
+    if state.control.final.get("resolution_repair"):
+        state.control.finalization_reason = "Investigation findings need explicit resolutions before finalizing."
+        state.messages.append({
+            "role": "user",
+            "content": _resolution_repair_prompt(state.control.final["resolution_repair"]),
+        })
+        state.control.final = None
+        state.control.stop_investigation = True
+    return DispatchAction.BREAK_TOOLS
+
+
+def _handle_clearify(
+    state: InvestigationState,
+    call_id: str,
+    name: str,
+    arguments: dict,
+    *,
+    analysis: dict,
+    clearify_runtime,
+    clearify_unknown: dict | None,
+    resolution_required_ids: list[str],
+    semantic_repair_required_ids: set[str],
+    asked_clearify_ids: set[str],
+) -> Iterator[DispatchAction]:
+    del resolution_required_ids, semantic_repair_required_ids
+
+    if clearify_unknown:
+        arguments["target_unknown_ids"] = [clearify_unknown["id"]]
+        arguments.setdefault("reason", "Resolve the blocking product decision.")
+        arguments.setdefault("question", clearify_unknown["question"])
+    target_ids = _target_unknown_ids(arguments)
+    target_ids = [
+        item for item in target_ids
+        if not any(_same_unknown_id(item, asked_id) for asked_id in asked_clearify_ids)
+    ]
+    arguments["target_unknown_ids"] = target_ids
+    if not target_ids:
+        output = json.dumps({
+            "skipped": True,
+            "reason": "These clearify unknowns were already asked in the current round.",
+        }, ensure_ascii=False)
+        state.messages.append({
+            "role": "tool",
+            "tool_call_id": call_id,
+            "content": output,
+        })
+        _bump_hardlock(state)
+        return DispatchAction.CONTINUE_TOOLS
+    _validate_tool_contract(
+        name,
+        target_unknown_ids=target_ids,
+        reason=str(arguments.get("reason") or "").strip(),
+        orientation=bool(arguments.get("orientation", False)),
+        analysis=_analysis_with_recorded_unknowns(
+            analysis,
+            state.findings.recorded,
+        ),
+    )
+    answered_by_previous_round = {
+        str(item.get("unknown_id") or "").strip()
+        for item in state.findings.recorded.get("resolutions", [])
+        if isinstance(item, dict)
+        and (
+            item.get("reason") in (CLEARIFY_RESOLUTION_REASON, CLEARIFY_UNRESOLVED_REASON)
+            or (
+                str(item.get("status") or "") in ("resolved", "partially_resolved")
+                and str(item.get("answer") or "").strip()
+            )
+        )
+    }
+    target_ids = [
+        item for item in target_ids
+        if not any(
+            _same_unknown_id(item, answered_id)
+            for answered_id in answered_by_previous_round
+        )
+    ]
+    arguments["target_unknown_ids"] = target_ids
+    if not target_ids:
+        output = json.dumps({
+            "skipped": True,
+            "reason": "These clearify unknowns already have authoritative user answers.",
+        }, ensure_ascii=False)
+        state.messages.append({
+            "role": "tool",
+            "tool_call_id": call_id,
+            "content": output,
+        })
+        _bump_hardlock(state)
+        return DispatchAction.CONTINUE_TOOLS
+    question_id = clearify_runtime.create_pending()
+    yield start_event(question_id, "user_question", _clearify_question(
+        arguments,
+        question_id=question_id,
+        analysis=analysis,
+    ))
+    answer = clearify_runtime.wait(question_id)
+    output = _clearify_tool_result(answer)
+    resolution_records = _clearify_resolution_records(arguments, answer)
+    state.progress.repeated_tool_error_name = ""
+    state.progress.repeated_tool_error_count = 0
+    if resolution_records:
+        for resolution in resolution_records:
+            asked_clearify_ids.add(resolution["unknown_id"])
+            for question_id in list(state.verification.clearify_questions):
+                if _same_unknown_id(question_id, resolution["unknown_id"]):
+                    state.verification.clearify_questions.pop(question_id, None)
+        state.findings.recorded = _merge_recorded_findings(
+            state.findings.recorded,
+            {"resolutions": resolution_records},
+        )
+    yield start_event(call_id, "tool", _tool_event(
+        name,
+        arguments,
+        output,
+        description="Ask the user for clarification",
+    ))
+    if resolution_records:
+        yield start_event(f"{call_id}-task-update", "task_update", {
+            "analysis_id": analysis.get("id", ""),
+            "items": _investigation_task_updates(
+                None,
+                _initial_unknowns(_analysis_with_recorded_unknowns(analysis, state.findings.recorded)),
+                resolution_records,
+            ),
+        })
+    state.messages.append(_tool_message(call_id, output))
+    return DispatchAction.CONTINUE_TOOLS
+
+
+def _handle_discovery(
+    state: InvestigationState,
+    call_id: str,
+    name: str,
+    arguments: dict,
+    *,
+    analysis: dict,
+    workspace_dir: str,
+    semantic_repair_required_ids: set[str],
+    verification_request: dict | None,
+    resolution_required_ids: list[str],
+    round_index: int,
+    run_id: str,
+    pricing_rules: dict | None,
+    semantic_gate_enabled: bool,
+) -> Iterator[DispatchAction]:
+    del semantic_repair_required_ids, resolution_required_ids, round_index, pricing_rules
+
+    cache_key = _tool_cache_key(name, arguments)
+    if name == "read":
+        cached_output = _read_from_file_cache(arguments, state.caches.read_file)
+        if cached_output is not None:
+            output = cached_output
+            yield start_event(call_id, registry.event_type(name), _tool_event(
+                name,
+                arguments,
+                output,
+                description="Investigation tool",
+                status="cached",
+            ))
+            state.messages.append(_tool_message(call_id, output))
+            return DispatchAction.CONTINUE_TOOLS
+    if cache_key in state.caches.tool:
+        cached_observation_id = state.caches.tool_observation_ids.get(cache_key, "")
+        state.progress.duplicate_no_progress_total += 1
+        if state.progress.duplicate_no_progress_signature == cache_key:
+            state.progress.duplicate_no_progress_count += 1
+        else:
+            state.progress.duplicate_no_progress_signature = cache_key
+            state.progress.duplicate_no_progress_count = 1
+        next_action = (
+            "resolve_unknowns"
+            if state.observations.pending_ids or cached_observation_id
+            else "choose_different_evidence"
+        )
+        output = _duplicate_no_progress_json(
+            name,
+            duplicate_count=state.progress.duplicate_no_progress_total,
+            cached_observation_id=cached_observation_id,
+            required_next_action=next_action,
+        )
+        if state.progress.duplicate_no_progress_count >= MAX_DUPLICATE_NO_PROGRESS:
+            state.control.force_synthesis_reason = _duplicate_no_progress_prompt(
+                name,
+                cached_observation_id,
+                state.observations.pending_ids,
+            )
+        yield start_event(call_id, registry.event_type(name), _tool_event(
+            name,
+            arguments,
+            output,
+            description="Investigation tool",
+            status="no_progress",
+            deduplicated=True,
+            cached_observation_id=cached_observation_id,
+        ))
+        state.messages.append(_tool_message(call_id, output))
+        if state.progress.duplicate_no_progress_total >= MAX_REPEATED_TOOL_ERRORS:
+            state.control.finalization_reason = (
+                "Runtime stopped after repeated duplicate no-progress tool calls: "
+                f"{name or 'invalid'}."
+            )
+            state.control.stop_investigation = True
+            yield start_event(f"{run_id}-safety-duplicate-no-progress", "safety_stop", {
+                "reason": "duplicate_no_progress",
+                "message": state.control.finalization_reason,
+                "tool": name or "invalid",
+                "cached_observation_id": cached_observation_id,
+            })
+            return DispatchAction.BREAK_TOOLS
+        return DispatchAction.CONTINUE_TOOLS
+    output = yield from _run_tool_stream(
+        name,
+        call_id,
+        arguments,
+        workspace_dir,
+        _analysis_with_recorded_unknowns(
+            analysis,
+            state.findings.recorded,
+        ),
+        relax_discovery_contract=(
+            semantic_gate_enabled
+            and _get_investigation_phase(state) == InvestigationPhase.REPAIR
+            and name in _REPAIR_ALLOWED_TOOL_NAMES - {"record_investigation_findings"}
+        ),
+    )
+    if name == "read":
+        _cache_read_full_text(arguments, output, state.caches.read_file)
+    state.progress.repeated_tool_error_name = ""
+    state.progress.repeated_tool_error_count = 0
+    state.caches.tool[cache_key] = output
+    observation = _tool_observation(name, call_id, output)
+    state.observations.items.append(observation)
+    state.caches.tool_observation_ids[cache_key] = observation["id"]
+    state.observations.pending_ids.append(observation["id"])
+    state.progress.duplicate_no_progress_signature = ""
+    state.progress.duplicate_no_progress_count = 0
+    state.progress.duplicate_no_progress_total = 0
+    state.control.force_synthesis_reason = ""
+    state.control.force_discovery_ids = []
+    if verification_request and _is_hypothesis_verifier_call(name, arguments):
+        state.verification.attempted.add((
+            verification_request["unknown_id"],
+            verification_request["hypothesis"],
+        ))
+        state.verification.queue.pop(0)
+    state.messages.append(_tool_message(call_id, output))
+    return DispatchAction.CONTINUE_TOOLS
 
 
 def _investigation_directive(
@@ -410,18 +1393,401 @@ def _discover_lsp_first_prompt(analysis: dict) -> str | None:
     )
 
 
-def investigation_stream(
+
+def _dispatch_tool_calls(
+    state: InvestigationState,
+    tool_calls: list[dict],
+    *,
+    analysis: dict,
+    provider: dict,
+    model: str,
+    pricing_rules: dict | None,
+    run_id: str,
+    workspace_dir: str,
+    semantic_gate_enabled: bool,
+    subagent_enabled: bool,
+    resolution_required_ids: list[str],
+    semantic_repair_required_ids: set[str],
+    verification_request: dict | None,
+    clearify_unknown: dict | None,
+    allowed_tool_names: set[str],
+    round_index: int,
+) -> Iterator[DispatchAction]:
+    round_error_names: set[str] = set()
+    asked_clearify_ids: set[str] = set()
+    for raw_call in tool_calls:
+        call_id = raw_call.get("id") or f"call-{uuid4().hex[:8]}"
+        function = raw_call.get("function") or {}
+        name = function.get("name") or ""
+        arguments = {}
+        if name == "load_skill":
+            _, output, _ = execute_skill_tool_call(raw_call)
+            yield from skill_runtime.pop_events()
+            state.messages.append({
+                "role": "tool",
+                "tool_call_id": call_id,
+                "content": output,
+            })
+            continue
+        try:
+            arguments = _investigation_tool_arguments(
+                name,
+                function.get("arguments"),
+                pending_observation_ids=state.observations.pending_ids,
+                resolution_required_ids=resolution_required_ids,
+            )
+            if name == "record_investigation_findings":
+                arguments = _record_arguments(arguments)
+            if verification_request and name == "subagent":
+                arguments = {
+                    "agent": "hypothesis-verifier",
+                    "task": json.dumps({
+                        "hypothesis": verification_request["hypothesis"],
+                        "context": [
+                            verification_request.get("reason", ""),
+                            f"Target contract unknown: {verification_request['unknown_id']}",
+                        ],
+                    }, ensure_ascii=False),
+                    "target_unknown_ids": [verification_request["unknown_id"]],
+                    "reason": verification_request.get("reason")
+                    or "Independently verify the material investigation inference.",
+                    "hypothesis": verification_request["hypothesis"],
+                    "expected_observation": (
+                        "The verifier returns a supported, opposed, or inconclusive "
+                        "verdict with evidence for the atomic hypothesis."
+                    ),
+                    "decision_impact": (
+                        "The target resolution can be accepted, rejected, or kept "
+                        "partial without repeating the same investigation."
+                    ),
+                    "stop_condition": (
+                        "Stop after one independent verdict for this atomic hypothesis."
+                    ),
+                }
+            failed_key = _tool_cache_key(name, arguments)
+            if failed_key in state.caches.failed_tool:
+                error_name = name or "invalid"
+                if error_name not in round_error_names:
+                    state.progress.repeated_tool_error_name = error_name
+                    state.progress.repeated_tool_error_count += 1
+                    round_error_names.add(error_name)
+                output = json.dumps({
+                    "error": {
+                        "code": "duplicate_failed_tool_call",
+                        "tool": name or "invalid",
+                        "retryable": False,
+                        "message": (
+                            "The same tool arguments already failed. "
+                            "Choose a different valid action; do not retry this call."
+                        ),
+                    },
+                }, ensure_ascii=False)
+                yield start_event(call_id, registry.event_type(name), _tool_event(
+                    name or "invalid",
+                    arguments,
+                    output,
+                    description="Investigation tool",
+                    status="error",
+                    deduplicated=True,
+                ))
+                state.messages.append(_tool_message(call_id, output))
+                if state.progress.repeated_tool_error_count >= MAX_REPEATED_TOOL_ERRORS:
+                    state.control.finalization_reason = (
+                        "Runtime stopped an identical failed tool call loop: "
+                        f"{name or 'invalid'}."
+                    )
+                    state.control.stop_investigation = True
+                    break
+                continue
+            if name not in allowed_tool_names:
+                if _recorded_resolves_initial_unknowns(
+                    state.findings.recorded,
+                    analysis,
+                    repair_ids=semantic_repair_required_ids,
+                ) and name != "finish_investigation":
+                    output = json.dumps({
+                        "error": "investigation_already_resolved",
+                        "retryable": True,
+                        "required_tool": "finish_investigation",
+                        "message": (
+                            "All initial unknowns are resolved. Call finish_investigation now; "
+                            "do not repeat discovery or recording tools."
+                        ),
+                    }, ensure_ascii=False)
+                    yield start_event(call_id, registry.event_type(name), _tool_event(
+                        name or "invalid",
+                        arguments,
+                        output,
+                        description="Investigation tool",
+                        status="error",
+                    ))
+                    state.messages.append(_tool_message(call_id, output))
+                    _bump_hardlock(state)
+                    continue
+                if resolution_required_ids and not semantic_repair_required_ids:
+                    # 非 REPAIR 场景：初始 unknowns 已有证据记录，先 resolve
+                    # 再发现。REPAIR 阶段（semantic_repair_required_ids 非空）
+                    # 必须允许 read/grep 补证据——repair 提示词明确要求先取证
+                    # 再 record，拦截 discovery 会让模型空转重写结论而死循环。
+                    required_tool = (
+                        "resolve_unknowns"
+                        if "resolve_unknowns" in allowed_tool_names
+                        else "record_investigation_findings"
+                        if "record_investigation_findings" in allowed_tool_names
+                        else ""
+                    )
+                    output = json.dumps({
+                        "error": "resolution_required",
+                        "retryable": True,
+                        **({"required_tool": required_tool} if required_tool else {}),
+                        "target_unknown_ids": resolution_required_ids,
+                        "message": (
+                            "Existing project evidence is already recorded for these unknowns. "
+                            "Resolve explicit unknowns before calling more discovery tools."
+                        ),
+                    }, ensure_ascii=False)
+                    yield start_event(call_id, registry.event_type(name), _tool_event(
+                        name or "invalid",
+                        arguments,
+                        output,
+                        description="Investigation tool",
+                        status="error",
+                    ))
+                    state.messages.append(_tool_message(call_id, output))
+                    _bump_hardlock(state)
+                    continue
+                output = _tool_blocked_error_json(
+                    name,
+                    allowed_tools=sorted(allowed_tool_names),
+                )
+                yield start_event(call_id, registry.event_type(name), _tool_event(
+                    name or "invalid",
+                    arguments,
+                    output,
+                    description="Investigation tool",
+                    status="error",
+                ))
+                state.messages.append(_tool_message(call_id, output))
+                state.messages.append({"role": "user", "content": (
+                    "The semantic quality gate rejected some resolutions; you are in "
+                    "resolution-repair state. resolve_unknowns is unavailable here — "
+                    "submit corrected, evidence-backed conclusions with "
+                    "record_investigation_findings instead, then call "
+                    "finish_investigation when every unknown is resolved."
+                ) if semantic_repair_required_ids and name == "resolve_unknowns" else (
+                    "The tool was blocked by the current investigation state. "
+                    "Choose one of the allowed tools from the tool result; do not retry "
+                    "the blocked discovery call with the same arguments."
+                )})
+                continue
+            if name == "resolve_unknowns":
+                yield from _handle_resolve(
+                    state,
+                    call_id,
+                    name,
+                    arguments,
+                    analysis=analysis,
+                    observations=state.observations.items,
+                    pending_observation_ids=state.observations.pending_ids,
+                    resolution_required_ids=resolution_required_ids,
+                    semantic_repair_required_ids=semantic_repair_required_ids,
+                )
+                continue
+            if name == "record_investigation_findings":
+                action = yield from _handle_record(
+                    state,
+                    call_id,
+                    name,
+                    arguments,
+                    analysis=analysis,
+                    provider=provider,
+                    model=model,
+                    pricing_rules=pricing_rules,
+                    run_id=run_id,
+                    workspace_dir=workspace_dir,
+                    semantic_gate_enabled=semantic_gate_enabled,
+                    subagent_enabled=subagent_enabled,
+                    resolution_required_ids=resolution_required_ids,
+                    semantic_repair_required_ids=semantic_repair_required_ids,
+                    verification_request=verification_request,
+                    clearify_unknown=clearify_unknown,
+                )
+                if action == DispatchAction.BREAK_TOOLS:
+                    break
+                continue
+            if name == "finish_investigation":
+                action = yield from _handle_finish(
+                    state,
+                    call_id,
+                    name,
+                    arguments,
+                    analysis=analysis,
+                    observations=state.observations.items,
+                    workspace_dir=workspace_dir,
+                    semantic_gate_enabled=semantic_gate_enabled,
+                    subagent_enabled=subagent_enabled,
+                    resolution_required_ids=resolution_required_ids,
+                    semantic_repair_required_ids=semantic_repair_required_ids,
+                    verification_request=verification_request,
+                    provider=provider,
+                    model=model,
+                    pricing_rules=pricing_rules,
+                    run_id=run_id,
+                )
+                if action == DispatchAction.BREAK_TOOLS:
+                    break
+                break
+            if name == "clearify":
+                yield from _handle_clearify(
+                    state,
+                    call_id,
+                    name,
+                    arguments,
+                    analysis=analysis,
+                    clearify_runtime=clearify_runtime,
+                    clearify_unknown=clearify_unknown,
+                    resolution_required_ids=resolution_required_ids,
+                    semantic_repair_required_ids=semantic_repair_required_ids,
+                    asked_clearify_ids=asked_clearify_ids,
+                )
+                continue
+            action = yield from _handle_discovery(
+                state,
+                call_id,
+                name,
+                arguments,
+                analysis=analysis,
+                workspace_dir=workspace_dir,
+                semantic_repair_required_ids=semantic_repair_required_ids,
+                verification_request=verification_request,
+                resolution_required_ids=resolution_required_ids,
+                round_index=round_index,
+                run_id=run_id,
+                pricing_rules=pricing_rules,
+                semantic_gate_enabled=semantic_gate_enabled,
+            )
+            if action == DispatchAction.BREAK_TOOLS:
+                break
+            continue
+        except Exception as exc:
+            state.control.finish_evidence_blocked = False
+            if (
+                name == "finish_investigation"
+                and isinstance(exc, ValueError)
+                and ("references file" in str(exc) or "claims behavior" in str(exc))
+            ):
+                state.control.finish_evidence_blocked = True
+            raw_arguments = function.get("arguments") or "{}"
+            partial_arguments = _partial_tool_arguments(raw_arguments)
+            if name == "record_investigation_findings":
+                partial_arguments = _record_arguments(partial_arguments)
+            if name == "resolve_unknowns":
+                partial_arguments = _resolve_unknown_arguments(partial_arguments)
+                salvaged_resolutions = _salvage_resolution_candidates(
+                    partial_arguments,
+                    state.observations.items,
+                )
+                if salvaged_resolutions:
+                    state.findings.recorded = _merge_recorded_findings(
+                        state.findings.recorded,
+                        {"resolutions": salvaged_resolutions},
+                    )
+                    state.findings.recorded = _bind_grounding_evidence(
+                        state.findings.recorded,
+                        state.observations.items,
+                    )
+            if name == "record_investigation_findings" and _has_finding_fields(partial_arguments):
+                state.findings.recorded = _merge_recorded_findings(state.findings.recorded, partial_arguments)
+                state.observations.pending_ids.clear()
+                state.findings.last_quality_audit = {}
+            output = _tool_repair_error_json(
+                exc,
+                name,
+                raw_arguments,
+                partial_arguments,
+                observations=state.observations.items,
+            )
+            error_name = name or "invalid"
+            state.caches.failed_tool[_tool_cache_key(
+                error_name,
+                arguments or partial_arguments,
+            )] = output
+            if error_name not in round_error_names:
+                if error_name == state.progress.repeated_tool_error_name:
+                    state.progress.repeated_tool_error_count += 1
+                else:
+                    state.progress.repeated_tool_error_name = error_name
+                    state.progress.repeated_tool_error_count = 1
+                round_error_names.add(error_name)
+            yield start_event(call_id, registry.event_type(name), {
+                "name": name or "invalid",
+                "description": "Investigation tool",
+                "status": "error",
+                "open": False,
+                "input": raw_arguments,
+                "output": output,
+            })
+            if error_name == "finish_investigation" and not state.control.finish_evidence_blocked:
+                # finish 参数错误（requires reason 等）后模型倾向停止，而停止会走自动
+                # finalize 吞掉失败（不完整的 investigation 流向下游导致
+                # patch_planning_failed）。hard-lock：参数类失败第一次就强制模型
+                # 补参数重试 finish。evidence 类失败（references file/claims behavior）
+                # 不强制——模型需要 read 补证据，锁定 finish 会死锁。
+                state.control.current_tool_choice = {"type": "function", "function": {"name": "finish_investigation"}}
+            if state.progress.repeated_tool_error_count >= MAX_REPEATED_TOOL_ERRORS:
+                state.control.finalization_reason = (
+                    "Runtime recovered after repeated tool argument errors: "
+                    f"{name or 'invalid'} failed with {exc}."
+                )
+                if name == "record_investigation_findings":
+                    state.control.final = _runtime_recovered_investigation(
+                        state.control.finalization_reason,
+                        analysis,
+                        state.observations.items,
+                        state.findings.recorded,
+                    )
+                state.control.stop_investigation = True
+        state.messages.append({
+            "role": "tool",
+            "tool_call_id": call_id,
+            "content": output,
+        })
+        if state.control.stop_investigation:
+            yield start_event(f"{run_id}-safety-repeated-tool-error", "safety_stop", {
+                "reason": "repeated_tool_error",
+                "message": state.control.finalization_reason,
+                "tool": name or "invalid",
+                "visibility": "diagnostic",
+            })
+            break
+    if state.control.final is not None:
+        return DispatchAction.TERMINATE
+    if state.control.stop_investigation:
+        return DispatchAction.TERMINATE
+    return DispatchAction.NEXT_ROUND
+
+
+def _should_terminate_investigation(
+    state: InvestigationState,
+    round_index: int,
+    max_rounds: int,
+) -> bool:
+    del round_index, max_rounds
+
+    return state.control.final is not None or state.control.stop_investigation
+
+
+def _initialize_investigation_stream(
     *,
     message: str,
     analysis: dict,
     context: list[str],
     workspace_dir: str,
-    max_rounds: int | None = None,
-    findings: list[str] | None = None,
-    previous_observations: list[dict] | None = None,
-    previous_knowledge: list[dict] | None = None,
-    previous_findings: dict | None = None,
-    preserve_grounding_evidence: bool = False,
+    max_rounds: int | None,
+    findings: list[str] | None,
+    previous_observations: list[dict] | None,
+    previous_knowledge: list[dict] | None,
+    previous_findings: dict | None,
 ) -> Iterator[dict]:
     setting = (
         model_settings.resolve(model_settings.DEFAULT_STAGE)
@@ -499,911 +1865,36 @@ def investigation_stream(
         "Investigation model stopped before finish_investigation; summarizing observed facts."
     )
     state.findings.last_record_signature = _recorded_findings_signature(state.findings.recorded)
+    return {
+        "provider": provider,
+        "model": model,
+        "pricing_rules": pricing_rules,
+        "effort_profile": effort_profile,
+        "quality_gate": quality_gate,
+        "semantic_gate_enabled": semantic_gate_enabled,
+        "subagent_enabled": subagent_enabled,
+        "rounds_per_unknown": rounds_per_unknown,
+        "min_rounds": min_rounds,
+        "max_rounds": max_rounds,
+        "run_id": run_id,
+        "stage_id": stage_id,
+        "tools": tools,
+        "state": state,
+    }
 
-    for round_index in _round_indexes(max_rounds, start=0):
-        thinking_id = f"{run_id}-thinking-{round_index}"
-        yield start_event(thinking_id, "thinking", {"text": "", "done": False, "open": True})
-        current_tools = tools
-        state.control.current_tool_choice = "required"
-        clearify_unknown = _pending_clearify_unknown(
-            state.findings.recorded,
-            analysis,
-            state.verification.clearify_questions,
-        )
-        verification_request = state.verification.queue[0] if state.verification.queue else None
-        semantic_repair_required_ids = (
-            _semantic_repair_resolution_ids(state.findings.recorded)
-            if semantic_gate_enabled
-            else set()
-        )
-        resolution_required_ids = _unknowns_needing_resolution(state.findings.recorded, state.observations.items, analysis)
-        resolution_required_ids = _dedupe_strings([
-            *resolution_required_ids,
-            *sorted(semantic_repair_required_ids),
-            *(
-                _pending_observation_unknown_ids(
-                    state.observations.items,
-                    state.observations.pending_ids,
-                    analysis,
-                    state.findings.recorded,
-                )
-                if len(state.observations.pending_ids) >= MAX_PENDING_DISCOVERY_OBSERVATIONS
-                else []
-            ),
-        ])
-        discovery_required_ids = list(state.control.force_discovery_ids)
-        if state.control.force_synthesis_reason and not discovery_required_ids:
-            discovery_required_ids = _unknowns_missing_project_evidence(
-                state.findings.recorded,
-                state.observations.items,
-                analysis,
-            )
-        current_phase, current_tools, state.control.current_tool_choice, directive_prompt = _investigation_directive(
-            recorded_findings=state.findings.recorded,
-            analysis=analysis,
-            tools=tools,
-            observations=state.observations.items,
-            semantic_repair_required_ids=semantic_repair_required_ids,
-            resolution_required_ids=resolution_required_ids,
-            discovery_required_ids=discovery_required_ids,
-            clearify_unknown=clearify_unknown,
-            verification_request=verification_request,
-            finish_evidence_blocked=state.control.finish_evidence_blocked,
-            force_synthesis_reason=state.control.force_synthesis_reason,
-            semantic_gate_enabled=semantic_gate_enabled,
-            read_only_no_unknowns=(
-                analysis.get("execution_mode") == "read_only"
-                and not analysis.get("unknowns")
-            ),
-        )
-        # 方案 A：最少调查轮数未达到时，禁止提前结束（fast 也要跑
-        # rounds_per_unknown × blocking_unknown 轮）。结束类 phase
-        # （FINISH/READ_ONLY_FINISH/SYNTHESIZE）强制降级为 DISCOVERY_REQUIRED，
-        # 且原 directive（如"调用 finish_investigation"）不再下发。
-        # 例外：所有 unknowns 已 resolved 时不再降级——调查内容已完成，
-        # 凑轮数没有可查的东西，降级只会让模型陷入
-        # "finish 被 blocked（不在 allowed）+ resolve 被 blocked（already_resolved）"
-        # 的死循环（实测 6 轮空转）。
-        budget_floor_active = (
-            round_index < min_rounds
-            and current_phase in (
-                InvestigationPhase.FINISH,
-                InvestigationPhase.READ_ONLY_FINISH,
-                InvestigationPhase.SYNTHESIZE,
-            )
-            and not _recorded_resolves_initial_unknowns(
-                state.findings.recorded,
-                analysis,
-                repair_ids=semantic_repair_required_ids,
-            )
-        )
-        if directive_prompt and not budget_floor_active:
-            state.messages.append({"role": "user", "content": directive_prompt})
-        if budget_floor_active:
-            current_phase = InvestigationPhase.DISCOVERY_REQUIRED
-            current_tools = _phase_tools(current_phase, tools=tools)
-            state.control.current_tool_choice = "required"
-            state.messages.append({
-                "role": "user",
-                "content": _minimum_rounds_prompt(min_rounds - round_index),
-            })
-        allowed_tool_names = {
-            str(((tool.get("function") or {}).get("name")) or "")
-            for tool in current_tools
-            if isinstance(tool, dict)
-        }
-        try:
-            assistant = _call_model(provider, model, state.messages, tools=current_tools, tool_choice=state.control.current_tool_choice)
-        except ValueError as exc:
-            reason = str(exc)
-            yield {"op": "update", "id": thinking_id, "patch": {
-                "text": reason,
-                "done": True,
-                "open": False,
-            }}
-            yield start_event(f"{run_id}-provider-error", "output", {
-                "content": f"Provider request failed: {reason}",
-                "streaming": False,
-            })
-            yield {"op": "update", "id": stage_id, "patch": {"state": "failed", "phase": "provider_error"}}
-            return
-        if usage := _usage_delta(pricing_rules, assistant.pop("_usage", {})):
-            _add_usage(state.usage.total, usage)
-            yield start_event(f"{run_id}-usage-{round_index}", "usage", {
-                "delta": usage,
-                "total": state.usage.total,
-            })
 
-        tool_calls = assistant.get("tool_calls") or []
-        content = _assistant_visible_text(assistant) or _tool_call_summary(tool_calls)
-        state.messages.append(_assistant_message(assistant))
-        yield {"op": "update", "id": thinking_id, "patch": {
-            "text": content,
-            "done": True,
-            "open": bool(tool_calls),
-        }}
-
-        if not tool_calls:
-            state.messages.append({"role": "user", "content": (
-                "You did not call a tool. Continue by making an actual tool call, "
-                "or call finish_investigation if the investigation is complete. "
-                "Do not describe intended tool use in prose."
-            )})
-            continue
-
-        round_error_names: set[str] = set()
-        asked_clearify_ids: set[str] = set()
-        for raw_call in tool_calls:
-            call_id = raw_call.get("id") or f"call-{uuid4().hex[:8]}"
-            function = raw_call.get("function") or {}
-            name = function.get("name") or ""
-            arguments = {}
-            if name == "load_skill":
-                _, output, _ = execute_skill_tool_call(raw_call)
-                yield from skill_runtime.pop_events()
-                state.messages.append({
-                    "role": "tool",
-                    "tool_call_id": call_id,
-                    "content": output,
-                })
-                continue
-            try:
-                arguments = _investigation_tool_arguments(
-                    name,
-                    function.get("arguments"),
-                    pending_observation_ids=state.observations.pending_ids,
-                    resolution_required_ids=resolution_required_ids,
-                )
-                if name == "record_investigation_findings":
-                    arguments = _record_arguments(arguments)
-                if verification_request and name == "subagent":
-                    arguments = {
-                        "agent": "hypothesis-verifier",
-                        "task": json.dumps({
-                            "hypothesis": verification_request["hypothesis"],
-                            "context": [
-                                verification_request.get("reason", ""),
-                                f"Target contract unknown: {verification_request['unknown_id']}",
-                            ],
-                        }, ensure_ascii=False),
-                        "target_unknown_ids": [verification_request["unknown_id"]],
-                        "reason": verification_request.get("reason")
-                        or "Independently verify the material investigation inference.",
-                        "hypothesis": verification_request["hypothesis"],
-                        "expected_observation": (
-                            "The verifier returns a supported, opposed, or inconclusive "
-                            "verdict with evidence for the atomic hypothesis."
-                        ),
-                        "decision_impact": (
-                            "The target resolution can be accepted, rejected, or kept "
-                            "partial without repeating the same investigation."
-                        ),
-                        "stop_condition": (
-                            "Stop after one independent verdict for this atomic hypothesis."
-                        ),
-                    }
-                failed_key = _tool_cache_key(name, arguments)
-                if failed_key in state.caches.failed_tool:
-                    error_name = name or "invalid"
-                    if error_name not in round_error_names:
-                        state.progress.repeated_tool_error_name = error_name
-                        state.progress.repeated_tool_error_count += 1
-                        round_error_names.add(error_name)
-                    output = json.dumps({
-                        "error": {
-                            "code": "duplicate_failed_tool_call",
-                            "tool": name or "invalid",
-                            "retryable": False,
-                            "message": (
-                                "The same tool arguments already failed. "
-                                "Choose a different valid action; do not retry this call."
-                            ),
-                        },
-                    }, ensure_ascii=False)
-                    yield start_event(call_id, registry.event_type(name), _tool_event(
-                        name or "invalid",
-                        arguments,
-                        output,
-                        description="Investigation tool",
-                        status="error",
-                        deduplicated=True,
-                    ))
-                    state.messages.append(_tool_message(call_id, output))
-                    if state.progress.repeated_tool_error_count >= MAX_REPEATED_TOOL_ERRORS:
-                        state.control.finalization_reason = (
-                            "Runtime stopped an identical failed tool call loop: "
-                            f"{name or 'invalid'}."
-                        )
-                        state.control.stop_investigation = True
-                        break
-                    continue
-                if name not in allowed_tool_names:
-                    if _recorded_resolves_initial_unknowns(
-                        state.findings.recorded,
-                        analysis,
-                        repair_ids=semantic_repair_required_ids,
-                    ) and name != "finish_investigation":
-                        output = json.dumps({
-                            "error": "investigation_already_resolved",
-                            "retryable": True,
-                            "required_tool": "finish_investigation",
-                            "message": (
-                                "All initial unknowns are resolved. Call finish_investigation now; "
-                                "do not repeat discovery or recording tools."
-                            ),
-                        }, ensure_ascii=False)
-                        yield start_event(call_id, registry.event_type(name), _tool_event(
-                            name or "invalid",
-                            arguments,
-                            output,
-                            description="Investigation tool",
-                            status="error",
-                        ))
-                        state.messages.append(_tool_message(call_id, output))
-                        _bump_hardlock(state)
-                        continue
-                    if resolution_required_ids and not semantic_repair_required_ids:
-                        # 非 REPAIR 场景：初始 unknowns 已有证据记录，先 resolve
-                        # 再发现。REPAIR 阶段（semantic_repair_required_ids 非空）
-                        # 必须允许 read/grep 补证据——repair 提示词明确要求先取证
-                        # 再 record，拦截 discovery 会让模型空转重写结论而死循环。
-                        required_tool = (
-                            "resolve_unknowns"
-                            if "resolve_unknowns" in allowed_tool_names
-                            else "record_investigation_findings"
-                            if "record_investigation_findings" in allowed_tool_names
-                            else ""
-                        )
-                        output = json.dumps({
-                            "error": "resolution_required",
-                            "retryable": True,
-                            **({"required_tool": required_tool} if required_tool else {}),
-                            "target_unknown_ids": resolution_required_ids,
-                            "message": (
-                                "Existing project evidence is already recorded for these unknowns. "
-                                "Resolve explicit unknowns before calling more discovery tools."
-                            ),
-                        }, ensure_ascii=False)
-                        yield start_event(call_id, registry.event_type(name), _tool_event(
-                            name or "invalid",
-                            arguments,
-                            output,
-                            description="Investigation tool",
-                            status="error",
-                        ))
-                        state.messages.append(_tool_message(call_id, output))
-                        _bump_hardlock(state)
-                        continue
-                    output = _tool_blocked_error_json(
-                        name,
-                        allowed_tools=sorted(allowed_tool_names),
-                    )
-                    yield start_event(call_id, registry.event_type(name), _tool_event(
-                        name or "invalid",
-                        arguments,
-                        output,
-                        description="Investigation tool",
-                        status="error",
-                    ))
-                    state.messages.append(_tool_message(call_id, output))
-                    state.messages.append({"role": "user", "content": (
-                        "The semantic quality gate rejected some resolutions; you are in "
-                        "resolution-repair state. resolve_unknowns is unavailable here — "
-                        "submit corrected, evidence-backed conclusions with "
-                        "record_investigation_findings instead, then call "
-                        "finish_investigation when every unknown is resolved."
-                    ) if semantic_repair_required_ids and name == "resolve_unknowns" else (
-                        "The tool was blocked by the current investigation state. "
-                        "Choose one of the allowed tools from the tool result; do not retry "
-                        "the blocked discovery call with the same arguments."
-                    )})
-                    continue
-                if name == "resolve_unknowns":
-                    arguments = _resolve_unknown_arguments(arguments)
-                    _require_control_reason(arguments, name)
-                    resolutions = _resolutions(arguments.get("resolutions"))
-                    if not resolutions:
-                        raise ValueError("resolve_unknowns requires at least one valid resolution")
-                    resolutions = _canonicalize_resolution_unknown_ids(
-                        resolutions,
-                        _analysis_with_recorded_unknowns(
-                            analysis,
-                            state.findings.recorded,
-                        ),
-                    )
-                    _validate_resolution_refs(
-                        resolutions,
-                        _beliefs(state.findings.recorded.get("beliefs")),
-                        state.observations.items,
-                    )
-                    state.findings.recorded = _merge_recorded_findings(
-                        state.findings.recorded,
-                        {"resolutions": resolutions},
-                    )
-                    state.findings.recorded = _bind_grounding_evidence(
-                        state.findings.recorded,
-                        state.observations.items,
-                    )
-                    resolved_observation_ids = {
-                        evidence_id
-                        for resolution in resolutions
-                        for evidence_id in resolution.get("evidence", [])
-                    }
-                    state.observations.pending_ids = [
-                        item for item in state.observations.pending_ids
-                        if item not in resolved_observation_ids
-                    ]
-                    state.progress.duplicate_no_progress_signature = ""
-                    state.progress.duplicate_no_progress_count = 0
-                    state.progress.duplicate_no_progress_total = 0
-                    state.control.force_synthesis_reason = ""
-                    semantic_repair_required_ids = _semantic_repair_resolution_ids(
-                        state.findings.recorded,
-                    )
-                    task_updates = _investigation_task_updates(
-                        None,
-                        _initial_unknowns(_analysis_with_recorded_unknowns(analysis, state.findings.recorded)),
-                        resolutions,
-                    )
-                    output = json.dumps({
-                        "resolved": True,
-                        "counts": {"resolutions": len(resolutions)},
-                        "unknown_ids": [item["unknown_id"] for item in resolutions],
-                    }, ensure_ascii=False)
-                    yield start_event(call_id, "tool", _tool_event(
-                        name,
-                        arguments,
-                        output,
-                        description="Resolve investigation unknowns",
-                        symbol="R",
-                    ))
-                    if task_updates:
-                        yield start_event(f"{call_id}-task-update", "task_update", {
-                            "analysis_id": analysis.get("id", ""),
-                            "items": task_updates,
-                        })
-                    state.messages.append(_tool_message(call_id, output))
-                    continue
-                if name == "record_investigation_findings":
-                    _require_control_reason(arguments, name)
-                    if semantic_repair_required_ids and isinstance(arguments.get("resolutions"), list) and arguments["resolutions"]:
-                        _require_repair_resolutions(arguments, semantic_repair_required_ids)
-                    if (
-                        not state.observations.pending_ids
-                        and not resolution_required_ids
-                        and not _has_finding_fields(arguments)
-                    ):
-                        output = json.dumps({
-                            "recorded": False,
-                            "code": "nothing_to_record",
-                            "next_action": "finish_investigation",
-                            "message": "No pending observations or unresolved evidence-backed resolutions are available to record.",
-                        }, ensure_ascii=False)
-                        yield start_event(call_id, "tool", _tool_event(
-                            name,
-                            arguments,
-                            output,
-                            description="Record investigation findings",
-                        ))
-                        state.messages.append(_tool_message(call_id, output))
-                        _bump_hardlock(state)
-                        continue
-                    if (
-                        not _has_finding_fields(arguments)
-                        or (
-                            analysis.get("_canonicalized")
-                            and state.observations.pending_ids
-                            and not _record_consumes_observations(arguments, state.observations.pending_ids)
-                        )
-                    ):
-                        arguments = yield from _record_findings_by_slots(
-                            state,
-                            provider=provider,
-                            model=model,
-                            pricing_rules=pricing_rules,
-                            run_id=run_id,
-                            reason=str(arguments.get("reason") or "").strip(),
-                            analysis=analysis,
-                            required_resolution_ids=resolution_required_ids,
-                        )
-                    if _empty_discovery_recording(
-                        arguments,
-                        state.observations.pending_ids,
-                        resolution_required_ids,
-                    ):
-                        output = json.dumps({
-                            "recorded": False,
-                            "code": "no_material_findings",
-                            "pending_observation_ids": state.observations.pending_ids,
-                            "next_action": "continue_discovery",
-                        }, ensure_ascii=False)
-                        yield start_event(call_id, "tool", _tool_event(
-                            name,
-                            arguments,
-                            output,
-                            description="Record investigation findings",
-                        ))
-                        state.messages.append(_tool_message(call_id, output))
-                        _bump_hardlock(state)
-                        continue
-                    _require_finding_fields(arguments)
-                    _reject_empty_repair(arguments, state.findings.recorded)
-                    # 剥离模型提交的 repair 诊断字段：repair_mode/semantic_missing
-                    # 只能由 audit 质量门打标。REPAIR 阶段模型会从上下文把上一轮
-                    # missing 原样抄进提交的 resolution，不清理则 merge 后
-                    # _semantic_repair_resolution_ids 永远判该 unknown 待修，
-                    # 即使证据已补齐也无限 REPAIR（U4 类死循环根因）。
-                    arguments = _strip_submitted_repair_diagnostics(arguments)
-                    state.findings.recorded = _merge_recorded_findings(state.findings.recorded, arguments)
-                    state.findings.recorded = _bind_grounding_evidence(
-                        state.findings.recorded,
-                        state.observations.items,
-                    )
-                    state.observations.pending_ids.clear()
-                    record_signature = _recorded_findings_signature(state.findings.recorded)
-                    if record_signature == state.findings.last_record_signature:
-                        state.progress.repeated_record_no_progress += 1
-                    else:
-                        state.progress.repeated_record_no_progress = 0
-                        state.progress.duplicate_no_progress_signature = ""
-                        state.progress.duplicate_no_progress_count = 0
-                        state.progress.duplicate_no_progress_total = 0
-                        state.control.force_synthesis_reason = ""
-                        state.control.force_discovery_ids = []
-                    state.findings.last_record_signature = record_signature
-                    if state.progress.repeated_record_no_progress:
-                        state.control.force_discovery_ids = _unknowns_missing_project_evidence(
-                            state.findings.recorded,
-                            state.observations.items,
-                            analysis,
-                        )
-                    if state.progress.repeated_record_no_progress >= MAX_REPEATED_RECORD_NO_PROGRESS:
-                        state.control.finalization_reason = (
-                            "Runtime stopped after repeated record_investigation_findings "
-                            "calls produced no semantic progress."
-                        )
-                        state.control.stop_investigation = True
-                    task_updates = _record_task_updates(state.findings.recorded)
-                    output = json.dumps({
-                        "recorded": True,
-                        "counts": {field: len(state.findings.recorded.get(field, [])) for field in FINDING_FIELDS},
-                        **({"stalled": True} if state.control.stop_investigation else {}),
-                    }, ensure_ascii=False)
-                    yield start_event(call_id, "tool", _tool_event(
-                        name,
-                        arguments,
-                        output,
-                        description="Record investigation findings",
-                    ))
-                    if task_updates:
-                        yield start_event(f"{call_id}-task-update", "task_update", {
-                            "analysis_id": analysis.get("id", ""),
-                            "items": task_updates,
-                        })
-                    state.messages.append(_tool_message(call_id, output))
-                    if state.control.stop_investigation:
-                        yield start_event(f"{run_id}-safety-record-no-progress", "safety_stop", {
-                            "reason": "record_no_progress",
-                            "message": state.control.finalization_reason,
-                            "tool": name,
-                        })
-                        break
-                    continue
-                if name == "finish_investigation":
-                    _require_control_reason(arguments, name)
-                    state.findings.recorded = _apply_direct_resolution_gate(
-                        state.findings.recorded,
-                        state.observations.items,
-                        strict_grounding=semantic_gate_enabled and _analysis_requests_implementation(analysis),
-                    )
-                    semantic_repair_required_ids = (
-                        _semantic_repair_resolution_ids(state.findings.recorded)
-                        if semantic_gate_enabled
-                        else set()
-                    )
-                    if (
-                        semantic_gate_enabled
-                        and
-                        analysis.get("_canonicalized")
-                        and not _audit_covers_resolutions(
-                            state.findings.last_quality_audit,
-                            state.findings.recorded,
-                            analysis,
-                        )
-                    ):
-                        state.findings.last_quality_audit = yield from _audit_recorded_findings(
-                            state,
-                            provider=provider,
-                            model=model,
-                            pricing_rules=pricing_rules,
-                            run_id=run_id,
-                            analysis=analysis,
-                        )
-                        state.findings.recorded, requests, questions = _apply_investigation_audit(
-                            state.findings.recorded,
-                            state.findings.last_quality_audit,
-                            observations=state.observations.items,
-                            strict_grounding=_analysis_requests_implementation(analysis),
-                            allow_verification=subagent_enabled and _analysis_requests_implementation(analysis),
-                            analysis=analysis,
-                        )
-                        semantic_repair_required_ids = _semantic_repair_resolution_ids(
-                            state.findings.recorded,
-                        )
-                        attempted = state.verification.attempted | {
-                            (item.get("unknown_id"), item.get("hypothesis"))
-                            for item in state.verification.queue
-                        }
-                        state.verification.queue.extend(
-                            item for item in requests
-                            if (item.get("unknown_id"), item.get("hypothesis")) not in attempted
-                            and _unknown_blocks_finish(item.get("unknown_id"), analysis, state.findings.recorded)
-                        )
-                        state.verification.clearify_questions.update({
-                            unknown_id: question
-                            for unknown_id, question in questions.items()
-                            if _unknown_blocks_finish(unknown_id, analysis, state.findings.recorded)
-                        })
-                    pending_resolution_statuses = {
-                        str(item.get("status") or "")
-                        for item in state.findings.recorded.get("resolutions", [])
-                        if isinstance(item, dict)
-                        and _unknown_blocks_finish(item.get("unknown_id"), analysis, state.findings.recorded)
-                    }
-                    if (
-                        state.verification.queue
-                        or state.verification.clearify_questions
-                        or pending_resolution_statuses & {"partially_resolved", "needs_clearify"}
-                    ):
-                        repair_payload = _semantic_repair_payload(
-                            state.findings.recorded,
-                            _semantic_repair_resolution_ids(state.findings.recorded),
-                        )
-                        output = json.dumps({
-                            "finished": False,
-                            "reason": "semantic_quality_gate",
-                            "repair": repair_payload,
-                            "next_action": (
-                                "clearify"
-                                if "needs_clearify" in pending_resolution_statuses or state.verification.clearify_questions
-                                else "verify_hypothesis"
-                                if state.verification.queue
-                                else "continue_investigation"
-                            ),
-                        }, ensure_ascii=False)
-                        state.messages.append({
-                            "role": "tool",
-                            "tool_call_id": call_id,
-                            "content": output,
-                        })
-                        state.messages.append({"role": "user", "content": (
-                            "The semantic quality gate did not authorize every resolution. "
-                            "Follow its next action; do not finish or reuse the rejected conclusion."
-                        )})
-                        break
-                    state.control.final = _finish_payload(
-                        _finish_arguments(
-                            state.findings.recorded,
-                            arguments,
-                            prefer_finish_summary=not _analysis_requests_implementation(analysis),
-                        ),
-                        analysis=analysis,
-                        observations=state.observations.items,
-                        repair_conflicts=True,
-                        workspace_dir=workspace_dir,
-                    )
-                    state.messages.append({
-                        "role": "tool",
-                        "tool_call_id": call_id,
-                        "content": json.dumps(state.control.final, ensure_ascii=False),
-                    })
-                    if state.control.final.get("resolution_repair"):
-                        state.control.finalization_reason = "Investigation findings need explicit resolutions before finalizing."
-                        state.messages.append({
-                            "role": "user",
-                            "content": _resolution_repair_prompt(state.control.final["resolution_repair"]),
-                        })
-                        state.control.final = None
-                        state.control.stop_investigation = True
-                    break
-                if name == "clearify":
-                    if clearify_unknown:
-                        arguments["target_unknown_ids"] = [clearify_unknown["id"]]
-                        arguments.setdefault("reason", "Resolve the blocking product decision.")
-                        arguments.setdefault("question", clearify_unknown["question"])
-                    target_ids = _target_unknown_ids(arguments)
-                    target_ids = [
-                        item for item in target_ids
-                        if not any(_same_unknown_id(item, asked_id) for asked_id in asked_clearify_ids)
-                    ]
-                    arguments["target_unknown_ids"] = target_ids
-                    if not target_ids:
-                        output = json.dumps({
-                            "skipped": True,
-                            "reason": "These clearify unknowns were already asked in the current round.",
-                        }, ensure_ascii=False)
-                        state.messages.append({
-                            "role": "tool",
-                            "tool_call_id": call_id,
-                            "content": output,
-                        })
-                        _bump_hardlock(state)
-                        continue
-                    _validate_tool_contract(
-                        name,
-                        target_unknown_ids=target_ids,
-                        reason=str(arguments.get("reason") or "").strip(),
-                        orientation=bool(arguments.get("orientation", False)),
-                        analysis=_analysis_with_recorded_unknowns(
-                            analysis,
-                            state.findings.recorded,
-                        ),
-                    )
-                    answered_by_previous_round = {
-                        str(item.get("unknown_id") or "").strip()
-                        for item in state.findings.recorded.get("resolutions", [])
-                        if isinstance(item, dict)
-                        and (
-                            item.get("reason") in (CLEARIFY_RESOLUTION_REASON, CLEARIFY_UNRESOLVED_REASON)
-                            or (
-                                str(item.get("status") or "") in ("resolved", "partially_resolved")
-                                and str(item.get("answer") or "").strip()
-                            )
-                        )
-                    }
-                    target_ids = [
-                        item for item in target_ids
-                        if not any(
-                            _same_unknown_id(item, answered_id)
-                            for answered_id in answered_by_previous_round
-                        )
-                    ]
-                    arguments["target_unknown_ids"] = target_ids
-                    if not target_ids:
-                        output = json.dumps({
-                            "skipped": True,
-                            "reason": "These clearify unknowns already have authoritative user answers.",
-                        }, ensure_ascii=False)
-                        state.messages.append({
-                            "role": "tool",
-                            "tool_call_id": call_id,
-                            "content": output,
-                        })
-                        _bump_hardlock(state)
-                        continue
-                    question_id = clearify_runtime.create_pending()
-                    yield start_event(question_id, "user_question", _clearify_question(
-                        arguments,
-                        question_id=question_id,
-                        analysis=analysis,
-                    ))
-                    answer = clearify_runtime.wait(question_id)
-                    output = _clearify_tool_result(answer)
-                    resolution_records = _clearify_resolution_records(arguments, answer)
-                    state.progress.repeated_tool_error_name = ""
-                    state.progress.repeated_tool_error_count = 0
-                    if resolution_records:
-                        for resolution in resolution_records:
-                            asked_clearify_ids.add(resolution["unknown_id"])
-                            for question_id in list(state.verification.clearify_questions):
-                                if _same_unknown_id(question_id, resolution["unknown_id"]):
-                                    state.verification.clearify_questions.pop(question_id, None)
-                        state.findings.recorded = _merge_recorded_findings(
-                            state.findings.recorded,
-                            {"resolutions": resolution_records},
-                        )
-                    yield start_event(call_id, "tool", _tool_event(
-                        name,
-                        arguments,
-                        output,
-                        description="Ask the user for clarification",
-                    ))
-                    if resolution_records:
-                        yield start_event(f"{call_id}-task-update", "task_update", {
-                            "analysis_id": analysis.get("id", ""),
-                            "items": _investigation_task_updates(
-                                None,
-                                _initial_unknowns(_analysis_with_recorded_unknowns(analysis, state.findings.recorded)),
-                                resolution_records,
-                            ),
-                        })
-                    state.messages.append(_tool_message(call_id, output))
-                    continue
-                cache_key = _tool_cache_key(name, arguments)
-                if name == "read":
-                    cached_output = _read_from_file_cache(arguments, state.caches.read_file)
-                    if cached_output is not None:
-                        output = cached_output
-                        yield start_event(call_id, registry.event_type(name), _tool_event(
-                            name,
-                            arguments,
-                            output,
-                            description="Investigation tool",
-                            status="cached",
-                        ))
-                        state.messages.append(_tool_message(call_id, output))
-                        continue
-                if cache_key in state.caches.tool:
-                    cached_observation_id = state.caches.tool_observation_ids.get(cache_key, "")
-                    state.progress.duplicate_no_progress_total += 1
-                    if state.progress.duplicate_no_progress_signature == cache_key:
-                        state.progress.duplicate_no_progress_count += 1
-                    else:
-                        state.progress.duplicate_no_progress_signature = cache_key
-                        state.progress.duplicate_no_progress_count = 1
-                    next_action = (
-                        "resolve_unknowns"
-                        if state.observations.pending_ids or cached_observation_id
-                        else "choose_different_evidence"
-                    )
-                    output = _duplicate_no_progress_json(
-                        name,
-                        duplicate_count=state.progress.duplicate_no_progress_total,
-                        cached_observation_id=cached_observation_id,
-                        required_next_action=next_action,
-                    )
-                    if state.progress.duplicate_no_progress_count >= MAX_DUPLICATE_NO_PROGRESS:
-                        state.control.force_synthesis_reason = _duplicate_no_progress_prompt(
-                            name,
-                            cached_observation_id,
-                            state.observations.pending_ids,
-                        )
-                    yield start_event(call_id, registry.event_type(name), _tool_event(
-                        name,
-                        arguments,
-                        output,
-                        description="Investigation tool",
-                        status="no_progress",
-                        deduplicated=True,
-                        cached_observation_id=cached_observation_id,
-                    ))
-                    state.messages.append(_tool_message(call_id, output))
-                    if state.progress.duplicate_no_progress_total >= MAX_REPEATED_TOOL_ERRORS:
-                        state.control.finalization_reason = (
-                            "Runtime stopped after repeated duplicate no-progress tool calls: "
-                            f"{name or 'invalid'}."
-                        )
-                        state.control.stop_investigation = True
-                        yield start_event(f"{run_id}-safety-duplicate-no-progress", "safety_stop", {
-                            "reason": "duplicate_no_progress",
-                            "message": state.control.finalization_reason,
-                            "tool": name or "invalid",
-                            "cached_observation_id": cached_observation_id,
-                        })
-                        break
-                    continue
-                output = yield from _run_tool_stream(
-                    name,
-                    call_id,
-                    arguments,
-                    workspace_dir,
-                    _analysis_with_recorded_unknowns(
-                        analysis,
-                        state.findings.recorded,
-                    ),
-                    relax_discovery_contract=(
-                        current_phase == InvestigationPhase.REPAIR
-                        and name in _REPAIR_ALLOWED_TOOL_NAMES - {"record_investigation_findings"}
-                    ),
-                )
-                if name == "read":
-                    _cache_read_full_text(arguments, output, state.caches.read_file)
-                state.progress.repeated_tool_error_name = ""
-                state.progress.repeated_tool_error_count = 0
-                state.caches.tool[cache_key] = output
-                observation = _tool_observation(name, call_id, output)
-                state.observations.items.append(observation)
-                state.caches.tool_observation_ids[cache_key] = observation["id"]
-                state.observations.pending_ids.append(observation["id"])
-                state.progress.duplicate_no_progress_signature = ""
-                state.progress.duplicate_no_progress_count = 0
-                state.progress.duplicate_no_progress_total = 0
-                state.control.force_synthesis_reason = ""
-                state.control.force_discovery_ids = []
-                if verification_request and _is_hypothesis_verifier_call(name, arguments):
-                    state.verification.attempted.add((
-                        verification_request["unknown_id"],
-                        verification_request["hypothesis"],
-                    ))
-                    state.verification.queue.pop(0)
-            except Exception as exc:
-                state.control.finish_evidence_blocked = False
-                if (
-                    name == "finish_investigation"
-                    and isinstance(exc, ValueError)
-                    and ("references file" in str(exc) or "claims behavior" in str(exc))
-                ):
-                    state.control.finish_evidence_blocked = True
-                raw_arguments = function.get("arguments") or "{}"
-                partial_arguments = _partial_tool_arguments(raw_arguments)
-                if name == "record_investigation_findings":
-                    partial_arguments = _record_arguments(partial_arguments)
-                if name == "resolve_unknowns":
-                    partial_arguments = _resolve_unknown_arguments(partial_arguments)
-                    salvaged_resolutions = _salvage_resolution_candidates(
-                        partial_arguments,
-                        state.observations.items,
-                    )
-                    if salvaged_resolutions:
-                        state.findings.recorded = _merge_recorded_findings(
-                            state.findings.recorded,
-                            {"resolutions": salvaged_resolutions},
-                        )
-                        state.findings.recorded = _bind_grounding_evidence(
-                            state.findings.recorded,
-                            state.observations.items,
-                        )
-                if name == "record_investigation_findings" and _has_finding_fields(partial_arguments):
-                    state.findings.recorded = _merge_recorded_findings(state.findings.recorded, partial_arguments)
-                    state.observations.pending_ids.clear()
-                    state.findings.last_quality_audit = {}
-                output = _tool_repair_error_json(
-                    exc,
-                    name,
-                    raw_arguments,
-                    partial_arguments,
-                    observations=state.observations.items,
-                )
-                error_name = name or "invalid"
-                state.caches.failed_tool[_tool_cache_key(
-                    error_name,
-                    arguments or partial_arguments,
-                )] = output
-                if error_name not in round_error_names:
-                    if error_name == state.progress.repeated_tool_error_name:
-                        state.progress.repeated_tool_error_count += 1
-                    else:
-                        state.progress.repeated_tool_error_name = error_name
-                        state.progress.repeated_tool_error_count = 1
-                    round_error_names.add(error_name)
-                yield start_event(call_id, registry.event_type(name), {
-                    "name": name or "invalid",
-                    "description": "Investigation tool",
-                    "status": "error",
-                    "open": False,
-                    "input": raw_arguments,
-                    "output": output,
-                })
-                if error_name == "finish_investigation" and not state.control.finish_evidence_blocked:
-                    # finish 参数错误（requires reason 等）后模型倾向停止，而停止会走自动
-                    # finalize 吞掉失败（不完整的 investigation 流向下游导致
-                    # patch_planning_failed）。hard-lock：参数类失败第一次就强制模型
-                    # 补参数重试 finish。evidence 类失败（references file/claims behavior）
-                    # 不强制——模型需要 read 补证据，锁定 finish 会死锁。
-                    state.control.current_tool_choice = {"type": "function", "function": {"name": "finish_investigation"}}
-                if state.progress.repeated_tool_error_count >= MAX_REPEATED_TOOL_ERRORS:
-                    state.control.finalization_reason = (
-                        "Runtime recovered after repeated tool argument errors: "
-                        f"{name or 'invalid'} failed with {exc}."
-                    )
-                    if name == "record_investigation_findings":
-                        state.control.final = _runtime_recovered_investigation(
-                            state.control.finalization_reason,
-                            analysis,
-                            state.observations.items,
-                            state.findings.recorded,
-                        )
-                    state.control.stop_investigation = True
-            state.messages.append({
-                "role": "tool",
-                "tool_call_id": call_id,
-                "content": output,
-            })
-            if state.control.stop_investigation:
-                yield start_event(f"{run_id}-safety-repeated-tool-error", "safety_stop", {
-                    "reason": "repeated_tool_error",
-                    "message": state.control.finalization_reason,
-                    "tool": name or "invalid",
-                    "visibility": "diagnostic",
-                })
-                break
-        if state.control.final is not None:
-            break
-        if state.control.stop_investigation:
-            break
-    else:
-        state.control.finalization_reason = "Investigation step limit reached. Summarizing observed facts."
-
+def _finish_investigation_stream(
+    state: InvestigationState,
+    *,
+    provider: dict,
+    model: str,
+    pricing_rules: dict | None,
+    run_id: str,
+    stage_id: str,
+    analysis: dict,
+    workspace_dir: str,
+    preserve_grounding_evidence: bool,
+) -> Iterator[dict]:
     if state.control.final is None and state.control.stop_investigation:
         state.control.final = _runtime_recovered_investigation(
             state.control.finalization_reason,
@@ -1452,6 +1943,151 @@ def investigation_stream(
     })
     yield {"op": "done", "investigation": state.control.final}
 
+
+def _run_investigation_round(
+    state: InvestigationState,
+    runtime: dict,
+    *,
+    round_index: int,
+    analysis: dict,
+    context: list[str],
+    workspace_dir: str,
+    preserve_grounding_evidence: bool,
+    previous_observations: list[dict] | None,
+    previous_knowledge: list[dict] | None,
+) -> Iterator[DispatchAction | None]:
+    run_id = runtime["run_id"]
+    max_rounds = runtime["max_rounds"]
+    thinking_id = f"{run_id}-thinking-{round_index}"
+    yield start_event(thinking_id, "thinking", {"text": "", "done": False, "open": True})
+    (
+        directive_prompt,
+        _current_phase,
+        current_tools,
+        allowed_tool_names,
+        resolution_required_ids,
+        clearify_unknown,
+        verification_request,
+        semantic_repair_required_ids,
+    ) = _prepare_round(
+        state,
+        analysis=analysis,
+        effort_profile=runtime["effort_profile"],
+        quality_gate=runtime["quality_gate"],
+        semantic_gate_enabled=runtime["semantic_gate_enabled"],
+        subagent_enabled=runtime["subagent_enabled"],
+        rounds_per_unknown=runtime["rounds_per_unknown"],
+        min_rounds=runtime["min_rounds"],
+        max_rounds=max_rounds,
+        run_id=run_id,
+        workspace_dir=workspace_dir,
+        tools=runtime["tools"],
+        current_round_index=round_index,
+        previous_rounds_usage=state.usage.total,
+        context=context,
+        model=runtime["model"],
+    )
+    tool_calls = yield from _collect_tool_calls(
+        state,
+        directive_prompt,
+        provider=runtime["provider"],
+        model=runtime["model"],
+        pricing_rules=runtime["pricing_rules"],
+        run_id=run_id,
+        round_index=round_index,
+        tools=current_tools,
+        current_tool_choice=state.control.current_tool_choice,
+        analysis=analysis,
+        context=context,
+        workspace_dir=workspace_dir,
+        max_rounds=max_rounds,
+        semantic_gate_enabled=runtime["semantic_gate_enabled"],
+        subagent_enabled=runtime["subagent_enabled"],
+        preserve_grounding_evidence=preserve_grounding_evidence,
+        previous_observations=previous_observations,
+        previous_knowledge=previous_knowledge,
+    )
+    if tool_calls is None:
+        return None
+    if not tool_calls:
+        return DispatchAction.NEXT_ROUND
+    return (yield from _dispatch_tool_calls(
+        state,
+        tool_calls,
+        analysis=analysis,
+        provider=runtime["provider"],
+        model=runtime["model"],
+        pricing_rules=runtime["pricing_rules"],
+        run_id=run_id,
+        workspace_dir=workspace_dir,
+        semantic_gate_enabled=runtime["semantic_gate_enabled"],
+        subagent_enabled=runtime["subagent_enabled"],
+        resolution_required_ids=resolution_required_ids,
+        semantic_repair_required_ids=semantic_repair_required_ids,
+        verification_request=verification_request,
+        clearify_unknown=clearify_unknown,
+        allowed_tool_names=allowed_tool_names,
+        round_index=round_index,
+    ))
+
+
+def investigation_stream(
+    *,
+    message: str,
+    analysis: dict,
+    context: list[str],
+    workspace_dir: str,
+    max_rounds: int | None = None,
+    findings: list[str] | None = None,
+    previous_observations: list[dict] | None = None,
+    previous_knowledge: list[dict] | None = None,
+    previous_findings: dict | None = None,
+    preserve_grounding_evidence: bool = False,
+) -> Iterator[dict]:
+    runtime = yield from _initialize_investigation_stream(
+        message=message,
+        analysis=analysis,
+        context=context,
+        workspace_dir=workspace_dir,
+        max_rounds=max_rounds,
+        findings=findings,
+        previous_observations=previous_observations,
+        previous_knowledge=previous_knowledge,
+        previous_findings=previous_findings,
+    )
+    state = runtime["state"]
+    max_rounds = runtime["max_rounds"]
+
+    for round_index in _round_indexes(max_rounds, start=0):
+        outcome = yield from _run_investigation_round(
+            state,
+            runtime,
+            round_index=round_index,
+            analysis=analysis,
+            context=context,
+            workspace_dir=workspace_dir,
+            preserve_grounding_evidence=preserve_grounding_evidence,
+            previous_observations=previous_observations,
+            previous_knowledge=previous_knowledge,
+        )
+        if outcome is None:
+            return
+        if outcome == DispatchAction.TERMINATE or _should_terminate_investigation(state, round_index, max_rounds):
+            break
+    else:
+        state.control.finalization_reason = "Investigation step limit reached. Summarizing observed facts."
+
+    yield from _finish_investigation_stream(
+        state,
+        provider=runtime["provider"],
+        model=runtime["model"],
+        pricing_rules=runtime["pricing_rules"],
+        run_id=runtime["run_id"],
+        stage_id=runtime["stage_id"],
+        analysis=analysis,
+        workspace_dir=workspace_dir,
+        preserve_grounding_evidence=preserve_grounding_evidence,
+    )
 
 def _investigation_tools() -> list[dict]:
     tools = [
