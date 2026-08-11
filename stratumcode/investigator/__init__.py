@@ -168,6 +168,8 @@ from .tools import (
     _tool_blocked_error_json,
     _tool_cache_key,
     _tool_call_subject,
+    _tool_event,
+    _tool_message,
     _tool_observation,
     _tool_repair_error_json,
     _validate_tool_contract,
@@ -193,6 +195,14 @@ class InvestigationPhase(StrEnum):
     RESOLVE = "resolve"
     DISCOVERY_REQUIRED = "discovery_required"
     DISCOVER = "discover"
+
+
+def _bump_hardlock(state: InvestigationState) -> None:
+    """Increment the already-resolved error counter; >=2 hard-locks finish_investigation."""
+    state.progress.already_resolved_error_count += 1
+    if state.progress.already_resolved_error_count >= 2:
+        # Hard-lock: force the model to call finish_investigation
+        state.control.current_tool_choice = {"type": "function", "function": {"name": "finish_investigation"}}
 
 
 def _investigation_directive(
@@ -690,20 +700,15 @@ def investigation_stream(
                             ),
                         },
                     }, ensure_ascii=False)
-                    yield start_event(call_id, registry.event_type(name), {
-                        "name": name or "invalid",
-                        "description": "Investigation tool",
-                        "status": "error",
-                        "open": False,
-                        "input": json.dumps(arguments, ensure_ascii=False, indent=2),
-                        "output": output,
-                        "deduplicated": True,
-                    })
-                    state.messages.append({
-                        "role": "tool",
-                        "tool_call_id": call_id,
-                        "content": output,
-                    })
+                    yield start_event(call_id, registry.event_type(name), _tool_event(
+                        name or "invalid",
+                        arguments,
+                        output,
+                        description="Investigation tool",
+                        status="error",
+                        deduplicated=True,
+                    ))
+                    state.messages.append(_tool_message(call_id, output))
                     if state.progress.repeated_tool_error_count >= MAX_REPEATED_TOOL_ERRORS:
                         state.control.finalization_reason = (
                             "Runtime stopped an identical failed tool call loop: "
@@ -727,23 +732,15 @@ def investigation_stream(
                                 "do not repeat discovery or recording tools."
                             ),
                         }, ensure_ascii=False)
-                        yield start_event(call_id, registry.event_type(name), {
-                            "name": name or "invalid",
-                            "description": "Investigation tool",
-                            "status": "error",
-                            "open": False,
-                            "input": json.dumps(arguments, ensure_ascii=False, indent=2),
-                            "output": output,
-                        })
-                        state.messages.append({
-                            "role": "tool",
-                            "tool_call_id": call_id,
-                            "content": output,
-                        })
-                        state.progress.already_resolved_error_count += 1
-                        if state.progress.already_resolved_error_count >= 2:
-                            # Hard-lock: force the model to call finish_investigation
-                            state.control.current_tool_choice = {"type": "function", "function": {"name": "finish_investigation"}}
+                        yield start_event(call_id, registry.event_type(name), _tool_event(
+                            name or "invalid",
+                            arguments,
+                            output,
+                            description="Investigation tool",
+                            status="error",
+                        ))
+                        state.messages.append(_tool_message(call_id, output))
+                        _bump_hardlock(state)
                         continue
                     if resolution_required_ids and not semantic_repair_required_ids:
                         # 非 REPAIR 场景：初始 unknowns 已有证据记录，先 resolve
@@ -767,41 +764,28 @@ def investigation_stream(
                                 "Resolve explicit unknowns before calling more discovery tools."
                             ),
                         }, ensure_ascii=False)
-                        yield start_event(call_id, registry.event_type(name), {
-                            "name": name or "invalid",
-                            "description": "Investigation tool",
-                            "status": "error",
-                            "open": False,
-                            "input": json.dumps(arguments, ensure_ascii=False, indent=2),
-                            "output": output,
-                        })
-                        state.messages.append({
-                            "role": "tool",
-                            "tool_call_id": call_id,
-                            "content": output,
-                        })
-                        state.progress.already_resolved_error_count += 1
-                        if state.progress.already_resolved_error_count >= 2:
-                            # Hard-lock: force the model to call finish_investigation
-                            state.control.current_tool_choice = {"type": "function", "function": {"name": "finish_investigation"}}
+                        yield start_event(call_id, registry.event_type(name), _tool_event(
+                            name or "invalid",
+                            arguments,
+                            output,
+                            description="Investigation tool",
+                            status="error",
+                        ))
+                        state.messages.append(_tool_message(call_id, output))
+                        _bump_hardlock(state)
                         continue
                     output = _tool_blocked_error_json(
                         name,
                         allowed_tools=sorted(allowed_tool_names),
                     )
-                    yield start_event(call_id, registry.event_type(name), {
-                        "name": name or "invalid",
-                        "description": "Investigation tool",
-                        "status": "error",
-                        "open": False,
-                        "input": json.dumps(arguments, ensure_ascii=False, indent=2),
-                        "output": output,
-                    })
-                    state.messages.append({
-                        "role": "tool",
-                        "tool_call_id": call_id,
-                        "content": output,
-                    })
+                    yield start_event(call_id, registry.event_type(name), _tool_event(
+                        name or "invalid",
+                        arguments,
+                        output,
+                        description="Investigation tool",
+                        status="error",
+                    ))
+                    state.messages.append(_tool_message(call_id, output))
                     state.messages.append({"role": "user", "content": (
                         "The semantic quality gate rejected some resolutions; you are in "
                         "resolution-repair state. resolve_unknowns is unavailable here — "
@@ -866,25 +850,19 @@ def investigation_stream(
                         "counts": {"resolutions": len(resolutions)},
                         "unknown_ids": [item["unknown_id"] for item in resolutions],
                     }, ensure_ascii=False)
-                    yield start_event(call_id, "tool", {
-                        "name": name,
-                        "description": "Resolve investigation unknowns",
-                        "status": "done",
-                        "open": False,
-                        "input": json.dumps(arguments, ensure_ascii=False, indent=2),
-                        "output": output,
-                        "symbol": "R",
-                    })
+                    yield start_event(call_id, "tool", _tool_event(
+                        name,
+                        arguments,
+                        output,
+                        description="Resolve investigation unknowns",
+                        symbol="R",
+                    ))
                     if task_updates:
                         yield start_event(f"{call_id}-task-update", "task_update", {
                             "analysis_id": analysis.get("id", ""),
                             "items": task_updates,
                         })
-                    state.messages.append({
-                        "role": "tool",
-                        "tool_call_id": call_id,
-                        "content": output,
-                    })
+                    state.messages.append(_tool_message(call_id, output))
                     continue
                 if name == "record_investigation_findings":
                     _require_control_reason(arguments, name)
@@ -901,23 +879,14 @@ def investigation_stream(
                             "next_action": "finish_investigation",
                             "message": "No pending observations or unresolved evidence-backed resolutions are available to record.",
                         }, ensure_ascii=False)
-                        yield start_event(call_id, "tool", {
-                            "name": name,
-                            "description": "Record investigation findings",
-                            "status": "done",
-                            "open": False,
-                            "input": json.dumps(arguments, ensure_ascii=False, indent=2),
-                            "output": output,
-                        })
-                        state.messages.append({
-                            "role": "tool",
-                            "tool_call_id": call_id,
-                            "content": output,
-                        })
-                        state.progress.already_resolved_error_count += 1
-                        if state.progress.already_resolved_error_count >= 2:
-                            # Hard-lock: force the model to call finish_investigation
-                            state.control.current_tool_choice = {"type": "function", "function": {"name": "finish_investigation"}}
+                        yield start_event(call_id, "tool", _tool_event(
+                            name,
+                            arguments,
+                            output,
+                            description="Record investigation findings",
+                        ))
+                        state.messages.append(_tool_message(call_id, output))
+                        _bump_hardlock(state)
                         continue
                     if (
                         not _has_finding_fields(arguments)
@@ -948,23 +917,14 @@ def investigation_stream(
                             "pending_observation_ids": state.observations.pending_ids,
                             "next_action": "continue_discovery",
                         }, ensure_ascii=False)
-                        yield start_event(call_id, "tool", {
-                            "name": name,
-                            "description": "Record investigation findings",
-                            "status": "done",
-                            "open": False,
-                            "input": json.dumps(arguments, ensure_ascii=False, indent=2),
-                            "output": output,
-                        })
-                        state.messages.append({
-                            "role": "tool",
-                            "tool_call_id": call_id,
-                            "content": output,
-                        })
-                        state.progress.already_resolved_error_count += 1
-                        if state.progress.already_resolved_error_count >= 2:
-                            # Hard-lock: force the model to call finish_investigation
-                            state.control.current_tool_choice = {"type": "function", "function": {"name": "finish_investigation"}}
+                        yield start_event(call_id, "tool", _tool_event(
+                            name,
+                            arguments,
+                            output,
+                            description="Record investigation findings",
+                        ))
+                        state.messages.append(_tool_message(call_id, output))
+                        _bump_hardlock(state)
                         continue
                     _require_finding_fields(arguments)
                     _reject_empty_repair(arguments, state.findings.recorded)
@@ -1009,24 +969,18 @@ def investigation_stream(
                         "counts": {field: len(state.findings.recorded.get(field, [])) for field in FINDING_FIELDS},
                         **({"stalled": True} if state.control.stop_investigation else {}),
                     }, ensure_ascii=False)
-                    yield start_event(call_id, "tool", {
-                        "name": name,
-                        "description": "Record investigation findings",
-                        "status": "done",
-                        "open": False,
-                        "input": json.dumps(arguments, ensure_ascii=False, indent=2),
-                        "output": output,
-                    })
+                    yield start_event(call_id, "tool", _tool_event(
+                        name,
+                        arguments,
+                        output,
+                        description="Record investigation findings",
+                    ))
                     if task_updates:
                         yield start_event(f"{call_id}-task-update", "task_update", {
                             "analysis_id": analysis.get("id", ""),
                             "items": task_updates,
                         })
-                    state.messages.append({
-                        "role": "tool",
-                        "tool_call_id": call_id,
-                        "content": output,
-                    })
+                    state.messages.append(_tool_message(call_id, output))
                     if state.control.stop_investigation:
                         yield start_event(f"{run_id}-safety-record-no-progress", "safety_stop", {
                             "reason": "record_no_progress",
@@ -1173,10 +1127,7 @@ def investigation_stream(
                             "tool_call_id": call_id,
                             "content": output,
                         })
-                        state.progress.already_resolved_error_count += 1
-                        if state.progress.already_resolved_error_count >= 2:
-                            # Hard-lock: force the model to call finish_investigation
-                            state.control.current_tool_choice = {"type": "function", "function": {"name": "finish_investigation"}}
+                        _bump_hardlock(state)
                         continue
                     _validate_tool_contract(
                         name,
@@ -1218,10 +1169,7 @@ def investigation_stream(
                             "tool_call_id": call_id,
                             "content": output,
                         })
-                        state.progress.already_resolved_error_count += 1
-                        if state.progress.already_resolved_error_count >= 2:
-                            # Hard-lock: force the model to call finish_investigation
-                            state.control.current_tool_choice = {"type": "function", "function": {"name": "finish_investigation"}}
+                        _bump_hardlock(state)
                         continue
                     question_id = clearify_runtime.create_pending()
                     yield start_event(question_id, "user_question", _clearify_question(
@@ -1244,14 +1192,12 @@ def investigation_stream(
                             state.findings.recorded,
                             {"resolutions": resolution_records},
                         )
-                    yield start_event(call_id, "tool", {
-                        "name": name,
-                        "description": "Ask the user for clarification",
-                        "status": "done",
-                        "open": False,
-                        "input": json.dumps(arguments, ensure_ascii=False, indent=2),
-                        "output": output,
-                    })
+                    yield start_event(call_id, "tool", _tool_event(
+                        name,
+                        arguments,
+                        output,
+                        description="Ask the user for clarification",
+                    ))
                     if resolution_records:
                         yield start_event(f"{call_id}-task-update", "task_update", {
                             "analysis_id": analysis.get("id", ""),
@@ -1261,30 +1207,21 @@ def investigation_stream(
                                 resolution_records,
                             ),
                         })
-                    state.messages.append({
-                        "role": "tool",
-                        "tool_call_id": call_id,
-                        "content": output,
-                    })
+                    state.messages.append(_tool_message(call_id, output))
                     continue
                 cache_key = _tool_cache_key(name, arguments)
                 if name == "read":
                     cached_output = _read_from_file_cache(arguments, state.caches.read_file)
                     if cached_output is not None:
                         output = cached_output
-                        yield start_event(call_id, registry.event_type(name), {
-                            "name": name,
-                            "description": "Investigation tool",
-                            "status": "cached",
-                            "open": False,
-                            "input": json.dumps(arguments, ensure_ascii=False, indent=2),
-                            "output": output,
-                        })
-                        state.messages.append({
-                            "role": "tool",
-                            "tool_call_id": call_id,
-                            "content": output,
-                        })
+                        yield start_event(call_id, registry.event_type(name), _tool_event(
+                            name,
+                            arguments,
+                            output,
+                            description="Investigation tool",
+                            status="cached",
+                        ))
+                        state.messages.append(_tool_message(call_id, output))
                         continue
                 if cache_key in state.caches.tool:
                     cached_observation_id = state.caches.tool_observation_ids.get(cache_key, "")
@@ -1311,21 +1248,16 @@ def investigation_stream(
                             cached_observation_id,
                             state.observations.pending_ids,
                         )
-                    yield start_event(call_id, registry.event_type(name), {
-                        "name": name,
-                        "description": "Investigation tool",
-                        "status": "no_progress",
-                        "open": False,
-                        "input": json.dumps(arguments, ensure_ascii=False, indent=2),
-                        "output": output,
-                        "deduplicated": True,
-                        "cached_observation_id": cached_observation_id,
-                    })
-                    state.messages.append({
-                        "role": "tool",
-                        "tool_call_id": call_id,
-                        "content": output,
-                    })
+                    yield start_event(call_id, registry.event_type(name), _tool_event(
+                        name,
+                        arguments,
+                        output,
+                        description="Investigation tool",
+                        status="no_progress",
+                        deduplicated=True,
+                        cached_observation_id=cached_observation_id,
+                    ))
+                    state.messages.append(_tool_message(call_id, output))
                     if state.progress.duplicate_no_progress_total >= MAX_REPEATED_TOOL_ERRORS:
                         state.control.finalization_reason = (
                             "Runtime stopped after repeated duplicate no-progress tool calls: "

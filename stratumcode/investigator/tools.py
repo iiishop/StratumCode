@@ -406,6 +406,33 @@ def _tool_cache_key(name: str, arguments: dict) -> str:
     return f"{name}:{json.dumps(comparable, ensure_ascii=False, sort_keys=True)}"
 
 
+def _tool_event(
+    name: str,
+    arguments: dict,
+    output: str,
+    *,
+    description: str,
+    status: str = "done",
+    **extra: object,
+) -> dict:
+    """Tool event payload for start_event (cross-module compatible shape)."""
+    payload = {
+        "name": name,
+        "description": description,
+        "status": status,
+        "open": False,
+        "input": json.dumps(arguments, ensure_ascii=False, indent=2),
+        "output": output,
+    }
+    payload.update(extra)
+    return payload
+
+
+def _tool_message(call_id: str, output: str) -> dict:
+    """Tool result message appended to the conversation."""
+    return {"role": "tool", "tool_call_id": call_id, "content": output}
+
+
 def _run_tool_stream(name: str, call_id: str, arguments: dict, workspace_dir: str, analysis: dict | None = None, *, relax_discovery_contract: bool = False) -> Iterator[dict]:
     registered_tool = registry.get(name)
     if (
