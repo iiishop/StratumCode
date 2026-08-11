@@ -39,7 +39,7 @@ from .ids import (
     _question_key,
     _unknowns,
 )
-from .state import InvestigationState
+from .state import InvestigationRuntime, InvestigationState
 from .util import _dedupe_strings, _string_list
 
 
@@ -153,13 +153,9 @@ def _empty_recorded_findings() -> dict:
 
 def _record_findings_by_slots(
     state: InvestigationState,
+    runtime: InvestigationRuntime,
     *,
-    provider: dict,
-    model: str,
-    pricing_rules: list[dict],
-    run_id: str,
     reason: str,
-    analysis: dict,
     required_resolution_ids: list[str] | None = None,
 ) -> Iterator[dict]:
     required_resolution_ids = required_resolution_ids or []
@@ -168,7 +164,7 @@ def _record_findings_by_slots(
         *_semantic_repair_observation_ids(state.findings.recorded, required_resolution_ids),
     ])
     resolution_slot_ids = _record_resolution_slot_ids(
-        analysis,
+        runtime.analysis,
         state.observations.items,
         state.findings.recorded,
         state.observations.pending_ids,
@@ -180,7 +176,7 @@ def _record_findings_by_slots(
         )},
         {"role": "user", "content": _record_slot_context(
             reason,
-            analysis,
+            runtime.analysis,
             state.observations.items,
             state.findings.recorded,
             state.observations.pending_ids,
@@ -222,16 +218,16 @@ def _record_findings_by_slots(
         attempt_messages = [*slot_messages, {"role": "user", "content": slot_prompt}]
         for attempt in range(attempts):
             assistant = _call_model(
-                provider,
-                model,
+                runtime.provider,
+                runtime.model,
                 attempt_messages,
                 tools=[],
                 use_skills=False,
             )
-            if usage := _usage_delta(pricing_rules, assistant.pop("_usage", {})):
+            if usage := _usage_delta(runtime.pricing_rules, assistant.pop("_usage", {})):
                 _add_usage(state.usage.total, usage)
                 usage_events.append(start_event(
-                    f"{run_id}-usage-record-slot-{len(usage_events)}",
+                    f"{runtime.run_id}-usage-record-slot-{len(usage_events)}",
                     "usage",
                     {"delta": usage, "total": state.usage.total},
                 ))
@@ -282,7 +278,7 @@ def _record_findings_by_slots(
         "resolutions": resolutions,
         "new_unknowns": _runtime_new_unknowns(
             filled.get("new_unknowns"),
-            analysis,
+            runtime.analysis,
             state.findings.recorded,
             resolutions,
         ),
@@ -806,8 +802,8 @@ def _merge_recorded_findings(current: dict, update: dict) -> dict:
                 value = [_remap_resolution_belief_ids(item, belief_aliases) for item in value]
             merged[field] = _merge_list_by_identity(merged[field], value)
             if field == "resolutions":
-                # clearify 用户答案是权威决定：覆盖同 unknown 的先前模型自解析，
-                # 避免 answers 里两条矛盾答案并存（重复 clearify 的根源）。
+                # clearify 鐢ㄦ埛绛旀鏄潈濞佸喅瀹氾細瑕嗙洊鍚?unknown 鐨勫厛鍓嶆ā鍨嬭嚜瑙ｆ瀽锛?
+                # 閬垮厤 answers 閲屼袱鏉＄煕鐩剧瓟妗堝苟瀛橈紙閲嶅 clearify 鐨勬牴婧愶級銆?
                 merged[field] = _supersede_resolutions_with_clearify(merged[field])
     return merged
 
@@ -918,11 +914,11 @@ def _append_resolution_repair(existing: dict, repair: dict) -> dict:
     for field in ("status", "reason"):
         if str(repair.get(field) or "").strip():
             merged[field] = repair[field]
-    # 保留 repair_mode/semantic_missing：append-only 修复是否真正通过
-    # 只能由 audit（finish 时的语义门禁）裁决，模型提交 repair 时不能
-    # 自我宣布 resolved。旧实现在这里 pop，导致下一轮 repair_ids 为空、
-    # 主循环误入 FINISH 分支、模型 read/record 被 already_resolved 拦截
-    # 的三面夹击死锁（d5eef05a 第二形态）。
+    # 淇濈暀 repair_mode/semantic_missing锛歛ppend-only 淇鏄惁鐪熸閫氳繃
+    # 鍙兘鐢?audit锛坒inish 鏃剁殑璇箟闂ㄧ锛夎鍐筹紝妯″瀷鎻愪氦 repair 鏃朵笉鑳?
+    # 鑷垜瀹ｅ竷 resolved銆傛棫瀹炵幇鍦ㄨ繖閲?pop锛屽鑷翠笅涓€杞?repair_ids 涓虹┖銆?
+    # 涓诲惊鐜鍏?FINISH 鍒嗘敮銆佹ā鍨?read/record 琚?already_resolved 鎷︽埅
+    # 鐨勪笁闈㈠す鍑绘閿侊紙d5eef05a 绗簩褰㈡€侊級銆?
     return merged
 
 def _reject_empty_repair(arguments: dict, recorded: dict) -> None:

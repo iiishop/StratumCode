@@ -174,7 +174,7 @@ from .tools import (
     _tool_repair_error_json,
     _validate_tool_contract,
 )
-from .state import InvestigationState, UsageState
+from .state import InvestigationRuntime, InvestigationState, UsageState
 
 
 class InvestigationPhase(StrEnum):
@@ -406,40 +406,27 @@ def _investigation_directive(
 
 def _prepare_round(
     state: InvestigationState,
+    runtime: InvestigationRuntime,
     *,
-    analysis: dict,
-    effort_profile: dict,
-    quality_gate: str,
-    semantic_gate_enabled: bool,
-    subagent_enabled: bool,
-    rounds_per_unknown: int,
-    min_rounds: int,
-    max_rounds: int,
-    run_id: str,
-    workspace_dir: str,
-    tools: list[dict],
     current_round_index: int,
     previous_rounds_usage: dict,
-    context: list[str],
-    model: str,
 ) -> tuple[str | None, InvestigationPhase, list[dict], set[str], list[str], dict | None, dict | None, set[str]]:
-    del effort_profile, quality_gate, subagent_enabled, rounds_per_unknown
-    del max_rounds, run_id, workspace_dir, previous_rounds_usage, context, model
+    del previous_rounds_usage
 
-    current_tools = tools
+    current_tools = runtime.tools
     state.control.current_tool_choice = "required"
     clearify_unknown = _pending_clearify_unknown(
         state.findings.recorded,
-        analysis,
+        runtime.analysis,
         state.verification.clearify_questions,
     )
     verification_request = state.verification.queue[0] if state.verification.queue else None
     semantic_repair_required_ids = (
         _semantic_repair_resolution_ids(state.findings.recorded)
-        if semantic_gate_enabled
+        if runtime.semantic_gate_enabled
         else set()
     )
-    resolution_required_ids = _unknowns_needing_resolution(state.findings.recorded, state.observations.items, analysis)
+    resolution_required_ids = _unknowns_needing_resolution(state.findings.recorded, state.observations.items, runtime.analysis)
     resolution_required_ids = _dedupe_strings([
         *resolution_required_ids,
         *sorted(semantic_repair_required_ids),
@@ -447,7 +434,7 @@ def _prepare_round(
             _pending_observation_unknown_ids(
                 state.observations.items,
                 state.observations.pending_ids,
-                analysis,
+                runtime.analysis,
                 state.findings.recorded,
             )
             if len(state.observations.pending_ids) >= MAX_PENDING_DISCOVERY_OBSERVATIONS
@@ -459,12 +446,12 @@ def _prepare_round(
         discovery_required_ids = _unknowns_missing_project_evidence(
             state.findings.recorded,
             state.observations.items,
-            analysis,
+            runtime.analysis,
         )
     current_phase, current_tools, state.control.current_tool_choice, directive_prompt = _investigation_directive(
         recorded_findings=state.findings.recorded,
-        analysis=analysis,
-        tools=tools,
+        analysis=runtime.analysis,
+        tools=runtime.tools,
         observations=state.observations.items,
         semantic_repair_required_ids=semantic_repair_required_ids,
         resolution_required_ids=resolution_required_ids,
@@ -473,10 +460,10 @@ def _prepare_round(
         verification_request=verification_request,
         finish_evidence_blocked=state.control.finish_evidence_blocked,
         force_synthesis_reason=state.control.force_synthesis_reason,
-        semantic_gate_enabled=semantic_gate_enabled,
+        semantic_gate_enabled=runtime.semantic_gate_enabled,
         read_only_no_unknowns=(
-            analysis.get("execution_mode") == "read_only"
-            and not analysis.get("unknowns")
+            runtime.analysis.get("execution_mode") == "read_only"
+            and not runtime.analysis.get("unknowns")
         ),
     )
     # 方案 A：最少调查轮数未达到时，禁止提前结束（fast 也要跑
@@ -488,7 +475,7 @@ def _prepare_round(
     # "finish 被 blocked（不在 allowed）+ resolve 被 blocked（already_resolved）"
     # 的死循环（实测 6 轮空转）。
     budget_floor_active = (
-        current_round_index < min_rounds
+        current_round_index < runtime.min_rounds
         and current_phase in (
             InvestigationPhase.FINISH,
             InvestigationPhase.READ_ONLY_FINISH,
@@ -496,7 +483,7 @@ def _prepare_round(
         )
         and not _recorded_resolves_initial_unknowns(
             state.findings.recorded,
-            analysis,
+            runtime.analysis,
             repair_ids=semantic_repair_required_ids,
         )
     )
@@ -504,12 +491,13 @@ def _prepare_round(
         state.messages.append({"role": "user", "content": directive_prompt})
     if budget_floor_active:
         current_phase = InvestigationPhase.DISCOVERY_REQUIRED
-        current_tools = _phase_tools(current_phase, tools=tools)
+        current_tools = _phase_tools(current_phase, tools=runtime.tools)
         state.control.current_tool_choice = "required"
         state.messages.append({
             "role": "user",
-            "content": _minimum_rounds_prompt(min_rounds - current_round_index),
+            "content": _minimum_rounds_prompt(runtime.min_rounds - current_round_index),
         })
+    state.control.current_tools = current_tools
     allowed_tool_names = {
         str(((tool.get("function") or {}).get("name")) or "")
         for tool in current_tools
@@ -530,30 +518,21 @@ def _prepare_round(
 def _collect_tool_calls(
     state: InvestigationState,
     directive: str | None,
+    runtime: InvestigationRuntime,
     *,
-    provider: dict,
-    model: str,
-    pricing_rules: dict | None,
-    run_id: str,
     round_index: int,
-    tools: list[dict],
-    analysis: dict,
-    context: list[str],
-    workspace_dir: str,
-    max_rounds: int,
-    semantic_gate_enabled: bool,
-    subagent_enabled: bool,
-    preserve_grounding_evidence: bool,
-    previous_observations: list[dict] | None,
-    previous_knowledge: list[dict] | None,
 ) -> Iterator[list[dict] | None]:
-    del directive, analysis, context, workspace_dir, max_rounds
-    del semantic_gate_enabled, subagent_enabled, preserve_grounding_evidence
-    del previous_observations, previous_knowledge
+    del directive
 
-    thinking_id = f"{run_id}-thinking-{round_index}"
+    thinking_id = f"{runtime.run_id}-thinking-{round_index}"
     try:
-        assistant = _call_model(provider, model, state.messages, tools=tools, tool_choice=state.control.current_tool_choice)
+        assistant = _call_model(
+            runtime.provider,
+            runtime.model,
+            state.messages,
+            tools=state.control.current_tools,
+            tool_choice=state.control.current_tool_choice,
+        )
     except ValueError as exc:
         reason = str(exc)
         yield {"op": "update", "id": thinking_id, "patch": {
@@ -561,15 +540,15 @@ def _collect_tool_calls(
             "done": True,
             "open": False,
         }}
-        yield start_event(f"{run_id}-provider-error", "output", {
+        yield start_event(f"{runtime.run_id}-provider-error", "output", {
             "content": f"Provider request failed: {reason}",
             "streaming": False,
         })
-        yield {"op": "update", "id": f"{run_id}-stage", "patch": {"state": "failed", "phase": "provider_error"}}
+        yield {"op": "update", "id": f"{runtime.run_id}-stage", "patch": {"state": "failed", "phase": "provider_error"}}
         return None
-    if usage := _usage_delta(pricing_rules, assistant.pop("_usage", {})):
+    if usage := _usage_delta(runtime.pricing_rules, assistant.pop("_usage", {})):
         _add_usage(state.usage.total, usage)
-        yield start_event(f"{run_id}-usage-{round_index}", "usage", {
+        yield start_event(f"{runtime.run_id}-usage-{round_index}", "usage", {
             "delta": usage,
             "total": state.usage.total,
         })
@@ -676,21 +655,14 @@ def _handle_record(
     call_id: str,
     name: str,
     arguments: dict,
+    runtime: InvestigationRuntime,
     *,
-    analysis: dict,
-    provider: dict,
-    model: str,
-    pricing_rules: dict | None,
-    run_id: str,
-    workspace_dir: str,
-    semantic_gate_enabled: bool,
-    subagent_enabled: bool,
     resolution_required_ids: list[str],
     semantic_repair_required_ids: set[str],
     verification_request: dict | None,
     clearify_unknown: dict | None,
 ) -> Iterator[DispatchAction]:
-    del workspace_dir, semantic_gate_enabled, subagent_enabled, verification_request, clearify_unknown
+    del verification_request, clearify_unknown
 
     _require_control_reason(arguments, name)
     if semantic_repair_required_ids and isinstance(arguments.get("resolutions"), list) and arguments["resolutions"]:
@@ -718,19 +690,15 @@ def _handle_record(
     if (
         not _has_finding_fields(arguments)
         or (
-            analysis.get("_canonicalized")
+            runtime.analysis.get("_canonicalized")
             and state.observations.pending_ids
             and not _record_consumes_observations(arguments, state.observations.pending_ids)
         )
     ):
         arguments = yield from _record_findings_by_slots(
             state,
-            provider=provider,
-            model=model,
-            pricing_rules=pricing_rules,
-            run_id=run_id,
+            runtime,
             reason=str(arguments.get("reason") or "").strip(),
-            analysis=analysis,
             required_resolution_ids=resolution_required_ids,
         )
     if _empty_discovery_recording(
@@ -782,7 +750,7 @@ def _handle_record(
         state.control.force_discovery_ids = _unknowns_missing_project_evidence(
             state.findings.recorded,
             state.observations.items,
-            analysis,
+            runtime.analysis,
         )
     if state.progress.repeated_record_no_progress >= MAX_REPEATED_RECORD_NO_PROGRESS:
         state.control.finalization_reason = (
@@ -804,12 +772,12 @@ def _handle_record(
     ))
     if task_updates:
         yield start_event(f"{call_id}-task-update", "task_update", {
-            "analysis_id": analysis.get("id", ""),
+            "analysis_id": runtime.analysis.get("id", ""),
             "items": task_updates,
         })
     state.messages.append(_tool_message(call_id, output))
     if state.control.stop_investigation:
-        yield start_event(f"{run_id}-safety-record-no-progress", "safety_stop", {
+        yield start_event(f"{runtime.run_id}-safety-record-no-progress", "safety_stop", {
             "reason": "record_no_progress",
             "message": state.control.finalization_reason,
             "tool": name,
@@ -820,72 +788,50 @@ def _handle_record(
 
 def _handle_finish(
     state: InvestigationState, call_id: str, name: str, arguments: dict,
-    *,
-    analysis: dict, observations: list[dict], workspace_dir: str,
-    semantic_gate_enabled: bool, subagent_enabled: bool,
-    provider: dict, model: str, pricing_rules: dict | None, run_id: str,
+    runtime: InvestigationRuntime,
 ) -> Iterator[DispatchAction]:
     _require_control_reason(arguments, name)
     state.findings.recorded = _apply_direct_resolution_gate(
         state.findings.recorded,
-        observations,
-        strict_grounding=semantic_gate_enabled and _analysis_requests_implementation(analysis),
+        state.observations.items,
+        strict_grounding=runtime.semantic_gate_enabled and _analysis_requests_implementation(runtime.analysis),
     )
     decision = yield from _decide_finish_transition(
         state,
-        analysis=analysis,
-        observations=observations,
-        semantic_gate_enabled=semantic_gate_enabled,
-        subagent_enabled=subagent_enabled,
-        provider=provider,
-        model=model,
-        pricing_rules=pricing_rules,
-        run_id=run_id,
+        runtime,
     )
     if decision is FinishDecision.ACCEPT:
-        return _accept_finish(state, call_id, arguments, analysis=analysis, observations=observations, workspace_dir=workspace_dir)
-    return _enter_finish_block(state, call_id, decision, analysis=analysis, observations=observations)
+        return _accept_finish(state, call_id, arguments, runtime)
+    return _enter_finish_block(state, call_id, decision, runtime)
 
 
 def _decide_finish_transition(
     state: InvestigationState,
-    *,
-    analysis: dict,
-    observations: list[dict],
-    semantic_gate_enabled: bool,
-    subagent_enabled: bool,
-    provider: dict,
-    model: str,
-    pricing_rules: dict | None,
-    run_id: str,
+    runtime: InvestigationRuntime,
 ) -> Iterator[FinishDecision]:
-    if semantic_gate_enabled:
+    if runtime.semantic_gate_enabled:
         _semantic_repair_resolution_ids(state.findings.recorded)
     if (
-        semantic_gate_enabled
+        runtime.semantic_gate_enabled
         and
-        analysis.get("_canonicalized")
+        runtime.analysis.get("_canonicalized")
         and not _audit_covers_resolutions(
             state.findings.last_quality_audit,
             state.findings.recorded,
-            analysis,
+            runtime.analysis,
         )
     ):
         state.findings.last_quality_audit = yield from _audit_recorded_findings(
             state,
-            provider=provider,
-            model=model,
-            pricing_rules=pricing_rules,
-            run_id=run_id,
-            analysis=analysis,
+            runtime,
         )
         state.findings.recorded, requests, questions = _apply_investigation_audit(
             state.findings.recorded,
             state.findings.last_quality_audit,
-            observations=observations,
-            strict_grounding=_analysis_requests_implementation(analysis),
-            allow_verification=subagent_enabled and _analysis_requests_implementation(analysis),
-            analysis=analysis,
+            observations=state.observations.items,
+            strict_grounding=_analysis_requests_implementation(runtime.analysis),
+            allow_verification=runtime.subagent_enabled and _analysis_requests_implementation(runtime.analysis),
+            analysis=runtime.analysis,
         )
         _semantic_repair_resolution_ids(
             state.findings.recorded,
@@ -897,18 +843,18 @@ def _decide_finish_transition(
         state.verification.queue.extend(
             item for item in requests
             if (item.get("unknown_id"), item.get("hypothesis")) not in attempted
-            and _unknown_blocks_finish(item.get("unknown_id"), analysis, state.findings.recorded)
+            and _unknown_blocks_finish(item.get("unknown_id"), runtime.analysis, state.findings.recorded)
         )
         state.verification.clearify_questions.update({
             unknown_id: question
             for unknown_id, question in questions.items()
-            if _unknown_blocks_finish(unknown_id, analysis, state.findings.recorded)
+            if _unknown_blocks_finish(unknown_id, runtime.analysis, state.findings.recorded)
         })
     pending_resolution_statuses = {
         str(item.get("status") or "")
         for item in state.findings.recorded.get("resolutions", [])
         if isinstance(item, dict)
-        and _unknown_blocks_finish(item.get("unknown_id"), analysis, state.findings.recorded)
+        and _unknown_blocks_finish(item.get("unknown_id"), runtime.analysis, state.findings.recorded)
     }
     if "needs_clearify" in pending_resolution_statuses or state.verification.clearify_questions:
         return FinishDecision.CLEARIFY
@@ -927,21 +873,18 @@ def _accept_finish(
     state: InvestigationState,
     call_id: str,
     arguments: dict,
-    *,
-    analysis: dict,
-    observations: list[dict],
-    workspace_dir: str,
+    runtime: InvestigationRuntime,
 ) -> DispatchAction:
     state.control.final = _finish_payload(
         _finish_arguments(
             state.findings.recorded,
             arguments,
-            prefer_finish_summary=not _analysis_requests_implementation(analysis),
+            prefer_finish_summary=not _analysis_requests_implementation(runtime.analysis),
         ),
-        analysis=analysis,
-        observations=observations,
+        analysis=runtime.analysis,
+        observations=state.observations.items,
         repair_conflicts=True,
-        workspace_dir=workspace_dir,
+        workspace_dir=runtime.workspace_dir,
     )
     state.messages.append({
         "role": "tool",
@@ -963,11 +906,9 @@ def _enter_finish_block(
     state: InvestigationState,
     call_id: str,
     decision: FinishDecision,
-    *,
-    analysis: dict,
-    observations: list[dict],
+    runtime: InvestigationRuntime,
 ) -> DispatchAction:
-    del analysis, observations
+    del runtime
 
     next_action = {
         FinishDecision.CLEARIFY: "clearify",
@@ -1001,9 +942,8 @@ def _handle_clearify(
     call_id: str,
     name: str,
     arguments: dict,
+    runtime: InvestigationRuntime,
     *,
-    analysis: dict,
-    clearify_runtime,
     clearify_unknown: dict | None,
     resolution_required_ids: list[str],
     semantic_repair_required_ids: set[str],
@@ -1039,7 +979,7 @@ def _handle_clearify(
         reason=str(arguments.get("reason") or "").strip(),
         orientation=bool(arguments.get("orientation", False)),
         analysis=_analysis_with_recorded_unknowns(
-            analysis,
+            runtime.analysis,
             state.findings.recorded,
         ),
     )
@@ -1075,13 +1015,13 @@ def _handle_clearify(
         })
         _bump_hardlock(state)
         return DispatchAction.CONTINUE_TOOLS
-    question_id = clearify_runtime.create_pending()
+    question_id = runtime.clearify_runtime.create_pending()
     yield start_event(question_id, "user_question", _clearify_question(
         arguments,
         question_id=question_id,
-        analysis=analysis,
+        analysis=runtime.analysis,
     ))
-    answer = clearify_runtime.wait(question_id)
+    answer = runtime.clearify_runtime.wait(question_id)
     output = _clearify_tool_result(answer)
     resolution_records = _clearify_resolution_records(arguments, answer)
     state.progress.repeated_tool_error_name = ""
@@ -1104,10 +1044,10 @@ def _handle_clearify(
     ))
     if resolution_records:
         yield start_event(f"{call_id}-task-update", "task_update", {
-            "analysis_id": analysis.get("id", ""),
+            "analysis_id": runtime.analysis.get("id", ""),
             "items": _investigation_task_updates(
                 None,
-                _initial_unknowns(_analysis_with_recorded_unknowns(analysis, state.findings.recorded)),
+                _initial_unknowns(_analysis_with_recorded_unknowns(runtime.analysis, state.findings.recorded)),
                 resolution_records,
             ),
         })
@@ -1120,18 +1060,14 @@ def _handle_discovery(
     call_id: str,
     name: str,
     arguments: dict,
+    runtime: InvestigationRuntime,
     *,
-    analysis: dict,
-    workspace_dir: str,
     semantic_repair_required_ids: set[str],
     verification_request: dict | None,
     resolution_required_ids: list[str],
     round_index: int,
-    run_id: str,
-    pricing_rules: dict | None,
-    semantic_gate_enabled: bool,
 ) -> Iterator[DispatchAction]:
-    del semantic_repair_required_ids, resolution_required_ids, round_index, pricing_rules
+    del semantic_repair_required_ids, resolution_required_ids, round_index
 
     cache_key = _tool_cache_key(name, arguments)
     if name == "read":
@@ -1188,7 +1124,7 @@ def _handle_discovery(
                 f"{name or 'invalid'}."
             )
             state.control.stop_investigation = True
-            yield start_event(f"{run_id}-safety-duplicate-no-progress", "safety_stop", {
+            yield start_event(f"{runtime.run_id}-safety-duplicate-no-progress", "safety_stop", {
                 "reason": "duplicate_no_progress",
                 "message": state.control.finalization_reason,
                 "tool": name or "invalid",
@@ -1200,13 +1136,13 @@ def _handle_discovery(
         name,
         call_id,
         arguments,
-        workspace_dir,
+        runtime.workspace_dir,
         _analysis_with_recorded_unknowns(
-            analysis,
+            runtime.analysis,
             state.findings.recorded,
         ),
         relax_discovery_contract=(
-            semantic_gate_enabled
+            runtime.semantic_gate_enabled
             and _get_investigation_phase(state) == InvestigationPhase.REPAIR
             and name in _REPAIR_ALLOWED_TOOL_NAMES - {"record_investigation_findings"}
         ),
@@ -1444,15 +1380,8 @@ def _discover_lsp_first_prompt(analysis: dict) -> str | None:
 def _dispatch_tool_calls(
     state: InvestigationState,
     tool_calls: list[dict],
+    runtime: InvestigationRuntime,
     *,
-    analysis: dict,
-    provider: dict,
-    model: str,
-    pricing_rules: dict | None,
-    run_id: str,
-    workspace_dir: str,
-    semantic_gate_enabled: bool,
-    subagent_enabled: bool,
     resolution_required_ids: list[str],
     semantic_repair_required_ids: set[str],
     verification_request: dict | None,
@@ -1549,7 +1478,7 @@ def _dispatch_tool_calls(
             if name not in allowed_tool_names:
                 if _recorded_resolves_initial_unknowns(
                     state.findings.recorded,
-                    analysis,
+                    runtime.analysis,
                     repair_ids=semantic_repair_required_ids,
                 ) and name != "finish_investigation":
                     output = json.dumps({
@@ -1633,7 +1562,7 @@ def _dispatch_tool_calls(
                     call_id,
                     name,
                     arguments,
-                    analysis=analysis,
+                    runtime,
                     resolution_required_ids=resolution_required_ids,
                     semantic_repair_required_ids=semantic_repair_required_ids,
                 )
@@ -1644,14 +1573,7 @@ def _dispatch_tool_calls(
                     call_id,
                     name,
                     arguments,
-                    analysis=analysis,
-                    provider=provider,
-                    model=model,
-                    pricing_rules=pricing_rules,
-                    run_id=run_id,
-                    workspace_dir=workspace_dir,
-                    semantic_gate_enabled=semantic_gate_enabled,
-                    subagent_enabled=subagent_enabled,
+                    runtime,
                     resolution_required_ids=resolution_required_ids,
                     semantic_repair_required_ids=semantic_repair_required_ids,
                     verification_request=verification_request,
@@ -1666,15 +1588,7 @@ def _dispatch_tool_calls(
                     call_id,
                     name,
                     arguments,
-                    analysis=analysis,
-                    observations=state.observations.items,
-                    workspace_dir=workspace_dir,
-                    semantic_gate_enabled=semantic_gate_enabled,
-                    subagent_enabled=subagent_enabled,
-                    provider=provider,
-                    model=model,
-                    pricing_rules=pricing_rules,
-                    run_id=run_id,
+                    runtime,
                 )
                 if action == DispatchAction.BREAK_TOOLS:
                     break
@@ -1685,8 +1599,7 @@ def _dispatch_tool_calls(
                     call_id,
                     name,
                     arguments,
-                    analysis=analysis,
-                    clearify_runtime=clearify_runtime,
+                    runtime,
                     clearify_unknown=clearify_unknown,
                     resolution_required_ids=resolution_required_ids,
                     semantic_repair_required_ids=semantic_repair_required_ids,
@@ -1698,15 +1611,11 @@ def _dispatch_tool_calls(
                 call_id,
                 name,
                 arguments,
-                analysis=analysis,
-                workspace_dir=workspace_dir,
+                runtime,
                 semantic_repair_required_ids=semantic_repair_required_ids,
                 verification_request=verification_request,
                 resolution_required_ids=resolution_required_ids,
                 round_index=round_index,
-                run_id=run_id,
-                pricing_rules=pricing_rules,
-                semantic_gate_enabled=semantic_gate_enabled,
             )
             if action == DispatchAction.BREAK_TOOLS:
                 break
@@ -1784,7 +1693,7 @@ def _dispatch_tool_calls(
                 if name == "record_investigation_findings":
                     state.control.final = _runtime_recovered_investigation(
                         state.control.finalization_reason,
-                        analysis,
+                        runtime.analysis,
                         state.observations.items,
                         state.findings.recorded,
                     )
@@ -1795,7 +1704,7 @@ def _dispatch_tool_calls(
             "content": output,
         })
         if state.control.stop_investigation:
-            yield start_event(f"{run_id}-safety-repeated-tool-error", "safety_stop", {
+            yield start_event(f"{runtime.run_id}-safety-repeated-tool-error", "safety_stop", {
                 "reason": "repeated_tool_error",
                 "message": state.control.finalization_reason,
                 "tool": name or "invalid",
@@ -1812,9 +1721,9 @@ def _dispatch_tool_calls(
 def _should_terminate_investigation(
     state: InvestigationState,
     round_index: int,
-    max_rounds: int,
+    runtime: InvestigationRuntime,
 ) -> bool:
-    del round_index, max_rounds
+    del round_index, runtime
 
     return state.control.final is not None or state.control.stop_investigation
 
@@ -1830,6 +1739,7 @@ def _initialize_investigation_stream(
     previous_observations: list[dict] | None,
     previous_knowledge: list[dict] | None,
     previous_findings: dict | None,
+    preserve_grounding_evidence: bool,
 ) -> Iterator[dict]:
     setting = (
         model_settings.resolve(model_settings.DEFAULT_STAGE)
@@ -1896,6 +1806,28 @@ def _initialize_investigation_stream(
     if prior_lines:
         messages.insert(2, {"role": "user", "content": "\n".join(prior_lines)})
     tools = _investigation_tools()
+    runtime = InvestigationRuntime(
+        provider=provider,
+        model=model,
+        pricing_rules=pricing_rules,
+        run_id=run_id,
+        stage_id=stage_id,
+        tools=tools,
+        analysis=analysis,
+        context=context,
+        workspace_dir=workspace_dir,
+        max_rounds=max_rounds,
+        min_rounds=min_rounds,
+        effort_profile=effort_profile,
+        quality_gate=quality_gate,
+        rounds_per_unknown=rounds_per_unknown,
+        semantic_gate_enabled=semantic_gate_enabled,
+        subagent_enabled=subagent_enabled,
+        preserve_grounding_evidence=preserve_grounding_evidence,
+        previous_observations=previous_observations,
+        previous_knowledge=previous_knowledge,
+        clearify_runtime=clearify_runtime,
+    )
     state = InvestigationState(messages=messages, usage=UsageState(total=usage_total))
     state.observations.items.extend([
         dict(item)
@@ -1921,39 +1853,27 @@ def _initialize_investigation_stream(
         "run_id": run_id,
         "stage_id": stage_id,
         "tools": tools,
+        "runtime": runtime,
         "state": state,
     }
 
 
 def _finish_investigation_stream(
     state: InvestigationState,
-    *,
-    provider: dict,
-    model: str,
-    pricing_rules: dict | None,
-    run_id: str,
-    stage_id: str,
-    analysis: dict,
-    workspace_dir: str,
-    preserve_grounding_evidence: bool,
+    runtime: InvestigationRuntime,
 ) -> Iterator[dict]:
     if state.control.final is None and state.control.stop_investigation:
         state.control.final = _runtime_recovered_investigation(
             state.control.finalization_reason,
-            analysis,
+            runtime.analysis,
             state.observations.items,
             state.findings.recorded,
         )
     elif state.control.final is None:
         state.control.final = yield from _finalize_investigation(
             state,
-            provider=provider,
-            model=model,
-            pricing_rules=pricing_rules,
-            run_id=run_id,
-            analysis=analysis,
+            runtime,
             reason=state.control.finalization_reason,
-            workspace_dir=workspace_dir,
         )
     if state.findings.last_quality_audit:
         state.control.final["quality_audit"] = state.findings.last_quality_audit
@@ -1962,23 +1882,23 @@ def _finish_investigation_stream(
             item for item in state.control.final.get("observations", [])
             if isinstance(item, dict)
         ],
-        preserve_grounding_evidence=preserve_grounding_evidence,
+        preserve_grounding_evidence=runtime.preserve_grounding_evidence,
     )
 
-    implementation_intent = _analysis_requests_implementation(analysis)
-    yield {"op": "update", "id": stage_id, "patch": {
+    implementation_intent = _analysis_requests_implementation(runtime.analysis)
+    yield {"op": "update", "id": runtime.stage_id, "patch": {
         "state": "done",
         "phase": "patch_planning_ready" if state.control.final.get("ready_for_patch_planning") and implementation_intent else "done",
     }}
     step = _step_result(state.control.final, implementation_intent=implementation_intent)
     state.control.final["step_result"] = step
-    yield start_event(f"{run_id}-step-result", "step_result", step)
+    yield start_event(f"{runtime.run_id}-step-result", "step_result", step)
     if state.control.final.get("task_updates"):
-        yield start_event(f"{run_id}-task-update", "task_update", {
-            "analysis_id": analysis.get("id", ""),
+        yield start_event(f"{runtime.run_id}-task-update", "task_update", {
+            "analysis_id": runtime.analysis.get("id", ""),
             "items": state.control.final["task_updates"],
         })
-    yield start_event(f"{run_id}-output", "output", {
+    yield start_event(f"{runtime.run_id}-output", "output", {
         "content": _summary(state.control.final),
         "streaming": False,
         "visibility": "diagnostic" if state.control.final.get("runtime_recovered") else "default",
@@ -1988,19 +1908,11 @@ def _finish_investigation_stream(
 
 def _run_investigation_round(
     state: InvestigationState,
-    runtime: dict,
+    runtime: InvestigationRuntime,
     *,
     round_index: int,
-    analysis: dict,
-    context: list[str],
-    workspace_dir: str,
-    preserve_grounding_evidence: bool,
-    previous_observations: list[dict] | None,
-    previous_knowledge: list[dict] | None,
 ) -> Iterator[DispatchAction | None]:
-    run_id = runtime["run_id"]
-    max_rounds = runtime["max_rounds"]
-    thinking_id = f"{run_id}-thinking-{round_index}"
+    thinking_id = f"{runtime.run_id}-thinking-{round_index}"
     yield start_event(thinking_id, "thinking", {"text": "", "done": False, "open": True})
     (
         directive_prompt,
@@ -2013,40 +1925,15 @@ def _run_investigation_round(
         semantic_repair_required_ids,
     ) = _prepare_round(
         state,
-        analysis=analysis,
-        effort_profile=runtime["effort_profile"],
-        quality_gate=runtime["quality_gate"],
-        semantic_gate_enabled=runtime["semantic_gate_enabled"],
-        subagent_enabled=runtime["subagent_enabled"],
-        rounds_per_unknown=runtime["rounds_per_unknown"],
-        min_rounds=runtime["min_rounds"],
-        max_rounds=max_rounds,
-        run_id=run_id,
-        workspace_dir=workspace_dir,
-        tools=runtime["tools"],
+        runtime,
         current_round_index=round_index,
         previous_rounds_usage=state.usage.total,
-        context=context,
-        model=runtime["model"],
     )
     tool_calls = yield from _collect_tool_calls(
         state,
         directive_prompt,
-        provider=runtime["provider"],
-        model=runtime["model"],
-        pricing_rules=runtime["pricing_rules"],
-        run_id=run_id,
+        runtime,
         round_index=round_index,
-        tools=current_tools,
-        analysis=analysis,
-        context=context,
-        workspace_dir=workspace_dir,
-        max_rounds=max_rounds,
-        semantic_gate_enabled=runtime["semantic_gate_enabled"],
-        subagent_enabled=runtime["subagent_enabled"],
-        preserve_grounding_evidence=preserve_grounding_evidence,
-        previous_observations=previous_observations,
-        previous_knowledge=previous_knowledge,
     )
     if tool_calls is None:
         return None
@@ -2055,14 +1942,7 @@ def _run_investigation_round(
     return (yield from _dispatch_tool_calls(
         state,
         tool_calls,
-        analysis=analysis,
-        provider=runtime["provider"],
-        model=runtime["model"],
-        pricing_rules=runtime["pricing_rules"],
-        run_id=run_id,
-        workspace_dir=workspace_dir,
-        semantic_gate_enabled=runtime["semantic_gate_enabled"],
-        subagent_enabled=runtime["subagent_enabled"],
+        runtime,
         resolution_required_ids=resolution_required_ids,
         semantic_repair_required_ids=semantic_repair_required_ids,
         verification_request=verification_request,
@@ -2085,7 +1965,7 @@ def investigation_stream(
     previous_findings: dict | None = None,
     preserve_grounding_evidence: bool = False,
 ) -> Iterator[dict]:
-    runtime = yield from _initialize_investigation_stream(
+    initialized = yield from _initialize_investigation_stream(
         message=message,
         analysis=analysis,
         context=context,
@@ -2095,39 +1975,27 @@ def investigation_stream(
         previous_observations=previous_observations,
         previous_knowledge=previous_knowledge,
         previous_findings=previous_findings,
+        preserve_grounding_evidence=preserve_grounding_evidence,
     )
-    state = runtime["state"]
-    max_rounds = runtime["max_rounds"]
+    state = initialized["state"]
+    runtime = initialized["runtime"]
 
-    for round_index in _round_indexes(max_rounds, start=0):
+    for round_index in _round_indexes(runtime.max_rounds, start=0):
         outcome = yield from _run_investigation_round(
             state,
             runtime,
             round_index=round_index,
-            analysis=analysis,
-            context=context,
-            workspace_dir=workspace_dir,
-            preserve_grounding_evidence=preserve_grounding_evidence,
-            previous_observations=previous_observations,
-            previous_knowledge=previous_knowledge,
         )
         if outcome is None:
             return
-        if outcome == DispatchAction.TERMINATE or _should_terminate_investigation(state, round_index, max_rounds):
+        if outcome == DispatchAction.TERMINATE or _should_terminate_investigation(state, round_index, runtime):
             break
     else:
         state.control.finalization_reason = "Investigation step limit reached. Summarizing observed facts."
 
     yield from _finish_investigation_stream(
         state,
-        provider=runtime["provider"],
-        model=runtime["model"],
-        pricing_rules=runtime["pricing_rules"],
-        run_id=runtime["run_id"],
-        stage_id=runtime["stage_id"],
-        analysis=analysis,
-        workspace_dir=workspace_dir,
-        preserve_grounding_evidence=preserve_grounding_evidence,
+        runtime,
     )
 
 def _investigation_tools() -> list[dict]:
@@ -2681,14 +2549,9 @@ def _empty_discovery_recording(
 
 def _audit_recorded_findings(
     state: InvestigationState,
-    *,
-    provider: dict,
-    model: str,
-    pricing_rules: list[dict],
-    run_id: str,
-    analysis: dict,
+    runtime: InvestigationRuntime,
 ) -> Iterator[dict]:
-    initial_unknowns = _initial_unknowns(analysis)
+    initial_unknowns = _initial_unknowns(runtime.analysis)
     target_resolutions = [
         item
         for item in state.findings.recorded.get("resolutions", [])
@@ -2721,13 +2584,13 @@ def _audit_recorded_findings(
         )
     }
     contract = {
-        "statements": analysis.get("statements", []),
-        "acceptance_criteria": analysis.get("acceptance_criteria", []),
-        "constraints": analysis.get("constraint_statements", []),
-        "scope": analysis.get("scope_statements", {}),
-        "reference_baselines": analysis.get("reference_baselines", []),
-        "unknowns": analysis.get("unknowns", []),
-        "execution_mode": analysis.get("execution_mode", ""),
+        "statements": runtime.analysis.get("statements", []),
+        "acceptance_criteria": runtime.analysis.get("acceptance_criteria", []),
+        "constraints": runtime.analysis.get("constraint_statements", []),
+        "scope": runtime.analysis.get("scope_statements", {}),
+        "reference_baselines": runtime.analysis.get("reference_baselines", []),
+        "unknowns": runtime.analysis.get("unknowns", []),
+        "execution_mode": runtime.analysis.get("execution_mode", ""),
     }
     all_beliefs = [
         item for item in state.findings.recorded.get("beliefs", [])
@@ -2787,7 +2650,7 @@ def _audit_recorded_findings(
         if cache_key in state.caches.audit:
             cached_verdicts = state.caches.audit[cache_key].get("verdicts", [])
             verdicts.extend(cached_verdicts)
-            yield from _quality_gate_events(run_id, unknown_id, cached_verdicts, 0)
+            yield from _quality_gate_events(runtime.run_id, unknown_id, cached_verdicts, 0)
             continue
         audit_messages = [{"role": "system", "content": prompt.build_investigation_auditor(
             app_settings.get_output_language()
@@ -2796,14 +2659,14 @@ def _audit_recorded_findings(
         for attempt in range(REQUIRED_AUDIT_ATTEMPTS):
 
             def ask(_path: str, slot_prompt: str) -> JSONValue:
-                assistant = _call_model(provider, model, [
+                assistant = _call_model(runtime.provider, runtime.model, [
                     *audit_messages,
                     {"role": "user", "content": f"{slot_prompt}\ncontext: {context}"},
                 ], tools=[])
-                if usage := _usage_delta(pricing_rules, assistant.pop("_usage", {})):
+                if usage := _usage_delta(runtime.pricing_rules, assistant.pop("_usage", {})):
                     _add_usage(state.usage.total, usage)
                     usage_events.append(start_event(
-                        f"{run_id}-usage-investigation-audit-{len(usage_events)}",
+                        f"{runtime.run_id}-usage-investigation-audit-{len(usage_events)}",
                         "usage",
                         {"delta": usage, "total": state.usage.total},
                     ))
@@ -2846,7 +2709,7 @@ def _audit_recorded_findings(
                 )
         state.caches.audit[cache_key] = audit
         verdicts.extend(audit["verdicts"])
-        yield from _quality_gate_events(run_id, unknown_id, audit["verdicts"], attempt)
+        yield from _quality_gate_events(runtime.run_id, unknown_id, audit["verdicts"], attempt)
     for event in usage_events:
         yield event
     return {"verdicts": verdicts}
@@ -2918,14 +2781,9 @@ def _normalize_investigation_audit(value, resolved_ids: list[str]) -> dict:
 
 def _finalize_investigation(
     state: InvestigationState,
+    runtime: InvestigationRuntime,
     *,
-    provider: dict,
-    model: str,
-    pricing_rules: list[dict],
-    run_id: str,
-    analysis: dict | None = None,
     reason: str = "Investigation needs a final structured summary.",
-    workspace_dir: str = "",
 ) -> Iterator[dict]:
     state.messages.append({"role": "user", "content": prompt.build_investigation_finalize(reason)})
     last_error = ""
@@ -2943,22 +2801,22 @@ def _finalize_investigation(
     best_progress = _finalization_progress_score(state.findings.recorded, state.observations.items)
     no_progress_attempts = 0
     for attempt in _round_indexes(attempts, start=0):
-        thinking_id = f"{run_id}-thinking-final-{attempt}"
+        thinking_id = f"{runtime.run_id}-thinking-final-{attempt}"
         yield start_event(thinking_id, "thinking", {
             "text": reason,
             "done": False,
             "open": True,
         })
         assistant = _call_model(
-            provider,
-            model,
+            runtime.provider,
+            runtime.model,
             state.messages,
             tools=[_resolve_unknowns_tool_schema(), _record_findings_tool_schema(), _finish_tool_schema()],
             tool_choice="required",
         )
-        if usage := _usage_delta(pricing_rules, assistant.pop("_usage", {})):
+        if usage := _usage_delta(runtime.pricing_rules, assistant.pop("_usage", {})):
             _add_usage(state.usage.total, usage)
-            yield start_event(f"{run_id}-usage-final-{attempt}", "usage", {
+            yield start_event(f"{runtime.run_id}-usage-final-{attempt}", "usage", {
                 "delta": usage,
                 "total": state.usage.total,
             })
@@ -3009,7 +2867,7 @@ def _finalize_investigation(
                 required_resolution_ids = _unknowns_needing_resolution(
                     state.findings.recorded,
                     state.observations.items,
-                    analysis,
+                    runtime.analysis,
                 )
                 if (
                     record_name != "resolve_unknowns"
@@ -3025,12 +2883,9 @@ def _finalize_investigation(
                 if record_name != "resolve_unknowns" and not _has_finding_fields(record_arguments):
                     record_arguments = yield from _record_findings_by_slots(
                         state,
-                        provider=provider,
-                        model=model,
-                        pricing_rules=pricing_rules,
-                        run_id=run_id,
+                        runtime,
                         reason=str(record_arguments.get("reason") or "").strip(),
-                        analysis=analysis or {},
+                        analysis=runtime.analysis or {},
                         required_resolution_ids=required_resolution_ids,
                     )
                     if not _has_finding_fields(record_arguments):
@@ -3054,21 +2909,17 @@ def _finalize_investigation(
                     state.findings.recorded,
                     state.observations.items,
                 )
-                if (analysis or {}).get("_canonicalized"):
+                if (runtime.analysis or {}).get("_canonicalized"):
                     state.findings.last_quality_audit = yield from _audit_recorded_findings(
                         state,
-                        provider=provider,
-                        model=model,
-                        pricing_rules=pricing_rules,
-                        run_id=run_id,
-                        analysis=analysis or {},
+                        runtime,
                     )
                     quality_audit = state.findings.last_quality_audit
                     state.findings.recorded, _, _ = _apply_investigation_audit(
                         state.findings.recorded,
                         state.findings.last_quality_audit,
                         observations=state.observations.items,
-                        analysis=analysis or {},
+                        analysis=runtime.analysis or {},
                     )
                 state.messages.append({
                     "role": "tool",
@@ -3114,12 +2965,12 @@ def _finalize_investigation(
                     _finish_arguments(
                         state.findings.recorded,
                         last_arguments,
-                        prefer_finish_summary=not _analysis_requests_implementation(analysis),
+                        prefer_finish_summary=not _analysis_requests_implementation(runtime.analysis),
                     ),
-                    analysis=analysis,
+                    analysis=runtime.analysis,
                     observations=state.observations.items,
                     repair_conflicts=True,
-                    workspace_dir=workspace_dir,
+                    workspace_dir=runtime.workspace_dir,
                 )
             except Exception as exc:
                 last_error = f"finish_investigation arguments were invalid: {exc}"
@@ -3185,21 +3036,21 @@ def _finalize_investigation(
         if stop_finalization:
             return _runtime_recovered_investigation(
                 last_error or "Investigation finalization repeated the same invalid tool call.",
-                analysis,
+                runtime.analysis,
                 state.observations.items,
                 state.findings.recorded,
             )
         if repeated_finalization_error_count >= MAX_REPEATED_TOOL_ERRORS:
             return _runtime_recovered_investigation(
                 last_error or "Investigation finalization repeated the same invalid response.",
-                analysis,
+                runtime.analysis,
                 state.observations.items,
                 state.findings.recorded,
             )
         if no_progress_attempts >= MAX_REPEATED_TOOL_ERRORS:
             return _runtime_recovered_investigation(
                 last_error or "Investigation finalization made no contract progress.",
-                analysis,
+                runtime.analysis,
                 state.observations.items,
                 state.findings.recorded,
             )
@@ -3222,19 +3073,19 @@ def _finalize_investigation(
                 _finish_arguments(
                     state.findings.recorded,
                     last_arguments,
-                    prefer_finish_summary=not _analysis_requests_implementation(analysis),
+                    prefer_finish_summary=not _analysis_requests_implementation(runtime.analysis),
                 ),
-                analysis=analysis,
+                analysis=runtime.analysis,
                 observations=state.observations.items,
                 repair_conflicts=True,
-                workspace_dir=workspace_dir,
+                workspace_dir=runtime.workspace_dir,
             )
         except Exception:
             pass
 
     return _runtime_recovered_investigation(
         last_error or "finish_investigation did not produce a usable result.",
-        analysis,
+        runtime.analysis,
         state.observations.items,
         state.findings.recorded,
     )

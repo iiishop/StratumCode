@@ -48,6 +48,7 @@ class ControlState:
     stop_investigation: bool = False
     finalization_reason: str = ""
     current_tool_choice: object = None
+    current_tools: list[dict] = field(default_factory=list)
     finish_evidence_blocked: bool = False
     force_synthesis_reason: str = ""
     force_discovery_ids: list[str] = field(default_factory=list)
@@ -57,6 +58,32 @@ class ControlState:
 @dataclass
 class UsageState:
     total: dict = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class InvestigationRuntime:
+    """Immutable runtime environment for one investigation lifecycle."""
+
+    provider: dict
+    model: str
+    pricing_rules: dict | None
+    run_id: str
+    stage_id: str
+    tools: list[dict]
+    analysis: dict
+    context: list[str]
+    workspace_dir: str
+    max_rounds: int
+    min_rounds: int
+    effort_profile: dict
+    quality_gate: str
+    rounds_per_unknown: int
+    semantic_gate_enabled: bool
+    subagent_enabled: bool
+    preserve_grounding_evidence: bool
+    previous_observations: list[dict] | None
+    previous_knowledge: list[dict] | None
+    clearify_runtime: object
 
 
 @dataclass
