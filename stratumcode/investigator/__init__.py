@@ -39,7 +39,6 @@ from .constants import (
     DISCOVERY_CONTRACT_FIELDS,
     FINDING_FIELDS,
     GROUNDING_LITERAL_REASON_PREFIX,
-    GROUNDING_LITERAL_SPAN_MAX_ITEMS,
     INVESTIGATION_CAPABILITY,
     LSP_DEFINITION_NOT_FOUND,
     LSP_DEFINITION_UNAVAILABLE,
@@ -56,9 +55,6 @@ from .constants import (
     _DEF_READ_NOISE_SYMBOLS,
     _FILE_REF_RE,
     _FILE_SYMBOL_RE,
-    _FRAMEWORK_ROOTS,
-    _NEGATIVE_CLAIM_RE,
-    _PYTHON_STDLIB_MODULES,
     _REPAIR_ALLOWED_TOOL_NAMES,
     _RUNTIME_EVIDENCE_RE,
 )
@@ -67,30 +63,39 @@ from .domain import (
     _belief_status,
     _belief_text,
     _beliefs,
-    _context_line_range,
-    _format_line_span_excerpt,
-    _literal_line_ranges,
     _observation_context_view,
-    _observation_grounding_literal_spans,
     _observation_reference_map,
     _observation_reference_payload,
     _observation_refs,
     _reference_list,
-    _trim_grounding_span_line,
 )
 from .evidence import (
     PROJECT_EVIDENCE_TOOLS,
     _alias_beliefs,
     _alias_statement,
+    _bind_grounding_evidence,
     _canonical_evidence_id,
+    _code_literal_is_negated,
     _drop_invalid_belief_refs,
     _file_ref_matches,
+    _grounding_code_literals,
+    _grounding_unsupported_for_resolution,
+    _infer_workspace_root,
+    _is_framework_module,
+    _is_grounding_code_literal,
+    _is_python_stdlib_module,
     _normalize_evidence_refs,
     _observation_evidence_excerpt,
+    _observation_covers_module,
     _observation_ref_by_id,
     _positive_project_observation,
     _ref_is_existential,
+    _resolution_evidence_lines,
+    _resolution_grounding_evidence_spans,
+    _resolution_is_absence_claim,
     _supporting_belief,
+    _supporting_observation_ids,
+    _unsupported_grounding_literals,
     _validate_belief_refs,
 )
 from .findings import (
@@ -2294,25 +2299,6 @@ def _resolution_required_prompt(
     ])
 
 
-def _resolution_evidence_lines(unknown_ids: list[str], recorded: dict, observations: list[dict]) -> list[str]:
-    wanted = set(unknown_ids)
-    lines = []
-    ref_by_id = _observation_ref_by_id(observations)
-    for observation in observations:
-        targets = {_normalize_unknown_id(item) for item in observation.get("target_unknown_ids", [])}
-        if targets & wanted and _positive_project_observation(observation):
-            observation_id = str(observation.get("id") or "").strip()
-            ref = ref_by_id.get(observation_id, observation_id)
-            lines.append(
-                f"- observation ref {ref} (id {observation_id}): "
-                f"{observation.get('title') or observation.get('summary')}"
-            )
-    for belief in recorded.get("beliefs", []):
-        if isinstance(belief, dict) and _supporting_belief(belief):
-            lines.append(f"- belief: {_belief_text(belief)}")
-    return lines[-12:]
-
-
 def _require_control_reason(arguments: dict, name: str) -> None:
     if not str(arguments.get("reason") or "").strip():
         raise ValueError(f"{name} requires reason")
@@ -4146,157 +4132,6 @@ def _apply_direct_resolution_gate(
     return gated
 
 
-def _resolution_is_absence_claim(resolution: dict, observations: list[dict]) -> bool:
-    """否定性结论（absence）判定：答案声称某物"不存在/未找到/未定义"，
-    且引用了至少一条观察（grep/glob 无命中、读取文件确认缺失等）。
-
-    absence 无法作为代码字面量被观察引用，质量门若仍要求字面量逐字命中，
-    这类结论会永远判缺、触发 REPAIR 死循环（见 U2 类"预期未定义"问题）。
-    """
-    answer = str(resolution.get("answer") or "")
-    if not _NEGATIVE_CLAIM_RE.search(answer):
-        return False
-    evidence_ids = set(_reference_list(resolution.get("evidence")))
-    return any(
-        isinstance(item, dict)
-        and str(item.get("id") or "") in evidence_ids
-        for item in observations or []
-    )
-
-
-def _grounding_unsupported_for_resolution(
-    resolution: dict,
-    recorded: dict,
-    observations: list[dict],
-) -> list[str]:
-    """计算 resolution 未获观察支撑的代码字面量，带两类豁免：
-
-    - derived_inference：推断本来就是模型的综合，不要求逐字引源码；
-    - absence（否定性结论）：声称"不存在"的字面量无法在源码里被观察到。
-    """
-    unsupported = _unsupported_grounding_literals(resolution, recorded, observations or [])
-    if unsupported and (
-        str(resolution.get("kind") or "") == "derived_inference"
-        or _resolution_is_absence_claim(resolution, observations or [])
-    ):
-        return []
-    return unsupported
-
-
-def _is_python_stdlib_module(name: str) -> bool:
-    """标准库判断：优先用运行时权威列表（sys.stdlib_module_names，
-    Python 3.10+ 内置、自动跟随版本），手写列表只作兜底。"""
-    return name in _PYTHON_STDLIB_MODULES or name in getattr(sys, "stdlib_module_names", ())
-
-
-def _is_framework_module(name: str) -> bool:
-    """非 Python 语言/框架级根命名空间判断。"""
-    return name in _FRAMEWORK_ROOTS
-
-
-def _unsupported_grounding_literals(
-    resolution: dict,
-    recorded: dict,
-    observations: list[dict],
-) -> list[str]:
-    evidence_ids = set(_reference_list(resolution.get("evidence")))
-    belief_ids = set(_reference_list(resolution.get("belief_ids")))
-    for belief in recorded.get("beliefs", []):
-        if isinstance(belief, dict) and str(belief.get("id") or "") in belief_ids:
-            evidence_ids.update(_reference_list(belief.get("evidence")))
-    evidence_obs = [
-        item
-        for item in observations
-        if isinstance(item, dict) and str(item.get("id") or "") in evidence_ids
-    ]
-    evidence = "\n".join(_grounding_observation_text(item) for item in evidence_obs)
-    normalized_evidence = re.sub(r"\s+", "", evidence)
-    literals = _grounding_code_literals(str(resolution.get("answer") or ""))
-    unsupported = []
-    for literal in literals:
-        if not _is_grounding_code_literal(literal):
-            continue
-        normalized_literal = re.sub(r"\s+", "", literal)
-        if normalized_literal in normalized_evidence:
-            continue
-        # 模块引用写法（useSessions.open / model_settings.resolve）豁免：
-        # 源码里是 `export async function open` / `def resolve`，点链字符串
-        # 本身不会出现在观察文本里。只要观察覆盖了对应源文件（path 命中
-        # 模块名），就认为该引用已 grounded——否则模型永远补不出这个字面量，
-        # REPAIR 死循环（useSessions.open 类根因）。
-        if "." in literal:
-            module = literal.split(".")[0]
-            # 先查项目内同名源文件：项目真有这个模块（如项目自己的 utils.py
-            # 或 System.cs）→ 模块文件豁免（类5），不进入框架判断。
-            if _observation_covers_module(evidence_obs, module):
-                continue
-            # 语言/框架级根引用（cmath.sqrt / System.Math.Sqrt /
-            # UnityEngine.Debug.Log / java.lang.Math.sqrt / console.log）：
-            # 语言环境的一部分，项目里没有对应源文件，grep/read 永远
-            # 产生不了这个字面量。要求观察证据毫无意义，直接放行。
-            if _is_python_stdlib_module(module) or _is_framework_module(module):
-                continue
-            # LSP 兜底：框架列表没覆盖的（冷门语言/新框架），问 LSP 符号
-            # 在项目里有没有定义。只有 server 正常返回"查不到"（NOT_FOUND）
-            # 才按框架/外部引用豁免——这是可信信号。UNAVAILABLE（自动安装+
-            # 退避重试后仍不可用）不豁免：宁可要求证据等环境修复，也不能把
-            # 未观察的项目代码引用误放行（同名文件层只兜底被观察过的文件）。
-            lsp_anchor = next(
-                (item for item in evidence_obs if item.get("path")),
-                None,
-            )
-            if lsp_anchor is not None:
-                workspace = _infer_workspace_root(str(lsp_anchor.get("path") or ""))
-                if workspace:
-                    status = _lsp_definition_file_typed(
-                        str(lsp_anchor.get("path")),
-                        module,
-                        workspace,
-                    )
-                    if status == LSP_DEFINITION_NOT_FOUND:
-                        continue
-        unsupported.append(literal)
-    return _dedupe_strings(unsupported)
-
-
-def _infer_workspace_root(path: str) -> str:
-    """从文件路径向上找项目根（含 .git 或常见项目标记文件的目录）。"""
-    current = os.path.dirname(os.path.abspath(path))
-    markers = (".git", "pyproject.toml", "package.json", "go.mod", "Cargo.toml",
-               "*.csproj", "*.sln", "pom.xml", "build.gradle", "composer.json",
-               "Gemfile", "mix.exs")
-    while True:
-        if any(
-            os.path.exists(os.path.join(current, marker))
-            or (marker.startswith("*.") and any(
-                os.path.exists(os.path.join(current, name))
-                for name in os.listdir(current)
-                if name.endswith(marker[1:])
-            ))
-            for marker in markers
-        ):
-            return current
-        parent = os.path.dirname(current)
-        if parent == current:
-            return ""
-        current = parent
-
-
-def _observation_covers_module(observations: list[dict], module: str) -> bool:
-    """观察的 path 是否覆盖了给定模块（useSessions -> useSessions.js）。"""
-    if not module:
-        return False
-    for item in observations:
-        path = str(item.get("path") or "")
-        if not path:
-            continue
-        base = os.path.basename(path)
-        stem = os.path.splitext(base)[0]
-        if module in (stem, base):
-            return True
-    return False
-
-
 def _semantic_repair_resolution_ids(recorded: dict) -> set[str]:
     return {
         str(item.get("unknown_id") or "")
@@ -4361,115 +4196,6 @@ def _semantic_repair_payload(recorded: dict, unknown_ids: set[str]) -> dict:
     }
 
 
-def _grounding_code_literals(value: str) -> list[str]:
-    quoted = [
-        literal
-        for literal in re.findall(r"`([^`\r\n]+)`", value)
-        if len(literal) <= 80
-        and "..." not in literal
-        and not literal.lstrip().startswith("<")
-    ]
-    return [
-        literal
-        for literal in _dedupe_strings([
-            *quoted,
-            *re.findall(
-                r"""\bv-(?:if|show|for|else-if|else|bind|on|model|html|text|slot|pre|cloak|once|memo)"""
-                r"""(?:\s*=\s*(?:"[^"\r\n]*"|'[^'\r\n]*'))?""",
-                value,
-            ),
-            *re.findall(
-                r"(?<![-A-Za-z0-9_$])[a-z_$][A-Za-z0-9_$]*"
-                r"(?:\.[A-Za-z_$][A-Za-z0-9_$]*)+"
-                r"(?![-A-Za-z0-9_$])",
-                value,
-            ),
-        ])
-        if not _code_literal_is_negated(value, literal)
-    ]
-
-
-def _code_literal_is_negated(value: str, literal: str) -> bool:
-    positions = [match.start() for match in re.finditer(re.escape(literal), value)]
-    return bool(positions) and all(
-        re.search(
-            r"(?:非|无|没有|不存在|\bnot|\bno)\s*[\(（]?\s*$",
-            value[max(0, index - 12):index].casefold(),
-        )
-        for index in positions
-    )
-
-
-def _bind_grounding_evidence(recorded: dict, observations: list[dict]) -> dict:
-    for field, text_field in (("beliefs", "statement"), ("resolutions", "answer")):
-        for item in recorded.get(field, []):
-            if not isinstance(item, dict):
-                continue
-            supporting_ids = _supporting_observation_ids(
-                _grounding_code_literals(str(item.get(text_field) or "")),
-                observations,
-            )
-            if supporting_ids:
-                item["evidence"] = _dedupe_strings([
-                    *_reference_list(item.get("evidence")),
-                    *supporting_ids,
-                ])
-    return recorded
-
-
-def _supporting_observation_ids(
-    literals: list[str],
-    observations: list[dict],
-) -> list[str]:
-    if not literals:
-        return []
-    result = []
-    for literal in literals:
-        normalized = re.sub(r"\s+", "", literal)
-        matches = [
-            str(item.get("id") or "")
-            for item in observations
-            if isinstance(item, dict)
-            and str(item.get("id") or "")
-            and normalized in re.sub(
-                r"\s+",
-                "",
-                _grounding_observation_text(item),
-            )
-        ]
-        if not matches:
-            return []
-        result.extend(matches)
-    return _dedupe_strings(result)
-
-
-def _resolution_grounding_evidence_spans(
-    resolution: dict,
-    recorded: dict,
-    observations: list[dict],
-) -> list[dict]:
-    literals = [
-        literal
-        for literal in _grounding_code_literals(str(resolution.get("answer") or ""))
-        if _is_grounding_code_literal(literal)
-    ]
-    if not literals:
-        return []
-    evidence_ids = set(_reference_list(resolution.get("evidence")))
-    belief_ids = set(_reference_list(resolution.get("belief_ids")))
-    for belief in recorded.get("beliefs", []):
-        if isinstance(belief, dict) and str(belief.get("id") or "") in belief_ids:
-            evidence_ids.update(_reference_list(belief.get("evidence")))
-    spans = [
-        span
-        for observation in observations
-        if isinstance(observation, dict)
-        and str(observation.get("id") or "") in evidence_ids
-        for span in _observation_grounding_literal_spans(observation, literals)
-    ]
-    return spans[:GROUNDING_LITERAL_SPAN_MAX_ITEMS]
-
-
 def _final_observations(
     observations: list[dict],
     *,
@@ -4481,23 +4207,6 @@ def _final_observations(
         {key: value for key, value in item.items() if key != "_grounding_evidence"}
         for item in observations
     ]
-
-
-def _is_grounding_code_literal(value: str) -> bool:
-    if value.casefold().endswith((
-        ".cfg", ".css", ".html", ".ini", ".js", ".json", ".jsx", ".lock",
-        ".md", ".py", ".toml", ".ts", ".tsx", ".txt", ".vue", ".yaml", ".yml",
-    )):
-        return False
-    return value.startswith(("v-if", "v-show", "@")) or any(
-        marker in value
-        for marker in ("=", "<", ">", "(", ")", "{", "}", "[", "]", "/", "\\")
-    ) or bool(
-        re.fullmatch(
-            r"[a-z_$][A-Za-z0-9_$]*(?:\.[A-Za-z_$][A-Za-z0-9_$]*)+",
-            value,
-        )
-    )
 
 
 def _audit_covers_resolutions(
