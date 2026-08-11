@@ -6,7 +6,7 @@ import os
 import platform
 import sys
 from collections.abc import Iterator
-from enum import StrEnum
+from enum import Enum, StrEnum
 from pathlib import Path
 from uuid import uuid4
 
@@ -203,6 +203,14 @@ class DispatchAction(StrEnum):
     BREAK_TOOLS = "break_tools"
     NEXT_ROUND = "next_round"
     TERMINATE = "terminate"
+
+
+class FinishDecision(Enum):
+    """Finish gate decision before applying the corresponding transition."""
+    ACCEPT = "accept"
+    REPAIR = "repair"
+    VERIFY = "verify"
+    CLEARIFY = "clearify"
 
 
 def _get_investigation_phase(state: InvestigationState) -> InvestigationPhase:
@@ -814,32 +822,46 @@ def _handle_record(
 
 
 def _handle_finish(
-    state: InvestigationState,
-    call_id: str,
-    name: str,
-    arguments: dict,
+    state: InvestigationState, call_id: str, name: str, arguments: dict,
     *,
-    analysis: dict,
-    observations: list[dict],
-    workspace_dir: str,
-    semantic_gate_enabled: bool,
-    subagent_enabled: bool,
-    resolution_required_ids: list[str],
-    semantic_repair_required_ids: set[str],
-    verification_request: dict | None,
-    provider: dict,
-    model: str,
-    pricing_rules: dict | None,
-    run_id: str,
+    analysis: dict, observations: list[dict], workspace_dir: str,
+    semantic_gate_enabled: bool, subagent_enabled: bool,
+    provider: dict, model: str, pricing_rules: dict | None, run_id: str,
 ) -> Iterator[DispatchAction]:
-    del resolution_required_ids, semantic_repair_required_ids, verification_request
-
     _require_control_reason(arguments, name)
     state.findings.recorded = _apply_direct_resolution_gate(
         state.findings.recorded,
         observations,
         strict_grounding=semantic_gate_enabled and _analysis_requests_implementation(analysis),
     )
+    decision = yield from _decide_finish_transition(
+        state,
+        analysis=analysis,
+        observations=observations,
+        semantic_gate_enabled=semantic_gate_enabled,
+        subagent_enabled=subagent_enabled,
+        provider=provider,
+        model=model,
+        pricing_rules=pricing_rules,
+        run_id=run_id,
+    )
+    if decision is FinishDecision.ACCEPT:
+        return _accept_finish(state, call_id, arguments, analysis=analysis, observations=observations, workspace_dir=workspace_dir)
+    return _enter_finish_block(state, call_id, decision, analysis=analysis, observations=observations)
+
+
+def _decide_finish_transition(
+    state: InvestigationState,
+    *,
+    analysis: dict,
+    observations: list[dict],
+    semantic_gate_enabled: bool,
+    subagent_enabled: bool,
+    provider: dict,
+    model: str,
+    pricing_rules: dict | None,
+    run_id: str,
+) -> Iterator[FinishDecision]:
     if semantic_gate_enabled:
         _semantic_repair_resolution_ids(state.findings.recorded)
     if (
@@ -891,37 +913,28 @@ def _handle_finish(
         if isinstance(item, dict)
         and _unknown_blocks_finish(item.get("unknown_id"), analysis, state.findings.recorded)
     }
+    if "needs_clearify" in pending_resolution_statuses or state.verification.clearify_questions:
+        return FinishDecision.CLEARIFY
+    if state.verification.queue:
+        return FinishDecision.VERIFY
     if (
         state.verification.queue
         or state.verification.clearify_questions
         or pending_resolution_statuses & {"partially_resolved", "needs_clearify"}
     ):
-        repair_payload = _semantic_repair_payload(
-            state.findings.recorded,
-            _semantic_repair_resolution_ids(state.findings.recorded),
-        )
-        output = json.dumps({
-            "finished": False,
-            "reason": "semantic_quality_gate",
-            "repair": repair_payload,
-            "next_action": (
-                "clearify"
-                if "needs_clearify" in pending_resolution_statuses or state.verification.clearify_questions
-                else "verify_hypothesis"
-                if state.verification.queue
-                else "continue_investigation"
-            ),
-        }, ensure_ascii=False)
-        state.messages.append({
-            "role": "tool",
-            "tool_call_id": call_id,
-            "content": output,
-        })
-        state.messages.append({"role": "user", "content": (
-            "The semantic quality gate did not authorize every resolution. "
-            "Follow its next action; do not finish or reuse the rejected conclusion."
-        )})
-        return DispatchAction.BREAK_TOOLS
+        return FinishDecision.REPAIR
+    return FinishDecision.ACCEPT
+
+
+def _accept_finish(
+    state: InvestigationState,
+    call_id: str,
+    arguments: dict,
+    *,
+    analysis: dict,
+    observations: list[dict],
+    workspace_dir: str,
+) -> DispatchAction:
     state.control.final = _finish_payload(
         _finish_arguments(
             state.findings.recorded,
@@ -946,6 +959,43 @@ def _handle_finish(
         })
         state.control.final = None
         state.control.stop_investigation = True
+    return DispatchAction.BREAK_TOOLS
+
+
+def _enter_finish_block(
+    state: InvestigationState,
+    call_id: str,
+    decision: FinishDecision,
+    *,
+    analysis: dict,
+    observations: list[dict],
+) -> DispatchAction:
+    del analysis, observations
+
+    next_action = {
+        FinishDecision.CLEARIFY: "clearify",
+        FinishDecision.VERIFY: "verify_hypothesis",
+        FinishDecision.REPAIR: "continue_investigation",
+    }[decision]
+    repair_payload = _semantic_repair_payload(
+        state.findings.recorded,
+        _semantic_repair_resolution_ids(state.findings.recorded),
+    )
+    output = json.dumps({
+        "finished": False,
+        "reason": "semantic_quality_gate",
+        "repair": repair_payload,
+        "next_action": next_action,
+    }, ensure_ascii=False)
+    state.messages.append({
+        "role": "tool",
+        "tool_call_id": call_id,
+        "content": output,
+    })
+    state.messages.append({"role": "user", "content": (
+        "The semantic quality gate did not authorize every resolution. "
+        "Follow its next action; do not finish or reuse the rejected conclusion."
+    )})
     return DispatchAction.BREAK_TOOLS
 
 
@@ -1626,9 +1676,6 @@ def _dispatch_tool_calls(
                     workspace_dir=workspace_dir,
                     semantic_gate_enabled=semantic_gate_enabled,
                     subagent_enabled=subagent_enabled,
-                    resolution_required_ids=resolution_required_ids,
-                    semantic_repair_required_ids=semantic_repair_required_ids,
-                    verification_request=verification_request,
                     provider=provider,
                     model=model,
                     pricing_rules=pricing_rules,
