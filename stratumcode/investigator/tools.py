@@ -5,12 +5,14 @@ import json
 import re
 from collections.abc import Iterator
 
+from .. import app_settings
 from ..agent.tools import openai_tool_schema
-from ..agent_runtime import start_event
+from ..agent_runtime import start_event, tool_error_json
 from ..tools import registry
 from .constants import DISCOVERY_CONTRACT_FIELDS, INVESTIGATION_CAPABILITY, _REPAIR_ALLOWED_TOOL_NAMES
+from .domain import _observation_reference_payload
 from .evidence import _observation_evidence_excerpt
-from .ids import _known_unknowns_by_canonical_id, _normalize_unknown_id, _target_unknown_ids
+from .ids import _known_unknowns_by_canonical_id, _normalize_unknown_id, _same_unknown_id, _target_unknown_ids
 
 
 # Phase -> 工具集映射。集中定义，避免主循环内散落的 if/elif。
@@ -233,6 +235,134 @@ def _finish_tool_schema() -> dict:
             "required": ["reason", "recommended_next_step"],
         },
     )
+
+
+def _duplicate_no_progress_json(
+    tool_name: str,
+    *,
+    duplicate_count: int,
+    cached_observation_id: str,
+    required_next_action: str,
+) -> str:
+    return json.dumps({
+        "code": "duplicate_no_progress",
+        "tool": tool_name or "invalid",
+        "cached_observation_id": cached_observation_id,
+        "duplicate_count": duplicate_count,
+        "retryable": False,
+        "required_next_action": required_next_action,
+        "message": (
+            "The same successful tool arguments were already observed. "
+            "This call produced no new investigation progress. "
+            "If you already obtained the needed information through code_nav, "
+            "lsp_tool, grep, or an earlier read, cite those observations in your "
+            "resolution instead of re-reading the same path. Otherwise call with "
+            "different arguments (other files or line ranges)."
+        ),
+    }, ensure_ascii=False)
+
+
+def _tool_blocked_error_json(tool_name: str, *, allowed_tools: list[str]) -> str:
+    required_action = allowed_tools[0] if len(allowed_tools) == 1 else "choose_allowed_tool"
+    return json.dumps({
+        "error": {
+            "code": "tool_blocked_by_investigation_state",
+            "tool": tool_name or "invalid",
+            "retryable": False,
+            "blocked_tool": tool_name or "invalid",
+            "allowed_tools": allowed_tools,
+            "required_action": required_action,
+            "message": (
+                "This tool is not available in the current investigation state. "
+                "Use an allowed control tool or wait until discovery is available again."
+            ),
+        },
+    }, ensure_ascii=False)
+
+
+def _tool_repair_error_json(
+    exc: Exception,
+    tool_name: str,
+    raw_arguments: str,
+    partial_arguments: dict,
+    attempt: int = 0,
+    *,
+    observations: list[dict] | None = None,
+) -> str:
+    try:
+        payload = json.loads(tool_error_json(exc, tool_name))
+    except json.JSONDecodeError:
+        payload = {"error": {"message": str(exc), "tool": tool_name or "invalid"}}
+    error = payload.setdefault("error", {})
+    error["partial_arguments"] = partial_arguments
+    error["attempt"] = attempt
+    error["missing_fields"] = _missing_fields_from_error(
+        str(exc),
+        partial_arguments,
+    )
+    if "unknown evidence ids" in str(exc) and observations:
+        error["valid_observation_refs"] = _observation_reference_payload(observations)
+        error["repair_instruction"] = (
+            "Reuse partial_arguments. Replace invalid evidence references with "
+            "resolution.observation_ids using one of valid_observation_refs.ref; "
+            "do not repeat discovery only to repair ids."
+        )
+    if tool_name == "finish_investigation" and "bugfix_readiness" in str(exc):
+        error["required_argument_shape"] = {
+            "bugfix_readiness": {
+                "failure_reproduced_or_observed": True,
+                "root_cause_or_failing_boundary_identified": True,
+                "patch_target_identified": True,
+                "expected_behavior_change_defined": True,
+                "validation_scenario_defined": True,
+                "reason": "Evidence-backed reason for each readiness field.",
+            }
+        }
+    if tool_name == "finish_investigation" and "requires reason" in str(exc):
+        error["repair_instruction"] = (
+            "finish_investigation requires the 'reason' argument. Add a concise "
+            "reason (why the investigation is complete, e.g. every blocking "
+            "unknown is resolved with evidence) to partial_arguments and call "
+            "finish_investigation again. Do not stop the investigation or call "
+            "other tools."
+        )
+        error["required_argument_shape"] = {
+            "reason": "Concise completion reason (non-empty).",
+            "summary": "Optional final summary text.",
+        }
+    if tool_name == "clearify" and "requires product_decision or engineering_decision targets" in str(exc):
+        error["retryable"] = False
+        error["required_action"] = "resolve_or_investigate_contract_unknown"
+        error["repair_instruction"] = (
+            "Do not retry clearify for non-decision unknowns. "
+            "Resolve the contract unknown from project evidence or continue discovery."
+        )
+    else:
+        error["repair_instruction"] = (
+            "Reuse partial_arguments. Return only the same tool call with missing/invalid fields corrected; "
+            "do not restart discovery or repeat the identical arguments."
+        )
+    return json.dumps(payload, ensure_ascii=False)
+
+
+def _missing_fields_from_error(
+    message: str,
+    partial_arguments: dict | None = None,
+) -> list[str]:
+    fields = []
+    lowered = message.casefold()
+    partial_arguments = partial_arguments or {}
+    for field in (
+        "reason",
+        "target_unknown_ids",
+        "summary",
+        "recommended_next_step",
+        "bugfix_readiness",
+        *DISCOVERY_CONTRACT_FIELDS,
+    ):
+        if field in lowered and not partial_arguments.get(field):
+            fields.append(field)
+    return fields
 
 
 def _tool_call_subject(name: str, arguments: dict) -> str:
@@ -495,3 +625,148 @@ def _tool_arguments(raw: str | None) -> dict:
     if not isinstance(arguments, dict):
         raise ValueError("tool arguments must be an object")
     return arguments
+
+
+def _step_result(final: dict, *, implementation_intent: bool = True) -> dict:
+    blockers = [item for item in final.get("unknowns", []) if item.get("blocking")]
+    # 已通过 clearify/调查得到答案的（resolutions 有记录）不再要求继续调查或重复弹窗
+    resolved_ids = {
+        str(item.get("unknown_id") or "").strip()
+        for item in final.get("resolutions", [])
+        if isinstance(item, dict)
+        and str(item.get("status") or "") in ("resolved", "partially_resolved", "deferred")
+        and str(item.get("unknown_id") or "").strip()
+    }
+    investigate = [
+        item for item in blockers
+        if item.get("resolution_strategy") == "investigate_project"
+        and not any(_same_unknown_id(item.get("id"), rid) for rid in resolved_ids)
+    ]
+    clearify = [item for item in blockers if item.get("resolution_strategy") == "clearify"]
+    unresolved_ids = [item["id"] for item in blockers if item.get("id")]
+    if final.get("runtime_failure") and (not blockers or _runtime_failure_blocks_continue(final)):
+        failure_reason = (
+            final.get("recovery_reason")
+            or final.get("summary")
+            or "Investigation failed before producing a valid final result."
+        )
+        return {
+            "next_step": "failed",
+            "continue_reason": failure_reason,
+            "target_unknown_ids": unresolved_ids,
+            "unresolved_unknown_ids": unresolved_ids,
+            "summary": "",
+            "beliefs": [],
+            "ready_for_patch_planning": False,
+            "patch_planning_context": [],
+            "resolutions": [],
+            "unknowns": final.get("unknowns", []),
+        }
+    if investigate:
+        return {
+            "next_step": "continue_investigation",
+            "continue_reason": "; ".join(item["question"] for item in investigate[:3]),
+            "target_unknown_ids": [item["id"] for item in investigate],
+            "unresolved_unknown_ids": unresolved_ids,
+            "summary": final.get("summary", ""),
+            "beliefs": final.get("beliefs", []),
+            "ready_for_patch_planning": False,
+            "patch_planning_context": final.get("patch_planning_context", []),
+            "resolutions": final.get("resolutions", []),
+            "unknowns": final.get("unknowns", []),
+        }
+    # 阻塞但不需要项目调查的 unknown（engineering/product/clearify 等决策类）：
+    # 继续调查，由 _pending_clearify_unknown 在 investigation_stream 内部强制
+    # 进入 CLEARIFY 阶段（模型调 clearify 工具）——clearify 只有内部这一条路径。
+    non_investigate = [
+        item for item in blockers
+        if item.get("resolution_strategy") != "investigate_project"
+        and not any(_same_unknown_id(item.get("id"), rid) for rid in resolved_ids)
+    ]
+    if non_investigate:
+        question = "; ".join(str(item.get("question") or "").strip() for item in non_investigate[:3])
+        return {
+            "next_step": "continue_investigation",
+            "continue_reason": question or "Blocking decision unknowns require user input.",
+            "target_unknown_ids": [item["id"] for item in non_investigate],
+            "unresolved_unknown_ids": unresolved_ids,
+            "summary": final.get("summary", ""),
+            "beliefs": final.get("beliefs", []),
+            "ready_for_patch_planning": False,
+            "patch_planning_context": final.get("patch_planning_context", []),
+            "resolutions": final.get("resolutions", []),
+            "unknowns": final.get("unknowns", []),
+        }
+    if final.get("ready_for_patch_planning") and implementation_intent:
+        return {
+            "next_step": "write_code",
+            "continue_reason": final.get("summary") or app_settings.text("ready_patch"),
+            "target_unknown_ids": [],
+            "unresolved_unknown_ids": [],
+            "summary": final.get("summary", ""),
+            "beliefs": final.get("beliefs", []),
+            "ready_for_patch_planning": True,
+            "patch_planning_context": final.get("patch_planning_context", []),
+            "resolutions": final.get("resolutions", []),
+            "unknowns": [],
+        }
+    if final.get("ready_for_patch_planning") and not implementation_intent:
+        return {
+            "next_step": "done",
+            "continue_reason": final.get("summary") or "Investigation complete.",
+            "target_unknown_ids": [],
+            "unresolved_unknown_ids": [],
+            "summary": final.get("summary", ""),
+            "beliefs": final.get("beliefs", []),
+            "ready_for_patch_planning": False,
+            "patch_planning_context": final.get("patch_planning_context", []),
+            "resolutions": final.get("resolutions", []),
+            "unknowns": [],
+        }
+    readiness = final.get("readiness")
+    readiness_reasons = [
+        str(reason)
+        for reason in (readiness.get("reasons", []) if isinstance(readiness, dict) else [])
+        if str(reason).strip()
+    ]
+    if implementation_intent and (
+        readiness_reasons
+        or str(final.get("recommended_next_step") or "").strip() == "patch_planning"
+    ):
+        unresolved = readiness_reasons or ["patch_planning_not_ready"]
+        return {
+            "next_step": "continue_investigation",
+            "continue_reason": "Patch planning readiness is incomplete: " + "; ".join(unresolved[:3]),
+            "target_unknown_ids": unresolved,
+            "unresolved_unknown_ids": unresolved,
+            "summary": final.get("summary", ""),
+            "beliefs": final.get("beliefs", []),
+            "ready_for_patch_planning": False,
+            "patch_planning_context": final.get("patch_planning_context", []),
+            "resolutions": final.get("resolutions", []),
+            "unknowns": final.get("unknowns", []),
+        }
+    open_questions = final.get("open_questions") or []
+    question = str(open_questions[0]) if open_questions else ""
+    return {
+        "next_step": "continue_investigation" if open_questions else "done",
+        "continue_reason": question
+        or final.get("summary")
+        or "Investigation complete.",
+        "target_unknown_ids": [],
+        "unresolved_unknown_ids": unresolved_ids,
+        "summary": final.get("summary", "") if open_questions else "",
+        "beliefs": final.get("beliefs", []),
+        "ready_for_patch_planning": False,
+        "patch_planning_context": final.get("patch_planning_context", []),
+        "resolutions": final.get("resolutions", []),
+        "unknowns": final.get("unknowns", []),
+    }
+
+
+def _runtime_failure_blocks_continue(final: dict) -> bool:
+    reason = str(final.get("recovery_reason") or final.get("summary") or "")
+    return (
+        "repeated tool argument errors" in reason
+        or "identical failed tool call loop" in reason
+    )
