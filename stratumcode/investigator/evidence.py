@@ -23,7 +23,6 @@ from .constants import (
     _FILE_SYMBOL_RE,
     _FRAMEWORK_ROOTS,
     _NEGATIVE_CLAIM_RE,
-    _PYTHON_STDLIB_MODULES,
 )
 from .domain import (
     _belief_status,
@@ -702,7 +701,7 @@ def _grounding_unsupported_for_resolution(
 def _is_python_stdlib_module(name: str) -> bool:
     """标准库判断：优先用运行时权威列表（sys.stdlib_module_names，
     Python 3.10+ 内置、自动跟随版本），手写列表只作兜底。"""
-    return name in _PYTHON_STDLIB_MODULES or name in getattr(sys, "stdlib_module_names", ())
+    return name in getattr(sys, "stdlib_module_names", ())
 
 
 def _is_framework_module(name: str) -> bool:

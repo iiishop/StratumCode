@@ -65,21 +65,6 @@ _RUNTIME_EVIDENCE_RE = re.compile(
 )
 RECORD_RECOVERY_REASON = "Record pending observations and required resolutions."
 
-_PYTHON_STDLIB_MODULES = frozenset({
-    "abc", "argparse", "array", "ast", "asyncio", "base64", "binascii", "bisect",
-    "builtins", "bz2", "cmath", "codecs", "collections", "concurrent", "contextlib",
-    "copy", "copyreg", "csv", "ctypes", "dataclasses", "datetime", "decimal",
-    "difflib", "email", "enum", "errno", "functools", "glob", "gzip", "hashlib",
-    "heapq", "hmac", "html", "http", "importlib", "inspect", "io", "itertools",
-    "json", "logging", "lzma", "math", "mmap", "multiprocessing", "operator", "os",
-    "pathlib", "pickle", "platform", "pprint", "queue", "random", "re", "sched",
-    "secrets", "select", "selectors", "shutil", "signal", "socket", "sqlite3",
-    "ssl", "stat", "statistics", "string", "struct", "subprocess", "sys",
-    "tempfile", "textwrap", "threading", "time", "traceback", "types", "typing",
-    "unicodedata", "unittest", "urllib", "uuid", "warnings", "weakref", "xml",
-    "zipfile", "zlib", "zoneinfo",
-})
-
 # 其他语言的框架/语言级根命名空间：与 Python 标准库同理，它们是语言环境
 # 的一部分，项目里没有对应源文件，grep/read 永远产生不了这些引用
 # （System.Math.Sqrt / UnityEngine.Debug.Log / java.lang.Math.sqrt /
