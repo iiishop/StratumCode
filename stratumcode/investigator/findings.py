@@ -39,6 +39,7 @@ from .ids import (
     _question_key,
     _unknowns,
 )
+from .state import InvestigationState
 from .util import _dedupe_strings, _string_list
 
 
@@ -151,30 +152,26 @@ def _empty_recorded_findings() -> dict:
 
 
 def _record_findings_by_slots(
+    state: InvestigationState,
     *,
     provider: dict,
     model: str,
-    messages: list[dict],
     pricing_rules: list[dict],
-    usage_total: dict,
     run_id: str,
     reason: str,
     analysis: dict,
-    observations: list[dict],
-    recorded_findings: dict,
-    pending_observation_ids: list[str],
     required_resolution_ids: list[str] | None = None,
 ) -> Iterator[dict]:
     required_resolution_ids = required_resolution_ids or []
     belief_observation_ids = _dedupe_strings([
-        *pending_observation_ids,
-        *_semantic_repair_observation_ids(recorded_findings, required_resolution_ids),
+        *state.observations.pending_ids,
+        *_semantic_repair_observation_ids(state.findings.recorded, required_resolution_ids),
     ])
     resolution_slot_ids = _record_resolution_slot_ids(
         analysis,
-        observations,
-        recorded_findings,
-        pending_observation_ids,
+        state.observations.items,
+        state.findings.recorded,
+        state.observations.pending_ids,
         required_resolution_ids,
     )
     slot_messages = [
@@ -184,9 +181,9 @@ def _record_findings_by_slots(
         {"role": "user", "content": _record_slot_context(
             reason,
             analysis,
-            observations,
-            recorded_findings,
-            pending_observation_ids,
+            state.observations.items,
+            state.findings.recorded,
+            state.observations.pending_ids,
             required_resolution_ids,
             belief_observation_ids,
             resolution_slot_ids,
@@ -207,8 +204,8 @@ def _record_findings_by_slots(
             required_answer_literals=_required_state_write_literals(
                 path,
                 resolution_slot_ids,
-                recorded_findings,
-                observations,
+                state.findings.recorded,
+                state.observations.items,
             ),
         )
         raw = ""
@@ -232,11 +229,11 @@ def _record_findings_by_slots(
                 use_skills=False,
             )
             if usage := _usage_delta(pricing_rules, assistant.pop("_usage", {})):
-                _add_usage(usage_total, usage)
+                _add_usage(state.usage.total, usage)
                 usage_events.append(start_event(
                     f"{run_id}-usage-record-slot-{len(usage_events)}",
                     "usage",
-                    {"delta": usage, "total": usage_total},
+                    {"delta": usage, "total": state.usage.total},
                 ))
             raw = _normalize_record_slot_answer(
                 _content_text(assistant.get("content")),
@@ -268,15 +265,15 @@ def _record_findings_by_slots(
     beliefs = _runtime_slot_beliefs(
         filled.get("beliefs"),
         belief_observation_ids,
-        recorded_findings,
+        state.findings.recorded,
     )
     resolutions = _runtime_slot_resolutions(
         filled.get("resolutions"),
         resolution_slot_ids,
-        observations,
-        recorded_findings,
+        state.observations.items,
+        state.findings.recorded,
         beliefs,
-        pending_observation_ids,
+        state.observations.pending_ids,
     )
     result: dict = {
         "reason": reason,
@@ -286,7 +283,7 @@ def _record_findings_by_slots(
         "new_unknowns": _runtime_new_unknowns(
             filled.get("new_unknowns"),
             analysis,
-            recorded_findings,
+            state.findings.recorded,
             resolutions,
         ),
     }
