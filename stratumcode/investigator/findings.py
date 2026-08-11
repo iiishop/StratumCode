@@ -13,10 +13,13 @@ from ..agent_runtime import (
     usage_delta as _usage_delta,
 )
 from ..json2slots import JSONValue, json2slots
+from ..status.task_contract import LEGACY_NEEDS_USER_STATUS
 from ..status.task_analysis import _json_candidates
 from .constants import (
+    CLEARIFY_RESOLUTION_REASON,
     FINDING_FIELDS,
     REQUIRED_FINDING_SLOT_ATTEMPTS,
+    RESOLUTION_KINDS,
     STATE_WRITE_REASON_PREFIX,
 )
 from .domain import (
@@ -25,16 +28,18 @@ from .domain import (
     _beliefs,
     _observation_context_view,
     _observation_reference_payload,
+    _observation_refs,
     _reference_list,
 )
 from .ids import (
+    _find_by_unknown_id,
     _initial_unknowns,
     _merge_unknowns,
     _normalize_unknown_id,
     _question_key,
     _unknowns,
 )
-from .util import _dedupe_strings
+from .util import _dedupe_strings, _string_list
 
 
 def _call_model(*args: object, **kwargs: object) -> dict:
@@ -687,3 +692,330 @@ def _assigned_state_ids(value: str) -> list[str]:
             value,
         )
     ])
+
+def _require_finding_fields(arguments: dict) -> None:
+    if not _has_finding_fields(arguments):
+        raise ValueError(
+            "record_investigation_findings must include at least one non-empty findings array; canonical arrays are "
+            "beliefs, resolutions, unknowns, new_unknowns, user_decisions_required, or task_updates"
+        )
+
+def _resolution_kind(raw: dict, status: str) -> str:
+    value = str(raw.get("kind") or "").strip()
+    if value in RESOLUTION_KINDS:
+        return value
+    if status == "deferred":
+        return "deferred"
+    if status == "needs_clearify":
+        return "user_decision"
+    return "derived_inference"
+
+def _semantic_missing_items(value) -> list[dict]:
+    if not isinstance(value, list):
+        return []
+    items = []
+    for raw in value:
+        if not isinstance(raw, dict):
+            continue
+        requirement = str(raw.get("requirement") or raw.get("text") or "").strip()
+        if not requirement:
+            continue
+        items.append({
+            "acceptance_id": str(raw.get("acceptance_id") or "").strip(),
+            "requirement": requirement,
+        })
+    return items
+
+def _continued_recorded_findings(previous: dict | None, observations: list[dict]) -> dict:
+    recorded = _merge_recorded_findings(_empty_recorded_findings(), previous or {})
+    observation_ids = {
+        str(item.get("id") or "").strip()
+        for item in observations
+        if isinstance(item, dict) and str(item.get("id") or "").strip()
+    }
+    by_tail = {
+        item.rsplit(":", 1)[-1]: item
+        for item in observation_ids
+    }
+    for field in ("beliefs", "resolutions"):
+        recorded[field] = [
+            dict(item) if isinstance(item, dict) else item
+            for item in recorded[field]
+        ]
+        for item in recorded[field]:
+            if not isinstance(item, dict):
+                continue
+            evidence = item.get("evidence")
+            if isinstance(evidence, list):
+                item["evidence"] = [
+                    value if value in observation_ids else by_tail.get(value, value)
+                    for value in (str(raw).strip() for raw in evidence)
+                    if value
+                ]
+    return recorded
+
+def _recorded_findings_signature(recorded: dict) -> str:
+    beliefs = [
+        {
+            "key": _belief_identity_key(item),
+            "evidence": sorted(_reference_list(item.get("evidence"))),
+            "status": str(item.get("status") or "").strip(),
+        }
+        for item in _beliefs(recorded.get("beliefs"))
+    ]
+    resolutions = [
+        {
+            "unknown_id": _normalize_unknown_id(item.get("unknown_id")),
+            "status": str(item.get("status") or "").strip(),
+            "evidence": sorted(_reference_list(item.get("evidence"))),
+            "belief_ids": sorted(_reference_list(item.get("belief_ids"))),
+        }
+        for item in _resolutions(recorded.get("resolutions"))
+    ]
+    unknowns = [
+        {
+            "id": _normalize_unknown_id(item.get("id")),
+            "status": str(item.get("status") or "").strip(),
+            "strategy": str(item.get("resolution_strategy") or "").strip(),
+        }
+        for item in _unknowns(recorded.get("unknowns")) + _unknowns(recorded.get("new_unknowns"))
+    ]
+    return json.dumps(
+        {
+            "beliefs": sorted(beliefs, key=lambda item: item["key"]),
+            "resolutions": sorted(resolutions, key=lambda item: item["unknown_id"]),
+            "unknowns": sorted(unknowns, key=lambda item: item["id"]),
+            "decisions": sorted(_string_list(recorded.get("user_decisions_required"))),
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+def _merge_recorded_findings(current: dict, update: dict) -> dict:
+    merged = {field: list(current.get(field, [])) for field in FINDING_FIELDS}
+    belief_aliases: dict[str, str] = {}
+    if isinstance(update.get("beliefs"), list):
+        merged["beliefs"], belief_aliases = _merge_beliefs_by_identity(
+            merged["beliefs"],
+            update["beliefs"],
+        )
+    for field in FINDING_FIELDS:
+        if field == "beliefs":
+            continue
+        value = update.get(field)
+        if isinstance(value, list):
+            if field == "resolutions" and belief_aliases:
+                value = [_remap_resolution_belief_ids(item, belief_aliases) for item in value]
+            merged[field] = _merge_list_by_identity(merged[field], value)
+            if field == "resolutions":
+                # clearify 用户答案是权威决定：覆盖同 unknown 的先前模型自解析，
+                # 避免 answers 里两条矛盾答案并存（重复 clearify 的根源）。
+                merged[field] = _supersede_resolutions_with_clearify(merged[field])
+    return merged
+
+def _supersede_resolutions_with_clearify(resolutions: list[dict]) -> list[dict]:
+    clearify_ids = {
+        str(item.get("unknown_id") or "").strip()
+        for item in resolutions
+        if isinstance(item, dict) and str(item.get("reason") or "") == CLEARIFY_RESOLUTION_REASON
+    }
+    if not clearify_ids:
+        return resolutions
+    return [
+        item
+        for item in resolutions
+        if not (
+            isinstance(item, dict)
+            and str(item.get("unknown_id") or "").strip() in clearify_ids
+            and str(item.get("reason") or "") != CLEARIFY_RESOLUTION_REASON
+        )
+    ]
+
+def _merge_beliefs_by_identity(left: list, right: list) -> tuple[list, dict[str, str]]:
+    result = list(left)
+    aliases: dict[str, str] = {}
+    positions: dict[str, int] = {}
+    for index, item in enumerate(result):
+        key = _belief_identity_key(item)
+        if key:
+            positions[key] = index
+    for item in right:
+        key = _belief_identity_key(item)
+        if key and key in positions:
+            existing = result[positions[key]]
+            if isinstance(existing, dict) and isinstance(item, dict):
+                result[positions[key]] = _merge_belief(existing, item)
+                old_id = str(existing.get("id") or "").strip()
+                new_id = str(item.get("id") or "").strip()
+                if old_id and new_id and old_id != new_id:
+                    aliases[new_id] = old_id
+            else:
+                result[positions[key]] = item
+        else:
+            if key:
+                positions[key] = len(result)
+            result.append(item)
+    return result, aliases
+
+def _merge_belief(existing: dict, item: dict) -> dict:
+    merged = {**existing, **item}
+    if existing.get("id"):
+        merged["id"] = existing["id"]
+    merged["evidence"] = _dedupe_strings([
+        *_reference_list(existing.get("evidence")),
+        *_reference_list(item.get("evidence")),
+    ])
+    return merged
+
+def _remap_resolution_belief_ids(item: object, aliases: dict[str, str]) -> object:
+    if not isinstance(item, dict) or not aliases:
+        return item
+    return {
+        **item,
+        "belief_ids": [
+            aliases.get(str(raw).strip(), str(raw).strip())
+            for raw in item.get("belief_ids", [])
+            if str(raw).strip()
+        ],
+    }
+
+def _merge_list_by_identity(left: list, right: list) -> list:
+    result = list(left)
+    positions: dict[str, int] = {}
+    for index, item in enumerate(result):
+        key = _identity_key(item)
+        if key:
+            positions[key] = index
+    for item in right:
+        key = _identity_key(item)
+        if key and key in positions:
+            existing = result[positions[key]]
+            if isinstance(existing, dict) and isinstance(item, dict):
+                if item.get("repair_mode") == "append_missing_only" and item.get("unknown_id"):
+                    result[positions[key]] = _append_resolution_repair(existing, item)
+                elif existing.get("reason") == CLEARIFY_RESOLUTION_REASON:
+                    result[positions[key]] = {**item, **existing}
+                else:
+                    result[positions[key]] = {**existing, **item}
+            else:
+                result[positions[key]] = item
+        else:
+            if key:
+                positions[key] = len(result)
+            result.append(item)
+    return result
+
+def _append_resolution_repair(existing: dict, repair: dict) -> dict:
+    merged = dict(existing)
+    new_refs = False
+    for field in ("evidence", "belief_ids"):
+        old_values = _reference_list(existing.get(field))
+        new_values = _reference_list(repair.get(field))
+        if any(value not in old_values for value in new_values):
+            new_refs = True
+        merged[field] = _dedupe_strings([
+            *old_values,
+            *new_values,
+        ])
+    for field in ("status", "reason"):
+        if str(repair.get(field) or "").strip():
+            merged[field] = repair[field]
+    # 保留 repair_mode/semantic_missing：append-only 修复是否真正通过
+    # 只能由 audit（finish 时的语义门禁）裁决，模型提交 repair 时不能
+    # 自我宣布 resolved。旧实现在这里 pop，导致下一轮 repair_ids 为空、
+    # 主循环误入 FINISH 分支、模型 read/record 被 already_resolved 拦截
+    # 的三面夹击死锁（d5eef05a 第二形态）。
+    return merged
+
+def _reject_empty_repair(arguments: dict, recorded: dict) -> None:
+    """Reject append_missing_only repair resolutions that add no new evidence.
+
+    Without this guard a model caught in the semantic repair loop can resubmit
+    the same partially_resolved resolution forever (empty belief_ids/evidence),
+    keeping the unknown permanently in the repair set with zero progress.
+    """
+    if not isinstance(arguments.get("resolutions"), list):
+        return
+    for item in arguments["resolutions"]:
+        if not isinstance(item, dict):
+            continue
+        if str(item.get("repair_mode") or "").strip() != "append_missing_only":
+            continue
+        unknown_id = str(item.get("unknown_id") or "").strip()
+        if not unknown_id:
+            continue
+        existing = _find_by_unknown_id(
+            [res for res in recorded.get("resolutions", []) if isinstance(res, dict)],
+            unknown_id,
+        )
+        old_evidence = set(_reference_list((existing or {}).get("evidence")))
+        old_beliefs = set(_reference_list((existing or {}).get("belief_ids")))
+        new_evidence = set(_reference_list(item.get("evidence")))
+        new_beliefs = set(_reference_list(item.get("belief_ids")))
+        if str(item.get("status") or "") == "resolved":
+            continue
+        if new_evidence - old_evidence or new_beliefs - old_beliefs:
+            continue
+        raise ValueError(
+            f"append_missing_only repair for {unknown_id} adds no new evidence or "
+            "belief_ids; gather the missing observations first (read/grep/code_nav), "
+            "then resubmit the repair with the new references."
+        )
+
+def _identity_key(item) -> str:
+    if not isinstance(item, dict):
+        return str(item)
+    for field in ("unknown_id", "id", "text", "statement", "question"):
+        value = str(item.get(field) or "").strip()
+        if field == "unknown_id":
+            value = _normalize_unknown_id(value)
+        if value:
+            return f"{field}:{value}"
+    return ""
+
+def _belief_identity_key(item) -> str:
+    if not isinstance(item, dict):
+        return str(item)
+    key = str(item.get("key") or item.get("fact_key") or "").strip()
+    if key:
+        return f"fact:{key.casefold()}"
+    statement = _normalize_statement(_belief_text(item))
+    if statement:
+        return f"statement:{statement}"
+    item_id = str(item.get("id") or "").strip()
+    return f"id:{item_id}" if item_id else ""
+
+def _normalize_statement(value: str) -> str:
+    return " ".join(str(value or "").split()).casefold()
+
+def _resolutions(value) -> list[dict]:
+    if not isinstance(value, list):
+        return []
+    items = []
+    for raw in value:
+        if not isinstance(raw, dict):
+            continue
+        unknown_id = str(raw.get("unknown_id") or raw.get("id") or "").strip()
+        status = str(raw.get("status") or "").strip()
+        if status == LEGACY_NEEDS_USER_STATUS:
+            status = "needs_clearify"
+        if status not in {"resolved", "partially_resolved", "needs_clearify", "deferred"}:
+            continue
+        if not unknown_id:
+            continue
+        item = {
+            "unknown_id": unknown_id,
+            "status": status,
+            "kind": _resolution_kind(raw, status),
+            "answer": str(raw.get("answer") or "").strip(),
+            "evidence": _observation_refs(raw),
+            "belief_ids": _string_list(raw.get("belief_ids")),
+            "reason": str(raw.get("reason") or "").strip(),
+        }
+        if str(raw.get("repair_mode") or "").strip() == "append_missing_only":
+            item["repair_mode"] = "append_missing_only"
+        if isinstance(raw.get("semantic_missing"), list):
+            item["semantic_missing"] = _semantic_missing_items(raw.get("semantic_missing"))
+        items.append(item)
+    return items
