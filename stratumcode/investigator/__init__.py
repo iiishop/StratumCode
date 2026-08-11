@@ -172,6 +172,7 @@ from .tools import (
     _tool_repair_error_json,
     _validate_tool_contract,
 )
+from .state import InvestigationState, UsageState
 
 
 class InvestigationPhase(StrEnum):
@@ -477,87 +478,68 @@ def investigation_stream(
     if prior_lines:
         messages.insert(2, {"role": "user", "content": "\n".join(prior_lines)})
     tools = _investigation_tools()
-    read_file_cache: dict[str, str] = {}
-    final = None
-    observations = [
+    state = InvestigationState(messages=messages, usage=UsageState(total=usage_total))
+    state.observations.items.extend([
         dict(item)
         for item in previous_observations or []
         if isinstance(item, dict) and item.get("fresh", True)
-    ]
-    tool_cache = {}
-    tool_cache_observation_ids: dict[str, str] = {}
-    audit_cache: dict[str, dict] = {}
-    recorded_findings = _continued_recorded_findings(previous_findings, observations)
-    finalization_reason = "Investigation model stopped before finish_investigation; summarizing observed facts."
-    pending_observation_ids: list[str] = []
-    repeated_tool_error_name = ""
-    repeated_tool_error_count = 0
-    already_resolved_error_count = 0
-    failed_tool_cache: dict[str, str] = {}
-    stop_investigation = False
-    verification_queue: list[dict] = []
-    attempted_verifications: set[tuple[str, str]] = set()
-    clearify_questions: dict[str, str] = {}
-    last_quality_audit: dict = {}
-    last_record_signature = _recorded_findings_signature(recorded_findings)
-    repeated_record_no_progress = 0
-    duplicate_no_progress_signature = ""
-    duplicate_no_progress_count = 0
-    duplicate_no_progress_total = 0
-    force_synthesis_reason = ""
-    force_discovery_ids: list[str] = []
-    finish_evidence_blocked = False
+    ])
+    state.findings.recorded = _continued_recorded_findings(previous_findings, state.observations.items)
+    state.control.finalization_reason = (
+        "Investigation model stopped before finish_investigation; summarizing observed facts."
+    )
+    state.findings.last_record_signature = _recorded_findings_signature(state.findings.recorded)
 
     for round_index in _round_indexes(max_rounds, start=0):
         thinking_id = f"{run_id}-thinking-{round_index}"
         yield start_event(thinking_id, "thinking", {"text": "", "done": False, "open": True})
         current_tools = tools
-        current_tool_choice = "required"
+        state.control.current_tool_choice = "required"
         clearify_unknown = _pending_clearify_unknown(
-            recorded_findings,
+            state.findings.recorded,
             analysis,
-            clearify_questions,
+            state.verification.clearify_questions,
         )
-        verification_request = verification_queue[0] if verification_queue else None
+        verification_request = state.verification.queue[0] if state.verification.queue else None
         semantic_repair_required_ids = (
-            _semantic_repair_resolution_ids(recorded_findings)
+            _semantic_repair_resolution_ids(state.findings.recorded)
             if semantic_gate_enabled
             else set()
         )
-        resolution_required_ids = _unknowns_needing_resolution(recorded_findings, observations, analysis)
+        resolution_required_ids = _unknowns_needing_resolution(state.findings.recorded, state.observations.items, analysis)
         resolution_required_ids = _dedupe_strings([
             *resolution_required_ids,
             *sorted(semantic_repair_required_ids),
             *(
                 _pending_observation_unknown_ids(
-                    observations,
-                    pending_observation_ids,
+                    state.observations.items,
+                    state.observations.pending_ids,
                     analysis,
-                    recorded_findings,
+                    state.findings.recorded,
                 )
-                if len(pending_observation_ids) >= MAX_PENDING_DISCOVERY_OBSERVATIONS
+                if len(state.observations.pending_ids) >= MAX_PENDING_DISCOVERY_OBSERVATIONS
                 else []
             ),
         ])
-        discovery_required_ids = list(force_discovery_ids)
-        if force_synthesis_reason and not discovery_required_ids:
+        discovery_required_ids = list(state.control.force_discovery_ids)
+        if state.control.force_synthesis_reason and not discovery_required_ids:
             discovery_required_ids = _unknowns_missing_project_evidence(
-                recorded_findings,
-                observations,
+                state.findings.recorded,
+                state.observations.items,
                 analysis,
             )
-        current_phase, current_tools, current_tool_choice, directive_prompt = _investigation_directive(
-            recorded_findings=recorded_findings,
+        current_phase, current_tools, state.control.current_tool_choice, directive_prompt = _investigation_directive(
+            recorded_findings=state.findings.recorded,
             analysis=analysis,
             tools=tools,
-            observations=observations,
+            observations=state.observations.items,
             semantic_repair_required_ids=semantic_repair_required_ids,
             resolution_required_ids=resolution_required_ids,
             discovery_required_ids=discovery_required_ids,
             clearify_unknown=clearify_unknown,
             verification_request=verification_request,
-            finish_evidence_blocked=finish_evidence_blocked,
-            force_synthesis_reason=force_synthesis_reason,
+            finish_evidence_blocked=state.control.finish_evidence_blocked,
+            force_synthesis_reason=state.control.force_synthesis_reason,
             semantic_gate_enabled=semantic_gate_enabled,
             read_only_no_unknowns=(
                 analysis.get("execution_mode") == "read_only"
@@ -580,18 +562,18 @@ def investigation_stream(
                 InvestigationPhase.SYNTHESIZE,
             )
             and not _recorded_resolves_initial_unknowns(
-                recorded_findings,
+                state.findings.recorded,
                 analysis,
                 repair_ids=semantic_repair_required_ids,
             )
         )
         if directive_prompt and not budget_floor_active:
-            messages.append({"role": "user", "content": directive_prompt})
+            state.messages.append({"role": "user", "content": directive_prompt})
         if budget_floor_active:
             current_phase = InvestigationPhase.DISCOVERY_REQUIRED
             current_tools = _phase_tools(current_phase, tools=tools)
-            current_tool_choice = "required"
-            messages.append({
+            state.control.current_tool_choice = "required"
+            state.messages.append({
                 "role": "user",
                 "content": _minimum_rounds_prompt(min_rounds - round_index),
             })
@@ -601,7 +583,7 @@ def investigation_stream(
             if isinstance(tool, dict)
         }
         try:
-            assistant = _call_model(provider, model, messages, tools=current_tools, tool_choice=current_tool_choice)
+            assistant = _call_model(provider, model, state.messages, tools=current_tools, tool_choice=state.control.current_tool_choice)
         except ValueError as exc:
             reason = str(exc)
             yield {"op": "update", "id": thinking_id, "patch": {
@@ -616,15 +598,15 @@ def investigation_stream(
             yield {"op": "update", "id": stage_id, "patch": {"state": "failed", "phase": "provider_error"}}
             return
         if usage := _usage_delta(pricing_rules, assistant.pop("_usage", {})):
-            _add_usage(usage_total, usage)
+            _add_usage(state.usage.total, usage)
             yield start_event(f"{run_id}-usage-{round_index}", "usage", {
                 "delta": usage,
-                "total": usage_total,
+                "total": state.usage.total,
             })
 
         tool_calls = assistant.get("tool_calls") or []
         content = _assistant_visible_text(assistant) or _tool_call_summary(tool_calls)
-        messages.append(_assistant_message(assistant))
+        state.messages.append(_assistant_message(assistant))
         yield {"op": "update", "id": thinking_id, "patch": {
             "text": content,
             "done": True,
@@ -632,7 +614,7 @@ def investigation_stream(
         }}
 
         if not tool_calls:
-            messages.append({"role": "user", "content": (
+            state.messages.append({"role": "user", "content": (
                 "You did not call a tool. Continue by making an actual tool call, "
                 "or call finish_investigation if the investigation is complete. "
                 "Do not describe intended tool use in prose."
@@ -649,7 +631,7 @@ def investigation_stream(
             if name == "load_skill":
                 _, output, _ = execute_skill_tool_call(raw_call)
                 yield from skill_runtime.pop_events()
-                messages.append({
+                state.messages.append({
                     "role": "tool",
                     "tool_call_id": call_id,
                     "content": output,
@@ -659,7 +641,7 @@ def investigation_stream(
                 arguments = _investigation_tool_arguments(
                     name,
                     function.get("arguments"),
-                    pending_observation_ids=pending_observation_ids,
+                    pending_observation_ids=state.observations.pending_ids,
                     resolution_required_ids=resolution_required_ids,
                 )
                 if name == "record_investigation_findings":
@@ -691,11 +673,11 @@ def investigation_stream(
                         ),
                     }
                 failed_key = _tool_cache_key(name, arguments)
-                if failed_key in failed_tool_cache:
+                if failed_key in state.caches.failed_tool:
                     error_name = name or "invalid"
                     if error_name not in round_error_names:
-                        repeated_tool_error_name = error_name
-                        repeated_tool_error_count += 1
+                        state.progress.repeated_tool_error_name = error_name
+                        state.progress.repeated_tool_error_count += 1
                         round_error_names.add(error_name)
                     output = json.dumps({
                         "error": {
@@ -717,22 +699,22 @@ def investigation_stream(
                         "output": output,
                         "deduplicated": True,
                     })
-                    messages.append({
+                    state.messages.append({
                         "role": "tool",
                         "tool_call_id": call_id,
                         "content": output,
                     })
-                    if repeated_tool_error_count >= MAX_REPEATED_TOOL_ERRORS:
-                        finalization_reason = (
+                    if state.progress.repeated_tool_error_count >= MAX_REPEATED_TOOL_ERRORS:
+                        state.control.finalization_reason = (
                             "Runtime stopped an identical failed tool call loop: "
                             f"{name or 'invalid'}."
                         )
-                        stop_investigation = True
+                        state.control.stop_investigation = True
                         break
                     continue
                 if name not in allowed_tool_names:
                     if _recorded_resolves_initial_unknowns(
-                        recorded_findings,
+                        state.findings.recorded,
                         analysis,
                         repair_ids=semantic_repair_required_ids,
                     ) and name != "finish_investigation":
@@ -753,15 +735,15 @@ def investigation_stream(
                             "input": json.dumps(arguments, ensure_ascii=False, indent=2),
                             "output": output,
                         })
-                        messages.append({
+                        state.messages.append({
                             "role": "tool",
                             "tool_call_id": call_id,
                             "content": output,
                         })
-                        already_resolved_error_count += 1
-                        if already_resolved_error_count >= 2:
+                        state.progress.already_resolved_error_count += 1
+                        if state.progress.already_resolved_error_count >= 2:
                             # Hard-lock: force the model to call finish_investigation
-                            current_tool_choice = {"type": "function", "function": {"name": "finish_investigation"}}
+                            state.control.current_tool_choice = {"type": "function", "function": {"name": "finish_investigation"}}
                         continue
                     if resolution_required_ids and not semantic_repair_required_ids:
                         # 非 REPAIR 场景：初始 unknowns 已有证据记录，先 resolve
@@ -793,15 +775,15 @@ def investigation_stream(
                             "input": json.dumps(arguments, ensure_ascii=False, indent=2),
                             "output": output,
                         })
-                        messages.append({
+                        state.messages.append({
                             "role": "tool",
                             "tool_call_id": call_id,
                             "content": output,
                         })
-                        already_resolved_error_count += 1
-                        if already_resolved_error_count >= 2:
+                        state.progress.already_resolved_error_count += 1
+                        if state.progress.already_resolved_error_count >= 2:
                             # Hard-lock: force the model to call finish_investigation
-                            current_tool_choice = {"type": "function", "function": {"name": "finish_investigation"}}
+                            state.control.current_tool_choice = {"type": "function", "function": {"name": "finish_investigation"}}
                         continue
                     output = _tool_blocked_error_json(
                         name,
@@ -815,12 +797,12 @@ def investigation_stream(
                         "input": json.dumps(arguments, ensure_ascii=False, indent=2),
                         "output": output,
                     })
-                    messages.append({
+                    state.messages.append({
                         "role": "tool",
                         "tool_call_id": call_id,
                         "content": output,
                     })
-                    messages.append({"role": "user", "content": (
+                    state.messages.append({"role": "user", "content": (
                         "The semantic quality gate rejected some resolutions; you are in "
                         "resolution-repair state. resolve_unknowns is unavailable here — "
                         "submit corrected, evidence-backed conclusions with "
@@ -842,41 +824,41 @@ def investigation_stream(
                         resolutions,
                         _analysis_with_recorded_unknowns(
                             analysis,
-                            recorded_findings,
+                            state.findings.recorded,
                         ),
                     )
                     _validate_resolution_refs(
                         resolutions,
-                        _beliefs(recorded_findings.get("beliefs")),
-                        observations,
+                        _beliefs(state.findings.recorded.get("beliefs")),
+                        state.observations.items,
                     )
-                    recorded_findings = _merge_recorded_findings(
-                        recorded_findings,
+                    state.findings.recorded = _merge_recorded_findings(
+                        state.findings.recorded,
                         {"resolutions": resolutions},
                     )
-                    recorded_findings = _bind_grounding_evidence(
-                        recorded_findings,
-                        observations,
+                    state.findings.recorded = _bind_grounding_evidence(
+                        state.findings.recorded,
+                        state.observations.items,
                     )
                     resolved_observation_ids = {
                         evidence_id
                         for resolution in resolutions
                         for evidence_id in resolution.get("evidence", [])
                     }
-                    pending_observation_ids = [
-                        item for item in pending_observation_ids
+                    state.observations.pending_ids = [
+                        item for item in state.observations.pending_ids
                         if item not in resolved_observation_ids
                     ]
-                    duplicate_no_progress_signature = ""
-                    duplicate_no_progress_count = 0
-                    duplicate_no_progress_total = 0
-                    force_synthesis_reason = ""
+                    state.progress.duplicate_no_progress_signature = ""
+                    state.progress.duplicate_no_progress_count = 0
+                    state.progress.duplicate_no_progress_total = 0
+                    state.control.force_synthesis_reason = ""
                     semantic_repair_required_ids = _semantic_repair_resolution_ids(
-                        recorded_findings,
+                        state.findings.recorded,
                     )
                     task_updates = _investigation_task_updates(
                         None,
-                        _initial_unknowns(_analysis_with_recorded_unknowns(analysis, recorded_findings)),
+                        _initial_unknowns(_analysis_with_recorded_unknowns(analysis, state.findings.recorded)),
                         resolutions,
                     )
                     output = json.dumps({
@@ -898,7 +880,7 @@ def investigation_stream(
                             "analysis_id": analysis.get("id", ""),
                             "items": task_updates,
                         })
-                    messages.append({
+                    state.messages.append({
                         "role": "tool",
                         "tool_call_id": call_id,
                         "content": output,
@@ -909,7 +891,7 @@ def investigation_stream(
                     if semantic_repair_required_ids and isinstance(arguments.get("resolutions"), list) and arguments["resolutions"]:
                         _require_repair_resolutions(arguments, semantic_repair_required_ids)
                     if (
-                        not pending_observation_ids
+                        not state.observations.pending_ids
                         and not resolution_required_ids
                         and not _has_finding_fields(arguments)
                     ):
@@ -927,47 +909,47 @@ def investigation_stream(
                             "input": json.dumps(arguments, ensure_ascii=False, indent=2),
                             "output": output,
                         })
-                        messages.append({
+                        state.messages.append({
                             "role": "tool",
                             "tool_call_id": call_id,
                             "content": output,
                         })
-                        already_resolved_error_count += 1
-                        if already_resolved_error_count >= 2:
+                        state.progress.already_resolved_error_count += 1
+                        if state.progress.already_resolved_error_count >= 2:
                             # Hard-lock: force the model to call finish_investigation
-                            current_tool_choice = {"type": "function", "function": {"name": "finish_investigation"}}
+                            state.control.current_tool_choice = {"type": "function", "function": {"name": "finish_investigation"}}
                         continue
                     if (
                         not _has_finding_fields(arguments)
                         or (
                             analysis.get("_canonicalized")
-                            and pending_observation_ids
-                            and not _record_consumes_observations(arguments, pending_observation_ids)
+                            and state.observations.pending_ids
+                            and not _record_consumes_observations(arguments, state.observations.pending_ids)
                         )
                     ):
                         arguments = yield from _record_findings_by_slots(
                             provider=provider,
                             model=model,
-                            messages=messages[:-1],
+                            messages=state.messages[:-1],
                             pricing_rules=pricing_rules,
-                            usage_total=usage_total,
+                            usage_total=state.usage.total,
                             run_id=run_id,
                             reason=str(arguments.get("reason") or "").strip(),
                             analysis=analysis,
-                            observations=observations,
-                            recorded_findings=recorded_findings,
-                            pending_observation_ids=pending_observation_ids,
+                            observations=state.observations.items,
+                            recorded_findings=state.findings.recorded,
+                            pending_observation_ids=state.observations.pending_ids,
                             required_resolution_ids=resolution_required_ids,
                         )
                     if _empty_discovery_recording(
                         arguments,
-                        pending_observation_ids,
+                        state.observations.pending_ids,
                         resolution_required_ids,
                     ):
                         output = json.dumps({
                             "recorded": False,
                             "code": "no_material_findings",
-                            "pending_observation_ids": pending_observation_ids,
+                            "pending_observation_ids": state.observations.pending_ids,
                             "next_action": "continue_discovery",
                         }, ensure_ascii=False)
                         yield start_event(call_id, "tool", {
@@ -978,58 +960,58 @@ def investigation_stream(
                             "input": json.dumps(arguments, ensure_ascii=False, indent=2),
                             "output": output,
                         })
-                        messages.append({
+                        state.messages.append({
                             "role": "tool",
                             "tool_call_id": call_id,
                             "content": output,
                         })
-                        already_resolved_error_count += 1
-                        if already_resolved_error_count >= 2:
+                        state.progress.already_resolved_error_count += 1
+                        if state.progress.already_resolved_error_count >= 2:
                             # Hard-lock: force the model to call finish_investigation
-                            current_tool_choice = {"type": "function", "function": {"name": "finish_investigation"}}
+                            state.control.current_tool_choice = {"type": "function", "function": {"name": "finish_investigation"}}
                         continue
                     _require_finding_fields(arguments)
-                    _reject_empty_repair(arguments, recorded_findings)
+                    _reject_empty_repair(arguments, state.findings.recorded)
                     # 剥离模型提交的 repair 诊断字段：repair_mode/semantic_missing
                     # 只能由 audit 质量门打标。REPAIR 阶段模型会从上下文把上一轮
                     # missing 原样抄进提交的 resolution，不清理则 merge 后
                     # _semantic_repair_resolution_ids 永远判该 unknown 待修，
                     # 即使证据已补齐也无限 REPAIR（U4 类死循环根因）。
                     arguments = _strip_submitted_repair_diagnostics(arguments)
-                    recorded_findings = _merge_recorded_findings(recorded_findings, arguments)
-                    recorded_findings = _bind_grounding_evidence(
-                        recorded_findings,
-                        observations,
+                    state.findings.recorded = _merge_recorded_findings(state.findings.recorded, arguments)
+                    state.findings.recorded = _bind_grounding_evidence(
+                        state.findings.recorded,
+                        state.observations.items,
                     )
-                    pending_observation_ids.clear()
-                    record_signature = _recorded_findings_signature(recorded_findings)
-                    if record_signature == last_record_signature:
-                        repeated_record_no_progress += 1
+                    state.observations.pending_ids.clear()
+                    record_signature = _recorded_findings_signature(state.findings.recorded)
+                    if record_signature == state.findings.last_record_signature:
+                        state.progress.repeated_record_no_progress += 1
                     else:
-                        repeated_record_no_progress = 0
-                        duplicate_no_progress_signature = ""
-                        duplicate_no_progress_count = 0
-                        duplicate_no_progress_total = 0
-                        force_synthesis_reason = ""
-                        force_discovery_ids = []
-                    last_record_signature = record_signature
-                    if repeated_record_no_progress:
-                        force_discovery_ids = _unknowns_missing_project_evidence(
-                            recorded_findings,
-                            observations,
+                        state.progress.repeated_record_no_progress = 0
+                        state.progress.duplicate_no_progress_signature = ""
+                        state.progress.duplicate_no_progress_count = 0
+                        state.progress.duplicate_no_progress_total = 0
+                        state.control.force_synthesis_reason = ""
+                        state.control.force_discovery_ids = []
+                    state.findings.last_record_signature = record_signature
+                    if state.progress.repeated_record_no_progress:
+                        state.control.force_discovery_ids = _unknowns_missing_project_evidence(
+                            state.findings.recorded,
+                            state.observations.items,
                             analysis,
                         )
-                    if repeated_record_no_progress >= MAX_REPEATED_RECORD_NO_PROGRESS:
-                        finalization_reason = (
+                    if state.progress.repeated_record_no_progress >= MAX_REPEATED_RECORD_NO_PROGRESS:
+                        state.control.finalization_reason = (
                             "Runtime stopped after repeated record_investigation_findings "
                             "calls produced no semantic progress."
                         )
-                        stop_investigation = True
-                    task_updates = _record_task_updates(recorded_findings)
+                        state.control.stop_investigation = True
+                    task_updates = _record_task_updates(state.findings.recorded)
                     output = json.dumps({
                         "recorded": True,
-                        "counts": {field: len(recorded_findings.get(field, [])) for field in FINDING_FIELDS},
-                        **({"stalled": True} if stop_investigation else {}),
+                        "counts": {field: len(state.findings.recorded.get(field, [])) for field in FINDING_FIELDS},
+                        **({"stalled": True} if state.control.stop_investigation else {}),
                     }, ensure_ascii=False)
                     yield start_event(call_id, "tool", {
                         "name": name,
@@ -1044,28 +1026,28 @@ def investigation_stream(
                             "analysis_id": analysis.get("id", ""),
                             "items": task_updates,
                         })
-                    messages.append({
+                    state.messages.append({
                         "role": "tool",
                         "tool_call_id": call_id,
                         "content": output,
                     })
-                    if stop_investigation:
+                    if state.control.stop_investigation:
                         yield start_event(f"{run_id}-safety-record-no-progress", "safety_stop", {
                             "reason": "record_no_progress",
-                            "message": finalization_reason,
+                            "message": state.control.finalization_reason,
                             "tool": name,
                         })
                         break
                     continue
                 if name == "finish_investigation":
                     _require_control_reason(arguments, name)
-                    recorded_findings = _apply_direct_resolution_gate(
-                        recorded_findings,
-                        observations,
+                    state.findings.recorded = _apply_direct_resolution_gate(
+                        state.findings.recorded,
+                        state.observations.items,
                         strict_grounding=semantic_gate_enabled and _analysis_requests_implementation(analysis),
                     )
                     semantic_repair_required_ids = (
-                        _semantic_repair_resolution_ids(recorded_findings)
+                        _semantic_repair_resolution_ids(state.findings.recorded)
                         if semantic_gate_enabled
                         else set()
                     )
@@ -1074,65 +1056,65 @@ def investigation_stream(
                         and
                         analysis.get("_canonicalized")
                         and not _audit_covers_resolutions(
-                            last_quality_audit,
-                            recorded_findings,
+                            state.findings.last_quality_audit,
+                            state.findings.recorded,
                             analysis,
                         )
                     ):
-                        last_quality_audit = yield from _audit_recorded_findings(
+                        state.findings.last_quality_audit = yield from _audit_recorded_findings(
                             provider=provider,
                             model=model,
                             messages=[
-                                item for item in messages[:-1]
+                                item for item in state.messages[:-1]
                                 if item.get("role") != "system"
                             ],
                             pricing_rules=pricing_rules,
-                            usage_total=usage_total,
+                            usage_total=state.usage.total,
                             run_id=run_id,
                             analysis=analysis,
-                            observations=observations,
-                            recorded_findings=recorded_findings,
-                            audit_cache=audit_cache,
+                            observations=state.observations.items,
+                            recorded_findings=state.findings.recorded,
+                            audit_cache=state.caches.audit,
                         )
-                        recorded_findings, requests, questions = _apply_investigation_audit(
-                            recorded_findings,
-                            last_quality_audit,
-                            observations=observations,
+                        state.findings.recorded, requests, questions = _apply_investigation_audit(
+                            state.findings.recorded,
+                            state.findings.last_quality_audit,
+                            observations=state.observations.items,
                             strict_grounding=_analysis_requests_implementation(analysis),
                             allow_verification=subagent_enabled and _analysis_requests_implementation(analysis),
                             analysis=analysis,
                         )
                         semantic_repair_required_ids = _semantic_repair_resolution_ids(
-                            recorded_findings,
+                            state.findings.recorded,
                         )
-                        attempted = attempted_verifications | {
+                        attempted = state.verification.attempted | {
                             (item.get("unknown_id"), item.get("hypothesis"))
-                            for item in verification_queue
+                            for item in state.verification.queue
                         }
-                        verification_queue.extend(
+                        state.verification.queue.extend(
                             item for item in requests
                             if (item.get("unknown_id"), item.get("hypothesis")) not in attempted
-                            and _unknown_blocks_finish(item.get("unknown_id"), analysis, recorded_findings)
+                            and _unknown_blocks_finish(item.get("unknown_id"), analysis, state.findings.recorded)
                         )
-                        clearify_questions.update({
+                        state.verification.clearify_questions.update({
                             unknown_id: question
                             for unknown_id, question in questions.items()
-                            if _unknown_blocks_finish(unknown_id, analysis, recorded_findings)
+                            if _unknown_blocks_finish(unknown_id, analysis, state.findings.recorded)
                         })
                     pending_resolution_statuses = {
                         str(item.get("status") or "")
-                        for item in recorded_findings.get("resolutions", [])
+                        for item in state.findings.recorded.get("resolutions", [])
                         if isinstance(item, dict)
-                        and _unknown_blocks_finish(item.get("unknown_id"), analysis, recorded_findings)
+                        and _unknown_blocks_finish(item.get("unknown_id"), analysis, state.findings.recorded)
                     }
                     if (
-                        verification_queue
-                        or clearify_questions
+                        state.verification.queue
+                        or state.verification.clearify_questions
                         or pending_resolution_statuses & {"partially_resolved", "needs_clearify"}
                     ):
                         repair_payload = _semantic_repair_payload(
-                            recorded_findings,
-                            _semantic_repair_resolution_ids(recorded_findings),
+                            state.findings.recorded,
+                            _semantic_repair_resolution_ids(state.findings.recorded),
                         )
                         output = json.dumps({
                             "finished": False,
@@ -1140,46 +1122,46 @@ def investigation_stream(
                             "repair": repair_payload,
                             "next_action": (
                                 "clearify"
-                                if "needs_clearify" in pending_resolution_statuses or clearify_questions
+                                if "needs_clearify" in pending_resolution_statuses or state.verification.clearify_questions
                                 else "verify_hypothesis"
-                                if verification_queue
+                                if state.verification.queue
                                 else "continue_investigation"
                             ),
                         }, ensure_ascii=False)
-                        messages.append({
+                        state.messages.append({
                             "role": "tool",
                             "tool_call_id": call_id,
                             "content": output,
                         })
-                        messages.append({"role": "user", "content": (
+                        state.messages.append({"role": "user", "content": (
                             "The semantic quality gate did not authorize every resolution. "
                             "Follow its next action; do not finish or reuse the rejected conclusion."
                         )})
                         break
-                    final = _finish_payload(
+                    state.control.final = _finish_payload(
                         _finish_arguments(
-                            recorded_findings,
+                            state.findings.recorded,
                             arguments,
                             prefer_finish_summary=not _analysis_requests_implementation(analysis),
                         ),
                         analysis=analysis,
-                        observations=observations,
+                        observations=state.observations.items,
                         repair_conflicts=True,
                         workspace_dir=workspace_dir,
                     )
-                    messages.append({
+                    state.messages.append({
                         "role": "tool",
                         "tool_call_id": call_id,
-                        "content": json.dumps(final, ensure_ascii=False),
+                        "content": json.dumps(state.control.final, ensure_ascii=False),
                     })
-                    if final.get("resolution_repair"):
-                        finalization_reason = "Investigation findings need explicit resolutions before finalizing."
-                        messages.append({
+                    if state.control.final.get("resolution_repair"):
+                        state.control.finalization_reason = "Investigation findings need explicit resolutions before finalizing."
+                        state.messages.append({
                             "role": "user",
-                            "content": _resolution_repair_prompt(final["resolution_repair"]),
+                            "content": _resolution_repair_prompt(state.control.final["resolution_repair"]),
                         })
-                        final = None
-                        stop_investigation = True
+                        state.control.final = None
+                        state.control.stop_investigation = True
                     break
                 if name == "clearify":
                     if clearify_unknown:
@@ -1197,15 +1179,15 @@ def investigation_stream(
                             "skipped": True,
                             "reason": "These clearify unknowns were already asked in the current round.",
                         }, ensure_ascii=False)
-                        messages.append({
+                        state.messages.append({
                             "role": "tool",
                             "tool_call_id": call_id,
                             "content": output,
                         })
-                        already_resolved_error_count += 1
-                        if already_resolved_error_count >= 2:
+                        state.progress.already_resolved_error_count += 1
+                        if state.progress.already_resolved_error_count >= 2:
                             # Hard-lock: force the model to call finish_investigation
-                            current_tool_choice = {"type": "function", "function": {"name": "finish_investigation"}}
+                            state.control.current_tool_choice = {"type": "function", "function": {"name": "finish_investigation"}}
                         continue
                     _validate_tool_contract(
                         name,
@@ -1214,12 +1196,12 @@ def investigation_stream(
                         orientation=bool(arguments.get("orientation", False)),
                         analysis=_analysis_with_recorded_unknowns(
                             analysis,
-                            recorded_findings,
+                            state.findings.recorded,
                         ),
                     )
                     answered_by_previous_round = {
                         str(item.get("unknown_id") or "").strip()
-                        for item in recorded_findings.get("resolutions", [])
+                        for item in state.findings.recorded.get("resolutions", [])
                         if isinstance(item, dict)
                         and (
                             item.get("reason") in (CLEARIFY_RESOLUTION_REASON, CLEARIFY_UNRESOLVED_REASON)
@@ -1242,15 +1224,15 @@ def investigation_stream(
                             "skipped": True,
                             "reason": "These clearify unknowns already have authoritative user answers.",
                         }, ensure_ascii=False)
-                        messages.append({
+                        state.messages.append({
                             "role": "tool",
                             "tool_call_id": call_id,
                             "content": output,
                         })
-                        already_resolved_error_count += 1
-                        if already_resolved_error_count >= 2:
+                        state.progress.already_resolved_error_count += 1
+                        if state.progress.already_resolved_error_count >= 2:
                             # Hard-lock: force the model to call finish_investigation
-                            current_tool_choice = {"type": "function", "function": {"name": "finish_investigation"}}
+                            state.control.current_tool_choice = {"type": "function", "function": {"name": "finish_investigation"}}
                         continue
                     question_id = clearify_runtime.create_pending()
                     yield start_event(question_id, "user_question", _clearify_question(
@@ -1261,16 +1243,16 @@ def investigation_stream(
                     answer = clearify_runtime.wait(question_id)
                     output = _clearify_tool_result(answer)
                     resolution_records = _clearify_resolution_records(arguments, answer)
-                    repeated_tool_error_name = ""
-                    repeated_tool_error_count = 0
+                    state.progress.repeated_tool_error_name = ""
+                    state.progress.repeated_tool_error_count = 0
                     if resolution_records:
                         for resolution in resolution_records:
                             asked_clearify_ids.add(resolution["unknown_id"])
-                            for question_id in list(clearify_questions):
+                            for question_id in list(state.verification.clearify_questions):
                                 if _same_unknown_id(question_id, resolution["unknown_id"]):
-                                    clearify_questions.pop(question_id, None)
-                        recorded_findings = _merge_recorded_findings(
-                            recorded_findings,
+                                    state.verification.clearify_questions.pop(question_id, None)
+                        state.findings.recorded = _merge_recorded_findings(
+                            state.findings.recorded,
                             {"resolutions": resolution_records},
                         )
                     yield start_event(call_id, "tool", {
@@ -1286,11 +1268,11 @@ def investigation_stream(
                             "analysis_id": analysis.get("id", ""),
                             "items": _investigation_task_updates(
                                 None,
-                                _initial_unknowns(_analysis_with_recorded_unknowns(analysis, recorded_findings)),
+                                _initial_unknowns(_analysis_with_recorded_unknowns(analysis, state.findings.recorded)),
                                 resolution_records,
                             ),
                         })
-                    messages.append({
+                    state.messages.append({
                         "role": "tool",
                         "tool_call_id": call_id,
                         "content": output,
@@ -1298,7 +1280,7 @@ def investigation_stream(
                     continue
                 cache_key = _tool_cache_key(name, arguments)
                 if name == "read":
-                    cached_output = _read_from_file_cache(arguments, read_file_cache)
+                    cached_output = _read_from_file_cache(arguments, state.caches.read_file)
                     if cached_output is not None:
                         output = cached_output
                         yield start_event(call_id, registry.event_type(name), {
@@ -1309,36 +1291,36 @@ def investigation_stream(
                             "input": json.dumps(arguments, ensure_ascii=False, indent=2),
                             "output": output,
                         })
-                        messages.append({
+                        state.messages.append({
                             "role": "tool",
                             "tool_call_id": call_id,
                             "content": output,
                         })
                         continue
-                if cache_key in tool_cache:
-                    cached_observation_id = tool_cache_observation_ids.get(cache_key, "")
-                    duplicate_no_progress_total += 1
-                    if duplicate_no_progress_signature == cache_key:
-                        duplicate_no_progress_count += 1
+                if cache_key in state.caches.tool:
+                    cached_observation_id = state.caches.tool_observation_ids.get(cache_key, "")
+                    state.progress.duplicate_no_progress_total += 1
+                    if state.progress.duplicate_no_progress_signature == cache_key:
+                        state.progress.duplicate_no_progress_count += 1
                     else:
-                        duplicate_no_progress_signature = cache_key
-                        duplicate_no_progress_count = 1
+                        state.progress.duplicate_no_progress_signature = cache_key
+                        state.progress.duplicate_no_progress_count = 1
                     next_action = (
                         "resolve_unknowns"
-                        if pending_observation_ids or cached_observation_id
+                        if state.observations.pending_ids or cached_observation_id
                         else "choose_different_evidence"
                     )
                     output = _duplicate_no_progress_json(
                         name,
-                        duplicate_count=duplicate_no_progress_total,
+                        duplicate_count=state.progress.duplicate_no_progress_total,
                         cached_observation_id=cached_observation_id,
                         required_next_action=next_action,
                     )
-                    if duplicate_no_progress_count >= MAX_DUPLICATE_NO_PROGRESS:
-                        force_synthesis_reason = _duplicate_no_progress_prompt(
+                    if state.progress.duplicate_no_progress_count >= MAX_DUPLICATE_NO_PROGRESS:
+                        state.control.force_synthesis_reason = _duplicate_no_progress_prompt(
                             name,
                             cached_observation_id,
-                            pending_observation_ids,
+                            state.observations.pending_ids,
                         )
                     yield start_event(call_id, registry.event_type(name), {
                         "name": name,
@@ -1350,20 +1332,20 @@ def investigation_stream(
                         "deduplicated": True,
                         "cached_observation_id": cached_observation_id,
                     })
-                    messages.append({
+                    state.messages.append({
                         "role": "tool",
                         "tool_call_id": call_id,
                         "content": output,
                     })
-                    if duplicate_no_progress_total >= MAX_REPEATED_TOOL_ERRORS:
-                        finalization_reason = (
+                    if state.progress.duplicate_no_progress_total >= MAX_REPEATED_TOOL_ERRORS:
+                        state.control.finalization_reason = (
                             "Runtime stopped after repeated duplicate no-progress tool calls: "
                             f"{name or 'invalid'}."
                         )
-                        stop_investigation = True
+                        state.control.stop_investigation = True
                         yield start_event(f"{run_id}-safety-duplicate-no-progress", "safety_stop", {
                             "reason": "duplicate_no_progress",
-                            "message": finalization_reason,
+                            "message": state.control.finalization_reason,
                             "tool": name or "invalid",
                             "cached_observation_id": cached_observation_id,
                         })
@@ -1376,7 +1358,7 @@ def investigation_stream(
                     workspace_dir,
                     _analysis_with_recorded_unknowns(
                         analysis,
-                        recorded_findings,
+                        state.findings.recorded,
                     ),
                     relax_discovery_contract=(
                         current_phase == InvestigationPhase.REPAIR
@@ -1384,33 +1366,33 @@ def investigation_stream(
                     ),
                 )
                 if name == "read":
-                    _cache_read_full_text(arguments, output, read_file_cache)
-                repeated_tool_error_name = ""
-                repeated_tool_error_count = 0
-                tool_cache[cache_key] = output
+                    _cache_read_full_text(arguments, output, state.caches.read_file)
+                state.progress.repeated_tool_error_name = ""
+                state.progress.repeated_tool_error_count = 0
+                state.caches.tool[cache_key] = output
                 observation = _tool_observation(name, call_id, output)
-                observations.append(observation)
-                tool_cache_observation_ids[cache_key] = observation["id"]
-                pending_observation_ids.append(observation["id"])
-                duplicate_no_progress_signature = ""
-                duplicate_no_progress_count = 0
-                duplicate_no_progress_total = 0
-                force_synthesis_reason = ""
-                force_discovery_ids = []
+                state.observations.items.append(observation)
+                state.caches.tool_observation_ids[cache_key] = observation["id"]
+                state.observations.pending_ids.append(observation["id"])
+                state.progress.duplicate_no_progress_signature = ""
+                state.progress.duplicate_no_progress_count = 0
+                state.progress.duplicate_no_progress_total = 0
+                state.control.force_synthesis_reason = ""
+                state.control.force_discovery_ids = []
                 if verification_request and _is_hypothesis_verifier_call(name, arguments):
-                    attempted_verifications.add((
+                    state.verification.attempted.add((
                         verification_request["unknown_id"],
                         verification_request["hypothesis"],
                     ))
-                    verification_queue.pop(0)
+                    state.verification.queue.pop(0)
             except Exception as exc:
-                finish_evidence_blocked = False
+                state.control.finish_evidence_blocked = False
                 if (
                     name == "finish_investigation"
                     and isinstance(exc, ValueError)
                     and ("references file" in str(exc) or "claims behavior" in str(exc))
                 ):
-                    finish_evidence_blocked = True
+                    state.control.finish_evidence_blocked = True
                 raw_arguments = function.get("arguments") or "{}"
                 partial_arguments = _partial_tool_arguments(raw_arguments)
                 if name == "record_investigation_findings":
@@ -1419,39 +1401,39 @@ def investigation_stream(
                     partial_arguments = _resolve_unknown_arguments(partial_arguments)
                     salvaged_resolutions = _salvage_resolution_candidates(
                         partial_arguments,
-                        observations,
+                        state.observations.items,
                     )
                     if salvaged_resolutions:
-                        recorded_findings = _merge_recorded_findings(
-                            recorded_findings,
+                        state.findings.recorded = _merge_recorded_findings(
+                            state.findings.recorded,
                             {"resolutions": salvaged_resolutions},
                         )
-                        recorded_findings = _bind_grounding_evidence(
-                            recorded_findings,
-                            observations,
+                        state.findings.recorded = _bind_grounding_evidence(
+                            state.findings.recorded,
+                            state.observations.items,
                         )
                 if name == "record_investigation_findings" and _has_finding_fields(partial_arguments):
-                    recorded_findings = _merge_recorded_findings(recorded_findings, partial_arguments)
-                    pending_observation_ids.clear()
-                    last_quality_audit = {}
+                    state.findings.recorded = _merge_recorded_findings(state.findings.recorded, partial_arguments)
+                    state.observations.pending_ids.clear()
+                    state.findings.last_quality_audit = {}
                 output = _tool_repair_error_json(
                     exc,
                     name,
                     raw_arguments,
                     partial_arguments,
-                    observations=observations,
+                    observations=state.observations.items,
                 )
                 error_name = name or "invalid"
-                failed_tool_cache[_tool_cache_key(
+                state.caches.failed_tool[_tool_cache_key(
                     error_name,
                     arguments or partial_arguments,
                 )] = output
                 if error_name not in round_error_names:
-                    if error_name == repeated_tool_error_name:
-                        repeated_tool_error_count += 1
+                    if error_name == state.progress.repeated_tool_error_name:
+                        state.progress.repeated_tool_error_count += 1
                     else:
-                        repeated_tool_error_name = error_name
-                        repeated_tool_error_count = 1
+                        state.progress.repeated_tool_error_name = error_name
+                        state.progress.repeated_tool_error_count = 1
                     round_error_names.add(error_name)
                 yield start_event(call_id, registry.event_type(name), {
                     "name": name or "invalid",
@@ -1461,73 +1443,73 @@ def investigation_stream(
                     "input": raw_arguments,
                     "output": output,
                 })
-                if error_name == "finish_investigation" and not finish_evidence_blocked:
+                if error_name == "finish_investigation" and not state.control.finish_evidence_blocked:
                     # finish 参数错误（requires reason 等）后模型倾向停止，而停止会走自动
                     # finalize 吞掉失败（不完整的 investigation 流向下游导致
                     # patch_planning_failed）。hard-lock：参数类失败第一次就强制模型
                     # 补参数重试 finish。evidence 类失败（references file/claims behavior）
                     # 不强制——模型需要 read 补证据，锁定 finish 会死锁。
-                    current_tool_choice = {"type": "function", "function": {"name": "finish_investigation"}}
-                if repeated_tool_error_count >= MAX_REPEATED_TOOL_ERRORS:
-                    finalization_reason = (
+                    state.control.current_tool_choice = {"type": "function", "function": {"name": "finish_investigation"}}
+                if state.progress.repeated_tool_error_count >= MAX_REPEATED_TOOL_ERRORS:
+                    state.control.finalization_reason = (
                         "Runtime recovered after repeated tool argument errors: "
                         f"{name or 'invalid'} failed with {exc}."
                     )
                     if name == "record_investigation_findings":
-                        final = _runtime_recovered_investigation(
-                            finalization_reason,
+                        state.control.final = _runtime_recovered_investigation(
+                            state.control.finalization_reason,
                             analysis,
-                            observations,
-                            recorded_findings,
+                            state.observations.items,
+                            state.findings.recorded,
                         )
-                    stop_investigation = True
-            messages.append({
+                    state.control.stop_investigation = True
+            state.messages.append({
                 "role": "tool",
                 "tool_call_id": call_id,
                 "content": output,
             })
-            if stop_investigation:
+            if state.control.stop_investigation:
                 yield start_event(f"{run_id}-safety-repeated-tool-error", "safety_stop", {
                     "reason": "repeated_tool_error",
-                    "message": finalization_reason,
+                    "message": state.control.finalization_reason,
                     "tool": name or "invalid",
                     "visibility": "diagnostic",
                 })
                 break
-        if final is not None:
+        if state.control.final is not None:
             break
-        if stop_investigation:
+        if state.control.stop_investigation:
             break
     else:
-        finalization_reason = "Investigation step limit reached. Summarizing observed facts."
+        state.control.finalization_reason = "Investigation step limit reached. Summarizing observed facts."
 
-    if final is None and stop_investigation:
-        final = _runtime_recovered_investigation(
-            finalization_reason,
+    if state.control.final is None and state.control.stop_investigation:
+        state.control.final = _runtime_recovered_investigation(
+            state.control.finalization_reason,
             analysis,
-            observations,
-            recorded_findings,
+            state.observations.items,
+            state.findings.recorded,
         )
-    elif final is None:
-        final = yield from _finalize_investigation(
+    elif state.control.final is None:
+        state.control.final = yield from _finalize_investigation(
             provider=provider,
             model=model,
-            messages=messages,
+            messages=state.messages,
             pricing_rules=pricing_rules,
-            usage_total=usage_total,
+            usage_total=state.usage.total,
             run_id=run_id,
             analysis=analysis,
-            observations=observations,
-            recorded_findings=recorded_findings,
-            audit_cache=audit_cache,
-            reason=finalization_reason,
+            observations=state.observations.items,
+            recorded_findings=state.findings.recorded,
+            audit_cache=state.caches.audit,
+            reason=state.control.finalization_reason,
             workspace_dir=workspace_dir,
         )
-    if last_quality_audit:
-        final["quality_audit"] = last_quality_audit
-    final["observations"] = _final_observations(
-        observations + [
-            item for item in final.get("observations", [])
+    if state.findings.last_quality_audit:
+        state.control.final["quality_audit"] = state.findings.last_quality_audit
+    state.control.final["observations"] = _final_observations(
+        state.observations.items + [
+            item for item in state.control.final.get("observations", [])
             if isinstance(item, dict)
         ],
         preserve_grounding_evidence=preserve_grounding_evidence,
@@ -1536,22 +1518,22 @@ def investigation_stream(
     implementation_intent = _analysis_requests_implementation(analysis)
     yield {"op": "update", "id": stage_id, "patch": {
         "state": "done",
-        "phase": "patch_planning_ready" if final.get("ready_for_patch_planning") and implementation_intent else "done",
+        "phase": "patch_planning_ready" if state.control.final.get("ready_for_patch_planning") and implementation_intent else "done",
     }}
-    step = _step_result(final, implementation_intent=implementation_intent)
-    final["step_result"] = step
+    step = _step_result(state.control.final, implementation_intent=implementation_intent)
+    state.control.final["step_result"] = step
     yield start_event(f"{run_id}-step-result", "step_result", step)
-    if final.get("task_updates"):
+    if state.control.final.get("task_updates"):
         yield start_event(f"{run_id}-task-update", "task_update", {
             "analysis_id": analysis.get("id", ""),
-            "items": final["task_updates"],
+            "items": state.control.final["task_updates"],
         })
     yield start_event(f"{run_id}-output", "output", {
-        "content": _summary(final),
+        "content": _summary(state.control.final),
         "streaming": False,
-        "visibility": "diagnostic" if final.get("runtime_recovered") else "default",
+        "visibility": "diagnostic" if state.control.final.get("runtime_recovered") else "default",
     })
-    yield {"op": "done", "investigation": final}
+    yield {"op": "done", "investigation": state.control.final}
 
 
 def _investigation_tools() -> list[dict]:
