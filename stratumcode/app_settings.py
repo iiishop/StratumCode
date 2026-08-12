@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import time
+from collections.abc import Callable
+from dataclasses import dataclass
 
 from . import db
 
@@ -294,65 +296,151 @@ def _init() -> None:
         )
 
 
-def get_output_language() -> str:
-    value = _get("output_language", DEFAULT_OUTPUT_LANGUAGE)
-    return value if value in LANGUAGES else DEFAULT_OUTPUT_LANGUAGE
+@dataclass(frozen=True)
+class _SettingSpec:
+    """声明式设置定义：key + 类型 + 校验规则。一个 spec 生成 getter/setter 对。"""
+
+    key: str
+    kind: str = "string"                    # string / enum / int / float
+    default: object = ""
+    allowed: frozenset | None = None        # enum 白名单
+    clamp: tuple | None = None              # 数值 (min, max)
+    registry: dict | None = None            # limits 注册表（round/task/output/effort）
+    registry_path: Callable | None = None   # (*keys) -> limits dict（effort 两级注册表）
+    error_name: str = "setting"
+    error_message: str = ""                 # 覆盖通用错误消息（保留历史文案）
 
 
-def save_output_language(language: str) -> str:
-    value = str(language or "").strip().casefold()
-    if value not in LANGUAGES:
-        raise ValueError("output_language must be en, zh, or ja")
-    _save("output_language", value)
-    return value
+def _make_accessor(spec: _SettingSpec) -> tuple[Callable, Callable]:
+    """通用 getter/setter 工厂。
 
+    getter(*keys)：keys 为空 → 固定 key；单 key → registry；双 key → registry_path + 动态存储 key。
+    setter(*args)：args[:-1] 是 keys，args[-1] 是 value。
+    """
 
-def get_font_scale() -> float:
-    try:
-        value = float(_get("font_scale", str(DEFAULT_FONT_SCALE)))
-    except (TypeError, ValueError):
-        value = DEFAULT_FONT_SCALE
-    return min(1.3, max(0.8, value))
+    def _limits_for(keys: tuple) -> dict:
+        if spec.registry_path:
+            return spec.registry_path(*keys)
+        return spec.registry or {}
 
+    def _storage_key(keys: tuple) -> str:
+        if keys:
+            if spec.registry_path:
+                return f"effort.{_effort_key(keys[0])}.{keys[1]}"
+            return keys[0]
+        return spec.key
 
-def save_font_scale(value) -> float:
-    try:
-        scale = float(value)
-    except (TypeError, ValueError) as exc:
-        raise ValueError("font_scale must be a number") from exc
-    scale = min(1.3, max(0.8, scale))
-    _save("font_scale", str(scale))
-    return scale
+    def getter(*keys: str):
+        limits = _limits_for(keys)
+        skey = _storage_key(keys)
+        if spec.registry is not None or spec.registry_path is not None:
+            limit_key = keys[-1]
+            if limit_key not in limits:
+                raise ValueError(f"unknown {spec.error_name}: {'.'.join(keys)}")
+            default = str(limits[limit_key].get("default", 0))
+        else:
+            default = str(spec.default)
+        raw = _get(skey, default)
+        if spec.kind == "enum":
+            return raw if spec.allowed is not None and raw in spec.allowed else spec.default
+        if spec.kind == "int":
+            try:
+                value = max(0, int(raw))
+            except (TypeError, ValueError):
+                value = int(default)
+            return value
+        if spec.kind == "float":
+            try:
+                value = float(raw)
+            except (TypeError, ValueError):
+                value = float(default)
+            if spec.clamp:
+                lo, hi = spec.clamp
+                value = min(hi, max(lo, value))
+            return value
+        return raw
 
-
-def _make_limit_accessors(registry: dict, *, label: str) -> tuple[object, object]:
-    """整数限制型设置的 getter/setter 工厂（round/task/output limit 共用模板）。"""
-
-    def getter(key: str) -> int:
-        if key not in registry:
-            raise ValueError(f"unknown {label} setting: {key}")
-        default = str(registry[key].get("default", 0))
-        try:
-            return max(0, int(_get(key, default)))
-        except (TypeError, ValueError):
-            return int(default)
-
-    def setter(key: str, value) -> int:
-        if key not in registry:
-            raise ValueError(f"unknown {label} setting: {key}")
-        try:
-            limit = max(0, int(value))
-        except (TypeError, ValueError) as exc:
-            raise ValueError(f"{key} must be a non-negative integer") from exc
-        _save(key, str(limit))
-        return limit
+    def setter(*args):
+        if not args:
+            raise ValueError("missing value")
+        *keys, value = args
+        limits = _limits_for(keys)
+        skey = _storage_key(keys)
+        if spec.registry is not None or spec.registry_path is not None:
+            limit_key = keys[-1]
+            if limit_key not in limits:
+                raise ValueError(f"unknown {spec.error_name}: {'.'.join(keys)}")
+        if spec.kind == "enum":
+            normalized = str(value or "").strip().casefold()
+            if spec.allowed is not None and normalized not in spec.allowed:
+                raise ValueError(
+                    spec.error_message or f"{spec.error_name} must be one of: {', '.join(sorted(spec.allowed))}"
+                )
+        elif spec.kind == "int":
+            try:
+                normalized = max(0, int(value))
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    spec.error_message or f"{spec.error_name} must be a non-negative integer"
+                ) from exc
+        elif spec.kind == "float":
+            try:
+                normalized = float(value)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(spec.error_message or f"{spec.error_name} must be a number") from exc
+            if spec.clamp:
+                lo, hi = spec.clamp
+                normalized = min(hi, max(lo, normalized))
+        else:
+            normalized = str(value or "").strip()
+        _save(skey, str(normalized))
+        return normalized
 
     return getter, setter
 
 
-get_round_limit, save_round_limit = _make_limit_accessors(ROUND_LIMITS, label="round limit")
-get_task_limit, save_task_limit = _make_limit_accessors(TASK_LIMITS, label="task limit")
-get_output_limit, save_output_limit = _make_limit_accessors(OUTPUT_LIMITS, label="output limit")
+get_output_language, save_output_language = _make_accessor(_SettingSpec(
+    key="output_language",
+    kind="enum",
+    default=DEFAULT_OUTPUT_LANGUAGE,
+    allowed=frozenset(LANGUAGES),
+    error_name="output_language",
+    error_message="output_language must be en, zh, or ja",
+))
+
+get_font_scale, save_font_scale = _make_accessor(_SettingSpec(
+    key="font_scale",
+    kind="float",
+    default=DEFAULT_FONT_SCALE,
+    clamp=(0.8, 1.3),
+    error_name="font_scale",
+    error_message="font_scale must be a number",
+))
+
+get_round_limit, save_round_limit = _make_accessor(_SettingSpec(
+    key="round_limits",
+    kind="int",
+    registry=ROUND_LIMITS,
+    error_name="round limit setting",
+))
+get_task_limit, save_task_limit = _make_accessor(_SettingSpec(
+    key="task_limits",
+    kind="int",
+    registry=TASK_LIMITS,
+    error_name="task limit setting",
+))
+get_output_limit, save_output_limit = _make_accessor(_SettingSpec(
+    key="output_limits",
+    kind="int",
+    registry=OUTPUT_LIMITS,
+    error_name="output limit setting",
+))
+get_effort_profile_limit, save_effort_profile_limit = _make_accessor(_SettingSpec(
+    key="effort",
+    kind="int",
+    registry_path=lambda profile_key, key: EFFORT_PROFILES[_effort_key(profile_key)]["limits"],
+    error_name="effort profile setting",
+))
 
 
 def get_effort_profile(effort: str | None) -> dict:
@@ -370,30 +458,6 @@ def get_effort_profile(effort: str | None) -> dict:
         "subagent_enabled": meta["subagent_enabled"],
         **limits,
     }
-
-
-def get_effort_profile_limit(profile: str, key: str) -> int:
-    profile_key = _effort_key(profile)
-    limits = EFFORT_PROFILES[profile_key]["limits"]
-    if key not in limits:
-        raise ValueError(f"unknown effort profile setting: {profile_key}.{key}")
-    default = str(limits[key]["default"])
-    try:
-        return max(0, int(_get(_effort_setting_key(profile_key, key), default)))
-    except (TypeError, ValueError):
-        return int(default)
-
-
-def save_effort_profile_limit(profile: str, key: str, value) -> int:
-    profile_key = _effort_key(profile)
-    if key not in EFFORT_PROFILES[profile_key]["limits"]:
-        raise ValueError(f"unknown effort profile setting: {profile_key}.{key}")
-    try:
-        limit = max(0, int(value))
-    except (TypeError, ValueError) as exc:
-        raise ValueError(f"{profile_key}.{key} must be a non-negative integer") from exc
-    _save(_effort_setting_key(profile_key, key), str(limit))
-    return limit
 
 
 def to_json() -> dict:
