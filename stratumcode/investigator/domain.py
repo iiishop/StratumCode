@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from collections.abc import Callable
 import json
 import re
 
@@ -16,21 +15,6 @@ from .constants import (
 )
 from .ids import _find_by_unknown_id, _normalize_unknown_id, _same_unknown_id, _unknowns
 from .util import _dedupe_strings, _skip_ws, _string_list
-
-
-def _missing_investigation_audit(*_args: object, **_kwargs: object) -> tuple[dict, list[dict], dict[str, str]]:
-    raise RuntimeError("investigation audit implementation is not registered")
-
-
-_apply_investigation_audit_impl = _missing_investigation_audit
-
-
-InvestigationAuditImpl = Callable[..., tuple[dict, list[dict], dict[str, str]]]
-
-
-def _set_investigation_audit_impl(impl: InvestigationAuditImpl) -> None:
-    global _apply_investigation_audit_impl
-    _apply_investigation_audit_impl = impl
 
 
 def _analysis_is_read_only(analysis: dict | None) -> bool:
@@ -663,34 +647,3 @@ def _investigation_task_updates(value, unknowns: list[dict], resolutions: list[d
     return updates[:8]
 
 
-def _apply_direct_resolution_gate(
-    recorded: dict,
-    observations: list[dict],
-    *,
-    strict_grounding: bool = True,
-) -> dict:
-    direct_ids = [
-        str(item.get("unknown_id") or "").strip()
-        for item in recorded.get("resolutions", [])
-        if isinstance(item, dict)
-        and str(item.get("kind") or "") == "direct_fact"
-        and str(item.get("status") or "") == "resolved"
-        and str(item.get("unknown_id") or "").strip()
-    ]
-    if not direct_ids:
-        return recorded
-    gated, _, _ = _apply_investigation_audit_impl(
-        recorded,
-        {"verdicts": [
-            {
-                "unknown_id": unknown_id,
-                "status": "grounded",
-                "reason": "Direct fact passed deterministic grounding checks.",
-            }
-            for unknown_id in direct_ids
-        ]},
-        observations=observations,
-        strict_grounding=strict_grounding,
-        allow_verification=False,
-    )
-    return gated
