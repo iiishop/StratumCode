@@ -325,46 +325,34 @@ def save_font_scale(value) -> float:
     return scale
 
 
-def get_round_limit(key: str) -> int:
-    if key not in ROUND_LIMITS:
-        raise ValueError(f"unknown round limit setting: {key}")
-    default = str(ROUND_LIMITS[key].get("default", 0))
-    try:
-        return max(0, int(_get(key, default)))
-    except (TypeError, ValueError):
-        return int(default)
+def _make_limit_accessors(registry: dict, *, label: str) -> tuple[object, object]:
+    """整数限制型设置的 getter/setter 工厂（round/task/output limit 共用模板）。"""
+
+    def getter(key: str) -> int:
+        if key not in registry:
+            raise ValueError(f"unknown {label} setting: {key}")
+        default = str(registry[key].get("default", 0))
+        try:
+            return max(0, int(_get(key, default)))
+        except (TypeError, ValueError):
+            return int(default)
+
+    def setter(key: str, value) -> int:
+        if key not in registry:
+            raise ValueError(f"unknown {label} setting: {key}")
+        try:
+            limit = max(0, int(value))
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"{key} must be a non-negative integer") from exc
+        _save(key, str(limit))
+        return limit
+
+    return getter, setter
 
 
-def save_round_limit(key: str, value) -> int:
-    if key not in ROUND_LIMITS:
-        raise ValueError(f"unknown round limit setting: {key}")
-    try:
-        limit = max(0, int(value))
-    except (TypeError, ValueError) as exc:
-        raise ValueError(f"{key} must be a non-negative integer") from exc
-    _save(key, str(limit))
-    return limit
-
-
-def get_task_limit(key: str) -> int:
-    if key not in TASK_LIMITS:
-        raise ValueError(f"unknown task limit setting: {key}")
-    default = str(TASK_LIMITS[key]["default"])
-    try:
-        return max(0, int(_get(key, default)))
-    except (TypeError, ValueError):
-        return int(default)
-
-
-def save_task_limit(key: str, value) -> int:
-    if key not in TASK_LIMITS:
-        raise ValueError(f"unknown task limit setting: {key}")
-    try:
-        limit = max(0, int(value))
-    except (TypeError, ValueError) as exc:
-        raise ValueError(f"{key} must be a non-negative integer") from exc
-    _save(key, str(limit))
-    return limit
+get_round_limit, save_round_limit = _make_limit_accessors(ROUND_LIMITS, label="round limit")
+get_task_limit, save_task_limit = _make_limit_accessors(TASK_LIMITS, label="task limit")
+get_output_limit, save_output_limit = _make_limit_accessors(OUTPUT_LIMITS, label="output limit")
 
 
 def get_effort_profile(effort: str | None) -> dict:
