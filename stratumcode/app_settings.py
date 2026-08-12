@@ -305,8 +305,9 @@ class _SettingSpec:
     default: object = ""
     allowed: frozenset | None = None        # enum 白名单
     clamp: tuple | None = None              # 数值 (min, max)
-    registry: dict | None = None            # limits 注册表（round/task/output/effort）
+    registry: dict | None = None            # limits 注册表（round/task/output）
     registry_path: Callable | None = None   # (*keys) -> limits dict（effort 两级注册表）
+    storage_key: Callable | None = None     # (*keys) -> 存储 key（effort 场景）
     error_name: str = "setting"
     error_message: str = ""                 # 覆盖通用错误消息（保留历史文案）
 
@@ -324,9 +325,9 @@ def _make_accessor(spec: _SettingSpec) -> tuple[Callable, Callable]:
         return spec.registry or {}
 
     def _storage_key(keys: tuple) -> str:
+        if spec.storage_key:
+            return spec.storage_key(*keys)
         if keys:
-            if spec.registry_path:
-                return f"effort.{_effort_key(keys[0])}.{keys[1]}"
             return keys[0]
         return spec.key
 
@@ -439,6 +440,7 @@ get_effort_profile_limit, save_effort_profile_limit = _make_accessor(_SettingSpe
     key="effort",
     kind="int",
     registry_path=lambda profile_key, key: EFFORT_PROFILES[_effort_key(profile_key)]["limits"],
+    storage_key=lambda profile_key, key: _effort_setting_key(_effort_key(profile_key), key),
     error_name="effort profile setting",
 ))
 
