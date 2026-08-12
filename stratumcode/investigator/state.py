@@ -1,6 +1,22 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from enum import StrEnum
+
+
+class InvestigationPhase(StrEnum):
+    """Mutually exclusive investigation phase for one round."""
+
+    CLEARIFY = "clearify"
+    VERIFY = "verify"
+    REPAIR = "repair"
+    FINISH = "finish"
+    FINISH_WITH_EVIDENCE_GAP = "finish_with_evidence_gap"
+    SYNTHESIZE = "synthesize"
+    READ_ONLY_FINISH = "read_only_finish"
+    RESOLVE = "resolve"
+    DISCOVERY_REQUIRED = "discovery_required"
+    DISCOVER = "discover"
 
 
 @dataclass

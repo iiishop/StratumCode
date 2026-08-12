@@ -30,6 +30,7 @@ from .domain import (
     _observation_reference_payload,
     _observation_refs,
     _reference_list,
+    _semantic_missing_items,
 )
 from .ids import (
     _find_by_unknown_id,
@@ -702,22 +703,6 @@ def _resolution_kind(raw: dict, status: str) -> str:
     if status == "needs_clearify":
         return "user_decision"
     return "derived_inference"
-
-def _semantic_missing_items(value) -> list[dict]:
-    if not isinstance(value, list):
-        return []
-    items = []
-    for raw in value:
-        if not isinstance(raw, dict):
-            continue
-        requirement = str(raw.get("requirement") or raw.get("text") or "").strip()
-        if not requirement:
-            continue
-        items.append({
-            "acceptance_id": str(raw.get("acceptance_id") or "").strip(),
-            "requirement": requirement,
-        })
-    return items
 
 def _continued_recorded_findings(previous: dict | None, observations: list[dict]) -> dict:
     recorded = _merge_recorded_findings(_empty_recorded_findings(), previous or {})

@@ -3,11 +3,15 @@ from __future__ import annotations
 import re
 
 from .constants import (
+    CLEARIFY_RESOLUTION_REASON,
     GROUNDING_LITERAL_SPAN_CONTEXT_LINES,
     GROUNDING_LITERAL_SPAN_MAX_ITEMS,
     GROUNDING_LITERAL_SPAN_MAX_LINE_CHARS,
     GROUNDING_LITERAL_SPAN_MAX_LINES,
+    GROUNDING_LITERAL_REASON_PREFIX,
+    STATE_WRITE_REASON_PREFIX,
 )
+from .ids import _normalize_unknown_id, _same_unknown_id, _unknowns
 from .util import _dedupe_strings, _string_list
 
 
@@ -240,3 +244,104 @@ def _beliefs(value) -> list[dict]:
             "evidence": evidence,
         })
     return items
+
+
+def _semantic_missing_items(value) -> list[dict]:
+    if not isinstance(value, list):
+        return []
+    items = []
+    for raw in value:
+        if not isinstance(raw, dict):
+            continue
+        requirement = str(raw.get("requirement") or raw.get("text") or "").strip()
+        if not requirement:
+            continue
+        items.append({
+            "acceptance_id": str(raw.get("acceptance_id") or "").strip(),
+            "requirement": requirement,
+        })
+    return items
+
+
+def _recorded_resolves_initial_unknowns(
+    recorded: dict,
+    analysis: dict | None,
+    *,
+    repair_ids: set[str] | None = None,
+) -> bool:
+    """Return whether recorded resolutions cover all initial unknowns."""
+    initial = [item for item in (analysis or {}).get("unknowns", []) if isinstance(item, dict) and item.get("id")]
+    if not initial:
+        return False
+    required_ids = [str(item["id"]) for item in initial]
+    if not _analysis_is_read_only(analysis):
+        required_ids.extend(
+            str(item["id"])
+            for item in (
+                _unknowns(recorded.get("unknowns"))
+                + _unknowns(recorded.get("new_unknowns"))
+            )
+            if item.get("blocking")
+        )
+    if repair_ids:
+        return False
+    resolved = [
+        str(item.get("unknown_id") or "").strip()
+        for item in recorded.get("resolutions", [])
+        if isinstance(item, dict)
+        and str(item.get("status") or "") in {"resolved", "deferred"}
+        and not _clearify_resolution_lacks_evidence(item)
+    ]
+    return all(any(_same_unknown_id(required_id, item) for item in resolved) for required_id in required_ids)
+
+
+def _clearify_resolution_lacks_evidence(item: dict) -> bool:
+    """Return whether a clearify resolution still lacks code evidence."""
+    if str(item.get("reason") or "") != CLEARIFY_RESOLUTION_REASON:
+        return False
+    return not _reference_list(item.get("evidence"))
+
+
+def _semantic_repair_payload(recorded: dict, unknown_ids: set[str]) -> dict:
+    target_ids = {
+        _normalize_unknown_id(item)
+        for item in unknown_ids
+        if str(item).strip()
+    }
+    resolutions = [
+        item for item in recorded.get("resolutions", [])
+        if isinstance(item, dict)
+        and _normalize_unknown_id(str(item.get("unknown_id") or "")) in target_ids
+    ]
+    recorded_ids = _dedupe_strings([
+        belief_id
+        for resolution in resolutions
+        for belief_id in _reference_list(resolution.get("belief_ids"))
+    ])
+    missing = [
+        missing_item
+        for resolution in resolutions
+        for missing_item in _semantic_missing_items(resolution.get("semantic_missing"))
+    ]
+    if not missing:
+        missing = []
+        for resolution in resolutions:
+            _reason = str(resolution.get("reason") or "").strip()
+            if _reason.startswith(GROUNDING_LITERAL_REASON_PREFIX):
+                _literal = _reason[len(GROUNDING_LITERAL_REASON_PREFIX):].strip()
+                _reason = f"Find and cite the exact code observation that contains: {_literal}" if _literal else "Cite the exact code observation that contains the claimed code literal."
+            elif _reason.startswith(STATE_WRITE_REASON_PREFIX):
+                _writes = _reason[len(STATE_WRITE_REASON_PREFIX):].strip()
+                _reason = f"Account for the following observed state writes in the resolution: {_writes}" if _writes else "Account for observed state writes in the resolution."
+            if not _reason:
+                _reason = "Add the missing semantic support."
+            missing.append({
+                "acceptance_id": "",
+                "requirement": _reason,
+            })
+    return {
+        "accepted": False,
+        "recorded_ids": recorded_ids,
+        "missing": missing,
+        "repair_mode": "append_missing_only",
+    }
