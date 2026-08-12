@@ -49,17 +49,27 @@ from .constants import (
 )
 from .domain import (
     _analysis_is_read_only,
+    _apply_direct_resolution_gate,
     _belief_status,
     _belief_text,
     _beliefs,
     _clearify_resolution_lacks_evidence,
+    _investigation_task_updates,
     _observation_context_view,
     _observation_reference_map,
     _observation_refs,
+    _partial_tool_arguments,
     _recorded_resolves_initial_unknowns,
+    _record_arguments,
     _reference_list,
+    _require_control_reason,
+    _resolve_unknown_arguments,
     _semantic_missing_items,
     _semantic_repair_payload,
+    _set_investigation_audit_impl,
+    _tool_call_summary,
+    _unknowns_needing_resolution,
+    _validate_resolution_refs,
 )
 from .directive import _investigation_directive
 from .evidence import (
@@ -1676,31 +1686,6 @@ def _minimum_rounds_prompt(remaining_rounds: int) -> str:
     )
 
 
-def _tool_call_summary(tool_calls: list[dict]) -> str:
-    items = []
-    for call in tool_calls:
-        if not isinstance(call, dict):
-            continue
-        function = call.get("function") or {}
-        name = function.get("name") or "tool"
-        try:
-            arguments = _tool_arguments(function.get("arguments"))
-        except ValueError:
-            arguments = {}
-        reason = str(arguments.get("reason") or arguments.get("operation_summary") or "").strip()
-        targets = arguments.get("target_unknown_ids") if isinstance(arguments.get("target_unknown_ids"), list) else []
-        subject = _tool_call_subject(name, arguments)
-        line = f"{name}{subject}"
-        if targets:
-            line += f" for {', '.join(str(item) for item in targets if str(item).strip())}"
-        if reason:
-            line += f": {reason}"
-        items.append(line)
-    if not items:
-        return ""
-    return "Calling tools:\n" + "\n".join(f"- {item}" for item in items)
-
-
 def _duplicate_no_progress_prompt(
     tool_name: str,
     cached_observation_id: str,
@@ -1717,49 +1702,6 @@ def _duplicate_no_progress_prompt(
     )
 
 
-def _partial_tool_arguments(raw: str | None) -> dict:
-    text = (raw or "{}").strip()
-    try:
-        value = json.loads(text)
-        return value if isinstance(value, dict) else {}
-    except json.JSONDecodeError:
-        return _partial_json_object(text)
-
-
-def _partial_json_object(text: str) -> dict:
-    decoder = json.JSONDecoder()
-    result = {}
-    index = _skip_ws(text, 0)
-    if index >= len(text) or text[index] != "{":
-        return result
-    index += 1
-    while True:
-        index = _skip_ws(text, index)
-        if index >= len(text) or text[index] == "}":
-            return result
-        try:
-            key, index = decoder.raw_decode(text, index)
-        except json.JSONDecodeError:
-            return result
-        if not isinstance(key, str):
-            return result
-        index = _skip_ws(text, index)
-        if index >= len(text) or text[index] != ":":
-            return result
-        index = _skip_ws(text, index + 1)
-        try:
-            value, index = decoder.raw_decode(text, index)
-        except json.JSONDecodeError:
-            return result
-        result[key] = value
-        index = _skip_ws(text, index)
-        if index >= len(text) or text[index] == "}":
-            return result
-        if text[index] != ",":
-            return result
-        index += 1
-
-
 def _record_consumes_observations(arguments: dict, observation_ids: list[str]) -> bool:
     pending = {str(item).strip() for item in observation_ids if str(item).strip()}
     if not pending:
@@ -1769,31 +1711,6 @@ def _record_consumes_observations(arguments: dict, observation_ids: list[str]) -
             if isinstance(item, dict) and pending.intersection(_reference_list(item.get("evidence"))):
                 return True
     return False
-
-
-def _resolve_unknown_arguments(arguments: dict) -> dict:
-    normalized = dict(arguments)
-    normalized["resolutions"] = _resolutions(normalized.get("resolutions"))
-    return normalized
-
-
-def _record_arguments(arguments: dict) -> dict:
-    normalized = dict(arguments)
-    if not (isinstance(normalized.get("beliefs"), list) and normalized["beliefs"]):
-        beliefs = _alias_beliefs(normalized.get("findings")) or _alias_beliefs(normalized.get("evidence_summaries"))
-        if beliefs:
-            normalized["beliefs"] = beliefs
-    if isinstance(normalized.get("new_unknowns"), list):
-        normalized["new_unknowns"] = [
-            {
-                **item,
-                "question": item.get("question") or item.get("summary"),
-                "resolution_strategy": item.get("resolution_strategy") or item.get("strategy"),
-            }
-            for item in normalized["new_unknowns"]
-            if isinstance(item, dict)
-        ]
-    return normalized
 
 
 def _is_hypothesis_verifier_call(name: str, arguments: dict) -> bool:
@@ -1882,30 +1799,6 @@ def _analysis_with_recorded_unknowns(analysis: dict, recorded: dict) -> dict:
     if recorded_resolutions:
         merged["resolutions"] = _resolutions(analysis.get("resolutions")) + _resolutions(recorded_resolutions)
     return merged
-
-
-def _unknowns_needing_resolution(recorded: dict, observations: list[dict], analysis: dict | None) -> list[str]:
-    initial = [
-        item for item in (analysis or {}).get("unknowns", [])
-        if isinstance(item, dict)
-        and item.get("blocking")
-        and item.get("resolution_strategy") == "investigate_project"
-        and str(item.get("id") or "").strip()
-    ]
-    if not initial:
-        return []
-    accounted = {
-        str(item.get("unknown_id") or "").strip()
-        for item in recorded.get("resolutions", [])
-        if isinstance(item, dict) and str(item.get("unknown_id") or "").strip()
-    }
-    supported = _supported_unknown_ids(recorded, observations)
-    return [
-        str(item["id"])
-        for item in initial
-        if not any(_same_unknown_id(item["id"], known_id) for known_id in accounted)
-        and any(_same_unknown_id(item["id"], supported_id) for supported_id in supported)
-    ]
 
 
 def _unknowns_missing_project_evidence(
@@ -2015,11 +1908,6 @@ def _observation_mentioned(text: str, observation: dict) -> bool:
     title = str(observation.get("title") or "")
     names = [path, Path(path).name if path else "", title]
     return any(name and name.casefold() in haystack for name in names)
-
-
-def _require_control_reason(arguments: dict, name: str) -> None:
-    if not str(arguments.get("reason") or "").strip():
-        raise ValueError(f"{name} requires reason")
 
 
 def _previous_context(observations: list[dict] | None, knowledge: list[dict] | None) -> list[str]:
@@ -3424,6 +3312,9 @@ def _apply_investigation_audit(
     return result, verification_requests, clearify_questions
 
 
+_set_investigation_audit_impl(_apply_investigation_audit)
+
+
 def _semantic_missing_reason(missing: list[dict]) -> str:
     requirements = [
         str(item.get("requirement") or "").strip()
@@ -3445,39 +3336,6 @@ def _resolution_requires_semantic_audit(resolution: dict, initial_unknowns: list
         and str(resolution.get("answer") or "").strip()
         and str(resolution.get("unknown_id") or "").strip()
     )
-
-
-def _apply_direct_resolution_gate(
-    recorded: dict,
-    observations: list[dict],
-    *,
-    strict_grounding: bool = True,
-) -> dict:
-    direct_ids = [
-        str(item.get("unknown_id") or "").strip()
-        for item in recorded.get("resolutions", [])
-        if isinstance(item, dict)
-        and str(item.get("kind") or "") == "direct_fact"
-        and str(item.get("status") or "") == "resolved"
-        and str(item.get("unknown_id") or "").strip()
-    ]
-    if not direct_ids:
-        return recorded
-    gated, _, _ = _apply_investigation_audit(
-        recorded,
-        {"verdicts": [
-            {
-                "unknown_id": unknown_id,
-                "status": "grounded",
-                "reason": "Direct fact passed deterministic grounding checks.",
-            }
-            for unknown_id in direct_ids
-        ]},
-        observations=observations,
-        strict_grounding=strict_grounding,
-        allow_verification=False,
-    )
-    return gated
 
 
 def _semantic_repair_resolution_ids(recorded: dict) -> set[str]:
@@ -3623,47 +3481,6 @@ def _recommended_next_step(finish: dict) -> str:
 
 def _clean_questions(value: list) -> list[str]:
     return [text for item in value if (text := str(item).strip())]
-
-
-def _validate_resolution_refs(resolutions: list[dict], beliefs: list[dict], observations: list[dict]) -> None:
-    evidence_ids = {
-        str(item.get("id") or "").strip()
-        for item in observations
-        if isinstance(item, dict) and str(item.get("id") or "").strip()
-    }
-    observation_refs = _observation_reference_map(observations)
-    belief_by_id = {
-        str(item.get("id") or "").strip(): item
-        for item in beliefs
-        if isinstance(item, dict) and str(item.get("id") or "").strip()
-    }
-    usable_belief_status = {"plausible", "supported", "strongly_supported", "runtime_confirmed"}
-    for resolution in resolutions:
-        missing_evidence = _normalize_evidence_refs(resolution, evidence_ids, observation_refs)
-        if missing_evidence:
-            sample_ids = sorted(evidence_ids)[:8]
-            raise ValueError(
-                f"resolution {resolution['unknown_id']} references unknown evidence ids: "
-                + ", ".join(missing_evidence)
-                + ". Evidence ids must be observation ids returned by read/glob/grep "
-                "(not tool call ids)"
-                + (f"; current observations: {', '.join(sample_ids)}" + ("..." if len(evidence_ids) > 8 else "") if sample_ids else "")
-            )
-        missing_beliefs = [item for item in resolution.get("belief_ids", []) if item not in belief_by_id]
-        if missing_beliefs:
-            raise ValueError(
-                f"resolution {resolution['unknown_id']} references unknown belief ids: "
-                + ", ".join(missing_beliefs)
-            )
-        weak_beliefs = [
-            item for item in resolution.get("belief_ids", [])
-            if belief_by_id[item].get("status") not in usable_belief_status
-        ]
-        if weak_beliefs:
-            raise ValueError(
-                f"resolution {resolution['unknown_id']} references unsupported belief ids: "
-                + ", ".join(weak_beliefs)
-            )
 
 
 def _salvage_resolution_candidates(arguments: dict, observations: list[dict]) -> list[dict]:
@@ -4070,84 +3887,6 @@ def _resolve_task_update_conflicts(
         item for item in unknowns
         if not any(_same_unknown_id(item.get("id"), known_id) for known_id in known_ids)
     ]
-
-
-def _investigation_task_updates(value, unknowns: list[dict], resolutions: list[dict] | None = None) -> list[dict]:
-    updates = []
-    resolved_ids = [
-        str(item.get("unknown_id") or "").strip()
-        for item in resolutions or []
-        if isinstance(item, dict) and item.get("status") == "resolved"
-    ]
-    if isinstance(value, list):
-        for raw in value:
-            if not isinstance(raw, dict):
-                continue
-            text = str(raw.get("text") or "").strip()
-            status = str(raw.get("status") or "").strip()
-            if not text or status not in {"unknown", "known", "deferred", "blocked", "added", "updated"}:
-                continue
-            item_id = str(raw.get("id") or "").strip()
-            if status == "known" and not any(
-                _same_unknown_id(item_id, resolved_id)
-                for resolved_id in resolved_ids
-            ):
-                status = "unknown"
-            trace = raw.get("trace") if isinstance(raw.get("trace"), list) else []
-            updates.append({
-                "id": item_id,
-                "kind": str(raw.get("kind") or "unknown").strip() or "unknown",
-                "text": text,
-                "status": status,
-                "reason": str(raw.get("reason") or "").strip(),
-                "trace": [str(item).strip() for item in trace if str(item).strip()][:6],
-            })
-    known_ids = {item["id"] for item in updates if item["status"] == "known" and item.get("id")}
-    for resolution in resolutions or []:
-        unknown_id = resolution.get("unknown_id", "")
-        if not unknown_id or any(_same_unknown_id(unknown_id, known_id) for known_id in known_ids):
-            continue
-        source = _find_by_unknown_id(unknowns, unknown_id, id_field="id")
-        text = (source or {}).get("question") or resolution.get("answer") or unknown_id
-        resolution_status = resolution.get("status")
-        status = {
-            "resolved": "known",
-            "partially_resolved": "unknown",
-            "needs_clearify": "blocked",
-            "deferred": "deferred",
-        }.get(resolution_status, "unknown")
-        evidence = resolution.get("evidence") if isinstance(resolution.get("evidence"), list) else []
-        trace = evidence or resolution.get("belief_ids", [])
-        updates.append({
-            "id": unknown_id,
-            "target_id": unknown_id,
-            "kind": "unknown",
-            "text": text,
-            "status": status,
-            "reason": resolution.get("reason", ""),
-            "trace": trace[:6],
-            "answers": [{
-                "source": "investigation",
-                "text": resolution.get("answer") or unknown_id,
-                "reason": resolution.get("reason", ""),
-                "trace": trace[:6],
-            }] if resolution.get("answer") else [],
-        })
-        if status == "known":
-            known_ids.add(unknown_id)
-    for item in unknowns:
-        existing_ids = {update.get("id") for update in updates if update.get("id")}
-        if any(_same_unknown_id(item.get("id"), existing_id) for existing_id in existing_ids):
-            continue
-        updates.append({
-            "id": item.get("id", ""),
-            "kind": "unknown",
-            "text": item["question"],
-            "status": _unknown_task_status(item),
-            "reason": item.get("resolution_strategy", ""),
-            "trace": [],
-        })
-    return updates[:8]
 
 
 def _summary(final: dict) -> str:
