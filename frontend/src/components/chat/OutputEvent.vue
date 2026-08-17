@@ -92,6 +92,7 @@ const parts = computed(() => renderMarkdown(props.event.content))
 
 .output-md {
   white-space: normal;
+  overflow-x: auto;
 }
 
 .output-md :deep(p) {
@@ -102,18 +103,24 @@ const parts = computed(() => renderMarkdown(props.event.content))
   margin-bottom: 0;
 }
 
+.output-md :deep(h1),
 .output-md :deep(h2),
 .output-md :deep(h3),
-.output-md :deep(h4) {
+.output-md :deep(h4),
+.output-md :deep(h5),
+.output-md :deep(h6) {
   margin: 14px 0 6px;
   color: var(--text-h, #102a5c);
   font-weight: 650;
   line-height: 1.3;
 }
 
+.output-md :deep(h1) { font-size: 17px; }
 .output-md :deep(h2) { font-size: 16px; }
 .output-md :deep(h3) { font-size: 14.5px; }
-.output-md :deep(h4) { font-size: 13.5px; }
+.output-md :deep(h4),
+.output-md :deep(h5),
+.output-md :deep(h6) { font-size: 13.5px; }
 
 .output-md :deep(strong) {
   color: var(--text-h, #102a5c);
@@ -125,12 +132,16 @@ const parts = computed(() => renderMarkdown(props.event.content))
   color: var(--text, #3f5274);
 }
 
-.output-md :deep(.md-inline) {
+.output-md :deep(:not(pre) > code) {
   padding: 1px 5px;
   border-radius: 4px;
   background: rgba(23, 86, 209, .07);
   color: var(--accent-text, #1748a3);
   font: .9em/1.5 var(--mono, monospace);
+}
+
+.output-md :deep(s) {
+  color: var(--text-muted, #71809c);
 }
 
 .output-md :deep(a) {
@@ -166,8 +177,15 @@ const parts = computed(() => renderMarkdown(props.event.content))
   margin: 0;
 }
 
+.output-md :deep(hr) {
+  margin: 14px 0;
+  border: 0;
+  border-top: 1px solid var(--border, #d9e3f5);
+}
+
 .output-md :deep(table) {
-  width: 100%;
+  width: max-content;
+  min-width: 100%;
   margin: 8px 0;
   border-collapse: collapse;
   font-size: 12.5px;

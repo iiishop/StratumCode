@@ -33,6 +33,7 @@ const parts = renderMarkdown(props.event.content || '')
   font-size: var(--font-body, 14px);
   line-height: 1.7;
   overflow-wrap: anywhere;
+  overflow-x: auto;
 }
 
 .facts-md :deep(p) {
@@ -58,11 +59,56 @@ const parts = renderMarkdown(props.event.content || '')
   font-weight: 650;
 }
 
-.facts-md :deep(.md-inline) {
+.facts-md :deep(:not(pre) > code) {
   padding: 1px 5px;
   border-radius: 4px;
   background: rgba(23, 86, 209, .07);
   color: var(--accent-text, #1748a3);
   font: .9em/1.5 var(--mono, monospace);
+}
+
+.facts-md :deep(pre) {
+  margin: 8px 0;
+  padding: 10px 12px;
+  overflow: auto;
+  border: 1px solid rgba(23, 86, 209, .1);
+  border-radius: 7px;
+  background: #f7f9fd;
+  white-space: pre;
+  font: 11px/1.55 var(--mono, monospace);
+}
+
+.facts-md :deep(h1),
+.facts-md :deep(h2),
+.facts-md :deep(h3),
+.facts-md :deep(h4),
+.facts-md :deep(h5),
+.facts-md :deep(h6) {
+  margin: 10px 0 5px;
+  color: var(--text-h, #102a5c);
+  font-weight: 650;
+  line-height: 1.3;
+}
+
+.facts-md :deep(blockquote) {
+  margin: 7px 0;
+  padding: 5px 10px;
+  border-left: 3px solid color-mix(in srgb, var(--accent, #1756d1) 30%, #d4e0f2);
+  border-radius: 0 5px 5px 0;
+  background: rgba(23, 86, 209, .03);
+}
+
+.facts-md :deep(table) {
+  width: max-content;
+  min-width: 100%;
+  margin: 6px 0;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.facts-md :deep(th),
+.facts-md :deep(td) {
+  padding: 5px 8px;
+  border-bottom: 1px solid var(--border, #d9e3f5);
 }
 </style>
