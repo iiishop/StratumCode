@@ -32,6 +32,8 @@ const isReframing = ref(false)
 const providerFilter = ref('')
 const modelFilter = ref('')
 const stageFilter = ref('')
+const workspaceFilter = ref('')
+const groupMode = ref('model')
 const hover = ref(null)
 const activeBucketKey = ref('')
 const activeAreaKey = ref('')
@@ -43,6 +45,7 @@ let refreshTimer = null
 let reframeTimer = null
 
 const filteredRecords = computed(() => records.value.filter(record =>
+  (!workspaceFilter.value || workspaceKey(record) === workspaceFilter.value) &&
   (!providerFilter.value || record.provider === providerFilter.value) &&
   (!modelFilter.value || modelName(record) === modelFilter.value) &&
   (!stageFilter.value || stageName(record) === stageFilter.value)
@@ -52,10 +55,13 @@ const viewKey = computed(() => [
   providerFilter.value || '*',
   modelFilter.value || '*',
   stageFilter.value || '*',
+  workspaceFilter.value || '*',
+  groupMode.value,
 ].join('|'))
 const providers = computed(() => unique(records.value.map(record => record.provider)))
 const models = computed(() => unique(records.value.map(record => modelName(record))))
 const stages = computed(() => unique(records.value.map(record => stageName(record))))
+const workspaces = computed(() => unique(records.value.map(record => workspaceKey(record))))
 const requests = computed(() => filteredRecords.value.length)
 const filteredTotal = computed(() => filteredRecords.value.reduce((acc, record) => {
   acc.input_tokens += Number(record.input_tokens || 0)
@@ -71,7 +77,7 @@ const cacheRatio = computed(() => {
   const input = Number(filteredTotal.value.input_tokens || 0)
   return input ? Math.round((cached / input) * 100) : 0
 })
-const topModels = computed(() => rankBy(filteredRecords.value, providerModelName, () => 1).slice(0, RANK_LIMIT))
+const topGroups = computed(() => rankBy(filteredRecords.value, groupName, () => 1).slice(0, RANK_LIMIT))
 const windowMeta = computed(() => {
   if (precision.value === 'hour') {
     const endMs = floorHour(nowMs.value)
@@ -108,11 +114,11 @@ const chartScopeText = computed(() => precision.value === 'hour'
 const historyScopeText = computed(() =>
   `Totals and rankings use all matching history. Before this window: ${fmt(olderRecords.value.length)} calls · ${fmt(olderTotal.value.total_tokens)} tokens.`
 )
-const chartModels = computed(() => rankBy(chartRecords.value, providerModelName, () => 1).slice(0, RANK_LIMIT))
+const chartGroups = computed(() => rankBy(chartRecords.value, groupName, () => 1).slice(0, RANK_LIMIT))
 const stageColors = computed(() => colorMap(stages.value, STAGE_COLORS))
-const modelColors = computed(() => colorMap(unique([
-  ...chartModels.value.map(item => item.name),
-  ...topModels.value.map(item => item.name),
+const groupColors = computed(() => colorMap(unique([
+  ...chartGroups.value.map(item => item.name),
+  ...topGroups.value.map(item => item.name),
 ]), MODEL_COLORS))
 const yTicks = computed(() => [1, .75, .5, .25, 0].map(ratio => ({
   value: Math.round(maxTokens.value * ratio),
@@ -138,15 +144,16 @@ const buckets = computed(() => {
     if (!byKey.has(key)) continue
     const bucket = byKey.get(key)
     const stage = stageName(record)
-    const model = providerModelName(record)
+    const group = groupName(record)
     addUsage(bucket, record)
     bucket.requests += 1
     bucket.stages[stage] = (bucket.stages[stage] || 0) + Number(record.total_tokens || 0)
-    if (!bucket.models[model]) {
-      bucket.models[model] = {
-        name: model,
+    if (!bucket.models[group]) {
+      bucket.models[group] = {
+        name: group,
         provider: record.provider || 'unknown provider',
         model: modelName(record),
+        workspace: workspaceLabel(record),
         input_tokens: 0,
         output_tokens: 0,
         cached_tokens: 0,
@@ -156,8 +163,8 @@ const buckets = computed(() => {
         requests: 0,
       }
     }
-    addUsage(bucket.models[model], record)
-    bucket.models[model].requests += 1
+    addUsage(bucket.models[group], record)
+    bucket.models[group].requests += 1
   }
   return [...byKey.values()].sort((a, b) => a.key.localeCompare(b.key))
 })
@@ -190,7 +197,7 @@ const sessionCosts = computed(() => rankUsageBy(chartRecords.value, sessionName)
 })))
 const areaGuideLines = computed(() => [62, 116, 170, 224])
 const areaSeries = computed(() => {
-  const names = chartModels.value.map(item => item.name)
+  const names = chartGroups.value.map(item => item.name)
   const countMax = Math.max(1, ...buckets.value.flatMap(bucket => names.map(name => bucket.models[name]?.requests || 0)))
   return names.map((name, index) => {
     const points = buckets.value.map((bucket, bucketIndex) => ({
@@ -202,28 +209,23 @@ const areaSeries = computed(() => {
     }))
     return {
       name,
-      color: modelColors.value[name] || MODEL_COLORS[index % MODEL_COLORS.length],
+      color: groupColors.value[name] || MODEL_COLORS[index % MODEL_COLORS.length],
       points,
       line: smoothPath(points),
       area: areaPath(points),
-      total: chartModels.value.find(item => item.name === name)?.value || 0,
+      total: chartGroups.value.find(item => item.name === name)?.value || 0,
     }
   })
 })
 
 async function loadUsage() {
-  if (!props.workspace?.id) {
-    records.value = []
-    total.value = {}
-    return
-  }
   loading.value = true
   error.value = ''
   try {
     const response = await fetch('/api/sessions/usage', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ workspace_id: props.workspace.id }),
+      body: JSON.stringify({}),
     })
     const data = await response.json().catch(() => ({}))
     if (!response.ok) throw new Error(data.error || `Usage request failed (${response.status})`)
@@ -295,6 +297,25 @@ function modelName(record) {
 
 function providerModelName(record) {
   return `${record.provider || 'unknown provider'} / ${modelName(record)}`
+}
+
+function workspaceKey(record) {
+  const id = record.workspace_id || 'unknown'
+  return `${id}::${workspaceLabel(record)}`
+}
+
+function workspaceLabel(record) {
+  const name = String(record.workspace_name || '').trim()
+  const path = String(record.workspace_path || '').split(/[\\/]/).filter(Boolean).pop()
+  return name || path || 'Unknown workspace'
+}
+
+function workspaceOptionLabel(value) {
+  return String(value || '').split('::').slice(1).join('::') || 'Unknown workspace'
+}
+
+function groupName(record) {
+  return groupMode.value === 'workspace' ? workspaceLabel(record) : providerModelName(record)
 }
 
 function stageName(record) {
@@ -388,7 +409,7 @@ function rankUsageBy(items, label) {
 function segmentStyle(series, tokens, totalTokens) {
   return {
     height: `${Math.max(2, Math.round((tokens / Math.max(1, totalTokens)) * 100))}%`,
-    background: modelColors.value[series] || '#536675',
+    background: groupColors.value[series] || '#536675',
   }
 }
 
@@ -511,6 +532,7 @@ function tokenShare(item, key) {
 }
 
 function clearFilters() {
+  workspaceFilter.value = ''
   providerFilter.value = ''
   modelFilter.value = ''
   stageFilter.value = ''
@@ -552,6 +574,14 @@ onUnmounted(() => {
         <button type="button" :class="{ 'is-active': precision === 'day' }" @click="precision = 'day'">30 days</button>
         <button type="button" :class="{ 'is-active': precision === 'hour' }" @click="precision = 'hour'">24 hours</button>
       </div>
+      <div class="usage-controls__segmented" title="Chart color grouping">
+        <button type="button" :class="{ 'is-active': groupMode === 'model' }" @click="groupMode = 'model'">By model</button>
+        <button type="button" :class="{ 'is-active': groupMode === 'workspace' }" @click="groupMode = 'workspace'">By workspace</button>
+      </div>
+      <select v-model="workspaceFilter" title="Filter workspace">
+        <option value="">All workspaces</option>
+        <option v-for="workspace in workspaces" :key="workspace" :value="workspace">{{ workspaceOptionLabel(workspace) }}</option>
+      </select>
       <select v-model="providerFilter" title="Filter provider">
         <option value="">All providers</option>
         <option v-for="provider in providers" :key="provider" :value="provider">{{ provider }}</option>
@@ -579,7 +609,7 @@ onUnmounted(() => {
         <header>
           <div>
             <h2>Token volume</h2>
-            <p>Stacked by provider and model in the selected chart window.</p>
+            <p>Stacked by {{ groupMode === 'workspace' ? 'workspace' : 'provider and model' }} in the selected chart window.</p>
           </div>
         </header>
         <div class="usage-chart-body">
@@ -621,7 +651,7 @@ onUnmounted(() => {
         <header>
           <div>
             <h2>Model requests</h2>
-            <p>API call trend for the selected chart window.</p>
+            <p>API call trend by {{ groupMode === 'workspace' ? 'workspace' : 'model' }} for the selected chart window.</p>
           </div>
         </header>
         <div class="usage-chart-body">
@@ -740,12 +770,12 @@ onUnmounted(() => {
     <section class="usage-breakdown">
       <article>
         <header>
-          <h2>Models</h2>
+          <h2>{{ groupMode === 'workspace' ? 'Workspaces' : 'Models' }}</h2>
           <span>{{ fmt(requests) }} requests</span>
         </header>
         <TransitionGroup name="usage-list" tag="div" class="rank-list">
-          <div v-for="item in topModels" :key="item.name" class="rank-row">
-          <span class="rank-row__swatch" :style="{ background: modelColors[item.name] }"></span>
+          <div v-for="item in topGroups" :key="item.name" class="rank-row">
+          <span class="rank-row__swatch" :style="{ background: groupColors[item.name] }"></span>
           <span>{{ item.name }}</span>
           <b>{{ fmt(item.value) }}</b>
           </div>
@@ -775,7 +805,7 @@ onUnmounted(() => {
         <div v-if="hover.rows?.length" class="usage-tooltip__rows">
           <div v-for="row in hover.rows" :key="row.name" class="usage-tooltip__row">
             <div class="usage-tooltip__row-top">
-              <span class="usage-tooltip__swatch" :style="{ background: modelColors[row.name] || '#536675' }"></span>
+              <span class="usage-tooltip__swatch" :style="{ background: groupColors[row.name] || '#536675' }"></span>
               <span class="usage-tooltip__name">{{ row.name }}</span>
               <b>{{ fmt(row.requests) }}</b>
             </div>
@@ -907,6 +937,10 @@ onUnmounted(() => {
 .usage-controls select {
   min-width: 150px;
   padding: 0 8px;
+}
+
+.usage-controls select[title="Filter workspace"] {
+  min-width: 190px;
 }
 
 .usage-controls .is-active {
