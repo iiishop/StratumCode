@@ -12,6 +12,7 @@ from ..status import task_analysis
 from ..tools import registry
 from ..tools.spec import ToolResult
 from .clearify import emit, mediate_state_question
+from .investigation_tasks import LightInvestigationTaskReducer
 
 UNSAFE_LIGHT_TOOLS = {
     "apply_patch",
@@ -285,6 +286,7 @@ def _run_investigation(
     from .. import investigator
 
     final = None
+    task_reducer = LightInvestigationTaskReducer(analysis)
     for event in investigator.investigation_stream(
         message=message,
         analysis=analysis,
@@ -294,7 +296,8 @@ def _run_investigation(
         if event.get("op") == "start" and event.get("event") == "user_question":
             mediate_state_question(event, workspace_dir)
             continue
-        emit(event)
+        for next_event in task_reducer.events_for(event):
+            emit(next_event)
         if event.get("op") == "done" and isinstance(event.get("investigation"), dict):
             final = event["investigation"]
     if final is None:
