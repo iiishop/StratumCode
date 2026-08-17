@@ -26,6 +26,7 @@ import QuestionRecord from './QuestionRecord.vue'
 import ValidationChecklistEvent from './ValidationChecklistEvent.vue'
 import ValidationResultEvent from './ValidationResultEvent.vue'
 import QualityGateEvent from './QualityGateEvent.vue'
+import MemoryEvent from './MemoryEvent.vue'
 
 const props = defineProps({
   event: { type: Object, required: true },
@@ -62,6 +63,10 @@ const eventComponents = {
   verification_checklist: ValidationChecklistEvent,
   validation_result: ValidationResultEvent,
   quality_gate: QualityGateEvent,
+  memory_write: MemoryEvent,
+  memory_reference: MemoryEvent,
+  memory_stale: MemoryEvent,
+  memory_conflict: MemoryEvent,
 }
 </script>
 

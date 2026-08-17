@@ -171,18 +171,31 @@ def list_by_workspace(workspace_id: int) -> list[dict]:
     return items
 
 
-def usage_events(workspace_id: int) -> dict:
+def usage_events(workspace_id: int | None = None) -> dict:
     _ensure_table()
     with db_session() as db:
-        rows = db.execute(
-            """
-            SELECT id, name, state_json, usage_json, created_at, updated_at
-            FROM sessions
-            WHERE workspace_id = ?
-            ORDER BY datetime(created_at) DESC, id DESC
-            """,
-            (int(workspace_id),),
-        ).fetchall()
+        if workspace_id is None:
+            rows = db.execute(
+                """
+                SELECT s.id, s.workspace_id, s.name, s.state_json, s.usage_json,
+                       s.created_at, s.updated_at, w.name AS workspace_name, w.path AS workspace_path
+                FROM sessions s
+                LEFT JOIN workspaces w ON w.id = s.workspace_id
+                ORDER BY datetime(s.created_at) DESC, s.id DESC
+                """
+            ).fetchall()
+        else:
+            rows = db.execute(
+                """
+                SELECT s.id, s.workspace_id, s.name, s.state_json, s.usage_json,
+                       s.created_at, s.updated_at, w.name AS workspace_name, w.path AS workspace_path
+                FROM sessions s
+                LEFT JOIN workspaces w ON w.id = s.workspace_id
+                WHERE s.workspace_id = ?
+                ORDER BY datetime(s.created_at) DESC, s.id DESC
+                """,
+                (int(workspace_id),),
+            ).fetchall()
     records = []
     total = _default_state()["usage"].copy()
     for row in rows:
@@ -235,6 +248,9 @@ def _usage_records_for_session(session: dict, state: dict) -> list[dict]:
                 "timestamp": _event_timestamp(event, session),
                 "session_id": session["id"],
                 "session_name": session["name"],
+                "workspace_id": session.get("workspace_id"),
+                "workspace_name": str(session.get("workspace_name") or "").strip(),
+                "workspace_path": str(session.get("workspace_path") or "").strip(),
                 "provider": str(data.get("provider") or current_stage.get("provider") or "").strip(),
                 "model": str(data.get("model") or current_stage.get("model") or "").strip(),
                 "stage": str(data.get("stage") or current_stage.get("name") or current_stage.get("phase") or "").strip(),

@@ -4,7 +4,7 @@ import json
 from copy import deepcopy
 
 from ..status.task_updates import _apply_task_updates
-from .task_authoring import author_task_analysis
+from .task_authoring import author_task_analysis, contextual_fallback_task_analysis
 from .task_seed import light_task_events
 
 
@@ -96,7 +96,7 @@ class LightTaskState:
         self.published_ids.add(analysis_id)
         return light_task_events(authored), assistant
 
-    def fallback_events_for_tool(self, tool_name: str) -> list[dict]:
+    def fallback_events_for_tool(self, tool_name: str, *, messages: list[dict]) -> list[dict]:
         if tool_name not in LIGHT_AUTHORED_TASK_TOOLS:
             return []
         analysis = self.current()
@@ -105,5 +105,11 @@ class LightTaskState:
         analysis_id = str(analysis.get("id") or "").strip()
         if not analysis_id or analysis_id in self.published_ids:
             return []
+        analysis = contextual_fallback_task_analysis(
+            base_analysis=analysis,
+            messages=messages,
+            tool_name=tool_name,
+        )
+        self.set_analysis(analysis)
         self.published_ids.add(analysis_id)
         return light_task_events(analysis)

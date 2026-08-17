@@ -4,8 +4,9 @@ import asyncio
 import json
 from dataclasses import dataclass
 from typing import Protocol
+from uuid import uuid4
 
-from .. import chat, subagents
+from .. import chat, memory_system, subagents
 from ..agent.policy import DISCOVERY_TOOLS
 from ..agent_runtime import execute_skill_tool_call, start_event, tool_arguments
 from ..status import task_analysis
@@ -27,7 +28,7 @@ LOCAL_LIGHT_TOOLS = ("run_investigation", "run_write_loop", "run_full_pipeline",
 
 
 class LightToolExecutor(Protocol):
-    def __call__(self, arguments: dict, workspace_dir: str) -> str:
+    def __call__(self, arguments: dict, workspace_dir: str, session_id: int | None) -> str:
         ...
 
 
@@ -64,7 +65,7 @@ def tool_schema(names: list[str]) -> list[dict]:
     return schemas
 
 
-def execute_tool_call(call: dict, workspace_dir: str) -> str:
+def execute_tool_call(call: dict, workspace_dir: str, session_id: int | None = None) -> str:
     function = call.get("function") or {}
     name = function.get("name") or ""
     arguments = tool_arguments(function.get("arguments"))
@@ -77,7 +78,7 @@ def execute_tool_call(call: dict, workspace_dir: str) -> str:
         "output": "",
         "open": False,
     }))
-    output = _execute_tool(name, arguments, call, workspace_dir)
+    output = _execute_tool(name, arguments, call, workspace_dir, session_id)
     emit({"op": "update", "id": event_id, "patch": {
         "status": "done" if not output.startswith("[error]") else "error",
         "output": output,
@@ -85,14 +86,14 @@ def execute_tool_call(call: dict, workspace_dir: str) -> str:
     return output
 
 
-def _execute_tool(name: str, arguments: dict, call: dict, workspace_dir: str) -> str:
+def _execute_tool(name: str, arguments: dict, call: dict, workspace_dir: str, session_id: int | None) -> str:
     local = light_tools().get(name)
     try:
         if name == "load_skill":
             _, output, _ = execute_skill_tool_call(call)
             return output
         if local is not None:
-            return local.execute(arguments, workspace_dir)
+            return local.execute(arguments, workspace_dir, session_id)
         tool = registry.get(name)
         if tool is None:
             return f"[error] unknown tool: {name}"
@@ -204,7 +205,7 @@ def _tool_result_text(result: ToolResult) -> str:
     return result.output or result.title
 
 
-def _run_investigation_tool(arguments: dict, workspace_dir: str) -> str:
+def _run_investigation_tool(arguments: dict, workspace_dir: str, session_id: int | None) -> str:
     message = _required_text(arguments, "message")
     context = _string_list(arguments.get("context"), "context")
     analysis = _dict_or_none(arguments.get("analysis"))
@@ -215,6 +216,7 @@ def _run_investigation_tool(arguments: dict, workspace_dir: str) -> str:
         analysis=analysis,
         context=context,
         workspace_dir=workspace_dir,
+        session_id=session_id,
     )
     return _json({
         "analysis": _analysis_summary(analysis),
@@ -222,7 +224,7 @@ def _run_investigation_tool(arguments: dict, workspace_dir: str) -> str:
     })
 
 
-def _run_write_loop_tool(arguments: dict, workspace_dir: str) -> str:
+def _run_write_loop_tool(arguments: dict, workspace_dir: str, session_id: int | None) -> str:
     message = _required_text(arguments, "message")
     context = _string_list(arguments.get("context"), "context")
     analysis = _required_dict(arguments, "analysis")
@@ -232,10 +234,12 @@ def _run_write_loop_tool(arguments: dict, workspace_dir: str) -> str:
         context=context,
         workspace_dir=workspace_dir,
         analysis=analysis,
+        session_id=session_id,
         state=chat.ChatState.DESIGNING,
         last_investigation=investigation,
     )
     events = _drive_chat_loop(run)
+    memory = _record_events_memory(workspace_dir, session_id, message, events)
     return _json({
         "state": run.state.value,
         "analysis": _analysis_summary(run.analysis or {}),
@@ -243,17 +247,20 @@ def _run_write_loop_tool(arguments: dict, workspace_dir: str) -> str:
         "validation_result": run.validation_result or {},
         "changed_files": run.changed_files,
         "events": _event_summary(events),
+        "memory": memory,
         "error": run.error,
     })
 
 
-def _run_full_pipeline_tool(arguments: dict, workspace_dir: str) -> str:
+def _run_full_pipeline_tool(arguments: dict, workspace_dir: str, session_id: int | None) -> str:
     message = _required_text(arguments, "message")
     context = _string_list(arguments.get("context"), "context")
-    events = _collect_state_events(chat.analyzed_stream(message, context, workspace_dir), workspace_dir)
+    events = _collect_state_events(chat.analyzed_stream(message, context, workspace_dir, session_id=session_id), workspace_dir)
+    memory = _record_events_memory(workspace_dir, session_id, message, events)
     return _json({
         "subtask": message,
         "events": _event_summary(events),
+        "memory": memory,
         "final": _last_output(events),
         "validation_result": _last_done_payload(events, "validation_result"),
         "investigation": _last_done_payload(events, "investigation"),
@@ -261,7 +268,7 @@ def _run_full_pipeline_tool(arguments: dict, workspace_dir: str) -> str:
     })
 
 
-def _run_subagent_tool(arguments: dict, workspace_dir: str) -> str:
+def _run_subagent_tool(arguments: dict, workspace_dir: str, session_id: int | None) -> str:
     agent = _required_text(arguments, "agent")
     task = _required_text(arguments, "task")
     events = list(subagents.run_stream(agent, task, workspace_dir))
@@ -282,16 +289,30 @@ def _run_investigation(
     analysis: dict,
     context: list[str],
     workspace_dir: str,
+    session_id: int | None,
 ) -> dict:
     from .. import investigator
 
     final = None
+    events = []
+    memory_snapshot = memory_system.select(
+        workspace_dir=workspace_dir,
+        session_id=session_id,
+        query=message,
+        analysis=analysis,
+        scopes=("turn", "session", "project"),
+        token_budget=3500,
+    )
+    legacy = memory_snapshot.to_legacy_context()
+    memory_context = memory_system.render_snapshot(memory_snapshot, consumer="investigation")
     task_reducer = LightInvestigationTaskReducer(analysis)
     for event in investigator.investigation_stream(
         message=message,
         analysis=analysis,
-        context=context,
+        context=context + ([memory_context] if memory_context else []),
         workspace_dir=workspace_dir,
+        previous_observations=legacy.get("observations", []),
+        previous_knowledge=legacy.get("knowledge", []),
     ):
         if event.get("op") == "start" and event.get("event") == "user_question":
             mediate_state_question(event, workspace_dir)
@@ -300,8 +321,10 @@ def _run_investigation(
             emit(next_event)
         if event.get("op") == "done" and isinstance(event.get("investigation"), dict):
             final = event["investigation"]
+        events.append(event)
     if final is None:
         raise ValueError("investigation finished without an investigation result")
+    _record_events_memory(workspace_dir, session_id, message, events)
     return final
 
 
@@ -333,6 +356,29 @@ def _event_summary(events: list[dict]) -> list[dict]:
             "phase": patch.get("phase") or data.get("phase", ""),
         })
     return summary
+
+
+def _record_events_memory(workspace_dir: str, session_id: int | None, message: str, events: list[dict]) -> dict:
+    turn_id = f"turn-{uuid4().hex[:12]}"
+    delta = memory_system.delta_from_events(
+        workspace_dir=workspace_dir,
+        session_id=session_id,
+        turn_id=turn_id,
+        events=events,
+        assistant_output=_last_output(events),
+    )
+    result = memory_system.record_delta(workspace_dir, delta)
+    count = len(result.get("records", []))
+    refs = len(result.get("refs", []))
+    if count or refs:
+        emit(start_event(f"memory-write-{uuid4().hex[:8]}", "memory_write", {
+            "status": "accepted",
+            "summary": f"Recorded {count} memory record(s) and {refs} reference(s).",
+            "records": result.get("records", [])[:8],
+            "refs": result.get("refs", [])[:8],
+            "source": message,
+        }))
+    return result
 
 
 def _last_output(events: list[dict]) -> str:

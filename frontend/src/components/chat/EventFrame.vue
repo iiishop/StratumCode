@@ -152,6 +152,10 @@ watch(() => props.status, (newStatus, oldStatus) => {
 .event-frame--error        { --event: #c44747; }
 .event-frame--no_progress  { --event: #9a6a00; }
 .event-frame--usage        { --event: #7c8ba0; }
+.event-frame--memory-write,
+.event-frame--memory-reference,
+.event-frame--memory-stale,
+.event-frame--memory-conflict { --event: #2f7d73; }
 
 /* ── left rail ────────────────────────────── */
 

@@ -7,7 +7,7 @@ from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-from . import app_settings, chat, clearify_runtime, code_structure, git_panel, lsp, mcp, model_settings, providers, sessions, skill_runtime, skills, subagents, terminal_manager, updates, workspaces
+from . import app_settings, chat, clearify_runtime, code_structure, git_panel, lsp, mcp, memory_system, model_settings, providers, sessions, skill_runtime, skills, subagents, terminal_manager, updates, workspaces
 from .tools import registry
 
 
@@ -82,6 +82,36 @@ def _get_code_structure_functions(handler, body):
     handler._json(code_structure.analyze_workspace(handler._workspace_path(), semantic=semantic))
 
 
+def _get_memory_snapshot(handler, body):
+    params = parse_qs(urlparse(handler.path).query)
+    workspace_dir = _memory_workspace_path(handler, params)
+    session_id = _optional_int((params.get("session_id") or [""])[0])
+    query = (params.get("q") or [""])[0]
+    snapshot = memory_system.select(
+        workspace_dir=workspace_dir,
+        session_id=session_id,
+        query=query,
+        scopes=("turn", "session", "project"),
+        token_budget=6000,
+    )
+    handler._json({
+        "snapshot": {
+            "records": snapshot.records,
+            "references": snapshot.references,
+            "stale": snapshot.stale,
+            "conflicts": snapshot.conflicts,
+            "summaries": snapshot.summaries,
+            "omitted": snapshot.omitted,
+        },
+        "records": memory_system.list_records(workspace_dir, include_reverted=True),
+    })
+
+
+def _get_memory_graph(handler, body):
+    params = parse_qs(urlparse(handler.path).query)
+    handler._json(memory_system.graph_data(_memory_workspace_path(handler, params)))
+
+
 _ROUTES: dict[tuple[str, str], object] = {
 
     # GET
@@ -104,6 +134,8 @@ _ROUTES: dict[tuple[str, str], object] = {
     ("GET", "/api/updates/status"): lambda h, b: h._json(updates.status(_force_refresh(h))),
     ("GET", "/api/git/status"): lambda h, b: h._json(git_panel.snapshot(h._workspace_path())),
     ("GET", "/api/code-structure/functions"): _get_code_structure_functions,
+    ("GET", "/api/memory/snapshot"): _get_memory_snapshot,
+    ("GET", "/api/memory/graph"): _get_memory_graph,
 
     # POST — 独立路由（不在前缀组里的）
     ("POST", "/api/model-settings/save"):   lambda h, b: (model_settings.save(b["stage"], int(b["provider_id"]), b["model_id"]), h._json({"ok": True})),
@@ -118,6 +150,9 @@ _ROUTES: dict[tuple[str, str], object] = {
     ("POST", "/api/updates/restart"):       lambda h, b: h._json(updates.restart()),
     ("POST", "/api/updates/apply"):         lambda h, b: h._handle_update_apply(b),
     ("POST", "/api/git/action"):            lambda h, b: h._json(git_panel.run_action(h._workspace_path(), str(b.get("action") or ""), b)),
+    ("POST", "/api/memory/update"):         lambda h, b: h._json(memory_system.update_record(_memory_workspace_path(h, b), str(b.get("id") or ""), b.get("patch", {}))),
+    ("POST", "/api/memory/revert"):         lambda h, b: h._json(memory_system.revert_record(_memory_workspace_path(h, b), str(b.get("id") or ""))),
+    ("POST", "/api/memory/refresh"):        lambda h, b: h._json({"records": memory_system.list_records(_memory_workspace_path(h, b), include_reverted=True)}),
     ("POST", "/api/chat"):                  lambda h, b: h._handle_chat(b),
     ("POST", "/api/chat/answer"):           lambda h, b: h._handle_chat_answer(b),
     ("POST", "/api/subagents/mcp-install"): lambda h, b: h._handle_mcp_install(b),
@@ -134,6 +169,7 @@ _ROUTES: dict[tuple[str, str], object] = {
     )),
     ("POST", "/api/skills/runtime/install"):lambda h, b: h._json({"runtime": skills.install_runtime()}),
     ("POST", "/api/files/preview"):         lambda h, b: h._handle_file_preview(b),
+    ("POST", "/api/files/resolve"):         lambda h, b: h._handle_file_resolve(b),
 }
 
 
@@ -180,7 +216,7 @@ _POST_PROVIDERS = {
 
 _POST_SESSIONS = {
     "list":       lambda h, b: h._json({"items": sessions.list_by_workspace(int(b["workspace_id"]))}),
-    "usage":      lambda h, b: h._json(sessions.usage_events(int(b["workspace_id"]))),
+    "usage":      lambda h, b: h._json(sessions.usage_events(_optional_int(b.get("workspace_id")))),
     "create":     lambda h, b: h._json({"session": sessions.create(int(b["workspace_id"]))}),
     "get":        lambda h, b: h._json({"session": sessions.get(int(b["id"]))}),
     "rename":     lambda h, b: (sessions.rename(int(b["id"]), b["name"]), h._json({"ok": True})),
@@ -203,6 +239,25 @@ _PREFIXES: dict[tuple[str, str], dict[str, object]] = {
     ("POST", "/api/sessions/"):  _POST_SESSIONS,
     ("POST", "/api/mcp/"):       _POST_MCP,
 }
+
+
+def _optional_int(value) -> int | None:
+    text = str(value or "").strip()
+    return int(text) if text else None
+
+
+def _memory_workspace_path(handler, source) -> str:
+    value = None
+    if isinstance(source, dict):
+        raw = source.get("workspace_id")
+        value = raw[0] if isinstance(raw, list) else raw
+    workspace_id = _optional_int(value)
+    if workspace_id is None:
+        return handler._workspace_path()
+    for workspace in workspaces.list_all(handler.workspace_dir):
+        if int(workspace["id"]) == workspace_id:
+            return workspace["path"]
+    raise ValueError("workspace not found")
 
 
 class _StratumThreadingHTTPServer(ThreadingHTTPServer):
@@ -536,6 +591,25 @@ class _Handler(SimpleHTTPRequestHandler):
             "truncated": truncated_bytes or total_lines > _FILE_PREVIEW_LINES,
         })
 
+    def _handle_file_resolve(self, body: dict):
+        candidates = body.get("paths")
+        if not isinstance(candidates, list):
+            self._json({"error": "paths must be a list"}, 400)
+            return
+        root = Path(self._workspace_path()).resolve()
+        resolved = {}
+        for raw in candidates[:500]:
+            if not isinstance(raw, str) or not raw.strip():
+                continue
+            target = _resolve_workspace_file(root, raw)
+            if target is None:
+                continue
+            resolved[raw] = {
+                "path": target.relative_to(root).as_posix(),
+                "absolute_path": str(target),
+            }
+        self._json({"files": resolved})
+
     def _workspace_path(self) -> str:
         return workspaces.active(self.workspace_dir)["path"]
 
@@ -562,3 +636,18 @@ def create(static_dir: str, port: int = 0, workspace_dir: str | None = None) -> 
         )
 
     return _StratumThreadingHTTPServer(("localhost", port), handler)
+
+
+def _resolve_workspace_file(root: Path, raw_path: str) -> Path | None:
+    value = raw_path.strip().strip("\"'")
+    if not value:
+        return None
+    candidate = Path(value)
+    if not candidate.is_absolute():
+        candidate = root / value
+    try:
+        target = candidate.resolve()
+        target.relative_to(root)
+    except (OSError, ValueError):
+        return None
+    return target if target.is_file() else None

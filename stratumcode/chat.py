@@ -253,6 +253,9 @@ def stream(request: dict, workspace_dir: str = ".") -> Iterator[dict]:
     context = request.get("context", [])
     if not isinstance(context, list) or not all(isinstance(path, str) for path in context):
         raise ValueError("context must be an array of file paths")
+    session_id = request.get("session_id")
+    if session_id is not None:
+        session_id = int(session_id)
     if "answer" in request:
         raise ValueError("chat answer resume is no longer supported; use /api/chat/answer for clearify tool replies")
-    return light_agent.stream(message, context, workspace_dir)
+    return light_agent.stream(message, context, workspace_dir, session_id=session_id)

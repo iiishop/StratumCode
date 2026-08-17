@@ -20,6 +20,7 @@ const LspPage = defineAsyncComponent(() => import('./components/lsp/LspPage.vue'
 const SkillsPage = defineAsyncComponent(() => import('./components/skills/SkillsPage.vue'))
 const SettingsPage = defineAsyncComponent(() => import('./components/settings/SettingsPage.vue'))
 const UsagePage = defineAsyncComponent(() => import('./components/usage/UsagePage.vue'))
+const MemoryPage = defineAsyncComponent(() => import('./components/memory/MemoryPage.vue'))
 const {
   items: workspaces,
   active: activeWorkspace,
@@ -48,6 +49,7 @@ const lspBootstrapSteps = computed(() => lspStore.bootstrapSteps.value)
 const currentTitle = computed(() => ({
   home: workspacePanel.value === 'structure' ? 'Code Structure' : 'Workspace',
   usage: 'Usage',
+  memory: 'Memory',
   providers: 'Providers',
   mcp: 'MCP',
   lsp: 'LSP',
@@ -577,6 +579,7 @@ watch(currentView, (v) => {
 
       <main class="main" :class="{ 'main--home': currentView === 'home' }">
       <UsagePage v-if="currentView === 'usage'" :workspace="activeWorkspace" />
+      <MemoryPage v-if="currentView === 'memory'" :workspace="activeWorkspace" />
 
       <!-- Providers view -->
       <div v-if="currentView === 'providers'" class="pm">
