@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-import asyncio
 import json
 import queue
 import threading
 from collections.abc import Iterator
+from uuid import uuid4
 
 from .. import model_settings, skill_runtime
 from ..agent_runtime import (
@@ -34,12 +34,28 @@ def ask(
 
     with skill_runtime.target_scope(skill_runtime.GLOBAL_TARGET):
         while True:
+            thinking_id = f"light-thinking-{uuid4().hex[:8]}"
+            _emit(start_event(thinking_id, "thinking", {
+                "text": "Thinking about the next action.",
+                "done": False,
+                "open": False,
+            }))
             assistant = call_model(provider, model, messages, tools=tools, use_skills=True)
             tool_calls = assistant.get("tool_calls") or []
             if not tool_calls:
+                _emit({"op": "update", "id": thinking_id, "patch": {
+                    "text": "Ready to answer.",
+                    "done": True,
+                    "open": False,
+                }})
                 return content_text(assistant.get("content") or "")
 
             messages.append(assistant_message(assistant))
+            _emit({"op": "update", "id": thinking_id, "patch": {
+                "text": _tool_call_summary(tool_calls),
+                "done": True,
+                "open": False,
+            }})
             for call in tool_calls:
                 output = execute_tool_call(call, workspace_dir)
                 messages.append({
@@ -51,10 +67,6 @@ def ask(
 
 def stream(message: str, context: list[str], workspace_dir: str) -> Iterator[dict]:
     output_id = "light-agent-output"
-    yield start_event(output_id, "output", {
-        "content": "",
-        "streaming": False,
-    })
     events: queue.Queue = queue.Queue()
 
     def publish(event: dict) -> None:
@@ -69,30 +81,16 @@ def stream(message: str, context: list[str], workspace_dir: str) -> Iterator[dic
                     "label": "Light agent",
                     "state": "running",
                     "phase": "deciding",
-                    "progress": [{
-                        "id": "think",
-                        "label": "Decide next action",
-                        "state": "running",
-                    }],
                 }))
                 result = ask(_prompt(message, context, workspace_dir), workspace_dir=workspace_dir)
                 publish({"op": "update", "id": stage_id, "patch": {
                     "state": "done",
                     "phase": "answered",
-                    "progress": [{
-                        "id": "think",
-                        "label": "Decide next action",
-                        "state": "done",
-                    }],
                 }})
-            publish({
-                "op": "update",
-                "id": output_id,
-                "patch": {
+            publish(start_event(output_id, "output", {
                     "content": result,
                     "streaming": False,
-                },
-            })
+            }))
             publish({"op": "done"})
         except Exception as exc:
             publish({"op": "error", "message": f"Light agent stream failed: {exc}"})
@@ -113,6 +111,21 @@ def _prompt(message: str, context: list[str], workspace_dir: str) -> str:
         "workspace_dir": workspace_dir,
         "context": context,
     })
+
+
+def _emit(event: dict) -> None:
+    from .clearify import emit
+
+    emit(event)
+
+
+def _tool_call_summary(tool_calls: list[dict]) -> str:
+    lines = ["Calling tools:"]
+    for call in tool_calls:
+        function = call.get("function") or {}
+        name = function.get("name") or "unknown_tool"
+        lines.append(f"- {name}: execute requested tool")
+    return "\n".join(lines)
 
 
 def _json(value: dict) -> str:

@@ -305,6 +305,7 @@ def _run_investigation(
         if event.get("op") == "start" and event.get("event") == "user_question":
             mediate_state_question(event, workspace_dir)
             continue
+        emit(event)
         if event.get("op") == "done" and isinstance(event.get("investigation"), dict):
             final = event["investigation"]
     if final is None:
@@ -322,6 +323,7 @@ def _collect_state_events(stream, workspace_dir: str) -> list[dict]:
         if event.get("op") == "start" and event.get("event") == "user_question":
             mediate_state_question(event, workspace_dir)
             continue
+        emit(event)
         events.append(event)
     return events
 
