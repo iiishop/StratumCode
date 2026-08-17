@@ -840,6 +840,29 @@ Return exactly this shape:
 Return an empty conflicts list when the plan is internally consistent.
 """
 
+NO_CHANGE_CLASSIFIER = """\
+You are StratumCode's patch-action classifier. Write user-visible text in {language}.
+Return one compact JSON object only. Do not use Markdown.
+
+For each candidate implementation step, decide whether its action requires a
+code change. A step requires NO code change only when it performs nothing but
+manual review, inspection, verification, confirmation, or documentation that the
+requested behavior already exists and needs no edit. Anything that adds, edits,
+creates, deletes, renames, moves, reconfigures, or otherwise modifies source
+code, tests, build files, or configuration REQUIRES a code change.
+
+Do not rely on keywords such as "manual review", "verification only", "no code
+change", "already implemented", or their translations. Judge by the concrete
+operation the step describes. A step that changes one thing and "nothing else"
+still requires a code change. A step whose entire operation is to
+inspect/confirm/verify existing behavior requires no code change.
+
+Return exactly this shape:
+{{"steps": [{{"step_slot": 1, "requires_code_change": false, "reason": "concise justification"}}]}}
+Include one entry per input step, using the same 1-based step_slot, a boolean
+requires_code_change, and a short reason.
+"""
+
 IMPLEMENTATION_RUNNER = """\
 You are StratumCode's implementation runner. Write user-visible text in {language}.
 
@@ -1407,6 +1430,10 @@ def build_patch_plan_consistency_auditor_system(language: str) -> str:
     return PATCH_PLAN_CONSISTENCY_AUDITOR.format(language=language) + "\n"
 
 
+def build_no_change_classifier_system(language: str) -> str:
+    return NO_CHANGE_CLASSIFIER.format(language=language) + "\n"
+
+
 def build_patch_plan_consistency_user(
     message: str,
     analysis: dict,
@@ -1440,6 +1467,32 @@ def build_patch_plan_consistency_user(
                 "step_ids": ["IS2", "IS3"],
                 "conflict": "concise description of the contradiction",
             }],
+        },
+    }, ensure_ascii=False, indent=2)
+
+
+def build_no_change_classifier_user(steps: list[dict]) -> str:
+    return json.dumps({
+        "output_contract": "patch_step_no_change_classification",
+        "steps": [
+            {
+                "step_slot": index,
+                "purpose": str(step.get("purpose") or ""),
+                "target": str(step.get("target") or ""),
+                "action": str(step.get("action") or ""),
+                "completion_conditions": step.get("completion_conditions") or [],
+                "minimality_check": str(step.get("minimality_check") or ""),
+            }
+            for index, step in enumerate(steps, start=1)
+        ],
+        "output_shape": {
+            "steps": [
+                {
+                    "step_slot": 1,
+                    "requires_code_change": True,
+                    "reason": "why this step requires or avoids a code change",
+                },
+            ],
         },
     }, ensure_ascii=False, indent=2)
 

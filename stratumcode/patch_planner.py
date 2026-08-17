@@ -8,9 +8,7 @@ from itertools import count
 from pathlib import Path
 from uuid import uuid4
 
-from . import app_settings, model_settings, patch_authorization, prompt, providers
-from .planning_facts import normalize_project_facts as _project_facts
-from .tools.builtin.common import IGNORED_DIRS
+from . import app_settings, model_settings, patch_authorization, path_utils, prompt, providers
 from .agent_runtime import (
     add_usage as _add_usage,
     call_model as _call_model,
@@ -20,26 +18,10 @@ from .agent_runtime import (
     start_event,
     usage_delta as _usage_delta,
 )
+from .planning_facts import normalize_project_facts as _project_facts
+from .tools.builtin.common import IGNORED_DIRS
 
 DEFAULT_PATCH_JSON_ATTEMPTS = 3
-NO_CHANGE_ACTION_MARKERS = (
-    "manual review",
-    "manual inspection",
-    "verification only",
-    "no code change",
-    "no additional code",
-    "already implemented",
-    "already satisfied",
-    "手动检查",
-    "人工检查",
-    "仅检查",
-    "无需代码",
-    "无需额外代码",
-    "不需要代码修改",
-    "已经实现",
-    "已实现",
-    "已满足",
-)
 
 
 def patch_planning_stream(
@@ -154,7 +136,15 @@ def patch_planning_stream(
                 run_id,
                 f"decision-{index}-{semantic_attempt}",
             )
-            _normalize_no_change_slot(slot)
+            yield from _normalize_no_change_slot(
+                slot,
+                provider=provider,
+                model=model,
+                pricing_rules=pricing_rules,
+                usage_total=usage_total,
+                run_id=run_id,
+                label=f"decision-{index}-{semantic_attempt}",
+            )
             slot_issues = _slot_step_issues(
                 slot,
                 workspace_dir,
@@ -1151,32 +1141,115 @@ def _has_usable_steps(value) -> bool:
     return isinstance(value, list) and any(isinstance(item, dict) and str(item.get("file") or "").strip() for item in value)
 
 
-def _normalize_no_change_slot(slot: dict | None) -> None:
+def _normalize_no_change_slot(
+    slot: dict | None,
+    *,
+    provider: dict,
+    model: str,
+    pricing_rules,
+    usage_total: dict,
+    run_id: str,
+    label: str,
+) -> Iterator[dict]:
     if not isinstance(slot, dict) or slot.get("needed") is False:
         return
     steps = [item for item in slot.get("step_content") or [] if isinstance(item, dict)]
-    if not steps or not all(_is_no_change_action(item) for item in steps):
+    if not steps:
+        return
+    classification = yield from _classify_step_actions(
+        provider,
+        model,
+        steps,
+        pricing_rules,
+        usage_total,
+        run_id,
+        label,
+    )
+    if not classification:
+        # Conservative fallback: keep the slot as a code-change slot and let the
+        # downstream semantic validation reject it rather than trusting a guess.
+        return
+    no_change_slots = set()
+    for item in classification:
+        if not isinstance(item, dict) or item.get("requires_code_change") is not False:
+            continue
+        slots = _numbered_slots([item.get("step_slot")], 10_000)
+        if slots:
+            no_change_slots.add(slots[0])
+    if no_change_slots != set(range(1, len(steps) + 1)):
         return
     fact_slots = sorted({
         fact_slot
         for item in steps
         for fact_slot in _numbered_slots(item.get("project_fact_slots"), 10_000)
     })
+    reasons = [
+        str(item.get("reason") or "").strip()
+        for item in classification
+        if isinstance(item, dict) and str(item.get("reason") or "").strip()
+    ]
+    skip_reason = "Runtime normalized verification-only steps that require no code change"
+    if reasons:
+        skip_reason += ": " + "; ".join(reasons)
     slot.update({
         "needed": False,
-        "skip_reason": "Runtime normalized verification-only steps that explicitly require no code change.",
+        "skip_reason": skip_reason,
         "skip_project_fact_slots": fact_slots,
         "step_content": [],
     })
 
 
-def _is_no_change_action(step: dict) -> bool:
-    text = " ".join([
-        str(step.get("purpose") or ""),
-        str(step.get("action") or ""),
-        str(step.get("minimality_check") or ""),
-    ]).casefold()
-    return any(marker in text for marker in NO_CHANGE_ACTION_MARKERS)
+def _classify_step_actions(
+    provider: dict,
+    model: str,
+    steps: list[dict],
+    pricing_rules,
+    usage_total: dict,
+    run_id: str,
+    label: str,
+) -> Iterator[list[dict] | None]:
+    messages = [
+        {"role": "system", "content": prompt.build_no_change_classifier_system(
+            app_settings.get_output_language()
+        )},
+        {"role": "user", "content": prompt.build_no_change_classifier_user(steps)},
+    ]
+    attempts = app_settings.get_round_limit("patch_json_attempts") or DEFAULT_PATCH_JSON_ATTEMPTS
+    for attempt in _attempt_indexes(attempts):
+        assistant = _call_model(provider, model, messages, tools=[])
+        if usage := _usage_delta(pricing_rules, assistant.pop("_usage", {})):
+            _add_usage(usage_total, usage)
+            yield start_event(
+                f"{run_id}-usage-nochange-{label}-{attempt}",
+                "usage",
+                {"delta": usage, "total": usage_total},
+            )
+        text = _content_text(assistant.get("content"))
+        try:
+            data = _json_from_text(text)
+        except (json.JSONDecodeError, ValueError) as exc:
+            messages.extend([
+                {"role": "assistant", "content": text[:4000]},
+                {"role": "user", "content": prompt.retry_json_instruction(
+                    exc,
+                    kind="no-change classification",
+                    forbidden="Markdown",
+                )},
+            ])
+            continue
+        steps_out = data.get("steps")
+        if not isinstance(steps_out, list):
+            messages.extend([
+                {"role": "assistant", "content": text[:4000]},
+                {"role": "user", "content": (
+                    "The no-change classification is missing its steps array. "
+                    "Return only corrected JSON whose top level is "
+                    '{"steps": [{"step_slot": 1, "requires_code_change": false, "reason": "..."}]}.'
+                )},
+            ])
+            continue
+        return steps_out
+    return None
 
 
 def _slot_step_issues(
@@ -1560,7 +1633,7 @@ def _append_slot_steps(target: list[dict], value, *, decision_slot: int) -> None
 def _step_responsibility_key(step: dict) -> tuple[str, str, str]:
     return (
         str(step.get("mode") or "modify").strip().casefold(),
-        str(step.get("file") or "").strip().replace("\\", "/").casefold(),
+        path_utils.normalized_path_key(step.get("file")),
         _normalized_target(step.get("responsibility_key") or step.get("target")),
     )
 
