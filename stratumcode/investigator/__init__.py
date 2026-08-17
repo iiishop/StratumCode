@@ -904,6 +904,36 @@ def _handle_clearify(
     return DispatchAction.CONTINUE_TOOLS
 
 
+def _record_discovery_progress(
+    state: InvestigationState,
+    cache_key: str,
+    name: str,
+    call_id: str,
+    arguments: dict,
+    output: str,
+    verification_request: dict | None,
+) -> None:
+    state.progress.repeated_tool_error_name = ""
+    state.progress.repeated_tool_error_count = 0
+    state.caches.tool[cache_key] = output
+    observation = _tool_observation(name, call_id, output)
+    state.observations.items.append(observation)
+    state.caches.tool_observation_ids[cache_key] = observation["id"]
+    state.observations.pending_ids.append(observation["id"])
+    state.progress.duplicate_no_progress_signature = ""
+    state.progress.duplicate_no_progress_count = 0
+    state.progress.duplicate_no_progress_total = 0
+    state.control.force_synthesis_reason = ""
+    state.control.force_discovery_ids = []
+    if verification_request and _is_hypothesis_verifier_call(name, arguments):
+        state.verification.attempted.add((
+            verification_request["unknown_id"],
+            verification_request["hypothesis"],
+        ))
+        state.verification.queue.pop(0)
+    state.messages.append(_tool_message(call_id, output))
+
+
 def _handle_discovery(
     state: InvestigationState,
     call_id: str,
@@ -919,19 +949,6 @@ def _handle_discovery(
     del semantic_repair_required_ids, resolution_required_ids, round_index
 
     cache_key = _tool_cache_key(name, arguments)
-    if name == "read":
-        cached_output = _read_from_file_cache(arguments, state.caches.read_file)
-        if cached_output is not None:
-            output = cached_output
-            yield start_event(call_id, registry.event_type(name), _tool_event(
-                name,
-                arguments,
-                output,
-                description="Investigation tool",
-                status="cached",
-            ))
-            state.messages.append(_tool_message(call_id, output))
-            return DispatchAction.CONTINUE_TOOLS
     if cache_key in state.caches.tool:
         cached_observation_id = state.caches.tool_observation_ids.get(cache_key, "")
         state.progress.duplicate_no_progress_total += 1
@@ -981,42 +998,46 @@ def _handle_discovery(
             })
             return DispatchAction.BREAK_TOOLS
         return DispatchAction.CONTINUE_TOOLS
-    output = yield from _run_tool_stream(
+
+    cached_output = (
+        _read_from_file_cache(arguments, state.caches.read_file) if name == "read" else None
+    )
+    if cached_output is not None:
+        output = cached_output
+        yield start_event(call_id, registry.event_type(name), _tool_event(
+            name,
+            arguments,
+            output,
+            description="Investigation tool",
+            status="cached",
+        ))
+    else:
+        output = yield from _run_tool_stream(
+            name,
+            call_id,
+            arguments,
+            runtime.workspace_dir,
+            _analysis_with_recorded_unknowns(
+                runtime.analysis,
+                state.findings.recorded,
+            ),
+            relax_discovery_contract=(
+                runtime.semantic_gate_enabled
+                and _get_investigation_phase(state) == InvestigationPhase.REPAIR
+                and name in _REPAIR_ALLOWED_TOOL_NAMES - {"record_investigation_findings"}
+            ),
+        )
+        if name == "read":
+            _cache_read_full_text(arguments, output, state.caches.read_file)
+    _record_discovery_progress(
+        state,
+        cache_key,
         name,
         call_id,
         arguments,
-        runtime.workspace_dir,
-        _analysis_with_recorded_unknowns(
-            runtime.analysis,
-            state.findings.recorded,
-        ),
-        relax_discovery_contract=(
-            runtime.semantic_gate_enabled
-            and _get_investigation_phase(state) == InvestigationPhase.REPAIR
-            and name in _REPAIR_ALLOWED_TOOL_NAMES - {"record_investigation_findings"}
-        ),
+        output,
+        verification_request,
     )
-    if name == "read":
-        _cache_read_full_text(arguments, output, state.caches.read_file)
-    state.progress.repeated_tool_error_name = ""
-    state.progress.repeated_tool_error_count = 0
-    state.caches.tool[cache_key] = output
-    observation = _tool_observation(name, call_id, output)
-    state.observations.items.append(observation)
-    state.caches.tool_observation_ids[cache_key] = observation["id"]
-    state.observations.pending_ids.append(observation["id"])
-    state.progress.duplicate_no_progress_signature = ""
-    state.progress.duplicate_no_progress_count = 0
-    state.progress.duplicate_no_progress_total = 0
-    state.control.force_synthesis_reason = ""
-    state.control.force_discovery_ids = []
-    if verification_request and _is_hypothesis_verifier_call(name, arguments):
-        state.verification.attempted.add((
-            verification_request["unknown_id"],
-            verification_request["hypothesis"],
-        ))
-        state.verification.queue.pop(0)
-    state.messages.append(_tool_message(call_id, output))
     return DispatchAction.CONTINUE_TOOLS
 
 
