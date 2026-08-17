@@ -53,10 +53,13 @@ const msgList = ref(null)
 const messages = reactive([])
 const msgRefs = reactive({})
 const isStreaming = ref(false)
+const isAtMessageBottom = ref(true)
+const isAutoScrollingMessages = ref(false)
 const currentChatState = ref('initializing')
 const restoring = ref(false)
 const copySessionStatus = ref('')
 let copySessionTimer
+const MESSAGE_BOTTOM_THRESHOLD = 28
 
 function addToFileContext(path) {
   if (fileContext.find(f => f.path === path)) return
@@ -483,6 +486,8 @@ function clearState() {
   fileContext.splice(0, fileContext.length)
   Object.assign(sessionUsage, usageDefaults())
   Object.assign(agentStatus, { state: 'idle', phase: '', provider: '', model: '', contextLength: null, contextUsed: 0 })
+  isAtMessageBottom.value = true
+  isAutoScrollingMessages.value = false
 }
 
 async function restoreState(state = {}) {
@@ -610,7 +615,7 @@ async function send(answer = null) {
     if (completedNormally && props.session?.id) {
       void generateSessionTitle(props.session.id, text, message)
     }
-    nextTick(scrollBottom)
+    nextTick(scrollForNewContent)
   }
 }
 
@@ -667,7 +672,7 @@ function stopChat() {
   isStreaming.value = false
   Object.assign(agentStatus, { state: 'idle', phase: 'completed' })
   scheduleSave()
-  nextTick(scrollBottom)
+  nextTick(scrollForNewContent)
 }
 
 async function continueAfterAnswer(answer) {
@@ -749,12 +754,54 @@ function analysisForId(id) {
 
 /* ── animation helpers ──────────────────────────────────── */
 
-function animSmoothScroll() {
-  if (!msgList.value) return
-  gsap.to(msgList.value, { scrollTop: msgList.value.scrollHeight, duration: 0.25, ease: 'power2.out' })
+function isMessageListAtBottom() {
+  const el = msgList.value
+  if (!el) return true
+  return el.scrollHeight - el.scrollTop - el.clientHeight <= MESSAGE_BOTTOM_THRESHOLD
 }
 
-function scrollBottom() { if (msgList.value) msgList.value.scrollTop = msgList.value.scrollHeight }
+function updateMessageScrollState() {
+  if (isAutoScrollingMessages.value) return
+  isAtMessageBottom.value = isMessageListAtBottom()
+}
+
+function handleMessageScrollIntent() {
+  if (!msgList.value) return
+  gsap.killTweensOf(msgList.value)
+  isAutoScrollingMessages.value = false
+  updateMessageScrollState()
+}
+
+function scrollForNewContent() {
+  if (!isAtMessageBottom.value) return
+  animSmoothScroll()
+}
+
+function animSmoothScroll() {
+  if (!msgList.value) return
+  isAutoScrollingMessages.value = true
+  gsap.to(msgList.value, {
+    scrollTop: msgList.value.scrollHeight,
+    duration: 0.25,
+    ease: 'power2.out',
+    onComplete: () => {
+      isAutoScrollingMessages.value = false
+      isAtMessageBottom.value = true
+    },
+    onInterrupt: () => {
+      isAutoScrollingMessages.value = false
+      updateMessageScrollState()
+    },
+  })
+}
+
+function scrollBottom() {
+  if (!msgList.value) return
+  gsap.killTweensOf(msgList.value)
+  isAutoScrollingMessages.value = false
+  msgList.value.scrollTop = msgList.value.scrollHeight
+  isAtMessageBottom.value = true
+}
 
 function upsertSubagent(data) {
   const existing = subagentRuns.find(agent =>
@@ -844,7 +891,7 @@ function onAgentPacket(packet, type, data) {
   }
 }
 
-const { stream: chatStream, abort: abortChat } = useChatStream(animSmoothScroll, onAgentPacket)
+const { stream: chatStream, abort: abortChat } = useChatStream(scrollForNewContent, onAgentPacket)
 
 function animateLast() {
   const ids = Object.keys(msgRefs)
@@ -942,7 +989,15 @@ watch(() => props.session?.id, (id, oldId) => {
         </div>
 
         <!-- messages -->
-        <div v-else ref="msgList" class="chat__msgs">
+        <div
+          v-else
+          ref="msgList"
+          class="chat__msgs"
+          @scroll="updateMessageScrollState"
+          @wheel.passive="handleMessageScrollIntent"
+          @touchstart.passive="handleMessageScrollIntent"
+          @mousedown="handleMessageScrollIntent"
+        >
           <div
             v-for="m in messages" :key="m.id"
             :ref="(el) => setMsgRef(m.id, el)"
@@ -993,6 +1048,21 @@ watch(() => props.session?.id, (id, oldId) => {
             </div>
           </div>
         </div>
+
+        <Transition name="jump-latest">
+          <button
+            v-if="messages.length && !isAtMessageBottom"
+            type="button"
+            class="chat__jump-latest"
+            @click="scrollBottom"
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M12 5v14"/>
+              <path d="m19 12-7 7-7-7"/>
+            </svg>
+            <span>Jump to latest</span>
+          </button>
+        </Transition>
 
       </div>
 
@@ -1085,7 +1155,7 @@ watch(() => props.session?.id, (id, oldId) => {
   flex: 1;
   overflow: visible;
 }
-.chat__main { flex: 1; display: flex; flex-direction: column; overflow: hidden; max-width: 820px; margin: 0 auto; width: 100%; padding: 0 32px; }
+.chat__main { position: relative; flex: 1; display: flex; flex-direction: column; overflow: hidden; max-width: 820px; margin: 0 auto; width: 100%; padding: 0 32px; }
 
 /* ---- empty ---- */
 .chat__empty { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 32px; }
@@ -1129,6 +1199,35 @@ watch(() => props.session?.id, (id, oldId) => {
 
 /* ---- messages ---- */
 .chat__msgs { flex: 1; overflow-y: auto; padding: 24px 8px 16px 0; margin-right: 6px; display: flex; flex-direction: column; gap: 16px; }
+.chat__jump-latest {
+  position: absolute;
+  right: 42px;
+  bottom: 18px;
+  z-index: 5;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 30px;
+  padding: 0 11px;
+  border: 1px solid var(--accent-border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-raised);
+  color: var(--accent-text);
+  box-shadow: 0 8px 24px rgba(15, 23, 42, 0.12);
+  font: 600 11px/1 var(--sans);
+  cursor: pointer;
+}
+.chat__jump-latest:hover { background: var(--accent-bg); }
+.chat__jump-latest svg { flex-shrink: 0; }
+.jump-latest-enter-active,
+.jump-latest-leave-active {
+  transition: opacity 0.14s ease, transform 0.14s ease;
+}
+.jump-latest-enter-from,
+.jump-latest-leave-to {
+  opacity: 0;
+  transform: translateY(6px);
+}
 .chat__msg { display: flex; }
 .chat__msg--user { justify-content: flex-end; }
 
