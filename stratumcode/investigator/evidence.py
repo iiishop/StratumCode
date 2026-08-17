@@ -296,12 +296,14 @@ def _project_file_ref(
     ref = _normalize_path(ref_raw)
     if not ref or ref.endswith(".pyc"):
         return ""
+    files, _ = _workspace_file_catalog(str(workspace_dir or ""))
+    if files:
+        for path in sorted(files, key=len):
+            if _file_ref_matches(path, ref):
+                return path
+        return ""
     observed = _observed_file_paths(observations) | _hit_files_from_observations(observations)
     for path in sorted(observed, key=len):
-        if _file_ref_matches(path, ref):
-            return path
-    files, _ = _workspace_file_catalog(str(workspace_dir or ""))
-    for path in sorted(files, key=len):
         if _file_ref_matches(path, ref):
             return path
     return ""

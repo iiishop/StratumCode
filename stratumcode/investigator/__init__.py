@@ -245,12 +245,25 @@ def _get_investigation_phase(state: InvestigationState) -> InvestigationPhase:
     return InvestigationPhase.DISCOVER
 
 
-def _bump_hardlock(state: InvestigationState) -> None:
-    """Increment the already-resolved error counter; >=2 hard-locks finish_investigation."""
+def _bump_hardlock(state: InvestigationState, *, required_next_tool: str = "") -> None:
+    """Record ignored control guidance and optionally force the next tool."""
     state.progress.already_resolved_error_count += 1
-    if state.progress.already_resolved_error_count >= 2:
-        # Hard-lock: force the model to call finish_investigation
-        state.control.current_tool_choice = {"type": "function", "function": {"name": "finish_investigation"}}
+    state.control.required_next_tool = required_next_tool
+
+
+def _apply_required_next_tool(
+    state: InvestigationState,
+    runtime: InvestigationRuntime,
+    *,
+    current_tools: list[dict],
+) -> tuple[list[dict], str | dict]:
+    required = state.control.required_next_tool
+    if not required:
+        return current_tools, state.control.current_tool_choice
+    tools = _named(current_tools, required) or _named(runtime.tools, required)
+    if required == "finish_investigation" and not tools:
+        tools = [_finish_tool_schema()]
+    return tools, {"type": "function", "function": {"name": required}}
 
 
 def _prepare_round(
@@ -346,6 +359,11 @@ def _prepare_round(
             "role": "user",
             "content": _minimum_rounds_prompt(runtime.min_rounds - current_round_index),
         })
+    current_tools, state.control.current_tool_choice = _apply_required_next_tool(
+        state,
+        runtime,
+        current_tools=current_tools,
+    )
     state.control.current_tools = current_tools
     allowed_tool_names = {
         str(((tool.get("function") or {}).get("name")) or "")
@@ -534,7 +552,7 @@ def _handle_record(
             description="Record investigation findings",
         ))
         state.messages.append(_tool_message(call_id, output))
-        _bump_hardlock(state)
+        _bump_hardlock(state, required_next_tool="finish_investigation")
         return DispatchAction.CONTINUE_TOOLS
     if (
         not _has_finding_fields(arguments)
@@ -820,7 +838,7 @@ def _handle_clearify(
             "tool_call_id": call_id,
             "content": output,
         })
-        _bump_hardlock(state)
+        _bump_hardlock(state, required_next_tool="finish_investigation")
         return DispatchAction.CONTINUE_TOOLS
     _validate_tool_contract(
         name,
@@ -862,7 +880,7 @@ def _handle_clearify(
             "tool_call_id": call_id,
             "content": output,
         })
-        _bump_hardlock(state)
+        _bump_hardlock(state, required_next_tool="finish_investigation")
         return DispatchAction.CONTINUE_TOOLS
     question_id = runtime.clearify_runtime.create_pending()
     yield start_event(question_id, "user_question", _clearify_question(
@@ -1104,41 +1122,6 @@ def _dispatch_tool_calls(
                         "Stop after one independent verdict for this atomic hypothesis."
                     ),
                 }
-            failed_key = _tool_cache_key(name, arguments)
-            if failed_key in state.caches.failed_tool:
-                error_name = name or "invalid"
-                if error_name not in round_error_names:
-                    state.progress.repeated_tool_error_name = error_name
-                    state.progress.repeated_tool_error_count += 1
-                    round_error_names.add(error_name)
-                output = json.dumps({
-                    "error": {
-                        "code": "duplicate_failed_tool_call",
-                        "tool": name or "invalid",
-                        "retryable": False,
-                        "message": (
-                            "The same tool arguments already failed. "
-                            "Choose a different valid action; do not retry this call."
-                        ),
-                    },
-                }, ensure_ascii=False)
-                yield start_event(call_id, registry.event_type(name), _tool_event(
-                    name or "invalid",
-                    arguments,
-                    output,
-                    description="Investigation tool",
-                    status="error",
-                    deduplicated=True,
-                ))
-                state.messages.append(_tool_message(call_id, output))
-                if state.progress.repeated_tool_error_count >= MAX_REPEATED_TOOL_ERRORS:
-                    state.control.finalization_reason = (
-                        "Runtime stopped an identical failed tool call loop: "
-                        f"{name or 'invalid'}."
-                    )
-                    state.control.stop_investigation = True
-                    break
-                continue
             if name not in allowed_tool_names:
                 if _recorded_resolves_initial_unknowns(
                     state.findings.recorded,
@@ -1162,7 +1145,7 @@ def _dispatch_tool_calls(
                         status="error",
                     ))
                     state.messages.append(_tool_message(call_id, output))
-                    _bump_hardlock(state)
+                    _bump_hardlock(state, required_next_tool="finish_investigation")
                     continue
                 if resolution_required_ids and not semantic_repair_required_ids:
                     # 非 REPAIR 场景：初始 unknowns 已有证据记录，先 resolve
@@ -1194,7 +1177,7 @@ def _dispatch_tool_calls(
                         status="error",
                     ))
                     state.messages.append(_tool_message(call_id, output))
-                    _bump_hardlock(state)
+                    _bump_hardlock(state, required_next_tool=required_tool)
                     continue
                 output = _tool_blocked_error_json(
                     name,
@@ -1247,6 +1230,8 @@ def _dispatch_tool_calls(
                     break
                 continue
             if name == "finish_investigation":
+                if state.control.required_next_tool == name:
+                    state.control.required_next_tool = ""
                 action = yield from _handle_finish(
                     state,
                     call_id,
@@ -1323,10 +1308,6 @@ def _dispatch_tool_calls(
                 observations=state.observations.items,
             )
             error_name = name or "invalid"
-            state.caches.failed_tool[_tool_cache_key(
-                error_name,
-                arguments or partial_arguments,
-            )] = output
             if error_name not in round_error_names:
                 if error_name == state.progress.repeated_tool_error_name:
                     state.progress.repeated_tool_error_count += 1

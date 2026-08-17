@@ -31,7 +31,6 @@ class CacheState:
     tool_observation_ids: dict[str, str] = field(default_factory=dict)
     audit: dict = field(default_factory=dict)
     read_file: dict = field(default_factory=dict)
-    failed_tool: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -65,6 +64,7 @@ class ControlState:
     finalization_reason: str = ""
     current_tool_choice: object = None
     current_tools: list[dict] = field(default_factory=list)
+    required_next_tool: str = ""
     finish_evidence_blocked: bool = False
     force_synthesis_reason: str = ""
     force_discovery_ids: list[str] = field(default_factory=list)
