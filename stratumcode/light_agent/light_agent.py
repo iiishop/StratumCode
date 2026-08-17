@@ -63,7 +63,28 @@ def stream(message: str, context: list[str], workspace_dir: str) -> Iterator[dic
     def run_agent() -> None:
         try:
             with event_sink(publish):
+                stage_id = "light-agent-stage"
+                publish(start_event(stage_id, "stage", {
+                    "name": "light_agent",
+                    "label": "Light agent",
+                    "state": "running",
+                    "phase": "deciding",
+                    "progress": [{
+                        "id": "think",
+                        "label": "Decide next action",
+                        "state": "running",
+                    }],
+                }))
                 result = ask(_prompt(message, context, workspace_dir), workspace_dir=workspace_dir)
+                publish({"op": "update", "id": stage_id, "patch": {
+                    "state": "done",
+                    "phase": "answered",
+                    "progress": [{
+                        "id": "think",
+                        "label": "Decide next action",
+                        "state": "done",
+                    }],
+                }})
             publish({
                 "op": "update",
                 "id": output_id,

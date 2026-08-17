@@ -7,11 +7,11 @@ from typing import Protocol
 
 from .. import chat, subagents
 from ..agent.policy import DISCOVERY_TOOLS
-from ..agent_runtime import execute_skill_tool_call, tool_arguments
+from ..agent_runtime import execute_skill_tool_call, start_event, tool_arguments
 from ..status import task_analysis
 from ..tools import registry
 from ..tools.spec import ToolResult
-from .clearify import mediate_state_question
+from .clearify import emit, mediate_state_question
 
 UNSAFE_LIGHT_TOOLS = {
     "apply_patch",
@@ -67,6 +67,24 @@ def execute_tool_call(call: dict, workspace_dir: str) -> str:
     function = call.get("function") or {}
     name = function.get("name") or ""
     arguments = tool_arguments(function.get("arguments"))
+    event_id = str(call.get("id") or f"light-tool-{name}")
+    emit(start_event(event_id, "tool", {
+        "name": name,
+        "description": _tool_description(name),
+        "status": "running",
+        "input": json.dumps(arguments, ensure_ascii=False),
+        "output": "",
+        "open": False,
+    }))
+    output = _execute_tool(name, arguments, call, workspace_dir)
+    emit({"op": "update", "id": event_id, "patch": {
+        "status": "done" if not output.startswith("[error]") else "error",
+        "output": output,
+    }})
+    return output
+
+
+def _execute_tool(name: str, arguments: dict, call: dict, workspace_dir: str) -> str:
     local = light_tools().get(name)
     try:
         if name == "load_skill":
@@ -80,6 +98,14 @@ def execute_tool_call(call: dict, workspace_dir: str) -> str:
         return _tool_result_text(asyncio.run(tool.execute(arguments, {"directory": workspace_dir})))
     except Exception as exc:
         return f"[error] {exc}"
+
+
+def _tool_description(name: str) -> str:
+    local = light_tools().get(name)
+    if local is not None:
+        return local.description
+    tool = registry.get(name)
+    return tool.description if tool is not None else ""
 
 
 def light_tools() -> dict[str, LightTool]:

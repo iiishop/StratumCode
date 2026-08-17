@@ -4,6 +4,7 @@ import json
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
+from uuid import uuid4
 
 from .. import clearify_runtime, model_settings
 from ..agent_runtime import call_model, content_text, start_event
@@ -23,6 +24,12 @@ def event_sink(sink: EventSink) -> Iterator[None]:
 
 def mediate_state_question(event: dict, workspace_dir: str) -> dict:
     data = event.get("data") if isinstance(event.get("data"), dict) else {}
+    _emit_tool(
+        "light_agent_clearify",
+        {"state_question": data},
+        "Evaluating delegated clearify question.",
+        status="running",
+    )
     decision = _decide_state_answer(data, workspace_dir, user_answers=[])
     answers = []
     while _needs_user(decision):
@@ -37,6 +44,12 @@ def mediate_state_question(event: dict, workspace_dir: str) -> dict:
     }
     if data.get("id"):
         clearify_runtime.answer(str(data["id"]), payload)
+    _emit_tool(
+        "light_agent_clearify",
+        {"state_question": data, "user_answers": answers},
+        json.dumps(payload, ensure_ascii=False),
+        status="done",
+    )
     return payload
 
 
@@ -116,6 +129,21 @@ def _emit(event: dict) -> None:
     sink = _EVENT_SINK.get()
     if sink is not None:
         sink(event)
+
+
+def emit(event: dict) -> None:
+    _emit(event)
+
+
+def _emit_tool(name: str, input_value: dict, output: str, *, status: str) -> None:
+    _emit(start_event(f"light-tool-{name}-{uuid4().hex[:8]}", "tool", {
+        "name": name,
+        "description": "Light agent mediation",
+        "status": status,
+        "input": json.dumps(input_value, ensure_ascii=False),
+        "output": output,
+        "open": False,
+    }))
 
 
 def _needs_user(decision: dict) -> bool:
