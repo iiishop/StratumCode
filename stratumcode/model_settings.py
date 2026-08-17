@@ -7,6 +7,7 @@ EVIDENCE_STAGE = "evidence"
 GIT_COMMIT_STAGE = "git_commit"
 TITLE_STAGE = "title"
 SUMMARY_STAGE = "summary"
+MEMORY_STAGE = "memory"
 
 # 单一事实来源：前端 stage 列表、顺序与文案都由这里下发，加 stage 只改这一份。
 # 顺序即数组顺序；编号由前端按数组下标生成，不在此维护。
@@ -17,6 +18,7 @@ STAGE_META = [
     {"id": GIT_COMMIT_STAGE,  "title": "Git commit message",    "detail": "Generate commit title and description"},
     {"id": TITLE_STAGE,       "title": "Session title",         "detail": "Generate session title from conversation"},
     {"id": SUMMARY_STAGE,     "title": "Investigation summary", "detail": "Summarize investigation findings"},
+    {"id": MEMORY_STAGE,      "title": "Memory extraction",     "detail": "Extract conversation references and memory candidates"},
 ]
 VALID_STAGES = {item["id"] for item in STAGE_META}
 

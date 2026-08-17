@@ -7,6 +7,7 @@ from uuid import uuid4
 
 from . import db
 from .freshness import freshness_status
+from .llm import call_memory_json
 from .models import ConversationRef, MemoryDelta, MemoryEvidence, MemoryLink, MemoryRecord
 
 
@@ -214,17 +215,17 @@ def _row_ref(row) -> dict:
 
 def _decode_json_fields(item: dict) -> dict:
     result = dict(item)
-    for key, fallback in (("fingerprint_json", {}), ("payload_json", {})):
+    for key, default_value in (("fingerprint_json", {}), ("payload_json", {})):
         if key in result:
-            result[key[:-5]] = _loads(result.pop(key), fallback)
+            result[key[:-5]] = _loads(result.pop(key), default_value)
     return result
 
 
-def _loads(value: str, fallback):
+def _loads(value: str, default_value):
     try:
         return json.loads(value or "")
     except json.JSONDecodeError:
-        return fallback
+        return default_value
 
 
 def _computed_freshness(workspace_dir: str, item: dict) -> str:
@@ -251,20 +252,29 @@ def _existing_statements(conn) -> dict[tuple[str, str], tuple[str, str]]:
 def _conflicting_record(existing: dict, record: MemoryRecord) -> str:
     key_prefix = str(record.subject_key).casefold()
     statement_key = _statement_key(record.statement)
+    candidates = []
     for (subject_key, known_statement_key), (known_id, known_statement) in existing.items():
         if subject_key != key_prefix or known_statement_key == statement_key:
             continue
-        if _looks_conflicting(known_statement, record.statement):
-            return known_id
+        candidates.append({"id": known_id, "statement": known_statement})
+    if not candidates:
+        return ""
+    data = call_memory_json("detect_conflict", {
+        "new_record": {
+            "id": record.id,
+            "subject_kind": record.subject_kind,
+            "subject_key": record.subject_key,
+            "kind": record.kind,
+            "statement": record.statement,
+            "confidence": record.confidence,
+        },
+        "candidates": candidates[:20],
+    })
+    conflict_id = str(data.get("conflict_id") or "").strip() if isinstance(data, dict) else ""
+    if conflict_id in {item["id"] for item in candidates}:
+        return conflict_id
     return ""
 
 
 def _statement_key(value: str) -> str:
     return " ".join(value.casefold().split())
-
-
-def _looks_conflicting(left: str, right: str) -> bool:
-    left_text = left.casefold()
-    right_text = right.casefold()
-    pairs = ((" is ", " is not "), (" enabled", " disabled"), (" true", " false"), (" yes", " no"))
-    return any(a in left_text and b in right_text or b in left_text and a in right_text for a, b in pairs)

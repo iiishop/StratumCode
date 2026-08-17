@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-import re
 from uuid import uuid4
 
 from .compressor import summaries_for_records
 from .freshness import file_fingerprint
-from .models import ConversationRef, MemoryDelta, MemoryEvidence, MemoryRecord
+from .llm import call_memory_json
+from .models import ConversationRef, MemoryDelta, MemoryEvidence, MemoryLink, MemoryRecord
 
 
 def delta_from_events(
@@ -16,184 +16,211 @@ def delta_from_events(
     events: list[dict],
     assistant_output: str = "",
 ) -> MemoryDelta:
-    delta = MemoryDelta()
-    for event in events:
-        if event.get("op") != "done":
-            continue
-        if isinstance(event.get("investigation"), dict):
-            _add_investigation(delta, workspace_dir, session_id, turn_id, event["investigation"])
-        if isinstance(event.get("validation_result"), dict):
-            _add_validation(delta, workspace_dir, session_id, turn_id, event["validation_result"])
-        if isinstance(event.get("implementation"), dict):
-            _add_implementation(delta, workspace_dir, session_id, turn_id, event["implementation"])
-    _add_refs(delta, session_id, turn_id, assistant_output)
+    delta = _llm_delta(
+        workspace_dir=workspace_dir,
+        session_id=session_id,
+        turn_id=turn_id,
+        source="events",
+        payload={
+            "events": _memory_event_payload(events),
+            "assistant_output": assistant_output,
+        },
+    )
     delta.records.extend(summaries_for_records(delta.records, session_id=session_id, turn_id=turn_id))
     return delta
 
 
 def delta_from_output(*, session_id: int | None, turn_id: str, output: str) -> MemoryDelta:
-    delta = MemoryDelta()
-    _add_refs(delta, session_id, turn_id, output)
-    return delta
-
-
-def _add_investigation(delta: MemoryDelta, workspace_dir: str, session_id: int | None, turn_id: str, investigation: dict) -> None:
-    investigation_id = str(investigation.get("id") or turn_id or uuid4().hex[:8])
-    summary = str(investigation.get("summary") or "").strip()
-    if summary:
-        record_id = f"investigation-{uuid4().hex[:12]}"
-        delta.records.append(MemoryRecord(
-            id=record_id,
-            scope="session",
-            kind="investigation",
-            subject_kind="task",
-            subject_key=investigation_id,
-            statement=summary,
-            confidence="verified",
-            freshness="fresh",
-            session_id=session_id,
-            turn_id=turn_id,
-            source="investigation",
-            payload={"request": investigation.get("request", "")},
-        ))
-    for index, belief in enumerate(investigation.get("beliefs", []) if isinstance(investigation.get("beliefs"), list) else [], start=1):
-        statement = str((belief or {}).get("statement") or "").strip()
-        if not statement:
-            continue
-        record_id = f"fact-{uuid4().hex[:12]}"
-        delta.records.append(MemoryRecord(
-            id=record_id,
-            scope="project",
-            kind="fact",
-            subject_kind="project",
-            subject_key=_subject_from_text(statement),
-            statement=statement,
-            confidence="verified" if str(belief.get("status") or "supported") == "supported" else "inferred",
-            freshness="fresh",
-            session_id=session_id,
-            turn_id=turn_id,
-            source="investigation_belief",
-            source_record_ids=[str(item) for item in belief.get("evidence", []) if str(item).strip()] if isinstance(belief.get("evidence"), list) else [],
-            payload={"belief_index": index},
-        ))
-    for obs in investigation.get("observations", []) if isinstance(investigation.get("observations"), list) else []:
-        if not isinstance(obs, dict):
-            continue
-        path = str(obs.get("path") or "").strip()
-        statement = str(obs.get("summary") or obs.get("title") or obs.get("tool") or "").strip()
-        if not statement:
-            continue
-        record_id = f"observation-{uuid4().hex[:12]}"
-        fingerprint = file_fingerprint(workspace_dir, path) if path else {}
-        delta.records.append(MemoryRecord(
-            id=record_id,
-            scope="session",
-            kind="observation",
-            subject_kind="file" if path else "project",
-            subject_key=path or _subject_from_text(statement),
-            statement=statement,
-            confidence="verified",
-            freshness="fresh" if fingerprint.get("exists", True) else "stale",
-            session_id=session_id,
-            turn_id=turn_id,
-            source="investigation_observation",
-            payload={"path": path, "fingerprint": fingerprint},
-        ))
-        delta.evidence.append(MemoryEvidence(
-            id=f"evidence-{uuid4().hex[:12]}",
-            record_id=record_id,
-            kind="tool_observation",
-            path=path,
-            excerpt=statement,
-            fingerprint=fingerprint,
-            payload={"source_observation_id": obs.get("id", "")},
-        ))
-
-
-def _add_validation(delta: MemoryDelta, workspace_dir: str, session_id: int | None, turn_id: str, result: dict) -> None:
-    summary = str(result.get("summary") or "").strip()
-    verdict = str(result.get("verdict") or "").strip()
-    if not summary and not verdict:
-        return
-    changed_files = [str(item) for item in result.get("changed_files", []) if str(item).strip()] if isinstance(result.get("changed_files"), list) else []
-    record_id = f"validation-{uuid4().hex[:12]}"
-    delta.records.append(MemoryRecord(
-        id=record_id,
-        scope="project",
-        kind="validation",
-        subject_kind="change",
-        subject_key=", ".join(changed_files[:3]) or "validation",
-        statement=summary or f"Validation verdict: {verdict}",
-        confidence="verified",
-        freshness="fresh",
+    return _llm_delta(
+        workspace_dir=".",
         session_id=session_id,
         turn_id=turn_id,
-        source="validation",
-        payload={"verdict": verdict, "changed_files": changed_files},
-    ))
-    for path in changed_files:
-        delta.evidence.append(MemoryEvidence(
-            id=f"evidence-{uuid4().hex[:12]}",
-            record_id=record_id,
-            kind="validation_file",
-            path=path,
-            excerpt=summary,
-            fingerprint=file_fingerprint(workspace_dir, path),
-        ))
+        source="assistant_output",
+        payload={"assistant_output": output},
+    )
 
 
-def _add_implementation(delta: MemoryDelta, workspace_dir: str, session_id: int | None, turn_id: str, implementation: dict) -> None:
-    changed_files = [str(item) for item in implementation.get("changed_files", []) if str(item).strip()] if isinstance(implementation.get("changed_files"), list) else []
-    if not changed_files:
-        return
-    record_id = f"change-{uuid4().hex[:12]}"
-    delta.records.append(MemoryRecord(
-        id=record_id,
-        scope="project",
-        kind="change",
-        subject_kind="file",
-        subject_key=", ".join(changed_files[:3]),
-        statement="Changed files: " + ", ".join(changed_files),
-        confidence="verified",
-        freshness="fresh",
+def _llm_delta(
+    *,
+    workspace_dir: str,
+    session_id: int | None,
+    turn_id: str,
+    source: str,
+    payload: dict,
+) -> MemoryDelta:
+    data = call_memory_json("extract_delta", {
+        "source": source,
+        "turn_id": turn_id,
+        **payload,
+    })
+    if not isinstance(data, dict):
+        return MemoryDelta()
+    records, index = _records_from_llm(data.get("records"), session_id=session_id, turn_id=turn_id)
+    return MemoryDelta(
+        records=records,
+        evidence=_evidence_from_llm(data.get("evidence"), records, index, workspace_dir),
+        links=_links_from_llm(data.get("links"), index),
+        refs=_refs_from_llm(data.get("refs"), session_id=session_id, turn_id=turn_id, record_index=index),
+    )
+
+
+def _memory_event_payload(events: list[dict]) -> list[dict]:
+    payload = []
+    for event in events:
+        data = event.get("data") if isinstance(event.get("data"), dict) else {}
+        item = {
+            "op": event.get("op", ""),
+            "event": event.get("event", ""),
+        }
+        for key in ("investigation", "validation_result", "implementation", "patch_plan", "design_plan"):
+            if isinstance(event.get(key), dict):
+                item[key] = event[key]
+        if data:
+            item["data"] = {
+                key: data.get(key)
+                for key in ("name", "summary", "content", "status", "phase", "verdict", "path", "output")
+                if key in data
+            }
+        payload.append(item)
+    return payload
+
+
+def _records_from_llm(value: object, *, session_id: int | None, turn_id: str) -> tuple[list[MemoryRecord], dict[int, str]]:
+    records = []
+    index = {}
+    for position, item in enumerate(value if isinstance(value, list) else [], start=1):
+        if not isinstance(item, dict):
+            continue
+        record = _record_from_llm(item, session_id=session_id, turn_id=turn_id)
+        if record is None:
+            continue
+        records.append(record)
+        index[position] = record.id
+    return records, index
+
+
+def _record_from_llm(item: dict, *, session_id: int | None, turn_id: str) -> MemoryRecord | None:
+    scope = _enum(item.get("scope"), {"turn", "session", "project"})
+    kind = _text(item.get("kind"))
+    subject_kind = _text(item.get("subject_kind"))
+    subject_key = _text(item.get("subject_key"))
+    statement = _text(item.get("statement"))
+    confidence = _enum(item.get("confidence"), {"verified", "inferred", "uncertain"})
+    status = _enum(item.get("status"), {"accepted", "pending"})
+    freshness = _enum(item.get("freshness"), {"fresh", "unknown"})
+    if not all((scope, kind, subject_kind, subject_key, statement, confidence, status, freshness)):
+        return None
+    payload = item.get("payload") if isinstance(item.get("payload"), dict) else {}
+    return MemoryRecord(
+        id=f"mem-{uuid4().hex[:12]}",
+        scope=scope,
+        kind=kind,
+        subject_kind=subject_kind,
+        subject_key=subject_key,
+        statement=statement,
+        confidence=confidence,
+        status=status,
+        freshness=freshness,
         session_id=session_id,
         turn_id=turn_id,
-        source="implementation",
-        payload={"changed_files": changed_files},
-    ))
-    for path in changed_files:
-        delta.evidence.append(MemoryEvidence(
+        source=_text(item.get("source")) or "memory_llm",
+        source_record_ids=_string_list(item.get("source_record_ids")),
+        payload=payload,
+    )
+
+
+def _evidence_from_llm(value: object, records: list[MemoryRecord], index: dict[int, str], workspace_dir: str) -> list[MemoryEvidence]:
+    evidence = []
+    for item in value if isinstance(value, list) else []:
+        if not isinstance(item, dict):
+            continue
+        record_id = _record_id_from_index(item.get("record_index"), records, index)
+        kind = _text(item.get("kind"))
+        excerpt = _text(item.get("excerpt"))
+        if not record_id or not kind or not excerpt:
+            continue
+        path = _text(item.get("path"))
+        evidence.append(MemoryEvidence(
             id=f"evidence-{uuid4().hex[:12]}",
             record_id=record_id,
-            kind="file_snapshot",
+            kind=kind,
             path=path,
-            excerpt=f"Implementation changed {path}",
-            fingerprint=file_fingerprint(workspace_dir, path),
+            excerpt=excerpt,
+            fingerprint=file_fingerprint(workspace_dir, path) if path else {},
+            payload=item.get("payload") if isinstance(item.get("payload"), dict) else {},
         ))
+    return evidence
 
 
-def _add_refs(delta: MemoryDelta, session_id: int | None, turn_id: str, output: str) -> None:
-    for index, content in _numbered_items(output)[:20]:
-        delta.refs.append(ConversationRef(
+def _links_from_llm(value: object, index: dict[int, str]) -> list[MemoryLink]:
+    links = []
+    for item in value if isinstance(value, list) else []:
+        if not isinstance(item, dict):
+            continue
+        source_id = index.get(_positive_int(item.get("source_record_index")))
+        target_id = index.get(_positive_int(item.get("target_record_index")))
+        relation = _text(item.get("relation"))
+        if source_id and target_id and relation:
+            links.append(MemoryLink(source_id=source_id, target_id=target_id, relation=relation))
+    return links
+
+
+def _refs_from_llm(
+    value: object,
+    *,
+    session_id: int | None,
+    turn_id: str,
+    record_index: dict[int, str],
+) -> list[ConversationRef]:
+    refs = []
+    for item in value if isinstance(value, list) else []:
+        if not isinstance(item, dict):
+            continue
+        kind = _enum(item.get("kind"), {"phase", "item", "risk", "action", "decision", "section"})
+        index = _positive_int(item.get("index"))
+        label = _text(item.get("label"))
+        content = _text(item.get("content"))
+        if not kind or index <= 0 or not label or not content:
+            continue
+        refs.append(ConversationRef(
             id=f"ref-{uuid4().hex[:12]}",
             session_id=session_id,
             turn_id=turn_id,
-            ref_key=f"assistant:{turn_id}:{index}",
-            label=f"Item {index}",
+            ref_key=f"assistant:{turn_id}:{kind}:{index}",
+            label=label,
             content=content,
-            payload={"index": index},
+            target_record_id=record_index.get(_positive_int(item.get("target_record_index")), ""),
+            payload={"index": index, "kind": kind, **(item.get("payload") if isinstance(item.get("payload"), dict) else {})},
         ))
+    return refs
 
 
-def _numbered_items(text: str) -> list[tuple[int, str]]:
-    items = []
-    for line in (text or "").splitlines():
-        match = re.match(r"\s*(?:[-*]\s*)?([0-9]+)[.)、]\s+(.+)", line)
-        if match:
-            items.append((int(match.group(1)), match.group(2).strip()))
-    return items
+def _record_id_from_index(value: object, records: list[MemoryRecord], index: dict[int, str]) -> str:
+    position = _positive_int(value)
+    if position in index:
+        return index[position]
+    if len(records) == 1:
+        return records[0].id
+    return ""
 
 
-def _subject_from_text(value: str) -> str:
-    words = re.findall(r"[\w./\\-]+", value)
-    return " ".join(words[:6]) or "project"
+def _text(value: object) -> str:
+    return str(value or "").strip()
+
+
+def _enum(value: object, allowed: set[str]) -> str:
+    text = _text(value).casefold()
+    return text if text in allowed else ""
+
+
+def _positive_int(value: object) -> int:
+    if isinstance(value, int):
+        return value if value > 0 else 0
+    text = _text(value)
+    return int(text) if text.isdigit() and int(text) > 0 else 0
+
+
+def _string_list(value: object) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [_text(item) for item in value if _text(item)]

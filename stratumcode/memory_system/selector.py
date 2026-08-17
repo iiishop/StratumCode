@@ -1,7 +1,6 @@
 from __future__ import annotations
 
-import re
-
+from .llm import call_memory_json
 from .models import MemorySnapshot
 from .resolver import resolve_references
 from .store import list_records
@@ -16,19 +15,36 @@ def select(
     scopes: tuple[str, ...] = ("turn", "session", "project"),
     token_budget: int = 4000,
 ) -> MemorySnapshot:
+    if not str(query or "").strip() and not analysis:
+        return MemorySnapshot()
     references = resolve_references(workspace_dir, session_id, query)
     records = [
         item for item in list_records(workspace_dir, limit=1000)
         if item.get("scope") in scopes and item.get("status") != "reverted"
     ]
-    terms = _query_terms(query, analysis)
-    scored = [(_score_record(item, terms, session_id, references), item) for item in records]
-    fresh = [item for score, item in scored if score > 0 and item.get("freshness") != "stale"]
-    stale = [item for score, item in scored if score > 0 and item.get("freshness") == "stale"]
-    fresh.sort(key=lambda item: _sort_key(item, session_id), reverse=True)
+    selection = _llm_selection(query, analysis, session_id, records, references)
+    selected_ids = set(selection.get("selected_record_ids", []))
+    stale_ids = set(selection.get("stale_record_ids", []))
+    conflict_ids = set(selection.get("conflict_record_ids", []))
+    summary_ids = set(selection.get("summary_record_ids", []))
+    for ref in references:
+        target = str(ref.get("target_record_id") or "").strip()
+        if target:
+            selected_ids.add(target)
+    fresh = [
+        item for item in records
+        if str(item.get("id") or "") in selected_ids and item.get("freshness") != "stale"
+    ]
+    stale = [
+        item for item in records
+        if str(item.get("id") or "") in stale_ids or (
+            str(item.get("id") or "") in selected_ids and item.get("freshness") == "stale"
+        )
+    ]
+    fresh.sort(key=lambda item: _selection_order(item, selection), reverse=False)
     selected, omitted = _fit_budget(fresh, token_budget)
-    summaries = [item for item in selected if item.get("kind") == "summary"]
-    conflicts = [item for item in selected if item.get("payload", {}).get("conflict")]
+    summaries = [item for item in selected if str(item.get("id") or "") in summary_ids or item.get("kind") == "summary"]
+    conflicts = [item for item in selected if str(item.get("id") or "") in conflict_ids]
     return MemorySnapshot(
         records=selected,
         references=references,
@@ -39,49 +55,64 @@ def select(
     )
 
 
-def _query_terms(query: str, analysis: dict | None) -> set[str]:
-    parts = [query or ""]
-    if isinstance(analysis, dict):
-        parts.append(str(analysis.get("summary") or ""))
-        intent = analysis.get("intent") if isinstance(analysis.get("intent"), dict) else {}
-        parts.append(str(intent.get("summary") or ""))
-        for bucket in ("unknowns", "acceptance_criteria", "constraints", "clues"):
-            for item in analysis.get(bucket, []) if isinstance(analysis.get(bucket), list) else []:
-                parts.append(str(item))
+def _llm_selection(query: str, analysis: dict | None, session_id: int | None, records: list[dict], references: list[dict]) -> dict:
+    data = call_memory_json("select_records", {
+        "query": query,
+        "analysis": analysis or {},
+        "session_id": session_id,
+        "references": [_reference_payload(item) for item in references],
+        "records": [_record_payload(item) for item in records[:200]],
+    })
+    if not isinstance(data, dict):
+        return {}
     return {
-        item.casefold()
-        for item in re.findall(r"[\w\u4e00-\u9fff]+", " ".join(parts))
-        if len(item) > 1
+        "selected_record_ids": _known_ids(data.get("selected_record_ids"), records),
+        "stale_record_ids": _known_ids(data.get("stale_record_ids"), records),
+        "conflict_record_ids": _known_ids(data.get("conflict_record_ids"), records),
+        "summary_record_ids": _known_ids(data.get("summary_record_ids"), records),
     }
 
 
-def _score_record(item: dict, terms: set[str], session_id: int | None, refs: list[dict]) -> int:
-    text = " ".join(str(item.get(key) or "") for key in ("statement", "subject_key", "kind", "source"))
+def _record_payload(item: dict) -> dict:
+    return {
+        "id": item.get("id", ""),
+        "scope": item.get("scope", ""),
+        "kind": item.get("kind", ""),
+        "subject_kind": item.get("subject_kind", ""),
+        "subject_key": item.get("subject_key", ""),
+        "statement": item.get("statement", ""),
+        "confidence": item.get("confidence", ""),
+        "freshness": item.get("freshness", ""),
+        "session_id": item.get("session_id"),
+        "source": item.get("source", ""),
+        "updated_at": item.get("updated_at", ""),
+    }
+
+
+def _reference_payload(item: dict) -> dict:
     payload = item.get("payload") if isinstance(item.get("payload"), dict) else {}
-    text += " " + " ".join(str(value) for value in payload.values() if isinstance(value, (str, int, float)))
-    score = len(terms & _terms(text))
-    if item.get("session_id") == session_id:
-        score += 4
-    if item.get("confidence") == "verified":
-        score += 3
-    if item.get("scope") == "project":
-        score += 1
-    target_ids = {str(ref.get("target_record_id") or "") for ref in refs}
-    if str(item.get("id") or "") in target_ids:
-        score += 20
-    return score
+    return {
+        "id": item.get("id", ""),
+        "label": item.get("label", ""),
+        "content": item.get("content", ""),
+        "target_record_id": item.get("target_record_id", ""),
+        "confidence": item.get("confidence", ""),
+        "reason": item.get("reason", ""),
+        "kind": payload.get("kind", ""),
+    }
 
 
-def _terms(value: str) -> set[str]:
-    return {item.casefold() for item in re.findall(r"[\w\u4e00-\u9fff]+", value or "") if len(item) > 1}
+def _known_ids(value: object, records: list[dict]) -> list[str]:
+    known = {str(item.get("id") or "") for item in records}
+    if not isinstance(value, list):
+        return []
+    return [str(item) for item in value if str(item) in known]
 
 
-def _sort_key(item: dict, session_id: int | None) -> tuple[int, int, str]:
-    return (
-        1 if item.get("session_id") == session_id else 0,
-        1 if item.get("confidence") == "verified" else 0,
-        str(item.get("updated_at") or item.get("created_at") or ""),
-    )
+def _selection_order(item: dict, selection: dict) -> int:
+    ids = selection.get("selected_record_ids", [])
+    record_id = str(item.get("id") or "")
+    return ids.index(record_id) if record_id in ids else len(ids)
 
 
 def _fit_budget(records: list[dict], token_budget: int) -> tuple[list[dict], int]:

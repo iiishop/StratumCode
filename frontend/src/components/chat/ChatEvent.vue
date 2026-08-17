@@ -67,6 +67,7 @@ const eventComponents = {
   memory_reference: MemoryEvent,
   memory_stale: MemoryEvent,
   memory_conflict: MemoryEvent,
+  memory_status: MemoryEvent,
 }
 </script>
 

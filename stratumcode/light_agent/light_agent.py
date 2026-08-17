@@ -123,16 +123,16 @@ def stream(message: str, context: list[str], workspace_dir: str, *, session_id: 
             analysis = task_state.current()
             if analysis is None:
                 raise ValueError("light agent task state is unavailable")
-            memory_snapshot = memory_system.select(
-                workspace_dir=workspace_dir,
-                session_id=session_id,
-                query=message,
-                analysis=analysis,
-                scopes=("turn", "session", "project"),
-                token_budget=3500,
-            )
-            memory_context = memory_system.render_snapshot(memory_snapshot, consumer="light_agent")
-            with event_sink(publish):
+            with memory_system.event_sink(publish), event_sink(publish):
+                memory_snapshot = memory_system.select(
+                    workspace_dir=workspace_dir,
+                    session_id=session_id,
+                    query=message,
+                    analysis=analysis,
+                    scopes=("turn", "session", "project"),
+                    token_budget=3500,
+                )
+                memory_context = memory_system.render_snapshot(memory_snapshot, consumer="light_agent")
                 if memory_snapshot.references:
                     publish(start_event(f"memory-reference-{uuid4().hex[:8]}", "memory_reference", {
                         "items": memory_snapshot.references,

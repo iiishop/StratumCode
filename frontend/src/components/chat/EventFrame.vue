@@ -155,7 +155,8 @@ watch(() => props.status, (newStatus, oldStatus) => {
 .event-frame--memory-write,
 .event-frame--memory-reference,
 .event-frame--memory-stale,
-.event-frame--memory-conflict { --event: #2f7d73; }
+.event-frame--memory-conflict,
+.event-frame--memory-status { --event: #2f7d73; }
 
 /* ── left rail ────────────────────────────── */
 
