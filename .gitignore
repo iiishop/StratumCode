@@ -21,3 +21,4 @@ doc/
 .tmp/
 .release-notes.md
 .DS_Store
+tools/
