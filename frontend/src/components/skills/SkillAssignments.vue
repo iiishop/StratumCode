@@ -583,7 +583,7 @@ function targetColor(id) {
 .sc__instructions { margin-top: 18px; padding: 14px 16px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--bg-overlay); transition: border-color 160ms ease; }
 .sc__instructions:hover { border-color: var(--accent-border); }
 .sc__instructions :deep(.se) { font-size: 12px; }
-.sc__instructions :deep(.se) :deep(pre), .sc__instructions :deep(.se) :deep(code) { font-size: 11.5px; }
+.sc__instructions :deep(.se pre), .sc__instructions :deep(.se code) { font-size: 11.5px; }
 .sc__footer { border-top: 1px solid var(--border); }
 @container (max-width: 850px) {
   .sc__workspace { grid-template-columns: minmax(260px, 1fr) minmax(360px, 1.4fr); height: auto; }
