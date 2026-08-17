@@ -5,11 +5,8 @@ import { animate, stagger as animeStagger } from 'animejs'
 import Sidebar from './components/Sidebar.vue'
 import HomePage from './components/HomePage.vue'
 import StageModelSettings from './components/providers/StageModelSettings.vue'
-import McpPage from './components/mcp/McpPage.vue'
-import LspPage from './components/lsp/LspPage.vue'
-import SkillsPage from './components/skills/SkillsPage.vue'
-import SettingsPage from './components/settings/SettingsPage.vue'
 import BottomBar from './components/BottomBar.vue'
+
 import { useMcp } from './composables/useMcp'
 import { useLsp } from './composables/useLsp'
 import { useSessions } from './composables/useSessions'
@@ -18,6 +15,10 @@ import { useWorkspaces } from './composables/useWorkspaces'
 const currentView = ref('home')
 const workspacePanel = ref('work')
 const CodeStructurePanel = defineAsyncComponent(() => import('./components/CodeStructurePanel.vue'))
+const McpPage = defineAsyncComponent(() => import('./components/mcp/McpPage.vue'))
+const LspPage = defineAsyncComponent(() => import('./components/lsp/LspPage.vue'))
+const SkillsPage = defineAsyncComponent(() => import('./components/skills/SkillsPage.vue'))
+const SettingsPage = defineAsyncComponent(() => import('./components/settings/SettingsPage.vue'))
 const {
   items: workspaces,
   active: activeWorkspace,
