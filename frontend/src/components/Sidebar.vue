@@ -38,6 +38,7 @@ function toggleCollapsed() {
 
 const NAV = [
   { id: 'home', label: 'All sessions', icon: 'M4 6h16v12H4z' },
+  { id: 'usage', label: 'Usage', icon: 'M5 19h14M7 16V9M12 16V5M17 16v-7' },
   { id: 'providers', label: 'Providers', icon: 'M4 8h16M4 13h16M4 18h16' },
   { id: 'mcp', label: 'MCP', icon: 'M8 8h8M8 12h8M8 16h8 M5 5h14v14H5z' },
   { id: 'lsp', label: 'LSP', icon: 'M8 5h8v14H8z M11 10h2 M11 14h2' },

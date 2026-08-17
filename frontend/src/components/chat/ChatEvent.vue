@@ -23,7 +23,6 @@ import StepResultEvent from './StepResultEvent.vue'
 import SafetyStopEvent from './SafetyStopEvent.vue'
 import InvestigationFactsEvent from './InvestigationFactsEvent.vue'
 import QuestionRecord from './QuestionRecord.vue'
-import UsageEvent from './UsageEvent.vue'
 import ValidationChecklistEvent from './ValidationChecklistEvent.vue'
 import ValidationResultEvent from './ValidationResultEvent.vue'
 import QualityGateEvent from './QualityGateEvent.vue'
@@ -60,7 +59,6 @@ const eventComponents = {
   safety_stop: SafetyStopEvent,
   investigation_facts: InvestigationFactsEvent,
   user_question: QuestionRecord,
-  usage: UsageEvent,
   verification_checklist: ValidationChecklistEvent,
   validation_result: ValidationResultEvent,
   quality_gate: QualityGateEvent,
@@ -68,10 +66,9 @@ const eventComponents = {
 </script>
 
 <template>
-  <div class="chat-event">
+  <div v-if="eventComponents[event.type]" class="chat-event">
     <component
       :is="eventComponents[event.type]"
-      v-if="eventComponents[event.type]"
       :event="event.data"
       @answer="$emit('answer', $event)"
     />

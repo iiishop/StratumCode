@@ -180,6 +180,7 @@ _POST_PROVIDERS = {
 
 _POST_SESSIONS = {
     "list":       lambda h, b: h._json({"items": sessions.list_by_workspace(int(b["workspace_id"]))}),
+    "usage":      lambda h, b: h._json(sessions.usage_events(int(b["workspace_id"]))),
     "create":     lambda h, b: h._json({"session": sessions.create(int(b["workspace_id"]))}),
     "get":        lambda h, b: h._json({"session": sessions.get(int(b["id"]))}),
     "rename":     lambda h, b: (sessions.rename(int(b["id"]), b["name"]), h._json({"ok": True})),

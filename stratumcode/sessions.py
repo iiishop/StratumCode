@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 
 from .db import db_session
 
@@ -17,6 +17,7 @@ SESSION_SCHEMA = """
         FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE
     )
 """
+_USAGE_TOKEN_FIELDS = ("input_tokens", "output_tokens", "cached_tokens", "total_tokens")
 
 
 def _ensure_table() -> None:
@@ -170,6 +171,29 @@ def list_by_workspace(workspace_id: int) -> list[dict]:
     return items
 
 
+def usage_events(workspace_id: int) -> dict:
+    _ensure_table()
+    with db_session() as db:
+        rows = db.execute(
+            """
+            SELECT id, name, state_json, usage_json, created_at, updated_at
+            FROM sessions
+            WHERE workspace_id = ?
+            ORDER BY datetime(created_at) DESC, id DESC
+            """,
+            (int(workspace_id),),
+        ).fetchall()
+    records = []
+    total = _default_state()["usage"].copy()
+    for row in rows:
+        state = _loads(row["state_json"], {})
+        session_total = _loads(row["usage_json"], {})
+        _add_usage_total(total, session_total)
+        records.extend(_usage_records_for_session(dict(row), state))
+    records.sort(key=lambda item: item["timestamp"])
+    return {"records": records, "total": total}
+
+
 def get(session_id: int) -> dict:
     _ensure_table()
     with db_session() as db:
@@ -186,6 +210,78 @@ def get(session_id: int) -> dict:
     state = _loads(row["state_json"], _default_state())
     usage = _loads(row["usage_json"], state.get("usage", {}))
     return {**dict(row), "state": state, "usage": usage}
+
+
+def _usage_records_for_session(session: dict, state: dict) -> list[dict]:
+    if not isinstance(state, dict):
+        return []
+    records = []
+    current_stage = {}
+    for message in state.get("messages", []):
+        if not isinstance(message, dict):
+            continue
+        for event in message.get("events", []):
+            if not isinstance(event, dict):
+                continue
+            data = event.get("data") if isinstance(event.get("data"), dict) else {}
+            event_type = event.get("type")
+            if event_type == "stage":
+                current_stage = {**current_stage, **data}
+                continue
+            if event_type != "usage":
+                continue
+            delta = data.get("delta") if isinstance(data.get("delta"), dict) else {}
+            records.append({
+                "timestamp": _event_timestamp(event, session),
+                "session_id": session["id"],
+                "session_name": session["name"],
+                "provider": str(data.get("provider") or current_stage.get("provider") or "").strip(),
+                "model": str(data.get("model") or current_stage.get("model") or "").strip(),
+                "stage": str(data.get("stage") or current_stage.get("name") or current_stage.get("phase") or "").strip(),
+                "input_tokens": _int(delta.get("input_tokens")),
+                "output_tokens": _int(delta.get("output_tokens")),
+                "cached_tokens": _int(delta.get("cached_tokens")),
+                "total_tokens": _int(delta.get("total_tokens")),
+                "cost": _float(delta.get("cost")),
+                "currency": str(delta.get("currency") or data.get("currency") or "USD"),
+                "pricing": delta.get("pricing") if isinstance(delta.get("pricing"), dict) else {},
+            })
+    return records
+
+
+def _event_timestamp(event: dict, session: dict) -> str:
+    created_at = event.get("createdAt")
+    if isinstance(created_at, (int, float)):
+        return datetime.fromtimestamp(float(created_at) / 1000, tz=timezone.utc).isoformat()
+    if isinstance(created_at, str) and created_at.strip():
+        cleaned = created_at.strip()
+        if cleaned.isdigit():
+            return datetime.fromtimestamp(float(cleaned) / 1000, tz=timezone.utc).isoformat()
+        return cleaned
+    return str(session.get("updated_at") or session.get("created_at") or "")
+
+
+def _add_usage_total(total: dict, usage: dict) -> None:
+    if not isinstance(usage, dict):
+        return
+    for key in _USAGE_TOKEN_FIELDS:
+        total[key] = _int(total.get(key)) + _int(usage.get(key))
+    total["cost"] = round(_float(total.get("cost")) + _float(usage.get("cost")), 6)
+    total["currency"] = str(usage.get("currency") or total.get("currency") or "USD")
+
+
+def _int(value: object) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _float(value: object) -> float:
+    try:
+        return float(value or 0)
+    except (TypeError, ValueError):
+        return 0.0
 
 
 def rename(session_id: int, name: str) -> None:

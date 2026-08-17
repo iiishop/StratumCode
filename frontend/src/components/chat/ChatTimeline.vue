@@ -9,11 +9,13 @@ const props = defineProps({
 })
 defineEmits(['answer'])
 
+const HIDDEN_EVENT_TYPES = new Set(['usage'])
 const expandedGroups = reactive({})
-const segments = computed(() => groupChatEvents(props.events))
+const visibleEvents = computed(() => props.events.filter(event => !HIDDEN_EVENT_TYPES.has(event?.type)))
+const segments = computed(() => groupChatEvents(visibleEvents.value))
 
 function isActiveGroup(segment) {
-  return props.running && segment.endIndex === props.events.length - 1
+  return props.running && segment.endIndex === visibleEvents.value.length - 1
 }
 
 function isGroupOpen(segment) {

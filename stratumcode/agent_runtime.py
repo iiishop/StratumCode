@@ -581,7 +581,7 @@ def usage_delta(pricing_rules: list[dict], usage: dict) -> dict:
     )
     pricing = active_pricing(pricing_rules)
     cost = usage_cost(input_tokens, output_tokens, cached_tokens, pricing) if pricing else 0.0
-    return {
+    delta = {
         "input_tokens": input_tokens,
         "output_tokens": output_tokens,
         "cached_tokens": cached_tokens,
@@ -589,6 +589,9 @@ def usage_delta(pricing_rules: list[dict], usage: dict) -> dict:
         "cost": round(cost, 6),
         "currency": (pricing or {}).get("currency") or pricing_currency(pricing_rules),
     }
+    if pricing:
+        delta["pricing"] = pricing_snapshot(pricing)
+    return delta
 
 
 def add_usage(total: dict, delta: dict) -> None:
@@ -601,6 +604,17 @@ def add_usage(total: dict, delta: dict) -> None:
 def pricing_currency(pricing_rules: list[dict]) -> str:
     pricing = active_pricing(pricing_rules)
     return (pricing or {}).get("currency", "USD")
+
+
+def pricing_snapshot(pricing: dict) -> dict:
+    return {
+        "currency": pricing.get("currency", "USD"),
+        "input_per_m": float(pricing.get("input_per_m") or 0),
+        "output_per_m": float(pricing.get("output_per_m") or 0),
+        "cache_per_m": float(pricing.get("cache_per_m") or 0),
+        "start": pricing.get("start", "00:00"),
+        "end": pricing.get("end", "24:00"),
+    }
 
 
 def active_pricing(rules: list[dict]) -> dict | None:
