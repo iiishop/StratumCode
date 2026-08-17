@@ -131,8 +131,9 @@ def light_tools() -> dict[str, LightTool]:
         "run_write_loop": LightTool(
             name="run_write_loop",
             description=(
-                "Run the existing rigorous write loop. It analyzes when needed, investigates when "
-                "needed, then runs design, patch planning, implementation, and validation. "
+                "Run the existing rigorous write loop from the design state. Requires the light "
+                "agent to provide analysis and investigation; this tool never runs analyzer or "
+                "investigation itself. "
                 "Returns validation-centered output instead of raw patch output."
             ),
             parameters={
@@ -142,9 +143,8 @@ def light_tools() -> dict[str, LightTool]:
                     "context": {"type": "array", "items": {"type": "string"}},
                     "analysis": {"type": "object"},
                     "investigation": {"type": "object"},
-                    "design_plan": {"type": "object"},
                 },
-                "required": ["message"],
+                "required": ["message", "analysis", "investigation"],
                 "additionalProperties": False,
             },
             execute=_run_write_loop_tool,
@@ -224,26 +224,15 @@ def _run_investigation_tool(arguments: dict, workspace_dir: str) -> str:
 def _run_write_loop_tool(arguments: dict, workspace_dir: str) -> str:
     message = _required_text(arguments, "message")
     context = _string_list(arguments.get("context"), "context")
-    analysis = _dict_or_none(arguments.get("analysis"))
-    if analysis is None:
-        analysis = _analyze(message, context, workspace_dir)
-    investigation = _dict_or_none(arguments.get("investigation"))
-    if investigation is None:
-        investigation = _run_investigation(
-            message=message,
-            analysis=analysis,
-            context=context,
-            workspace_dir=workspace_dir,
-        )
-    design_plan = _dict_or_none(arguments.get("design_plan"))
+    analysis = _required_dict(arguments, "analysis")
+    investigation = _required_dict(arguments, "investigation")
     run = chat.ChatRun(
         message=message,
         context=context,
         workspace_dir=workspace_dir,
         analysis=analysis,
-        state=chat.ChatState.PATCH_PLANNING if design_plan is not None else chat.ChatState.DESIGNING,
+        state=chat.ChatState.DESIGNING,
         last_investigation=investigation,
-        design_plan=design_plan,
     )
     events = _drive_chat_loop(run)
     return _json({
@@ -389,6 +378,13 @@ def _dict_or_none(value: object) -> dict | None:
         return None
     if not isinstance(value, dict):
         raise ValueError("expected an object")
+    return value
+
+
+def _required_dict(arguments: dict, field: str) -> dict:
+    value = arguments.get(field)
+    if not isinstance(value, dict):
+        raise ValueError(f"{field} is required")
     return value
 
 
