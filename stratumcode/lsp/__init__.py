@@ -126,6 +126,12 @@ _NPM_LSP = {
         "args": ["--stdio"],
     },
 }
+_SERVER_ARG_DEFAULTS = {
+    "ast-grep": ["lsp"],
+}
+_SERVER_WORKSPACE_CONFIGS = {
+    "ast-grep": ("sgconfig.yml", "sgconfig.yaml"),
+}
 
 
 def _ensure_table() -> None:
@@ -172,11 +178,17 @@ def _row_to_server(row) -> dict:
     data["enabled"] = bool(data["enabled"])
     data["languages"] = _loads(data.pop("languages_json"), [])
     data["env"] = _loads(data.pop("env_json"), {})
-    data["args"] = _loads(data.pop("args_json", "[]"), [])
+    data["args"] = _server_args(data["name"], _loads(data.pop("args_json", "[]"), []))
     data["categories"] = _loads(data.pop("categories_json", "[]"), [])
     data["available"] = bool(data.get("executable") and _command_available(data["executable"]))
     data["status"] = "ready" if data["enabled"] and data["available"] else "missing" if data["enabled"] else "disabled"
     return data
+
+
+def _server_args(name: str, args: list[str]) -> list[str]:
+    if args:
+        return args
+    return list(_SERVER_ARG_DEFAULTS.get(name, []))
 
 
 def _command_available(command: str) -> bool:
@@ -668,7 +680,7 @@ def install(name: str) -> dict:
                 server["enabled"] = True
                 server["install_version"] = result.stdout.strip().splitlines()[-1] if result.stdout.strip() else "installed"
                 server["executable"] = _mason_package_executable(name)
-                server["args"] = _NPM_LSP.get(name, {}).get("args", [])
+                server["args"] = _server_args(name, _NPM_LSP.get(name, {}).get("args", []))
             else:
                 raise ValueError(result.stderr.strip() or result.stdout.strip() or "mason install failed")
         except (subprocess.TimeoutExpired, OSError, ValueError) as exc:
@@ -884,7 +896,7 @@ def query(params: dict, workspace_dir: str) -> dict:
     if operation not in {"document_symbols", "definition", "references", "hover"}:
         raise ValueError(f"unsupported lsp operation: {operation}")
     path = _workspace_path(str(params.get("path") or ""), workspace_dir)
-    server = _server_for_query(params, path)
+    server = _server_for_query(params, path, workspace_dir)
     init_options = _initialization_options(server, params)
     timeout = float(params.get("timeout") or 30)
     root = _server_root(path, workspace_dir)
@@ -915,7 +927,7 @@ def query_batch(
     for index, params in enumerate(params_list):
         try:
             path = _workspace_path(str(params.get("path") or ""), workspace_dir)
-            server = _server_for_query(params, path)
+            server = _server_for_query(params, path, workspace_dir)
             root = str(_server_root(path, workspace_dir))
         except Exception as exc:
             results[index] = {"error": str(exc)}
@@ -991,7 +1003,7 @@ def _query_once(client, params: dict, path: Path, workspace_dir: str) -> dict:
 def touch_file(path: str, workspace_dir: str, timeout: float = 3) -> dict:
     try:
         target = _workspace_path(path, workspace_dir)
-        server = _server_for_query({}, target)
+        server = _server_for_query({}, target, workspace_dir)
         root = str(_server_root(target, workspace_dir))
         client = _client(server, root, _initialization_options(server, {}), timeout)
     except Exception as exc:
@@ -1097,13 +1109,13 @@ def _workspace_path(path: str, workspace_dir: str) -> Path:
     return target
 
 
-def _server_for_query(params: dict, path: Path) -> dict:
+def _server_for_query(params: dict, path: Path, workspace_dir: str) -> dict:
     requested = str(params.get("server_id") or params.get("server") or "").strip()
     if requested:
-        server = _resolve_local_server(requested, path)
+        server = _resolve_local_server(requested, path, workspace_dir)
     else:
         candidates = [item for item in _local_servers() if item["enabled"] and item["available"]]
-        server = _best_server(candidates, "", path)
+        server = _best_server(candidates, "", path, workspace_dir)
         if server is None:
             raise ValueError(f"no enabled available LSP server matches {path.suffix or path.name}")
     if not server["enabled"]:
@@ -1151,32 +1163,51 @@ def _local_servers() -> list[dict]:
     return [_row_to_server(row) for row in rows]
 
 
-def _resolve_local_server(requested: str, path: Path) -> dict:
+def _resolve_local_server(requested: str, path: Path, workspace_dir: str) -> dict:
     servers = _local_servers()
     exact = next((server for server in servers if server["name"] == requested), None)
     if exact:
+        if not _server_usable_in_workspace(exact, path, workspace_dir):
+            raise ValueError(f"lsp server is not configured for this workspace: {requested}")
         return exact
     candidates = [server for server in servers if server["enabled"] and server["available"]]
-    server = _best_server(candidates, requested, path)
+    server = _best_server(candidates, requested, path, workspace_dir)
     if server:
         return server
     available = ", ".join(server["name"] for server in candidates) or "none"
     raise ValueError(f"lsp server not found: {requested}. Available enabled servers: {available}")
 
 
-def _best_server(candidates: list[dict], requested: str, path: Path) -> dict | None:
-    if not candidates:
+def _best_server(candidates: list[dict], requested: str, path: Path, workspace_dir: str) -> dict | None:
+    usable = [server for server in candidates if _server_usable_in_workspace(server, path, workspace_dir)]
+    if not usable:
         return None
     requested = _language_alias(requested.casefold())
     suffix = path.suffix.lower().lstrip(".")
     file_language = _language_alias(suffix)
-    for server in candidates:
+    for server in usable:
         if requested and _server_supports(server, requested):
             return server
-    for server in candidates:
+    for server in usable:
         if file_language and _server_supports(server, file_language):
             return server
-    return candidates[0] if requested else None
+    return usable[0] if requested else None
+
+
+def _server_usable_in_workspace(server: dict, path: Path, workspace_dir: str) -> bool:
+    config_names = _SERVER_WORKSPACE_CONFIGS.get(str(server.get("name") or ""))
+    if not config_names:
+        return True
+    root = Path(workspace_dir or ".").resolve()
+    start = path.parent if path.is_file() else path
+    current = start.resolve()
+    while current.is_relative_to(root):
+        if any((current / name).is_file() for name in config_names):
+            return True
+        if current == root:
+            return False
+        current = current.parent
+    return False
 
 
 def _server_supports(server: dict, language: str) -> bool:

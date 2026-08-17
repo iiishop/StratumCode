@@ -19,7 +19,7 @@ from ..agent_runtime import (
     usage_delta,
 )
 from .clearify import event_sink
-from .task_seed import light_task_analysis, light_task_events
+from .task_seed import light_task_analysis
 from .task_state import LightTaskState
 from .tools import default_light_tools, execute_tool_call, tool_schema
 
@@ -70,6 +70,19 @@ def ask(
                 "open": False,
             }})
             for call in tool_calls:
+                if task_state is not None:
+                    task_events, task_assistant = _state_machine_task_events(
+                        task_state,
+                        call,
+                        messages,
+                        provider,
+                        model,
+                    )
+                    if task_assistant is not None:
+                        _emit_usage(f"{thinking_id}-task-author", pricing_rules, usage_total, task_assistant)
+                    for event in task_events:
+                        _emit(event)
+                    call = _with_current_analysis(call, task_state)
                 output = execute_tool_call(call, workspace_dir)
                 messages.append({
                     "role": "tool",
@@ -98,8 +111,6 @@ def stream(message: str, context: list[str], workspace_dir: str) -> Iterator[dic
             if analysis is None:
                 raise ValueError("light agent task state is unavailable")
             with event_sink(publish):
-                for event in light_task_events(analysis):
-                    publish(event)
                 stage_id = "light-agent-stage"
                 publish(start_event(stage_id, "stage", {
                     "name": "light_agent",
@@ -109,7 +120,7 @@ def stream(message: str, context: list[str], workspace_dir: str) -> Iterator[dic
                     **_stage_model_data(setting),
                 }))
                 result = ask(
-                    _prompt(message, context, workspace_dir, analysis),
+                    _prompt(message, context, workspace_dir),
                     workspace_dir=workspace_dir,
                     setting=setting,
                     task_state=task_state,
@@ -136,17 +147,21 @@ def stream(message: str, context: list[str], workspace_dir: str) -> Iterator[dic
         yield event
 
 
-def _prompt(message: str, context: list[str], workspace_dir: str, analysis: dict) -> str:
+def _prompt(message: str, context: list[str], workspace_dir: str) -> str:
     return _json({
         "user_request": message,
         "workspace_dir": workspace_dir,
         "context": context,
-        "task_analysis": analysis,
         "light_agent_instructions": [
             "Before calling tools, put a concise user-visible reason in assistant content.",
             "When a tool schema has a reason or operation_summary field, fill it with the concrete reason for that call.",
             "The reason must explain what uncertainty the tool call resolves or what decision it enables.",
-            "When calling run_investigation, pass task_analysis as the analysis argument unless you intentionally need a fresh full analyzer pass.",
+            "Do not infer task execution mode from internal fallback task memory.",
+            "When calling run_full_pipeline, pass only the focused requirement; the legacy task analyzer will author the task contract.",
+            "The runtime authors a light-agent task contract only for run_investigation and run_write_loop.",
+            "Use direct read-only tools for cheap routing and narrow confirmation, not as a substitute for delegated investigation.",
+            "For a requested code change, delegate to run_investigation, run_write_loop, or run_full_pipeline once you know enough to choose the workflow.",
+            "When calling run_investigation, the runtime will inject the authored task_analysis argument.",
             "Call run_write_loop only after analysis and investigation are available; it starts at design and will not run analyzer or investigation.",
         ],
     })
@@ -174,6 +189,45 @@ def _emit_usage(event_id: str, pricing_rules: list[dict], usage_total: dict, ass
         "delta": usage,
         "total": usage_total,
     }))
+
+
+def _state_machine_task_events(
+    task_state: LightTaskState,
+    call: dict,
+    messages: list[dict],
+    provider: dict,
+    model: str,
+) -> tuple[list[dict], dict | None]:
+    try:
+        return task_state.publish_events_for_tool(
+            _tool_call_name(call),
+            messages=messages,
+            provider=provider,
+            model=model,
+        )
+    except (json.JSONDecodeError, ValueError, TypeError) as exc:
+        _emit(start_event(f"light-task-authoring-{uuid4().hex[:8]}", "thinking", {
+            "text": f"Task authoring failed; using current light agent task state. Reason: {exc}",
+            "done": True,
+            "open": False,
+        }))
+        return task_state.fallback_events_for_tool(_tool_call_name(call)), None
+
+
+def _with_current_analysis(call: dict, task_state: LightTaskState) -> dict:
+    name = _tool_call_name(call)
+    if name not in {"run_investigation", "run_write_loop"}:
+        return call
+    analysis = task_state.current()
+    if analysis is None:
+        return call
+    result = dict(call)
+    function = dict(result.get("function") or {})
+    arguments = tool_arguments(function.get("arguments"))
+    arguments["analysis"] = analysis
+    function["arguments"] = json.dumps(arguments, ensure_ascii=False)
+    result["function"] = function
+    return result
 
 
 def _pricing_rules(setting: dict) -> list[dict]:
@@ -214,6 +268,11 @@ def _tool_call_summary(tool_calls: list[dict]) -> str:
     if not items:
         return ""
     return "Calling tools:\n" + "\n".join(f"- {item}" for item in items)
+
+
+def _tool_call_name(call: dict) -> str:
+    function = call.get("function") or {}
+    return str(function.get("name") or "")
 
 
 def _tool_call_subject(name: str, arguments: dict) -> str:
