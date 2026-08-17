@@ -245,21 +245,14 @@ def _skill_selection_context(run: ChatRun) -> str:
 
 
 def stream(request: dict, workspace_dir: str = ".") -> Iterator[dict]:
+    from .light_agent import light_agent
+
     message = request.get("message", "").strip()
     if not message:
         raise ValueError("message is required")
     context = request.get("context", [])
     if not isinstance(context, list) or not all(isinstance(path, str) for path in context):
         raise ValueError("context must be an array of file paths")
-    max_rounds = request.get("max_rounds")
-    if max_rounds is not None:
-        max_rounds = min(50, max(0, int(max_rounds)))
     if "answer" in request:
         raise ValueError("chat answer resume is no longer supported; use /api/chat/answer for clearify tool replies")
-    return analyzed_stream(
-        message,
-        context,
-        workspace_dir,
-        max_rounds=max_rounds,
-        session_id=request.get("session_id"),
-    )
+    return light_agent.stream(message, context, workspace_dir)
