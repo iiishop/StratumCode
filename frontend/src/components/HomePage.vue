@@ -16,6 +16,7 @@ const props = defineProps({
   activeWorkspace: { type: Object, default: null },
   workspaceError: { type: String, default: '' },
   sessions: { type: Array, default: () => [] },
+  persistSessionState: { type: Function, default: null },
 })
 const emit = defineEmits([
   'save-session-state',
@@ -60,6 +61,10 @@ const restoring = ref(false)
 const copySessionStatus = ref('')
 let copySessionTimer
 const MESSAGE_BOTTOM_THRESHOLD = 28
+const SESSION_SAVE_DEBOUNCE_MS = 220
+let saveInFlight = false
+let saveRequestedWhileInFlight = false
+let queuedSaveSessionId = null
 
 function addToFileContext(path) {
   if (fileContext.find(f => f.path === path)) return
@@ -456,16 +461,65 @@ function scheduleSave() {
     saveTimer = null
     const targetSessionId = saveTimerSessionId
     saveTimerSessionId = null
-    saveSessionState(targetSessionId)
-  }, 220)
+    requestSessionSave(targetSessionId)
+  }, SESSION_SAVE_DEBOUNCE_MS)
 }
 
-function saveSessionState(sessionId = props.session?.id) {
+async function saveSessionState(sessionId = props.session?.id) {
   if (!sessionId) return
-  emit('save-session-state', {
+  const payload = {
     session_id: sessionId,
     state: snapshotState(),
+  }
+  if (props.persistSessionState) {
+    await props.persistSessionState(payload)
+    return
+  }
+  emit('save-session-state', payload)
+}
+
+function requestSessionSave(sessionId = props.session?.id) {
+  if (!sessionId) return
+  queuedSaveSessionId = sessionId
+  if (saveInFlight) {
+    saveRequestedWhileInFlight = true
+    return
+  }
+  void drainSessionSaveQueue()
+}
+
+async function drainSessionSaveQueue() {
+  if (saveInFlight) return
+  saveInFlight = true
+  try {
+    while (queuedSaveSessionId) {
+      const sessionId = queuedSaveSessionId
+      queuedSaveSessionId = null
+      saveRequestedWhileInFlight = false
+      try {
+        await saveSessionState(sessionId)
+      } catch (error) {
+        console.warn('Session save failed', error)
+      }
+      if (saveRequestedWhileInFlight && !queuedSaveSessionId) queuedSaveSessionId = sessionId
+    }
+  } finally {
+    saveInFlight = false
+    saveRequestedWhileInFlight = false
+  }
+}
+
+function saveSessionStateOnUnload() {
+  const sessionId = props.session?.id
+  if (!sessionId || !navigator.sendBeacon) return
+  const payload = JSON.stringify({
+    id: sessionId,
+    state: snapshotState(),
   })
+  navigator.sendBeacon(
+    '/api/sessions/save-state',
+    new Blob([payload], { type: 'application/json' }),
+  )
 }
 
 function flushPendingSave(sessionId = saveTimerSessionId || props.session?.id) {
@@ -474,7 +528,7 @@ function flushPendingSave(sessionId = saveTimerSessionId || props.session?.id) {
   saveTimer = null
   const targetSessionId = sessionId || saveTimerSessionId
   saveTimerSessionId = null
-  saveSessionState(targetSessionId)
+  requestSessionSave(targetSessionId)
 }
 
 function clearState() {
@@ -695,9 +749,8 @@ async function continueAfterAnswer(answer) {
   const data = await response.json().catch(() => ({}))
   if (!response.ok) throw new Error(data.error || `Answer submit failed (${response.status})`)
   // Immediately persist answer_status='submitted' — no debounce window.
-  // Vue 3 emit is fire-and-forget; the parent saveActiveSessionState awaits the backend.
   const sessionId = props.session?.id
-  if (sessionId) saveSessionState(sessionId)
+  if (sessionId) await saveSessionState(sessionId)
 }
 
 async function answerQuestion(answer) {
@@ -889,6 +942,9 @@ function onAgentPacket(packet, type, data) {
     const run = currentEvidenceRun()
     if (run) run.status = packet.run.state
   }
+  if (!restoring.value && packet.op !== 'ping') {
+    requestSessionSave()
+  }
 }
 
 const { stream: chatStream, abort: abortChat } = useChatStream(scrollForNewContent, onAgentPacket)
@@ -901,6 +957,7 @@ function animateLast() {
 }
 
 onMounted(() => {
+  window.addEventListener('beforeunload', saveSessionStateOnUnload)
   loadTools()
   gsapCtx = gsap.context(() => {
     if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) return
@@ -918,6 +975,8 @@ onMounted(() => {
 })
 onUnmounted(() => {
   abortChat()
+  window.removeEventListener('beforeunload', saveSessionStateOnUnload)
+  saveSessionStateOnUnload()
   gsapCtx?.revert()
   // Flush pending save before unmount so answer_status='submitted' is persisted.
   flushPendingSave()

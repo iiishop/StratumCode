@@ -196,10 +196,15 @@ async function saveActiveSessionState(payload) {
   const state = payload?.state || payload
   if (!sessionId || !state) return
   await sessionStore.saveState(sessionId, state)
+  const savedState = JSON.parse(JSON.stringify(state))
   const usage = state.usage ? JSON.parse(JSON.stringify(state.usage)) : {}
   const item = sessionStore.items.value.find(item => item.id === sessionId)
+  if (item) item.state = savedState
   if (item) item.usage = usage
-  if (activeSession.value?.id === sessionId) activeSession.value.usage = usage
+  if (activeSession.value?.id === sessionId) {
+    activeSession.value.state = savedState
+    activeSession.value.usage = usage
+  }
 }
 
 function dedupName(name) {
@@ -780,6 +785,7 @@ watch(currentView, (v) => {
           :active-workspace="activeWorkspace"
           :workspace-error="workspaceError"
           :sessions="sessionItems"
+          :persist-session-state="saveActiveSessionState"
           @save-session-state="saveActiveSessionState"
           @rename-session="renameSession"
           @delete-session="removeSession"
