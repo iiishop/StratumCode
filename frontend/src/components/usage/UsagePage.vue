@@ -68,10 +68,9 @@ const filteredTotal = computed(() => filteredRecords.value.reduce((acc, record) 
   acc.output_tokens += Number(record.output_tokens || 0)
   acc.cached_tokens += Number(record.cached_tokens || 0)
   acc.total_tokens += Number(record.total_tokens || 0)
-  acc.cost += Number(record.cost || 0)
-  acc.currency = record.currency || acc.currency
+  addCost(acc, record)
   return acc
-}, { input_tokens: 0, output_tokens: 0, cached_tokens: 0, total_tokens: 0, cost: 0, currency: total.value.currency || 'USD' }))
+}, emptyUsageTotal()))
 const cacheRatio = computed(() => {
   const cached = Number(filteredTotal.value.cached_tokens || 0)
   const input = Number(filteredTotal.value.input_tokens || 0)
@@ -137,7 +136,7 @@ const buckets = computed(() => {
   for (let index = 0; index < windowMeta.value.count; index += 1) {
     const bucketMs = windowMeta.value.startMs + (index * windowMeta.value.bucketMs)
     const key = bucketKey(bucketMs, precision.value)
-    byKey.set(key, emptyBucket(key, precision.value, total.value.currency || 'USD'))
+    byKey.set(key, emptyBucket(key, precision.value))
   }
   for (const record of chartRecords.value) {
     const key = bucketKey(record.timestamp, precision.value)
@@ -159,7 +158,8 @@ const buckets = computed(() => {
         cached_tokens: 0,
         total_tokens: 0,
         cost: 0,
-        currency: record.currency || 'USD',
+        costs_by_currency: {},
+        currency: record.currency || '',
         requests: 0,
       }
     }
@@ -265,6 +265,19 @@ function money(value) {
   return Number(value || 0).toFixed(6)
 }
 
+function formatCosts(item) {
+  const costs = item?.costs_by_currency || {}
+  const entries = Object.entries(costs)
+    .filter(([, value]) => Number(value || 0) !== 0)
+    .sort(([left], [right]) => left.localeCompare(right))
+  if (entries.length) {
+    return entries.map(([currency, value]) => `${currency} ${money(value)}`).join(' · ')
+  }
+  const cost = Number(item?.cost || 0)
+  if (!cost) return '—'
+  return `${item?.currency || 'USD'} ${money(cost)}`
+}
+
 function unique(values) {
   return [...new Set(values.filter(value => String(value || '').trim()))].sort()
 }
@@ -280,15 +293,37 @@ function addUsage(target, source) {
   target.output_tokens += Number(source.output_tokens || 0)
   target.cached_tokens += Number(source.cached_tokens || 0)
   target.total_tokens += Number(source.total_tokens || 0)
-  target.cost += Number(source.cost || 0)
-  target.currency = source.currency || target.currency
+  addCost(target, source)
+}
+
+function addCost(target, source) {
+  const cost = Number(source.cost || 0)
+  const currency = String(source.currency || '').trim()
+  target.cost += cost
+  if (currency) target.currency = currency
+  if (!target.costs_by_currency) target.costs_by_currency = {}
+  if (cost && currency) {
+    target.costs_by_currency[currency] = Number(((target.costs_by_currency[currency] || 0) + cost).toFixed(6))
+  }
+}
+
+function emptyUsageTotal() {
+  return {
+    input_tokens: 0,
+    output_tokens: 0,
+    cached_tokens: 0,
+    total_tokens: 0,
+    cost: 0,
+    currency: '',
+    costs_by_currency: {},
+  }
 }
 
 function sumUsage(items) {
   return items.reduce((acc, record) => {
     addUsage(acc, record)
     return acc
-  }, { input_tokens: 0, output_tokens: 0, cached_tokens: 0, total_tokens: 0, cost: 0, currency: total.value.currency || 'USD' })
+  }, emptyUsageTotal())
 }
 
 function modelName(record) {
@@ -344,7 +379,7 @@ function floorDay(value) {
   return date.getTime()
 }
 
-function emptyBucket(key, mode, currency) {
+function emptyBucket(key, mode) {
   return {
     key,
     label: bucketLabel(key, mode),
@@ -353,7 +388,8 @@ function emptyBucket(key, mode, currency) {
     cached_tokens: 0,
     total_tokens: 0,
     cost: 0,
-    currency,
+    currency: '',
+    costs_by_currency: {},
     requests: 0,
     stages: {},
     models: {},
@@ -395,7 +431,8 @@ function rankUsageBy(items, label) {
         cached_tokens: 0,
         total_tokens: 0,
         cost: 0,
-        currency: item.currency || total.value.currency || 'USD',
+        currency: '',
+        costs_by_currency: {},
         requests: 0,
       })
     }
@@ -502,7 +539,7 @@ function bucketHoverPayload(bucket, event) {
     detail: `${fmt(bucket.total_tokens)} tokens · ${fmt(bucket.requests)} API calls${anomalyBucketKeys.value.has(bucket.key) ? ' · spike' : ''}`,
     rows: Object.values(bucket.models).sort((a, b) => b.total_tokens - a.total_tokens),
     cost: bucket.cost,
-    currency: bucket.currency,
+    costs_by_currency: bucket.costs_by_currency,
   }, event)
 }
 
@@ -565,7 +602,7 @@ onUnmounted(() => {
         <span><small>tokens</small><b>{{ fmt(filteredTotal.total_tokens) }}</b></span>
         <span><small>requests</small><b>{{ fmt(requests) }}</b></span>
         <span><small>cache</small><b>{{ cacheRatio }}%</b></span>
-        <span><small>cost</small><b>{{ filteredTotal.currency || 'USD' }} {{ money(filteredTotal.cost) }}</b></span>
+        <span><small>cost</small><b>{{ formatCosts(filteredTotal) }}</b></span>
       </div>
     </header>
 
@@ -730,7 +767,7 @@ onUnmounted(() => {
             <div class="stage-funnel__numbers">
               <span>{{ fmt(item.requests) }} calls</span>
               <span>{{ fmt(item.total_tokens) }} tokens</span>
-              <span>{{ item.currency || 'USD' }} {{ money(item.cost) }}</span>
+              <span>{{ formatCosts(item) }}</span>
             </div>
           </div>
         </TransitionGroup>
@@ -749,7 +786,7 @@ onUnmounted(() => {
           <div v-for="item in sessionCosts" :key="item.name" class="session-cost">
             <div class="session-cost__top">
               <strong>{{ item.name }}</strong>
-              <b>{{ item.currency || 'USD' }} {{ money(item.cost) }}</b>
+              <b>{{ formatCosts(item) }}</b>
             </div>
             <div class="session-cost__bar">
               <span class="is-input" :style="{ width: tokenShare(item, 'input_tokens') }"></span>
@@ -819,7 +856,7 @@ onUnmounted(() => {
               <span><small>out</small>{{ fmt(row.output_tokens) }}</span>
               <span><small>cache</small>{{ fmt(row.cached_tokens) }}</span>
               <span><small>hit</small>{{ hitRate(row) }}%</span>
-              <span v-if="row.cost"><small>cost</small>{{ row.currency || 'USD' }} {{ money(row.cost) }}</span>
+              <span v-if="row.cost"><small>cost</small>{{ formatCosts(row) }}</span>
             </div>
           </div>
         </div>

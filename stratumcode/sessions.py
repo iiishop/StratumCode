@@ -204,6 +204,7 @@ def usage_events(workspace_id: int | None = None) -> dict:
         _add_usage_total(total, session_total)
         records.extend(_usage_records_for_session(dict(row), state))
     records.sort(key=lambda item: item["timestamp"])
+    total["costs_by_currency"] = _costs_by_currency(records)
     return {"records": records, "total": total}
 
 
@@ -284,6 +285,17 @@ def _add_usage_total(total: dict, usage: dict) -> None:
         total[key] = _int(total.get(key)) + _int(usage.get(key))
     total["cost"] = round(_float(total.get("cost")) + _float(usage.get("cost")), 6)
     total["currency"] = str(usage.get("currency") or total.get("currency") or "USD")
+
+
+def _costs_by_currency(records: list[dict]) -> dict[str, float]:
+    totals: dict[str, float] = {}
+    for record in records:
+        currency = str(record.get("currency") or "").strip() or "USD"
+        cost = _float(record.get("cost"))
+        if cost == 0:
+            continue
+        totals[currency] = round(totals.get(currency, 0.0) + cost, 6)
+    return totals
 
 
 def _int(value: object) -> int:
