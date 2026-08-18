@@ -32,7 +32,7 @@ def summaries_for_records(records: list[MemoryRecord], *, session_id: int | None
             subject_kind=subject_kind,
             subject_key=subject_key,
             statement=statement,
-            confidence=confidence,
+            confidence="inferred" if confidence == "verified" else confidence,
             freshness="fresh",
             session_id=session_id,
             turn_id=turn_id,

@@ -58,7 +58,10 @@ def _phase_tools(
                 "subagent",
             }
         ]
-    return list(tools)
+    return [
+        tool for tool in tools
+        if ((tool.get("function") or {}).get("name") or "") != "clearify"
+    ]
 
 
 def _named(tools: list[dict], *names: str) -> list[dict]:

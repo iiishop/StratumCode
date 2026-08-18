@@ -1,11 +1,86 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Literal
+from typing import Literal, cast
 
 MemoryScope = Literal["turn", "session", "project"]
 MemoryStatus = Literal["accepted", "reverted", "edited", "pending"]
 FreshnessStatus = Literal["fresh", "stale", "unknown"]
+MemoryImportance = Literal["low", "medium", "high", "critical", "unknown"]
+
+
+@dataclass(slots=True)
+class MemoryPayload:
+    predicate: str = ""
+    objects: list[str] = field(default_factory=list)
+    affected_paths: list[str] = field(default_factory=list)
+    applies_when: str = ""
+    invalidated_by: list[str] = field(default_factory=list)
+    importance: MemoryImportance = "unknown"
+    canonical_subject_key: str = ""
+    fingerprint: dict = field(default_factory=dict)
+    audit: dict = field(default_factory=dict)
+    task_kind: str = ""
+    task_status: str = ""
+    request: str = ""
+    path: str = ""
+    extra: dict = field(default_factory=dict)
+
+    @classmethod
+    def from_mapping(cls, value: object) -> MemoryPayload:
+        data = value if isinstance(value, dict) else {}
+        known = {
+            "predicate",
+            "objects",
+            "affected_paths",
+            "applies_when",
+            "invalidated_by",
+            "importance",
+            "canonical_subject_key",
+            "fingerprint",
+            "audit",
+            "task_kind",
+            "task_status",
+            "request",
+            "path",
+            "extra",
+        }
+        extra = data.get("extra") if isinstance(data.get("extra"), dict) else {}
+        extra = {**{key: item for key, item in data.items() if key not in known}, **extra}
+        return cls(
+            predicate=_text(data.get("predicate")),
+            objects=_string_list(data.get("objects")),
+            affected_paths=_string_list(data.get("affected_paths")),
+            applies_when=_text(data.get("applies_when")),
+            invalidated_by=_string_list(data.get("invalidated_by")),
+            importance=_importance(data.get("importance")),
+            canonical_subject_key=_text(data.get("canonical_subject_key")),
+            fingerprint=data.get("fingerprint") if isinstance(data.get("fingerprint"), dict) else {},
+            audit=data.get("audit") if isinstance(data.get("audit"), dict) else {},
+            task_kind=_text(data.get("task_kind")),
+            task_status=_text(data.get("task_status")),
+            request=_text(data.get("request")),
+            path=_text(data.get("path")),
+            extra=extra,
+        )
+
+    def to_dict(self) -> dict:
+        return {
+            "predicate": self.predicate,
+            "objects": self.objects,
+            "affected_paths": self.affected_paths,
+            "applies_when": self.applies_when,
+            "invalidated_by": self.invalidated_by,
+            "importance": self.importance,
+            "canonical_subject_key": self.canonical_subject_key,
+            "fingerprint": self.fingerprint,
+            "audit": self.audit,
+            "task_kind": self.task_kind,
+            "task_status": self.task_status,
+            "request": self.request,
+            "path": self.path,
+            "extra": self.extra,
+        }
 
 
 @dataclass(slots=True)
@@ -127,3 +202,20 @@ def _task_item(item: dict) -> dict:
         "status": item.get("payload", {}).get("task_status", "open"),
         "reason": item.get("source", ""),
     }
+
+
+def _text(value: object) -> str:
+    return str(value or "").strip()
+
+
+def _string_list(value: object) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [_text(item) for item in value if _text(item)]
+
+
+def _importance(value: object) -> MemoryImportance:
+    text = _text(value).casefold()
+    if text in {"low", "medium", "high", "critical"}:
+        return cast(MemoryImportance, text)
+    return "unknown"

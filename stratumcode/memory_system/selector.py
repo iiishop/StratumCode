@@ -74,6 +74,7 @@ def _llm_selection(query: str, analysis: dict | None, session_id: int | None, re
 
 
 def _record_payload(item: dict) -> dict:
+    payload = item.get("payload") if isinstance(item.get("payload"), dict) else {}
     return {
         "id": item.get("id", ""),
         "scope": item.get("scope", ""),
@@ -86,6 +87,14 @@ def _record_payload(item: dict) -> dict:
         "session_id": item.get("session_id"),
         "source": item.get("source", ""),
         "updated_at": item.get("updated_at", ""),
+        "semantic": {
+            "predicate": payload.get("predicate", ""),
+            "objects": payload.get("objects", []),
+            "affected_paths": payload.get("affected_paths", []),
+            "applies_when": payload.get("applies_when", ""),
+            "invalidated_by": payload.get("invalidated_by", []),
+            "importance": payload.get("importance", "unknown"),
+        },
     }
 
 

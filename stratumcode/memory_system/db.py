@@ -23,11 +23,14 @@ def initialize(workspace_dir: str) -> Path:
     root.mkdir(parents=True, exist_ok=True)
     _ensure_gitignore(Path(workspace_dir or ".").expanduser().resolve())
     path = root / MEMORY_DB
-    with _connect(path) as conn:
+    conn = _connect(path)
+    try:
         conn.executescript(SCHEMA)
         if _fts5_available(conn):
             conn.executescript(FTS_SCHEMA)
         conn.commit()
+    finally:
+        conn.close()
     return path
 
 

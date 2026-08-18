@@ -9,6 +9,10 @@ from . import db
 from .freshness import freshness_status
 from .llm import call_memory_json
 from .models import ConversationRef, MemoryDelta, MemoryEvidence, MemoryLink, MemoryRecord
+from .normalization import graph_relation, normalize_evidence, normalize_payload, normalize_records
+
+
+CONFLICT_CANDIDATE_KINDS = {"fact", "change", "validation", "decision"}
 
 
 def list_records(workspace_dir: str, *, include_reverted: bool = False, limit: int = 500) -> list[dict]:
@@ -22,7 +26,8 @@ def list_records(workspace_dir: str, *, include_reverted: bool = False, limit: i
             """,
             (1 if include_reverted else 0, int(limit)),
         ).fetchall()
-    return [_row_record(workspace_dir, row) for row in rows]
+        supported_ids = _supported_record_ids(conn)
+    return [_row_record(workspace_dir, row, supported_ids) for row in rows]
 
 
 def list_refs(workspace_dir: str, session_id: int | None, *, limit: int = 80) -> list[dict]:
@@ -42,31 +47,36 @@ def list_refs(workspace_dir: str, session_id: int | None, *, limit: int = 80) ->
 def record_delta(workspace_dir: str, delta: MemoryDelta) -> dict:
     if not delta.records and not delta.evidence and not delta.links and not delta.refs:
         return {"records": [], "refs": [], "links": []}
+    records = _records_with_ids(delta.records)
+    evidence = normalize_evidence(workspace_dir, delta.evidence)
+    records = normalize_records(workspace_dir, records, evidence)
     with db.db_session(workspace_dir) as conn:
         existing = _existing_statements(conn)
-        conflicts = []
-        for record in delta.records:
-            record_id = record.id or f"mem-{uuid4().hex[:12]}"
-            record = MemoryRecord(**{**asdict(record), "id": record_id})
-            conflict_id = _conflicting_record(existing, record)
+        semantic_links = []
+        for record in records:
+            relation, target_id = _semantic_relation(existing, record)
             _upsert_record(conn, record)
             _upsert_fts(conn, record)
-            if conflict_id:
-                conflicts.append({"source_id": record.id, "target_id": conflict_id, "relation": "conflicts"})
+            if target_id and relation != "none":
+                semantic_links.append({"source_id": record.id, "target_id": target_id, "relation": relation})
                 conn.execute(
                     "INSERT OR IGNORE INTO memory_links (source_id, target_id, relation) VALUES (?, ?, ?)",
-                    (record.id, conflict_id, "conflicts"),
+                    (record.id, target_id, relation),
                 )
-        for evidence in delta.evidence:
-            _insert_evidence(conn, evidence)
+            existing[(record.subject_kind.casefold(), record.subject_key.casefold(), record.kind.casefold(), _statement_key(record.statement))] = (
+                record.id,
+                record.statement,
+            )
+        for item in evidence:
+            _insert_evidence(conn, item)
         for link in delta.links:
-            _insert_link(conn, link)
+            _insert_link(conn, MemoryLink(link.source_id, link.target_id, graph_relation(link.relation)))
         for ref in delta.refs:
             _insert_ref(conn, ref)
     return {
-        "records": [asdict(record) for record in delta.records],
+        "records": [asdict(record) for record in records],
         "refs": [asdict(ref) for ref in delta.refs],
-        "links": [asdict(link) for link in delta.links] + conflicts,
+        "links": [asdict(link) for link in delta.links] + semantic_links,
     }
 
 
@@ -85,7 +95,9 @@ def update_record(workspace_dir: str, record_id: str, patch: dict) -> dict:
         row = conn.execute("SELECT * FROM memory_records WHERE id = ?", (record_id,)).fetchone()
         if row is None:
             raise ValueError("memory record not found")
-    return _row_record(workspace_dir, row)
+    with db.db_session(workspace_dir) as conn:
+        supported_ids = _supported_record_ids(conn)
+    return _row_record(workspace_dir, row, supported_ids)
 
 
 def revert_record(workspace_dir: str, record_id: str) -> dict:
@@ -199,11 +211,22 @@ def _insert_ref(conn, ref: ConversationRef) -> None:
     )
 
 
-def _row_record(workspace_dir: str, row) -> dict:
+def _row_record(workspace_dir: str, row, supported_ids: set[str]) -> dict:
     item = dict(row)
     item["source_record_ids"] = _loads(item.pop("source_record_ids_json", "[]"), [])
-    item["payload"] = _loads(item.pop("payload_json", "{}"), {})
+    item["payload"] = normalize_payload(
+        workspace_dir,
+        str(item.get("subject_kind") or ""),
+        str(item.get("subject_key") or ""),
+        _loads(item.pop("payload_json", "{}"), {}),
+    )
     item["freshness"] = _computed_freshness(workspace_dir, item)
+    if item.get("confidence") == "verified" and item.get("id") not in supported_ids:
+        item["confidence"] = "inferred"
+        item.setdefault("payload", {})["audit"] = {
+            **(item.get("payload", {}).get("audit") if isinstance(item.get("payload", {}).get("audit"), dict) else {}),
+            "downgraded_reason": "verified_without_evidence",
+        }
     return item
 
 
@@ -221,6 +244,11 @@ def _decode_json_fields(item: dict) -> dict:
     return result
 
 
+def _supported_record_ids(conn) -> set[str]:
+    rows = conn.execute("SELECT DISTINCT record_id FROM memory_evidence").fetchall()
+    return {str(row["record_id"]) for row in rows}
+
+
 def _loads(value: str, default_value):
     try:
         return json.loads(value or "")
@@ -236,12 +264,24 @@ def _computed_freshness(workspace_dir: str, item: dict) -> str:
     return str(item.get("freshness") or "unknown")
 
 
-def _existing_statements(conn) -> dict[tuple[str, str], tuple[str, str]]:
+def _records_with_ids(records: list[MemoryRecord]) -> list[MemoryRecord]:
+    return [
+        MemoryRecord(**{**asdict(record), "id": record.id or f"mem-{uuid4().hex[:12]}"})
+        for record in records
+    ]
+
+
+def _existing_statements(conn) -> dict[tuple[str, str, str, str], tuple[str, str]]:
     rows = conn.execute(
-        "SELECT id, subject_key, statement FROM memory_records WHERE status != 'reverted'"
+        "SELECT id, subject_kind, subject_key, kind, statement FROM memory_records WHERE status != 'reverted'"
     ).fetchall()
     return {
-        (str(row["subject_key"]).casefold(), _statement_key(str(row["statement"]))): (
+        (
+            str(row["subject_kind"]).casefold(),
+            str(row["subject_key"]).casefold(),
+            str(row["kind"]).casefold(),
+            _statement_key(str(row["statement"])),
+        ): (
             str(row["id"]),
             str(row["statement"]),
         )
@@ -249,16 +289,25 @@ def _existing_statements(conn) -> dict[tuple[str, str], tuple[str, str]]:
     }
 
 
-def _conflicting_record(existing: dict, record: MemoryRecord) -> str:
-    key_prefix = str(record.subject_key).casefold()
+def _semantic_relation(existing: dict, record: MemoryRecord) -> tuple[str, str]:
+    if record.kind not in CONFLICT_CANDIDATE_KINDS:
+        return "none", ""
+    subject_kind = str(record.subject_kind).casefold()
+    subject_key = str(record.subject_key).casefold()
+    kind = str(record.kind).casefold()
     statement_key = _statement_key(record.statement)
     candidates = []
-    for (subject_key, known_statement_key), (known_id, known_statement) in existing.items():
-        if subject_key != key_prefix or known_statement_key == statement_key:
+    for (known_subject_kind, known_subject_key, known_kind, known_statement_key), (known_id, known_statement) in existing.items():
+        if (
+            known_subject_kind != subject_kind
+            or known_subject_key != subject_key
+            or known_kind != kind
+            or known_statement_key == statement_key
+        ):
             continue
         candidates.append({"id": known_id, "statement": known_statement})
     if not candidates:
-        return ""
+        return "none", ""
     data = call_memory_json("detect_conflict", {
         "new_record": {
             "id": record.id,
@@ -271,9 +320,10 @@ def _conflicting_record(existing: dict, record: MemoryRecord) -> str:
         "candidates": candidates[:20],
     })
     conflict_id = str(data.get("conflict_id") or "").strip() if isinstance(data, dict) else ""
-    if conflict_id in {item["id"] for item in candidates}:
-        return conflict_id
-    return ""
+    relation = graph_relation(data.get("relation") if isinstance(data, dict) else "")
+    if conflict_id in {item["id"] for item in candidates} and relation in {"conflicts", "supersedes", "resolved_by"}:
+        return relation, conflict_id
+    return "none", ""
 
 
 def _statement_key(value: str) -> str:

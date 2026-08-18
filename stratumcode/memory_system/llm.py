@@ -194,7 +194,7 @@ def _operation_schema(operation: str) -> dict:
             "type": "object",
             "properties": {
                 "conflict_id": {"type": "string"},
-                "relation": {"type": "string", "enum": ["conflicts", "supersedes", "none"]},
+                "relation": {"type": "string", "enum": ["conflicts", "supersedes", "resolved_by", "none"]},
                 "reason": {"type": "string"},
             },
             "required": ["conflict_id", "relation", "reason"],
@@ -238,7 +238,10 @@ def _prompt(operation: str, payload: dict) -> str:
             "Prefer not returning an item over guessing.",
             "Use concise statements, but do not truncate evidence needed for traceability.",
             "Mark verified only for validation results, actual project changes, or explicitly verified code facts.",
+            "Verified records must have concrete evidence. If evidence is unavailable, use inferred or uncertain.",
             "Mark recommendations, risks, and inferences as inferred or pending, not verified.",
+            "For file subjects, use workspace-relative paths such as main.py, never absolute paths.",
+            "Use payload for structured semantics: predicate, objects, affected_paths, applies_when, invalidated_by, and importance when available.",
         ],
         "schemas": {
             "extract_delta": {
@@ -253,7 +256,19 @@ def _prompt(operation: str, payload: dict) -> str:
                     "freshness": "fresh|unknown",
                     "source": "source label",
                     "source_record_ids": ["optional source ids"],
-                    "payload": "optional object",
+                    "payload": {
+                        "predicate": "stable semantic relation, for example defines/adds/validates/recommends/risks/depends_on/resolves",
+                        "objects": ["symbols, APIs, tasks, decisions, or concepts this record is about"],
+                        "affected_paths": ["workspace-relative file paths affected by or relevant to this record"],
+                        "applies_when": "condition under which this memory should be reused",
+                        "invalidated_by": ["conditions or file changes that would make this memory stale or unsafe"],
+                        "importance": "low|medium|high|critical|unknown",
+                        "task_kind": "optional task kind for task memories",
+                        "task_status": "optional task status for task memories",
+                        "request": "optional originating user request",
+                        "path": "optional primary workspace-relative path",
+                        "extra": "optional object for fields that do not fit the schema",
+                    },
                 }],
                 "evidence": [{
                     "record_index": "1-based index into records",
@@ -265,7 +280,7 @@ def _prompt(operation: str, payload: dict) -> str:
                 "links": [{
                     "source_record_index": "1-based index into records",
                     "target_record_index": "1-based index into records",
-                    "relation": "supports|depends_on|supersedes|conflicts|mentions",
+                    "relation": "supports|depends_on|supersedes|conflicts|mentions|derived_from|summarizes|resolved_by",
                 }],
                 "refs": [{
                     "index": "integer, 1-based within the same kind/order",
@@ -304,7 +319,7 @@ def _prompt(operation: str, payload: dict) -> str:
             },
             "detect_conflict": {
                 "conflict_id": "existing record id or empty string",
-                "relation": "conflicts|supersedes|none",
+                "relation": "conflicts|supersedes|resolved_by|none",
                 "reason": "short explanation",
             },
         },

@@ -1,7 +1,7 @@
 <script setup>
 import { Handle, Position, VueFlow } from '@vue-flow/core'
 import '@vue-flow/core/dist/style.css'
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import FileReference from '../FileReference.vue'
 import { languageFromPath } from '../../lib/fileRefs'
 import { parseBlock } from '../../lib/markdown'
@@ -17,6 +17,8 @@ const graph = ref({ nodes: [], edges: [] })
 const resolvedFileRefs = ref(new Map())
 const selectedId = ref('')
 const filters = ref({ scope: 'all', status: 'active', freshness: 'all', query: '' })
+const exportStatus = ref('')
+let exportStatusTimer = null
 
 const filteredRecords = computed(() => {
   const query = filters.value.query.trim().toLowerCase()
@@ -33,11 +35,15 @@ const filteredRecords = computed(() => {
 const selectedRecord = computed(() => records.value.find(record => record.id === selectedId.value) || filteredRecords.value[0] || null)
 const memoryStats = computed(() => {
   const active = records.value.filter(record => record.status !== 'reverted')
+  const diagnostics = graph.value.diagnostics || {}
   return {
     active: active.length,
     project: active.filter(record => record.scope === 'project').length,
     stale: active.filter(record => record.freshness === 'stale').length,
     conflicts: graph.value.edges.filter(edge => edge.label === 'conflicts').length,
+    unsupportedVerified: diagnostics.unsupported_verified_record_ids?.length || 0,
+    duplicateSubjects: diagnostics.duplicate_subjects?.length || 0,
+    derivedEdges: diagnostics.derived_edges || 0,
   }
 })
 const selectedSourceIds = computed(() => {
@@ -47,9 +53,11 @@ const selectedSourceIds = computed(() => {
 const selectedPayloadRows = computed(() => {
   const payload = selectedRecord.value?.payload
   if (!payload || typeof payload !== 'object') return []
+  const order = new Map(['predicate', 'objects', 'affected_paths', 'applies_when', 'invalidated_by', 'importance', 'canonical_subject_key', 'task_kind', 'task_status', 'request', 'path', 'audit', 'extra'].map((key, index) => [key, index]))
   return Object.entries(payload)
-    .filter(([, value]) => value !== '' && value != null)
-    .slice(0, 8)
+    .filter(([, value]) => isMeaningfulPayloadValue(value))
+    .sort(([left], [right]) => (order.get(left) ?? 99) - (order.get(right) ?? 99))
+    .slice(0, 12)
     .map(([key, value]) => ({ key, value: typeof value === 'object' ? JSON.stringify(value) : String(value) }))
 })
 const graphLayout = computed(() => layoutMemoryGraph(graph.value.nodes, graph.value.edges))
@@ -122,6 +130,79 @@ async function accept(record) {
     body: JSON.stringify({ workspace_id: props.workspace.id, id: record.id, patch: { status: 'accepted' } }),
   })
   await loadMemory()
+}
+
+async function exportStructuredGraph() {
+  window.clearTimeout(exportStatusTimer)
+  try {
+    await writeClipboard(JSON.stringify(structuredGraphExport(), null, 2))
+    exportStatus.value = 'Copied'
+  } catch (reason) {
+    exportStatus.value = `Copy failed: ${reason?.message || 'clipboard unavailable'}`
+  } finally {
+    exportStatusTimer = window.setTimeout(() => { exportStatus.value = '' }, 2200)
+  }
+}
+
+function structuredGraphExport() {
+  return {
+    exported_at: new Date().toISOString(),
+    url: window.location.href,
+    workspace: props.workspace ? plain(props.workspace) : null,
+    filters: plain(filters.value),
+    stats: plain(memoryStats.value),
+    selected_record_id: selectedRecord.value?.id || '',
+    counts: {
+      records: records.value.length,
+      filtered_records: filteredRecords.value.length,
+      raw_nodes: graph.value.nodes?.length || 0,
+      raw_edges: graph.value.edges?.length || 0,
+      flow_nodes: flowNodes.value.length,
+      flow_edges: flowEdges.value.length,
+      resolved_file_refs: resolvedFileRefs.value.size,
+    },
+    records: plain(records.value),
+    filtered_record_ids: filteredRecords.value.map(record => record.id),
+    graph: {
+      raw: plain(graph.value),
+      flow: {
+        nodes: plain(flowNodes.value),
+        edges: plain(flowEdges.value),
+      },
+      resolved_file_refs: Object.fromEntries(resolvedFileRefs.value.entries()),
+    },
+  }
+}
+
+async function writeClipboard(text) {
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(text)
+    return
+  }
+  const area = document.createElement('textarea')
+  area.value = text
+  area.setAttribute('readonly', '')
+  area.style.position = 'fixed'
+  area.style.left = '-9999px'
+  area.style.top = '0'
+  document.body.appendChild(area)
+  area.select()
+  try {
+    document.execCommand('copy')
+  } finally {
+    document.body.removeChild(area)
+  }
+}
+
+function plain(value) {
+  return JSON.parse(JSON.stringify(value))
+}
+
+function isMeaningfulPayloadValue(value) {
+  if (value == null || value === '') return false
+  if (Array.isArray(value)) return value.length > 0
+  if (typeof value === 'object') return Object.keys(value).length > 0
+  return value !== 'unknown'
 }
 
 function layoutMemoryGraph(nodes, edges) {
@@ -472,6 +553,9 @@ function titleCase(value) {
 
 watch(() => props.workspace?.id, loadMemory)
 onMounted(loadMemory)
+onUnmounted(() => {
+  window.clearTimeout(exportStatusTimer)
+})
 </script>
 
 <template>
@@ -502,6 +586,18 @@ onMounted(loadMemory)
       <article :class="{ 'is-warn': memoryStats.conflicts }">
         <span>Conflicts</span>
         <strong>{{ memoryStats.conflicts }}</strong>
+      </article>
+      <article :class="{ 'is-warn': memoryStats.unsupportedVerified }">
+        <span>Unsupported verified</span>
+        <strong>{{ memoryStats.unsupportedVerified }}</strong>
+      </article>
+      <article :class="{ 'is-warn': memoryStats.duplicateSubjects }">
+        <span>Duplicate subjects</span>
+        <strong>{{ memoryStats.duplicateSubjects }}</strong>
+      </article>
+      <article>
+        <span>Derived edges</span>
+        <strong>{{ memoryStats.derivedEdges }}</strong>
       </article>
     </section>
 
@@ -557,10 +653,15 @@ onMounted(loadMemory)
             <strong>Memory graph</strong>
             <span>Subjects flow into records, with evidence attached on the right.</span>
           </div>
-          <div class="memory-graph__legend">
-            <span><i class="is-subject"></i>Subject</span>
-            <span><i class="is-memory"></i>Memory</span>
-            <span><i class="is-evidence"></i>Evidence</span>
+          <div class="memory-graph__tools">
+            <div class="memory-graph__legend">
+              <span><i class="is-subject"></i>Subject</span>
+              <span><i class="is-memory"></i>Memory</span>
+              <span><i class="is-evidence"></i>Evidence</span>
+            </div>
+            <button type="button" :disabled="loading || !graph.nodes.length" @click="exportStructuredGraph">
+              {{ exportStatus || 'Copy graph JSON' }}
+            </button>
           </div>
         </div>
         <VueFlow
@@ -719,7 +820,7 @@ onMounted(loadMemory)
 }
 .memory-stats {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(154px, 1fr));
   gap: 10px;
 }
 .memory-stats article {
@@ -874,6 +975,14 @@ onMounted(loadMemory)
   color: #637a94;
   font: 10px/1.35 var(--mono);
 }
+.memory-graph__tools {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  min-width: 0;
+}
 .memory-graph__legend {
   display: flex;
   flex-wrap: wrap;
@@ -903,6 +1012,20 @@ onMounted(loadMemory)
 }
 .memory-graph__legend .is-evidence {
   background: #c79324;
+}
+.memory-graph__tools button {
+  height: 26px;
+  padding: 0 9px;
+  border: 1px solid #cbd9ea;
+  border-radius: 7px;
+  color: #0d2d5c;
+  background: #fff;
+  font: 800 9px/1 var(--mono);
+  white-space: nowrap;
+}
+.memory-graph__tools button:disabled {
+  cursor: not-allowed;
+  opacity: .55;
 }
 .memory-graph :deep(.vue-flow) {
   width: 100%;
