@@ -87,5 +87,10 @@ export function useSessions() {
     await request('/sessions/save-state', { id, state })
   }
 
-  return { items, active, loading, error, load, create, open, rename, remove, saveState, clear }
+  async function saveStateIncrement(id, increment) {
+    if (!id) return
+    await request('/sessions/save-state', { id, increment })
+  }
+
+  return { items, active, loading, error, load, create, open, rename, remove, saveState, saveStateIncrement, clear }
 }

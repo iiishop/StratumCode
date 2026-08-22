@@ -324,18 +324,101 @@ def rename(session_id: int, name: str) -> None:
         )
 
 
-def save_state(session_id: int, state: dict) -> None:
-    if not isinstance(state, dict):
-        raise ValueError("state must be an object")
-    current = get(session_id)["state"]
-    state = {**current, **state}
-    state["taskItems"] = _merge_by_task(current.get("taskItems", []), state.get("taskItems", []))
-    state["knowledge"] = _merge_by_id(current.get("knowledge", []), state.get("knowledge", []))
-    state["investigations"] = _merge_by_id(current.get("investigations", []), state.get("investigations", []))
-    state["observations"] = _cap_observations(
-        _merge_by_id(current.get("observations", []), state.get("observations", [])),
-        state["knowledge"],
-    )
+def save_state(session_id: int, state: dict | None = None, increment: dict | None = None) -> None:
+    """Persist session state.
+
+    Two modes:
+    - full: ``state`` replaces/merges the whole snapshot (legacy path,
+      low-frequency: unload, answer submit).
+    - incremental: only newly appended messages/events are sent; merge into
+      the stored baseline. Keeps per-save cost bounded regardless of session
+      length — the frontend previously full-serialized the whole tree on
+      every streamed event, which inflated the V8 heap (old space grows,
+      never shrinks).
+    """
+    if state is not None:
+        if not isinstance(state, dict):
+            raise ValueError("state must be an object")
+        current = get(session_id)["state"]
+        state = {**current, **state}
+        state["taskItems"] = _merge_by_task(current.get("taskItems", []), state.get("taskItems", []))
+        state["knowledge"] = _merge_by_id(current.get("knowledge", []), state.get("knowledge", []))
+        state["investigations"] = _merge_by_id(current.get("investigations", []), state.get("investigations", []))
+        state["observations"] = _cap_observations(
+            _merge_by_id(current.get("observations", []), state.get("observations", [])),
+            state["knowledge"],
+        )
+        _write_state(session_id, state)
+        return
+    if increment is not None:
+        _apply_increment(session_id, increment)
+        return
+    raise ValueError("state or increment required")
+
+
+def _apply_increment(session_id: int, increment: dict) -> None:
+    """Merge an event-level increment into the stored session state.
+
+    ``increment`` shape (from the frontend chat timeline):
+      { new_messages: [message, ...],   # whole new messages (incl. all events)
+        appends:      [{ id, events: [...] }, ...],  # new events on existing messages
+        usage:        {...} | None }
+    Events are upserted by id: re-sent events (active/streaming ones that the
+    frontend keeps including until they finish) overwrite in place.
+    """
+    if not isinstance(increment, dict):
+        raise ValueError("increment must be an object")
+    state = get(session_id)["state"]
+    new_messages = increment.get("new_messages") or []
+    appends = increment.get("appends") or []
+    usage = increment.get("usage")
+
+    msgs = state.get("messages")
+    if not isinstance(msgs, list):
+        msgs = []
+    by_id = {m["id"]: m for m in msgs if isinstance(m, dict) and m.get("id") is not None}
+
+    for nm in new_messages:
+        if not isinstance(nm, dict):
+            continue
+        mid = nm.get("id")
+        if mid in by_id:
+            # Defensive: a whole-message resend overwrites in place.
+            by_id[mid].clear()
+            by_id[mid].update(nm)
+        else:
+            by_id[mid] = nm
+            msgs.append(nm)
+
+    for ap in appends:
+        if not isinstance(ap, dict):
+            continue
+        msg = by_id.get(ap.get("id"))
+        if not isinstance(msg, dict):
+            continue
+        events = msg.get("events")
+        if not isinstance(events, list):
+            events = []
+            msg["events"] = events
+        ev_by_id = {e["id"]: e for e in events if isinstance(e, dict) and e.get("id") is not None}
+        for ev in ap.get("events") or []:
+            if not isinstance(ev, dict):
+                continue
+            eid = ev.get("id")
+            if eid in ev_by_id:
+                ev_by_id[eid].update(ev)
+            else:
+                if eid is not None:
+                    ev_by_id[eid] = ev
+                events.append(ev)
+
+    state["messages"] = msgs
+    # 其余状态量小、增长慢：随增量全量覆盖，保证会话恢复不丢这些部分
+    for key in ("evidenceRuns", "taskAnalyses", "subagentRuns", "fileContext", "activeRunId"):
+        if key in increment:
+            state[key] = increment[key]
+    if isinstance(usage, dict):
+        state["usage"] = usage
     _write_state(session_id, state)
 
 

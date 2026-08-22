@@ -197,8 +197,14 @@ async function removeWorkspace(id) {
 
 async function saveActiveSessionState(payload) {
   const sessionId = payload?.session_id || activeSession.value?.id
+  if (!sessionId) return
+  // 增量路径：只传新增/变更的 messages/events，不整体覆盖会话树（避免高频全量序列化撑爆 V8 堆）
+  if (payload?.increment) {
+    await sessionStore.saveStateIncrement(sessionId, payload.increment)
+    return
+  }
   const state = payload?.state || payload
-  if (!sessionId || !state) return
+  if (!state) return
   await sessionStore.saveState(sessionId, state)
   const savedState = JSON.parse(JSON.stringify(state))
   const usage = state.usage ? JSON.parse(JSON.stringify(state.usage)) : {}

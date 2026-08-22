@@ -62,9 +62,71 @@ const copySessionStatus = ref('')
 let copySessionTimer
 const MESSAGE_BOTTOM_THRESHOLD = 28
 const SESSION_SAVE_DEBOUNCE_MS = 220
+const STREAM_SAVE_INTERVAL_MS = 5000
 let saveInFlight = false
 let saveRequestedWhileInFlight = false
 let queuedSaveSessionId = null
+
+/* ── 增量保存游标 ──
+ * 会话树只增不减，全量序列化成本随会话长度增长（V8 old space 只扩不缩，
+ * 高频大分配最终把 renderer 堆顶到 10GB+）。改为增量：只传上次落盘后
+ * 新增的 message/event，save 成本与历史长度无关。
+ * 进行中（streaming/running）的事件不推进游标——每次落盘都带其最新状态，
+ * 后端按 event id 覆盖合并；完结后才被游标越过，从增量中消失。
+ */
+const savedEventCounts = new Map()  // messageId -> 已保存的完结事件数
+let savedMessageCount = 0
+let streamSaveTimer = null
+let lastStreamSaveAt = 0
+let pendingSaveSessionId = null
+
+function isActiveEvent(event) {
+  const d = event?.data || {}
+  return d.streaming === true || d.status === 'running'
+}
+
+function completedEventCount(message) {
+  let i = savedEventCounts.get(message.id) || 0
+  while (i < message.events.length && !isActiveEvent(message.events[i])) i += 1
+  return i
+}
+
+function buildStateIncrement() {
+  const newMessages = messages.slice(savedMessageCount).map(plain)
+  const appends = []
+  const covered = new Map()
+  for (const m of messages.slice(0, savedMessageCount)) {
+    const saved = savedEventCounts.get(m.id) || 0
+    const end = completedEventCount(m)
+    if (end > saved) {
+      appends.push({ id: m.id, events: m.events.slice(saved, end).map(plain) })
+      covered.set(m.id, end)
+    }
+  }
+  // messages 走增量；其余状态增长慢、量小，随增量全量带（避免会话恢复不完整）
+  // 字段名与 snapshotState/_default_state 保持一致（camelCase）
+  return {
+    newMessages,
+    appends,
+    covered,
+    small: {
+      evidenceRuns: plain(evidenceRuns),
+      taskAnalyses: plain(taskAnalyses),
+      subagentRuns: plain(subagentRuns),
+      fileContext: plain(fileContext),
+      activeRunId: activeRunId.value,
+      usage: plain(sessionUsage),
+    },
+  }
+}
+
+function commitIncrement(snapshot) {
+  for (const m of snapshot.newMessages) {
+    savedEventCounts.set(m.id, completedEventCount(m))
+  }
+  for (const [id, end] of snapshot.covered) savedEventCounts.set(id, end)
+  savedMessageCount = messages.length
+}
 
 function addToFileContext(path) {
   if (fileContext.find(f => f.path === path)) return
@@ -461,25 +523,78 @@ function scheduleSave() {
     saveTimer = null
     const targetSessionId = saveTimerSessionId
     saveTimerSessionId = null
-    requestSessionSave(targetSessionId)
+    // send 完成等关键节点：绕过节流窗口立即落盘，保证流结束状态完整
+    flushSessionSave(targetSessionId)
   }, SESSION_SAVE_DEBOUNCE_MS)
 }
 
-async function saveSessionState(sessionId = props.session?.id) {
+async function saveSessionState(sessionId = props.session?.id, opts = {}) {
   if (!sessionId) return
+  // 全量路径：低频/紧急场景（beforeunload、answer 提交），保留完整快照
+  if (opts.full) {
+    const payload = { session_id: sessionId, state: snapshotState() }
+    if (props.persistSessionState) {
+      await props.persistSessionState(payload)
+    } else {
+      emit('save-session-state', payload)
+    }
+    return
+  }
+  // 增量路径：只传自上次落盘以来的新增/变更，成本与历史长度无关。
+  // 无新事件也发送：小状态（evidenceRuns/activeRunId 等）可能单独变化，
+  // 且固定间隔落盘兼作崩溃恢复心跳
+  const increment = buildStateIncrement()
   const payload = {
     session_id: sessionId,
-    state: snapshotState(),
+    increment: {
+      new_messages: increment.newMessages,
+      appends: increment.appends,
+      ...increment.small,
+    },
   }
   if (props.persistSessionState) {
     await props.persistSessionState(payload)
+  } else {
+    emit('save-session-state', payload)
+    // emit 路径无法确认落盘成功：不推进游标，下次 save 会重发，不丢数据
     return
   }
-  emit('save-session-state', payload)
+  // 只有会话未切换才推进游标；否则丢弃（增量随下次保存重发，后端 merge 幂等）
+  if (props.session?.id === sessionId) commitIncrement(increment)
 }
 
 function requestSessionSave(sessionId = props.session?.id) {
   if (!sessionId) return
+  // 节流：事件流期间合并落盘，窗口内只记 pending，到点统一保存
+  const elapsed = Date.now() - lastStreamSaveAt
+  if (elapsed >= STREAM_SAVE_INTERVAL_MS) {
+    lastStreamSaveAt = Date.now()
+    queueSessionSave(sessionId)
+    return
+  }
+  pendingSaveSessionId = sessionId
+  if (streamSaveTimer == null) {
+    streamSaveTimer = setTimeout(() => {
+      streamSaveTimer = null
+      lastStreamSaveAt = Date.now()
+      if (pendingSaveSessionId) queueSessionSave(pendingSaveSessionId)
+      pendingSaveSessionId = null
+    }, STREAM_SAVE_INTERVAL_MS - elapsed)
+  }
+}
+
+// 绕过节流窗口立即落盘：send 完成/stop 等关键节点用，保证流结束状态完整
+function flushSessionSave(sessionId) {
+  if (streamSaveTimer) {
+    clearTimeout(streamSaveTimer)
+    streamSaveTimer = null
+  }
+  pendingSaveSessionId = null
+  lastStreamSaveAt = Date.now()
+  queueSessionSave(sessionId)
+}
+
+function queueSessionSave(sessionId) {
   queuedSaveSessionId = sessionId
   if (saveInFlight) {
     saveRequestedWhileInFlight = true
@@ -523,12 +638,12 @@ function saveSessionStateOnUnload() {
 }
 
 function flushPendingSave(sessionId = saveTimerSessionId || props.session?.id) {
-  if (!saveTimer) return
   clearTimeout(saveTimer)
   saveTimer = null
   const targetSessionId = sessionId || saveTimerSessionId
   saveTimerSessionId = null
-  requestSessionSave(targetSessionId)
+  // 切会话/卸载前：绕过节流窗口强制落盘，避免旧会话丢最近增量
+  if (targetSessionId) flushSessionSave(targetSessionId)
 }
 
 function clearState() {
@@ -542,6 +657,14 @@ function clearState() {
   Object.assign(agentStatus, { state: 'idle', phase: '', provider: '', model: '', contextLength: null, contextUsed: 0 })
   isAtMessageBottom.value = true
   isAutoScrollingMessages.value = false
+  // 清空增量游标与未决保存
+  savedEventCounts.clear()
+  savedMessageCount = 0
+  pendingSaveSessionId = null
+  if (streamSaveTimer) {
+    clearTimeout(streamSaveTimer)
+    streamSaveTimer = null
+  }
 }
 
 async function restoreState(state = {}) {
@@ -574,6 +697,10 @@ async function restoreState(state = {}) {
   Object.assign(agentStatus, { state: 'idle', phase: '', provider: '', model: '', contextLength: null, contextUsed: 0 })
 
   restoring.value = false
+  // 恢复的 messages 即落盘基线：游标对齐到当前完结事件，避免重复保存
+  savedMessageCount = messages.length
+  savedEventCounts.clear()
+  for (const m of messages) savedEventCounts.set(m.id, completedEventCount(m))
   await nextTick()
   scrollBottom()
 }
@@ -749,8 +876,9 @@ async function continueAfterAnswer(answer) {
   const data = await response.json().catch(() => ({}))
   if (!response.ok) throw new Error(data.error || `Answer submit failed (${response.status})`)
   // Immediately persist answer_status='submitted' — no debounce window.
+  // 全量路径：answer_status 修改的是已完结事件，增量不会重发，必须完整快照
   const sessionId = props.session?.id
-  if (sessionId) await saveSessionState(sessionId)
+  if (sessionId) await saveSessionState(sessionId, { full: true })
 }
 
 async function answerQuestion(answer) {
@@ -982,6 +1110,10 @@ onUnmounted(() => {
   flushPendingSave()
   clearTimeout(copySessionTimer)
   clearTimeout(copyMsgTimer)
+  if (streamSaveTimer) {
+    clearTimeout(streamSaveTimer)
+    streamSaveTimer = null
+  }
 })
 
 watch(() => props.session?.id, (id, oldId) => {
