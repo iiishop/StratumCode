@@ -43,6 +43,18 @@ class Api:
         return str(result[0]) if result else ""
 
 
+def _pick_gui():
+    """Linux 上优先 QtWebEngine（Chromium 内核）渲染，WebKitGTK 在 NVIDIA/Wayland 下帧率偏低。
+    Windows/macOS 返回 None，走系统默认内核（WebView2 / WKWebView），行为不变。"""
+    if sys.platform.startswith("linux"):
+        try:
+            import qtpy  # noqa: F401
+            return "qt"
+        except ImportError:
+            return None
+    return None
+
+
 def _frontend_deps_installed() -> bool:
     """Check that every dependency declared in package.json exists in node_modules."""
     pkg_path = FRONTEND_DIR / "package.json"
@@ -102,7 +114,7 @@ def main():
     api = Api()
     window = webview.create_window("StratumCode", f"http://localhost:{port}", js_api=api)
     api.set_window(window)
-    webview.start()
+    webview.start(gui=_pick_gui())
 
 
 def main_dev():
@@ -127,4 +139,4 @@ def main_dev():
     api = Api()
     window = webview.create_window("StratumCode", url, js_api=api)
     api.set_window(window)
-    webview.start()
+    webview.start(gui=_pick_gui())
