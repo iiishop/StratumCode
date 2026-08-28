@@ -23,6 +23,7 @@
   <img alt="Local first" src="https://img.shields.io/badge/runtime-local--first-1756d1" />
   <img alt="MCP" src="https://img.shields.io/badge/tools-MCP-6658c7" />
   <img alt="LSP" src="https://img.shields.io/badge/code%20intelligence-LSP-0f7d65" />
+  <img alt="GitHub stars" src="https://img.shields.io/github/stars/iiishop/StratumCode?style=flat-square" />
 </p>
 
 ---
@@ -55,11 +56,21 @@ Agent 出现之前的程序员，每天做的最多的事是在电脑前发呆�
 
 StratumCode 换了一个前提：**软件变更在被执行之前，应该是可以被解释的。**
 
+## Highlights
+
+| 亮点 | 为什么重要 |
+|---|---|
+| 证据驱动的状态机 | 每个阶段有独立职责和转移规则，调查未完成不会进入设计 |
+| Runtime 级硬约束 | 正确性不依赖模型遵循提示词——Patch 授权、快照、原子提交、回滚都由 runtime 强制 |
+| 持久化工程记忆 | 跨会话的 memory_system：图结构、压缩、新鲜度、选择器——项目知识可以积累 |
+| 本地优先 | 数据留在你的机器上，OpenAI 兼容端点 + 实验性 Codex OAuth |
+| 桌面应用 | pywebview + Vue 3，时间线、内存面板、用量统计、自更新都在界面里 |
+
 ## 工作流
 
 StratumCode 用一个明确的状态机串联整个过程。每个阶段有独立的职责和转移规则：
 
-```
+```text
 用户需求 → Task Analysis → Investigation → Design → Patch Planning → Implementation → Validation
                   ↑               ↑                         ↑                      │
                   └── 证据不足 ───┘                         └── 需修复 ─────────────┘
@@ -200,26 +211,37 @@ uv run stratumcode-dev
 - **LSP 支持**：符号、定义、引用、悬浮信息、诊断
 - **Skills 面板**：按全局、阶段、子代理配置能力
 - **时间线事件**：证据、工具、代理、任务、过渡、计划、补丁、验证结果一览
-- **用量统计**：Token、缓存和费用信息
+- **用量统计**：Token、缓存和费用信息（按币种）
+- **工程记忆面板**：查看跨会话记忆图、选择与压缩结果
+- **代码结构面板**：仓库结构浏览
+- **Git 面板**：仓库状态与常用操作
+- **自更新检查**：应用内检查新版本
 
 ## 项目结构
 
-```
+```text
 StratumCode/
 ├── frontend/              Vue 3 + Vite 桌面 UI
 │   └── src/
-│       ├── components/    页面、时间线事件、计划和检查器
+│       ├── components/    页面、时间线、检查器、内存、用量、设置
 │       └── composables/   前端状态和 API 集成
 │
 ├── stratumcode/
 │   ├── chat.py            显式运行状态机
 │   ├── status/            各阶段状态处理器和任务契约
-│   ├── investigator.py    证据收集和 Unknown 消解
+│   ├── investigator/      证据收集、发现与 Unknown 消解
+│   ├── hypothesis_verifier.py  假设验证子代理
 │   ├── design_planner.py  基于事实的设计编制
 │   ├── patch_planner.py   可执行 Patch Plan 生成
 │   ├── implementation_runner.py  实施和验证循环
 │   ├── patch_engine.py    快照、原子编辑和回滚
 │   ├── patch_authorization.py   Plan 和 Step 级别写授权
+│   ├── memory_system/     持久化工程记忆（图、压缩、选择）
+│   ├── code_structure/    仓库结构构建
+│   ├── agent/             代理策略与证据
+│   ├── clearify_runtime.py  需用户确认的提问路由
+│   ├── git_panel.py       Git 集成
+│   ├── updates.py         自更新检查
 │   ├── skill_runtime.py   阶段/子代理 skill 加载
 │   ├── tools/             内置工具注册
 │   ├── lsp/               Language Server Protocol 集成
@@ -234,19 +256,24 @@ StratumCode/
 ## 当前状态
 
 > [!IMPORTANT]
-> StratumCode 处于 **Alpha** 阶段。契约格式、存储结构、Provider 传输和 UI 都可能随提交变化。请在版本控制的仓库上使用，依赖修改前 Review diff。
+> StratumCode 处于 **Alpha** 阶段（当前 v0.0.17）。契约格式、存储结构、Provider 传输和 UI 都可能随提交变化。请在版本控制的仓库上使用，依赖修改前 Review diff。
 
 ### 已实现
 
 - [x] 带工作区和会话管理的本地桌面应用
 - [x] 完整的 Task Analysis → Investigation → Design → Patch → Validation 状态机
 - [x] 结构化任务契约、Unknown、观察、信念、验收标准
+- [x] 独立假设验证子代理（找支持/反对证据 → 审计 → 置信结论）
+- [x] 持久化工程记忆（图结构、压缩、新鲜度、选择器）
 - [x] OpenAI 兼容 Provider + 实验性 Codex OAuth
 - [x] MCP 服务发现和动态工具注册
 - [x] LSP 符号、定义、引用、悬浮、诊断
 - [x] 按全局/阶段/子代理配置的动态 Skills
 - [x] Patch 授权、快照、陈旧检测、原子写入、回滚
-- [x] 结构化时间线事件和用量统计
+- [x] 会话增量保存（避免大会话内存泄漏）
+- [x] 用量统计（按币种计费）
+- [x] 自更新检查与 Git 面板
+- [x] Linux 平台支持
 
 ### 开发中
 
@@ -255,15 +282,13 @@ StratumCode/
 - [ ] 更完整的可执行 Patch Plan 确定性校验
 - [ ] 更广泛的工具支持（测试、构建、格式化、静态检查）
 - [ ] 完整的修复路由（范围、环境、产品决策类失败）
-- [ ] 带依赖感知的持久化工程记忆
 - [ ] 固定 Benchmark 套件（Bugfix、Feature、Refactor、UI、Config、Concurrency）
 
 ## 近期方向
 
-- 为每个项目实现持久化的工程记忆
 - 架构设计专用子代理
 - 跨前后端调用流程链可视化——从触发到结束的全过程
-- Git 集成、CI/CD 集成
+- CI/CD 集成
 
 ## 贡献
 
