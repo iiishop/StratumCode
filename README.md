@@ -6,14 +6,20 @@
   <img src="docs/assets/stratumcode-wordmark.png" alt="StratumCode" width="640" />
 </p>
 
+<h1 align="center">StratumCode</h1>
+
 <p align="center">
-  <strong>证据驱动，契约先行。</strong>
+  <strong>Evidence-driven. Contract-first.</strong>
 </p>
 
 <p align="center">
-  一个本地优先的软件工程 Agent。不会直接从你的指令跳到改代码——<br/>
-  而是走完任务分析、代码调查、设计决策、可执行施工计划、事务式修改和独立验证一整套流程。<br/>
-  每一步都可追踪、可审计、可回退。
+  A local-first software engineering agent. It does not jump from your instruction straight to editing code —<br/>
+  it runs the full pipeline: task analysis, code investigation, design decisions, an executable patch plan,<br/>
+  transactional edits, and independent validation. Every step is traceable, auditable, and reversible.
+</p>
+
+<p align="center">
+  <a href="./README.md">English</a> | <a href="./README.zh-CN.md">简体中文</a>
 </p>
 
 <p align="center">
@@ -28,162 +34,162 @@
 
 ---
 
-## 为什么要做这个
+## Why this exists
 
-从去年开始，我几乎把所有编码工作都交给了 AI。起初还算克制——自己设计好架构、定好接口，再让 Claude 逐个文件产出。后来 Copilot 的 agent 能力上线，我连设计都省了。需求丢进去，等结果，不好就再试一次。现在流行叫"许愿式编程"。
+About a year ago, I handed almost all of my coding work to AI. At first I stayed disciplined — designing the architecture and interfaces myself, then having Claude produce files one by one. Then Copilot's agent mode landed, and I stopped even doing the design. Throw the requirement in, wait for a result, and if it is not right, try again. This is what people now call "wishful programming."
 
-效率当然高。毕设那会儿产出速度是原来的三四倍。以前一天最多写一千行，现在可能只是一个对话的量。
+It was certainly faster. During my thesis project, output speed tripled or quadrupled. A thousand lines used to be a good day's work; now it is a single conversation.
 
-但有些东西在消失。以前写完一段代码，脑子里就能预演运行效果，最后看着自己一砖一瓦搭起来的东西在屏幕上跑——那种爽感是不言而喻的。还有对代码质量的执念：硬编码不能忍、高耦合不能忍、为了可维护性整日整夜地琢磨。
+But something was disappearing. I used to be able to run the code in my head before it ran on the screen — tracing the flow, predicting behavior, then watching something I had built brick by brick actually work. That feeling was the whole point. Along with it went my obsession with code quality: the intolerance for hardcoding, for tight coupling, for nights spent on maintainability.
 
-Agent 改变了这一切。输出量太大了，大到我已经不再 Review，只看最终效果。代码变成了黑箱，而我成了验收机器。
+The agent changed all of that. The output volume got so large that I stopped reviewing and only checked the final result. Code became a black box, and I became an acceptance machine.
 
-大约半年前，纯 agent coding 到了瓶颈期。我试着转回手写，但尝过那种效率之后，很难回头。就像工业革命时期，你还在抱着珍妮机，别人已经流水线了。
+About six months in, pure agent coding hit a wall. I tried switching back to writing code by hand, but once you have tasted that efficiency it is hard to go back. It is like trying to use a spinning jenny while everyone else has moved to the assembly line.
 
-所以我开始读 ReAct、Toolformer 这些早期 agent 论文，试遍了市面上的主流 coding agent，最终决定自己做。
+So I started reading the early agent papers — ReAct, Toolformer — tried every mainstream coding agent on the market, and finally decided to build my own.
 
-**StratumCode**，直译是"代码层析"，但我更喜欢叫它"代码考古"。
+**StratumCode**, literally "stratum analysis of code." But I prefer to call it "code archaeology."
 
-Agent 出现之前的程序员，每天做的最多的事是在电脑前发呆。根据函数名跳转看实现、根据字段名查引用、在脑子里把整个模块跑起来，构建一个庞大的代码网络。其实很像考古——从一个小碎片开始，逐渐扩展，最终拼出一个庞大造物的真相。
+Before agents, the most common thing a programmer did was stare at the screen. Jump from a function name to its implementation, follow a field to its references, run the whole module in your head, and slowly build a mental map of a large codebase. It is a lot like archaeology — starting from a small fragment, expanding outward, and eventually reconstructing the truth of a vast artifact.
 
-这个 agent 也是这个思路。我要用程序化的契约和 runtime 管理来硬性约束流程，而不是靠 skill 写一堆提示词苦口婆心求模型遵守。
+This agent works the same way. I want programmatic contracts and runtime enforcement to constrain the process — not a pile of skill prompts that politely beg the model to behave.
 
-## 核心理念
+## Core philosophy
 
-> **模型负责提议。Runtime 负责验证、授权、记录和路由。**
+> **The model proposes. The runtime validates, authorizes, records, and routes.**
 
-大多数 coding agent 追求从需求到补丁的最短路径。这很高效——直到需求本身的假设是错的、代码库告诉你另一个故事、或者一个看似合理的修改悄悄破坏了某处的契约。
+Most coding agents chase the shortest path from requirement to patch. That is efficient — until the requirement's assumption is wrong, the codebase tells a different story, or a reasonable-looking change quietly breaks a contract somewhere.
 
-StratumCode 换了一个前提：**软件变更在被执行之前，应该是可以被解释的。**
+StratumCode starts from a different premise: **a software change should be explainable before it is executed.**
 
 ## Highlights
 
-| 亮点 | 为什么重要 |
+| Highlight | Why it matters |
 |---|---|
-| 证据驱动的状态机 | 每个阶段有独立职责和转移规则，调查未完成不会进入设计 |
-| Runtime 级硬约束 | 正确性不依赖模型遵循提示词——Patch 授权、快照、原子提交、回滚都由 runtime 强制 |
-| 持久化工程记忆 | 跨会话的 memory_system：图结构、压缩、新鲜度、选择器——项目知识可以积累 |
-| 本地优先 | 数据留在你的机器上，OpenAI 兼容端点 + 实验性 Codex OAuth |
-| 桌面应用 | pywebview + Vue 3，时间线、内存面板、用量统计、自更新都在界面里 |
+| Evidence-driven state machine | Each stage has its own responsibility and transition rules; investigation never leaks into design |
+| Runtime-level hard constraints | Correctness does not depend on the model following a prompt — patch authorization, snapshots, atomic commits, and rollback are enforced by the runtime |
+| Persistent engineering memory | Cross-session `memory_system`: graph structure, compression, freshness, selector — project knowledge accumulates |
+| Local-first | Data stays on your machine; OpenAI-compatible endpoints plus experimental Codex OAuth |
+| Desktop application | pywebview + Vue 3: timeline, memory panel, usage stats, self-update all in the UI |
 
-## 工作流
+## Workflow
 
-StratumCode 用一个明确的状态机串联整个过程。每个阶段有独立的职责和转移规则：
+StratumCode drives the whole process with an explicit state machine. Each stage has its own responsibilities and transition rules:
 
 ```text
-用户需求 → Task Analysis → Investigation → Design → Patch Planning → Implementation → Validation
+User request → Task Analysis → Investigation → Design → Patch Planning → Implementation → Validation
                   ↑               ↑                         ↑                      │
-                  └── 证据不足 ───┘                         └── 需修复 ─────────────┘
-                                                                  需重设计 ──────────┘
-                                                                  需用户确认 ────────→ 提问
+                  └── evidence ───┘                         └── repair ────────────┘
+                  insufficient                                    redesign ─────────┘
+                                                                   user input ───────→ ask
 ```
 
-### 1. Task Analysis — 搞清楚你到底要什么
+### 1. Task Analysis — figure out what you actually want
 
-不只是解析自然语言。这个阶段产出：
+More than natural-language parsing. This stage produces:
 
-- **任务分类**：Feature / Bugfix / Refactor / Investigation 等
-- **Goal**：从你的输入中提取核心意图
-- **Unknowns**：哪些事现在还不清楚、需要调查
-- **Acceptance Criteria**：任务结束时，哪些可观察事实必须成立
-- **Behavior Contract**：这个功能在接口层面怎么运作？输入是什么、输出是什么、什么叫成功、什么叫失败、边界在哪里
-- **Scope**：这次做什么、明确不做什么、还有什么悬而未决
+- **Task classification**: Feature / Bugfix / Refactor / Investigation etc.
+- **Goal**: the core intent extracted from your input
+- **Unknowns**: what is not yet clear and needs investigation
+- **Acceptance Criteria**: which observable facts must hold when the task ends
+- **Behavior Contract**: how this feature behaves at the interface level — inputs, outputs, what success and failure mean, and where the boundaries are
+- **Scope**: what this task does, explicitly does not do, and what remains open
 
-### 2. Investigation — 像个真程序员一样调查代码
+### 2. Investigation — survey the code like a real programmer
 
-围绕 Unknowns 展开，逐一解决。模型可以调用：
+Driven by the Unknowns, resolved one by one. The model can call:
 
-- 基础工具：Read、Grep、Glob
-- LSP 工具：符号释义、定义跳转、引用查找、实现跳转——就跟你用 IDE 时一样
-- MCP：如果你配置了并且刚好相关
-- Web：搜索和抓取
+- Basic tools: Read, Grep, Glob
+- LSP tools: symbol info, go-to-definition, find-references, go-to-implementation — just like an IDE
+- MCP: if you have configured it and it is relevant
+- Web: search and fetch
 
-还有一个专门做**假设验证**的子代理。碰到需要大规模验证的假设时调用，强制走"找支持证据 → 找反对证据 → 审计证据关系 → 分析结论"的流程。结果不是"我觉得"，而是"97% 置信，假设成立"。
+There is also a dedicated **hypothesis verification** subagent. For assumptions that need large-scale validation, it forces a strict loop: "find supporting evidence → find opposing evidence → audit the relationship → state a conclusion." The result is not "I think so" but "97% confidence, hypothesis holds."
 
-调查的终点不是"模型觉得够了"，而是每条 Unknown 都被解决，每条 Acceptance 都有项目事实支撑。
+Investigation ends not when "the model feels done," but when every Unknown is resolved and every Acceptance is backed by project facts.
 
-### 3. Design — 先想清楚再动手
+### 3. Design — think before you touch code
 
-设计阶段不碰代码，只产出设计文档。它把 Acceptance Criteria 转化为：
+Design never touches code; it only produces a design document. It converts Acceptance Criteria into:
 
-- **Requirements**：保留与原始 Acceptance 的对应关系，不在重新表述中改变验收语义
-- **Project Alignment**：每条需求对照项目现状——已满足 (Matched)、明确缺失 (Missing)、还是证据不足 (Ambiguous)
-- **Design Decision**：综合所有需求和现状，决定最终采用什么设计。每条决策必须说明**解决了哪些需求**、**基于什么事实**
+- **Requirements**: preserving the link to the original Acceptances — restating must not change the acceptance semantics
+- **Project Alignment**: each requirement checked against the current project — Matched, Missing, or Ambiguous
+- **Design Decision**: the final design given all requirements and the current state. Every decision must state which requirements it resolves and which facts it is based on
 
-这里讨论的是行为、职责边界、状态流和数据流。不是"修改哪个文件"。
+This is about behavior, responsibility boundaries, state flow, and data flow. Not "which file to edit."
 
-### 4. Patch Planning — 把设计拆成可执行的施工计划
+### 4. Patch Planning — break the design into an executable construction plan
 
-对每条 Design Decision，先判断是否真的需要改代码（可能现有实现已经满足）。如果需要，生成具体的 Implementation Step：
+For each Design Decision, first decide whether code changes are even needed (the existing implementation may already satisfy it). If needed, produce concrete Implementation Steps:
 
-- 哪个文件、哪个函数/组件
-- 做什么操作
-- 完成条件是什么
-- 如果删掉这一步会失去什么
-- 这一步不应该顺便碰什么
+- Which file, which function/component
+- What operation
+- What the completion condition is
+- What would be lost if this step were removed
+- What this step should not touch along the way
 
-然后进入第二轮审计：每条 Acceptance 被哪些 Step 覆盖？验证用的命令和操作有项目事实支撑吗？Step 之间需要合并吗？有 Step 的 Purpose、Action 和 Completion Conditions 偏离了原始设计吗？
+Then a second audit pass: which Steps cover each Acceptance? Are the validation commands and operations backed by project facts? Do any Steps need merging? Has any Step's Purpose, Action, or Completion Conditions drifted from the original design?
 
-### 5. Implementation — 事务式修改
+### 5. Implementation — transactional edits
 
-这是第一个真正改代码的阶段。但不是在 IDE 里随便改——每次修改都必须指定 Step ID，通过 `apply_patch` 执行。Runtime 自动注入授权 ID、Plan Hash、关联的 Acceptance 和 Design Decision。模型不能改计划外的文件，也不能擅自扩大某一步的职责。
+This is the first stage that actually changes code. But not arbitrary edits in an IDE — every change must specify a Step ID and execute through `apply_patch`. The runtime injects the authorization ID, Plan Hash, and the linked Acceptances and Design Decisions. The model cannot touch files outside the plan, nor silently expand a step's scope.
 
-修改前必须先读取文件快照。修改后 Runtime 校验：文件存在？目标代码文本已加入或移除？零 diff 的 Patch 直接拒绝。
+The file snapshot must be read before modification. After the patch, the runtime verifies: does the file exist? Was the target text added or removed? Zero-diff patches are rejected outright.
 
-如果 Implementation 中途失败，已经应用的 Patch 会按照 Rollback Record 倒序回滚，不留下半成品的施工痕迹。
+If Implementation fails midway, applied patches are rolled back in reverse order via the Rollback Record — no half-finished construction debris.
 
-### 6. Validation — 独立验收
+### 6. Validation — independent acceptance
 
-Validation 不信任 Implementation 说的"已经完成"。它重新读取修改后的代码，对照原始 Acceptance、Patch Plan 和 Change Records，独立判断：
+Validation does not trust Implementation's claim of "done." It re-reads the modified code and, against the original Acceptances, Patch Plan, and Change Records, independently judges:
 
-- 每条 Step 是否完整执行
-- 实际修改是否符合 Design，有没有遗漏、偏离或扩张
-- 最终行为是否满足 Acceptance Criteria
+- Was every Step fully executed?
+- Does the actual change match the design — anything missed, drifted, or expanded?
+- Does the final behavior satisfy the Acceptance Criteria?
 
-至少需要一次成功的工具检查才能给 `passed`。只根据计划总结、没有实际读代码或跑检查就宣布成功——是不允许的。
+At least one successful tool check is required for `passed`. Declaring success from a plan summary without actually reading code or running checks is not allowed.
 
-可能的结果：
+Possible outcomes:
 
-| 结果 | 含义 |
-|------|------|
-| `passed` | 验证通过，任务完成 |
-| `local_repair` | 设计对但实现有问题，返回 Design 重新规划 |
-| `redesign` | 设计方案本身不足或错误 |
-| `missing_evidence` | 证据不足以判断，返回 Investigation |
-| `clearify` | 存在产品选择需要你确认 |
-| `inconclusive` | 无法形成可靠结论 |
+| Result | Meaning |
+|---|---|
+| `passed` | Validation passed, task complete |
+| `local_repair` | Design is right but the implementation is flawed; return to Design |
+| `redesign` | The design itself is insufficient or wrong |
+| `missing_evidence` | Not enough evidence to judge; return to Investigation |
+| `clearify` | A product choice needs your input |
+| `inconclusive` | No reliable conclusion possible |
 
-## Skills 系统
+## Skills system
 
-Skills 可以按阶段部署，而不是一股脑全塞进 prompt。你可以给全局定义、给某个具体阶段定义、两者可以被独立配置或叠加。
+Skills are deployed per stage rather than stuffed into the prompt all at once. You can define them globally, for a specific stage, or both — independently configured or stacked.
 
-内置 `find-skills` 命令可以在线搜索安装。每个阶段开始时强制模型选择 0 到多个 skill，中途如果需要也可以主动加载。渐进式披露，避免 prompt 污染。
+The built-in `find-skills` command can search and install skills online. At the start of every stage the model is forced to choose zero or more skills, and can load more mid-stage if needed. Progressive disclosure keeps the prompt clean.
 
-## 安全保障
+## Safety guarantees
 
-StratumCode 的正确性不依赖于模型遵循一段提示词文本。以下是 runtime 层面的硬约束：
+StratumCode's correctness does not depend on the model following a piece of prompt text. These are hard constraints at the runtime level:
 
-- **显式执行模式**：只读任务不会悄悄变成实施任务
-- **范围授权**：Patch 只能触碰授权 Step 所指定的文件
-- **不可变 Plan Hash**：Patch 请求必须匹配已授权的计划
-- **文件快照**：修改已有文件前必须先读取
-- **陈旧检测**：并发修改使过期快照失效
-- **原子提交**：多文件 Patch 作为一个事务提交
-- **零 diff 拒绝**：没有真实变更不能声称进度
-- **Patch 记录**：每个 Step 的意图、文件、哈希和 diff 都被记录
-- **回滚**：失败的 Implementation 可以恢复已提交的文件
-- **证据门槛**：`passed` 必须有一次成功的验证工具结果
+- **Explicit execution mode**: read-only tasks never silently become implementation tasks
+- **Scope authorization**: patches may only touch files specified by the authorized Step
+- **Immutable Plan Hash**: patch requests must match the authorized plan
+- **File snapshots**: existing files must be read before modification
+- **Staleness detection**: concurrent edits invalidate stale snapshots
+- **Atomic commits**: multi-file patches commit as one transaction
+- **Zero-diff rejection**: no real change, no claimed progress
+- **Patch records**: every Step's intent, file, hash, and diff are recorded
+- **Rollback**: a failed Implementation can restore committed files
+- **Evidence gate**: `passed` requires at least one successful validation tool result
 
-## 快速开始
+## Quick Start
 
-### 环境要求
+### Requirements
 
 - Python **3.13+**
-- Node.js 和 npm
+- Node.js and npm
 - [`uv`](https://docs.astral.sh/uv/)
-- 一个通过应用内配置的模型提供商
+- A model provider configured in-app
 
-### 安装运行
+### Install and run
 
 ```bash
 git clone https://github.com/iiishop/StratumCode.git
@@ -192,121 +198,125 @@ cd StratumCode
 uv sync
 npm --prefix frontend install
 
-# 生产模式
+# Production mode
 uv run stratumcode
 
-# 开发模式（API + Vite 热更新 + pywebview）
+# Development mode (API + Vite HMR + pywebview)
 uv run stratumcode-dev
 ```
 
-首次生产启动时，如果 `frontend/dist` 不存在，会自动构建 Vue 前端。
+On first production launch, if `frontend/dist` does not exist, the Vue frontend is built automatically.
 
-## 桌面界面
+## Desktop UI
 
-`pywebview` 原生窗口承载 Vue 3 前端。不是命令行工具——你有：
+A `pywebview` native window hosts the Vue 3 frontend. This is not a CLI tool — you get:
 
-- **工作区和会话管理**：不同仓库互不干扰，可恢复
-- **Providers 配置**：OpenAI 兼容端点 + 实验性 Codex OAuth
-- **MCP 集成**：外部工具和仓库智能
-- **LSP 支持**：符号、定义、引用、悬浮信息、诊断
-- **Skills 面板**：按全局、阶段、子代理配置能力
-- **时间线事件**：证据、工具、代理、任务、过渡、计划、补丁、验证结果一览
-- **用量统计**：Token、缓存和费用信息（按币种）
-- **工程记忆面板**：查看跨会话记忆图、选择与压缩结果
-- **代码结构面板**：仓库结构浏览
-- **Git 面板**：仓库状态与常用操作
-- **自更新检查**：应用内检查新版本
+- **Workspace and session management**: repositories stay isolated and resumable
+- **Provider configuration**: OpenAI-compatible endpoints + experimental Codex OAuth
+- **MCP integration**: external tools and repository intelligence
+- **LSP support**: symbols, definitions, references, hover, diagnostics
+- **Skills panel**: capability configuration per global, stage, and subagent
+- **Timeline events**: evidence, tools, agents, tasks, transitions, plans, patches, validation results
+- **Usage stats**: token, cache, and cost information (per currency)
+- **Memory panel**: inspect the cross-session memory graph, selection, and compression results
+- **Code structure panel**: repository structure browsing
+- **Git panel**: repository status and common operations
+- **Self-update check**: check for new versions in-app
 
-## 项目结构
+## Project structure
 
 ```text
 StratumCode/
-├── frontend/              Vue 3 + Vite 桌面 UI
+├── frontend/              Vue 3 + Vite desktop UI
 │   └── src/
-│       ├── components/    页面、时间线、检查器、内存、用量、设置
-│       └── composables/   前端状态和 API 集成
+│       ├── components/    pages, timeline, inspector, memory, usage, settings
+│       └── composables/   frontend state and API integration
 │
 ├── stratumcode/
-│   ├── chat.py            显式运行状态机
-│   ├── status/            各阶段状态处理器和任务契约
-│   ├── investigator/      证据收集、发现与 Unknown 消解
-│   ├── hypothesis_verifier.py  假设验证子代理
-│   ├── design_planner.py  基于事实的设计编制
-│   ├── patch_planner.py   可执行 Patch Plan 生成
-│   ├── implementation_runner.py  实施和验证循环
-│   ├── patch_engine.py    快照、原子编辑和回滚
-│   ├── patch_authorization.py   Plan 和 Step 级别写授权
-│   ├── memory_system/     持久化工程记忆（图、压缩、选择）
-│   ├── code_structure/    仓库结构构建
-│   ├── agent/             代理策略与证据
-│   ├── clearify_runtime.py  需用户确认的提问路由
-│   ├── git_panel.py       Git 集成
-│   ├── updates.py         自更新检查
-│   ├── skill_runtime.py   阶段/子代理 skill 加载
-│   ├── tools/             内置工具注册
-│   ├── lsp/               Language Server Protocol 集成
-│   ├── mcp/               Model Context Protocol 客户端
-│   ├── providers.py       模型提供商和 Codex 传输
-│   ├── sessions.py        持久会话工件
-│   └── server.py          本地应用 API
+│   ├── chat.py            explicit runtime state machine
+│   ├── status/            per-stage state handlers and task contracts
+│   ├── investigator/      evidence collection, findings, Unknown resolution
+│   ├── hypothesis_verifier.py  hypothesis verification subagent
+│   ├── design_planner.py  fact-based design authoring
+│   ├── patch_planner.py   executable Patch Plan generation
+│   ├── implementation_runner.py  implementation and validation loop
+│   ├── patch_engine.py    snapshots, atomic edits, rollback
+│   ├── patch_authorization.py  Plan- and Step-level write authorization
+│   ├── memory_system/     persistent engineering memory (graph, compression, selection)
+│   ├── code_structure/    repository structure building
+│   ├── agent/             agent policy and evidence
+│   ├── clearify_runtime.py  routing for user-confirmation questions
+│   ├── git_panel.py       Git integration
+│   ├── updates.py         self-update check
+│   ├── skill_runtime.py   per-stage/subagent skill loading
+│   ├── tools/             built-in tool registration
+│   ├── lsp/               Language Server Protocol integration
+│   ├── mcp/               Model Context Protocol client
+│   ├── providers.py       model providers and Codex transport
+│   ├── sessions.py        persistent session artifacts
+│   └── server.py          local app API
 │
-└── pyproject.toml         Python 包和 CLI 入口
+└── pyproject.toml         Python package and CLI entry points
 ```
 
-## 当前状态
+## Current status
 
 > [!IMPORTANT]
-> StratumCode 处于 **Alpha** 阶段（当前 v0.0.17）。契约格式、存储结构、Provider 传输和 UI 都可能随提交变化。请在版本控制的仓库上使用，依赖修改前 Review diff。
+> StratumCode is in **Alpha** (currently v0.0.17). Contract formats, storage schemas, provider transports, and UI may change with every commit. Use it on version-controlled repositories and review diffs before relying on changes.
 
-### 已实现
+### Implemented
 
-- [x] 带工作区和会话管理的本地桌面应用
-- [x] 完整的 Task Analysis → Investigation → Design → Patch → Validation 状态机
-- [x] 结构化任务契约、Unknown、观察、信念、验收标准
-- [x] 独立假设验证子代理（找支持/反对证据 → 审计 → 置信结论）
-- [x] 持久化工程记忆（图结构、压缩、新鲜度、选择器）
-- [x] OpenAI 兼容 Provider + 实验性 Codex OAuth
-- [x] MCP 服务发现和动态工具注册
-- [x] LSP 符号、定义、引用、悬浮、诊断
-- [x] 按全局/阶段/子代理配置的动态 Skills
-- [x] Patch 授权、快照、陈旧检测、原子写入、回滚
-- [x] 会话增量保存（避免大会话内存泄漏）
-- [x] 用量统计（按币种计费）
-- [x] 自更新检查与 Git 面板
-- [x] Linux 平台支持
+- [x] Local desktop app with workspace and session management
+- [x] Full Task Analysis → Investigation → Design → Patch → Validation state machine
+- [x] Structured task contracts, Unknowns, observations, beliefs, acceptance criteria
+- [x] Independent hypothesis verification subagent (supporting/opposing evidence → audit → confidence conclusion)
+- [x] Persistent engineering memory (graph structure, compression, freshness, selector)
+- [x] OpenAI-compatible Provider + experimental Codex OAuth
+- [x] MCP service discovery and dynamic tool registration
+- [x] LSP symbols, definitions, references, hover, diagnostics
+- [x] Dynamic Skills configured per global/stage/subagent
+- [x] Patch authorization, snapshots, staleness detection, atomic writes, rollback
+- [x] Incremental session saving (avoids memory leaks in large sessions)
+- [x] Usage statistics (per-currency cost tracking)
+- [x] Self-update check and Git panel
+- [x] Linux platform support
 
-### 开发中
+### In progress
 
-- [ ] 更丰富的仓库智能和可复用上下文
-- [ ] 按任务类型的针对性调查策略
-- [ ] 更完整的可执行 Patch Plan 确定性校验
-- [ ] 更广泛的工具支持（测试、构建、格式化、静态检查）
-- [ ] 完整的修复路由（范围、环境、产品决策类失败）
-- [ ] 固定 Benchmark 套件（Bugfix、Feature、Refactor、UI、Config、Concurrency）
+- [ ] Richer repository intelligence and reusable context
+- [ ] Task-type-specific investigation strategies
+- [ ] More complete deterministic validation of executable Patch Plans
+- [ ] Broader tool support (tests, builds, formatting, static checks)
+- [ ] Complete repair routing (scope, environment, product-decision failures)
+- [ ] A fixed benchmark suite (Bugfix, Feature, Refactor, UI, Config, Concurrency)
 
-## 近期方向
+## Near-term direction
 
-- 架构设计专用子代理
-- 跨前后端调用流程链可视化——从触发到结束的全过程
-- CI/CD 集成
+- Dedicated architecture design subagent
+- Cross-frontend/backend call-chain visualization — from trigger to completion
+- CI/CD integration
 
-## 贡献
+## Contributing
 
-特别欢迎以下方向的贡献：
+Contributions are especially welcome in these areas:
 
-- Runtime 契约和确定性校验器
-- 仓库索引和代码导航
-- 安全补丁和并发编辑保护
-- LSP 和 MCP 互操作
-- 评估任务和回归测试
-- Provider 适配器和本地模型支持
-- Vue 界面的开发者体验改进
+- Runtime contracts and deterministic validators
+- Repository indexing and code navigation
+- Safe patching and concurrent edit protection
+- LSP and MCP interoperability
+- Evaluation tasks and regression tests
+- Provider adapters and local model support
+- Developer experience improvements in the Vue UI
 
-大的架构变动前请先开 Issue，确认职责边界后再动手。
+For large architectural changes, open an Issue first and confirm responsibility boundaries before starting.
+
+## Star History
+
+[![Star History Chart](https://api.star-history.com/svg?repos=iiishop%2FStratumCode&type=Date)](https://star-history.com/#iiishop/StratumCode&Date)
 
 ---
 
 <p align="center">
   <strong>StratumCode</strong><br/>
-  审查证据。理解决策。信任 diff。
+  Review the evidence. Understand the decision. Trust the diff.
 </p>
