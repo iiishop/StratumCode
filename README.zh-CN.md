@@ -312,7 +312,13 @@ StratumCode/
 
 ## Star History
 
-[![Star History Chart](https://api.star-history.com/svg?repos=iiishop%2FStratumCode&type=Date&v=2)](https://star-history.com/#iiishop/StratumCode&Date)
+<a href="https://www.star-history.com/?type=date&repos=iiishop%2FStratumCode">
+ <picture>
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=iiishop/StratumCode&type=date&theme=dark&legend=top-left&sealed_token=MI0kFbaKfpR8-dBkLUbRBaJGTGVuyFvgaIJJ_MuXGgYSbZ1cPafzVtoSV0fg8DDPJBb_CubPEd7kam3n_m2wy9T9oD9YS283OLlv22mtupVSt-OCmvP-wA" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=iiishop/StratumCode&type=date&legend=top-left&sealed_token=MI0kFbaKfpR8-dBkLUbRBaJGTGVuyFvgaIJJ_MuXGgYSbZ1cPafzVtoSV0fg8DDPJBb_CubPEd7kam3n_m2wy9T9oD9YS283OLlv22mtupVSt-OCmvP-wA" />
+   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=iiishop/StratumCode&type=date&legend=top-left&sealed_token=MI0kFbaKfpR8-dBkLUbRBaJGTGVuyFvgaIJJ_MuXGgYSbZ1cPafzVtoSV0fg8DDPJBb_CubPEd7kam3n_m2wy9T9oD9YS283OLlv22mtupVSt-OCmvP-wA" />
+ </picture>
+</a>
 
 ---
 
