@@ -312,7 +312,7 @@ For large architectural changes, open an Issue first and confirm responsibility 
 
 ## Star History
 
-[![Star History Chart](https://api.star-history.com/svg?repos=iiishop%2FStratumCode&type=Date)](https://star-history.com/#iiishop/StratumCode&Date)
+[![Star History Chart](https://api.star-history.com/svg?repos=iiishop%2FStratumCode&type=Date&v=2)](https://star-history.com/#iiishop/StratumCode&Date)
 
 ---
 
