@@ -303,6 +303,22 @@ def _tool_repair_error_json(
         str(exc),
         partial_arguments,
     )
+    error["repair_instruction"] = (
+        "Reuse partial_arguments. Return only the same tool call with missing/invalid fields corrected; "
+        "do not restart discovery or repeat the identical arguments."
+    )
+    if tool_name == "finish_investigation" and (
+        "references file" in str(exc) or "claims behavior" in str(exc)
+    ):
+        error["missing_fields"] = []
+        error["required_action"] = "repair_resolution_evidence"
+        error["repair_instruction"] = (
+            "The recorded resolutions have evidence gaps, not missing finish arguments. "
+            "Use existing observations to correct the affected resolutions with resolve_unknowns, "
+            "or gather targeted evidence for the specific claims listed in the error. "
+            "Use relevant line ranges or symbol queries; do not read unrelated modules. "
+            "Then retry finish_investigation using partial_arguments."
+        )
     if "unknown evidence ids" in str(exc) and observations:
         error["valid_observation_refs"] = _observation_reference_payload(observations)
         error["repair_instruction"] = (
@@ -340,11 +356,6 @@ def _tool_repair_error_json(
             "Do not retry clearify for non-decision unknowns. "
             "Resolve the contract unknown from project evidence or continue discovery."
         )
-    else:
-        error["repair_instruction"] = (
-            "Reuse partial_arguments. Return only the same tool call with missing/invalid fields corrected; "
-            "do not restart discovery or repeat the identical arguments."
-        )
     return json.dumps(payload, ensure_ascii=False)
 
 
@@ -363,7 +374,8 @@ def _missing_fields_from_error(
         "bugfix_readiness",
         *DISCOVERY_CONTRACT_FIELDS,
     ):
-        if field in lowered and not partial_arguments.get(field):
+        field_pattern = rf"(?<![\w/\\.]){re.escape(field)}(?![\w/\\]|\.[\w])"
+        if re.search(field_pattern, lowered) and not partial_arguments.get(field):
             fields.append(field)
     return fields
 

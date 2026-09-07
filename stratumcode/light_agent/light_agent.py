@@ -164,11 +164,11 @@ def stream(message: str, context: list[str], workspace_dir: str, *, session_id: 
                     "state": "done",
                     "phase": "answered",
                 }})
-                _record_direct_output_memory(workspace_dir, session_id, turn_id, result, publish)
-            publish(start_event(output_id, "output", {
+                publish(start_event(output_id, "output", {
                     "content": result,
                     "streaming": False,
-            }))
+                }))
+                _record_direct_output_memory(workspace_dir, session_id, turn_id, result, publish)
             publish({"op": "done"})
         except Exception as exc:
             publish({"op": "error", "message": f"Light agent stream failed: {exc}"})
