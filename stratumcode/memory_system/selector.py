@@ -22,6 +22,8 @@ def select(
         item for item in list_records(workspace_dir, limit=1000)
         if item.get("scope") in scopes and item.get("status") != "reverted"
     ]
+    if not records:
+        return MemorySnapshot(references=references)
     selection = _llm_selection(query, analysis, session_id, records, references)
     selected_ids = set(selection.get("selected_record_ids", []))
     stale_ids = set(selection.get("stale_record_ids", []))

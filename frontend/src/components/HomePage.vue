@@ -60,6 +60,7 @@ const currentChatState = ref('initializing')
 const restoring = ref(false)
 const copySessionStatus = ref('')
 let copySessionTimer
+let messageScrollFrame = null
 const MESSAGE_BOTTOM_THRESHOLD = 28
 const SESSION_SAVE_DEBOUNCE_MS = 220
 const STREAM_SAVE_INTERVAL_MS = 5000
@@ -82,12 +83,13 @@ let pendingSaveSessionId = null
 
 function isActiveEvent(event) {
   const d = event?.data || {}
-  return d.streaming === true || d.status === 'running'
+  return d.streaming === true || d.status === 'running' || (event?.type === 'thinking' && d.done !== true)
 }
 
 function completedEventCount(message) {
   let i = savedEventCounts.get(message.id) || 0
-  while (i < message.events.length && !isActiveEvent(message.events[i])) i += 1
+  const events = message.events || []
+  while (i < events.length && !isActiveEvent(events[i])) i += 1
   return i
 }
 
@@ -98,8 +100,8 @@ function buildStateIncrement() {
   for (const m of messages.slice(0, savedMessageCount)) {
     const saved = savedEventCounts.get(m.id) || 0
     const end = completedEventCount(m)
-    if (end > saved) {
-      appends.push({ id: m.id, events: m.events.slice(saved, end).map(plain) })
+    if ((m.events?.length || 0) > saved) {
+      appends.push({ id: m.id, events: m.events.slice(saved).map(plain) })
       covered.set(m.id, end)
     }
   }
@@ -109,6 +111,7 @@ function buildStateIncrement() {
     newMessages,
     appends,
     covered,
+    messageCount: messages.length,
     small: {
       evidenceRuns: plain(evidenceRuns),
       taskAnalyses: plain(taskAnalyses),
@@ -125,7 +128,7 @@ function commitIncrement(snapshot) {
     savedEventCounts.set(m.id, completedEventCount(m))
   }
   for (const [id, end] of snapshot.covered) savedEventCounts.set(id, end)
-  savedMessageCount = messages.length
+  savedMessageCount = snapshot.messageCount
 }
 
 function addToFileContext(path) {
@@ -647,6 +650,7 @@ function flushPendingSave(sessionId = saveTimerSessionId || props.session?.id) {
 }
 
 function clearState() {
+  cancelMessageScroll()
   messages.splice(0, messages.length)
   evidenceRuns.splice(0, evidenceRuns.length)
   taskAnalyses.splice(0, taskAnalyses.length)
@@ -801,6 +805,7 @@ async function send(answer = null) {
 }
 
 async function generateSessionTitle(sessionId, userText, assistantMsg) {
+  const target = props.sessions?.find(s => s.id === sessionId)
   try {
     const output = assistantMsg.events
       .filter(e => e.type === 'output')
@@ -823,9 +828,6 @@ async function generateSessionTitle(sessionId, userText, assistantMsg) {
     // 因此对 props.session.name 赋值即等价于对 sessionStore.active.value.name 赋值。
     if (props.session?.id === sessionId) {
       props.session.name = title
-      // 显式更新 sessionName 计算属性依赖的响应式字段 sessionStore.active.value.name，
-      // 确保标题生成完成后界面立即刷新（props.session 即 sessionStore.active.value 的同一对象）。
-      sessionStore.active.value.name = title
     }
   } catch {
     // Title generation is non-critical
@@ -947,6 +949,7 @@ function updateMessageScrollState() {
 }
 
 function handleMessageScrollIntent() {
+  cancelMessageScroll()
   if (!msgList.value) return
   gsap.killTweensOf(msgList.value)
   isAutoScrollingMessages.value = false
@@ -954,12 +957,23 @@ function handleMessageScrollIntent() {
 }
 
 function scrollForNewContent() {
-  if (!isAtMessageBottom.value) return
-  animSmoothScroll()
+  if (!isAtMessageBottom.value || messageScrollFrame !== null) return
+  messageScrollFrame = requestAnimationFrame(() => {
+    messageScrollFrame = null
+    if (isAtMessageBottom.value) animSmoothScroll()
+  })
+}
+
+function cancelMessageScroll() {
+  if (messageScrollFrame !== null) cancelAnimationFrame(messageScrollFrame)
+  messageScrollFrame = null
 }
 
 function animSmoothScroll() {
   if (!msgList.value) return
+  const following = isAtMessageBottom.value
+  gsap.killTweensOf(msgList.value)
+  isAtMessageBottom.value = following
   isAutoScrollingMessages.value = true
   gsap.to(msgList.value, {
     scrollTop: msgList.value.scrollHeight,
@@ -977,6 +991,7 @@ function animSmoothScroll() {
 }
 
 function scrollBottom() {
+  cancelMessageScroll()
   if (!msgList.value) return
   gsap.killTweensOf(msgList.value)
   isAutoScrollingMessages.value = false
@@ -1102,6 +1117,7 @@ onMounted(() => {
   }, chatRef.value)
 })
 onUnmounted(() => {
+  cancelMessageScroll()
   abortChat()
   window.removeEventListener('beforeunload', saveSessionStateOnUnload)
   saveSessionStateOnUnload()

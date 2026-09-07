@@ -22,6 +22,10 @@ _MASON_CACHE = Path.home() / ".cache" / "stratumcode" / "mason-registry"
 _SYNC_INTERVAL = 3600  # re-sync if older than 1 hour
 LSP_ROOT = Path.home() / ".local" / "share" / "stratumcode" / "lsp"
 _MASON_PLUGIN_REPO = "https://github.com/mason-org/mason.nvim"
+_MASON_VERSION_CHECK_INTERVAL = 3600
+_NVIM_REQUIRED_VERSION = "0.10"
+_mason_latest_cache = {"version": "", "checked_at": 0.0, "error": ""}
+_tool_latest_cache: dict[str, dict] = {}
 _clients: dict[tuple[str, str], "_LspClient"] = {}
 _clients_lock = threading.RLock()
 _diagnostics: dict[str, list[dict]] = {}
@@ -240,19 +244,173 @@ def _mason_command() -> str:
     return str(_mason_bin()) if _mason_bin().exists() and _tool_command("nvim") else ""
 
 
+def _git_output(command: list[str], timeout: int = 30) -> str:
+    try:
+        result = subprocess.run(command, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout)
+    except (subprocess.TimeoutExpired, OSError) as exc:
+        raise ValueError(str(exc)) from exc
+    if result.returncode != 0:
+        raise ValueError(result.stderr.strip() or result.stdout.strip() or "git command failed")
+    return result.stdout.strip()
+
+
+def _short_version(value: str) -> str:
+    value = (value or "").strip()
+    return value[:12] if re.fullmatch(r"[0-9a-fA-F]{40}", value) else value
+
+
+def _version_tuple(value: str) -> tuple[int, ...]:
+    m = re.search(r"(\d+(?:\.\d+)+)", value or "")
+    if not m:
+        return ()
+    return tuple(int(part) for part in m.group(1).split("."))
+
+
+def _version_label(value: str) -> str:
+    m = re.search(r"(\d+(?:\.\d+)+(?:[.-][0-9A-Za-z]+)*)", value or "")
+    return m.group(1) if m else (value or "").strip()
+
+
+def _is_newer_version(candidate: str, current: str) -> bool:
+    candidate_tuple = _version_tuple(candidate)
+    current_tuple = _version_tuple(current)
+    if not candidate_tuple or not current_tuple:
+        return False
+    size = max(len(candidate_tuple), len(current_tuple))
+    return candidate_tuple + (0,) * (size - len(candidate_tuple)) > current_tuple + (0,) * (size - len(current_tuple))
+
+
+def _first_line(command: list[str], timeout: int = 10) -> tuple[str, str]:
+    try:
+        result = subprocess.run(command, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout)
+    except (subprocess.TimeoutExpired, OSError) as exc:
+        return "", str(exc)
+    if result.returncode != 0:
+        return "", result.stderr.strip() or result.stdout.strip() or "version command failed"
+    lines = (result.stdout or "").strip().splitlines()
+    return (lines[0].strip() if lines else ""), ""
+
+
+def _winget_latest_version(package_id: str, force: bool = False) -> tuple[str, str]:
+    now = time.time()
+    cached = _tool_latest_cache.get(package_id, {})
+    cached_at = float(cached.get("checked_at") or 0)
+    if not force and now - cached_at < _MASON_VERSION_CHECK_INTERVAL:
+        return str(cached.get("version") or ""), str(cached.get("error") or "")
+    winget = which("winget")
+    if os.name != "nt" or not winget:
+        error = "latest version check requires winget on Windows"
+        _tool_latest_cache[package_id] = {"version": "", "checked_at": now, "error": error}
+        return "", error
+    try:
+        result = subprocess.run(
+            [winget, "show", "--id", package_id, "--exact", "--accept-source-agreements"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=30,
+        )
+    except (subprocess.TimeoutExpired, OSError) as exc:
+        error = str(exc)
+        _tool_latest_cache[package_id] = {"version": "", "checked_at": now, "error": error}
+        return "", error
+    if result.returncode != 0:
+        error = result.stderr.strip() or result.stdout.strip() or "winget show failed"
+        _tool_latest_cache[package_id] = {"version": "", "checked_at": now, "error": error}
+        return "", error
+    latest = ""
+    for line in (result.stdout or "").splitlines():
+        m = re.match(r"\s*Version:\s*(.+?)\s*$", line)
+        if m:
+            latest = m.group(1).strip()
+            break
+    error = "" if latest else "cannot read latest version from winget"
+    _tool_latest_cache[package_id] = {"version": latest, "checked_at": now, "error": error}
+    return latest, error
+
+
+def _dependency_status(
+    command: str,
+    package_id: str,
+    version_command: list[str] | None = None,
+    required_version: str = "",
+) -> dict:
+    executable = _tool_command(command)
+    current = ""
+    current_error = ""
+    if executable:
+        current, current_error = _first_line(version_command or [executable, "--version"])
+    latest, latest_error = _winget_latest_version(package_id) if executable or which("winget") else ("", "")
+    current_version = _version_label(current)
+    below_required = bool(required_version and _is_newer_version(required_version, current_version))
+    return {
+        "available": bool(executable),
+        "command": executable,
+        "current_version": current_version,
+        "latest_version": latest,
+        "outdated": _is_newer_version(latest, current),
+        "required_version": required_version,
+        "below_required": below_required,
+        "latest_error": latest_error,
+        "version_error": current_error,
+    }
+
+
+def _mason_plugin_current_version(plugin: Path) -> str:
+    if not (plugin / ".git").exists():
+        return ""
+    try:
+        return _git_output([_tool_command("git"), "-C", str(plugin), "rev-parse", "HEAD"], timeout=10)
+    except ValueError:
+        return ""
+
+
+def _mason_plugin_latest_version(force: bool = False) -> tuple[str, str]:
+    now = time.time()
+    cached_at = float(_mason_latest_cache.get("checked_at") or 0)
+    if not force and now - cached_at < _MASON_VERSION_CHECK_INTERVAL:
+        return str(_mason_latest_cache.get("version") or ""), str(_mason_latest_cache.get("error") or "")
+    git = _tool_command("git")
+    if not git:
+        _mason_latest_cache.update({"version": "", "checked_at": now, "error": "git is not available"})
+        return "", "git is not available"
+    try:
+        output = _git_output([git, "ls-remote", _MASON_PLUGIN_REPO, "HEAD"], timeout=15)
+        latest = output.split()[0] if output.split() else ""
+        error = "" if latest else "cannot read latest mason.nvim version"
+    except ValueError as exc:
+        latest = ""
+        error = str(exc)
+    _mason_latest_cache.update({"version": latest, "checked_at": now, "error": error})
+    return latest, error
+
+
+def _mason_plugin_status(force_latest: bool = False) -> dict:
+    plugin = LSP_ROOT / "mason.nvim"
+    current = _mason_plugin_current_version(plugin) if plugin.exists() else ""
+    latest, latest_error = _mason_plugin_latest_version(force_latest) if _tool_command("git") else ("", "")
+    outdated = bool(current and latest and current != latest)
+    return {
+        "installed": plugin.exists(),
+        "current_version": _short_version(current),
+        "latest_version": _short_version(latest),
+        "outdated": outdated,
+        "latest_error": latest_error,
+    }
+
+
 def mason_status() -> dict:
     command = _mason_command()
-    return {"available": bool(command), "command": command}
+    return {"available": bool(command), "command": command, **_mason_plugin_status()}
 
 
 def bootstrap_status() -> dict:
-    git = _tool_command("git")
-    nvim = _tool_command("nvim")
     mason = _mason_command()
     return {
-        "git": {"available": bool(git), "command": git},
-        "nvim": {"available": bool(nvim), "command": nvim},
-        "mason": {"available": bool(mason), "command": mason},
+        "git": _dependency_status("git", "Git.Git"),
+        "nvim": _dependency_status("nvim", "Neovim.Neovim", required_version=_NVIM_REQUIRED_VERSION),
+        "mason": {"available": bool(mason), "command": mason, **_mason_plugin_status()},
     }
 
 
@@ -260,15 +418,23 @@ def bootstrap_mason_events():
     yield {"op": "status", "status": bootstrap_status()}
     for name, installer in (("git", _install_git), ("nvim", _install_nvim), ("mason", install_mason)):
         status = bootstrap_status()[name]
-        if status["available"]:
+        if status["available"] and not status.get("outdated") and not status.get("below_required"):
             yield {"op": "step", "name": name, "status": "done", "message": status["command"]}
             continue
-        yield {"op": "step", "name": name, "status": "running", "message": "installing"}
+        message = "updating" if status.get("outdated") or status.get("below_required") else "installing"
+        yield {"op": "step", "name": name, "status": "running", "message": message}
         try:
             installer()
             status = bootstrap_status()[name]
             if not status["available"]:
                 raise ValueError(f"{name} installed but is not available in this process")
+            if status.get("below_required"):
+                raise ValueError(
+                    f"{name} now version {status.get('current_version') or 'unknown'} "
+                    f"need >= {status.get('required_version') or 'unknown'}"
+                )
+            if status.get("outdated"):
+                raise ValueError(f"{name} is still not up to date after update")
             yield {"op": "step", "name": name, "status": "done", "message": status["command"]}
         except ValueError as exc:
             yield {"op": "step", "name": name, "status": "error", "message": str(exc)}
@@ -277,26 +443,39 @@ def bootstrap_mason_events():
 
 
 def _install_git() -> None:
-    _winget_install("Git.Git", "Git")
+    _winget_install_or_upgrade("Git.Git", "Git", _dependency_status("git", "Git.Git")["outdated"])
 
 
 def _install_nvim() -> None:
-    _winget_install("Neovim.Neovim", "Neovim")
+    status = _dependency_status("nvim", "Neovim.Neovim", required_version=_NVIM_REQUIRED_VERSION)
+    _winget_install_or_upgrade("Neovim.Neovim", "Neovim", status["outdated"] or status["below_required"])
 
 
-def _winget_install(package_id: str, label: str) -> None:
+def _winget_install_or_upgrade(package_id: str, label: str, upgrade: bool = False) -> None:
     winget = which("winget")
     if os.name != "nt" or not winget:
         raise ValueError(f"{label} is required. Automatic install currently needs winget on Windows.")
+    action = "upgrade" if upgrade else "install"
     _run_checked([
-        winget, "install", "--id", package_id, "--exact",
+        winget, action, "--id", package_id, "--exact",
         "--accept-package-agreements", "--accept-source-agreements",
     ], timeout=600)
 
 
+def _ensure_tool_current(command: str, package_id: str, label: str) -> str:
+    required_version = _NVIM_REQUIRED_VERSION if command == "nvim" else ""
+    status = _dependency_status(command, package_id, required_version=required_version)
+    if not status["available"] or status["outdated"] or status["below_required"]:
+        _winget_install_or_upgrade(package_id, label, status["outdated"] or status["below_required"])
+        status = _dependency_status(command, package_id, required_version=required_version)
+    if not status["available"]:
+        raise ValueError(f"{label} installed but is not available in this process")
+    return str(status["command"])
+
+
 def _run_checked(command: list[str], timeout: int) -> subprocess.CompletedProcess:
     try:
-        result = subprocess.run(command, capture_output=True, text=True, timeout=timeout)
+        result = subprocess.run(command, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout)
     except (subprocess.TimeoutExpired, OSError) as exc:
         raise ValueError(str(exc)) from exc
     if result.returncode != 0:
@@ -318,7 +497,7 @@ def _nvim_supports_mason() -> tuple[bool, str]:
     if not nvim:
         return False, "no nvim"
     try:
-        result = subprocess.run([nvim, "--version"], capture_output=True, text=True, timeout=10)
+        result = subprocess.run([nvim, "--version"], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=10)
     except (subprocess.TimeoutExpired, OSError) as exc:
         return False, f"cannot read nvim version: {exc}"
     first = (result.stdout or "").strip().splitlines()[0] if (result.stdout or "").strip() else ""
@@ -329,8 +508,8 @@ def _nvim_supports_mason() -> tuple[bool, str]:
 
 
 def install_mason() -> dict:
-    if not _tool_command("git"):
-        raise ValueError("git is required to install mason.nvim")
+    git = _ensure_tool_current("git", "Git.Git", "Git")
+    _ensure_tool_current("nvim", "Neovim.Neovim", "Neovim")
     nvim_ok, nvim_version = _nvim_supports_mason()
     if not nvim_ok:
         raise ValueError(
@@ -340,16 +519,29 @@ def install_mason() -> dict:
     plugin = LSP_ROOT / "mason.nvim"
     if not plugin.exists():
         try:
+            plugin.parent.mkdir(parents=True, exist_ok=True)
             subprocess.run(
-                [_tool_command("git"), "clone", "--depth=1", _MASON_PLUGIN_REPO, str(plugin)],
+                [git, "clone", "--depth=1", _MASON_PLUGIN_REPO, str(plugin)],
                 check=True,
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=120,
             )
         except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError) as exc:
             detail = getattr(exc, "stderr", "") or str(exc)
             raise ValueError(f"failed to install mason.nvim: {detail}") from exc
+    elif not (plugin / ".git").exists():
+        raise ValueError(f"mason.nvim exists at {plugin} but is not a git checkout")
+    else:
+        try:
+            status = _mason_plugin_status(force_latest=True)
+            if status["outdated"]:
+                _git_output([git, "-C", str(plugin), "fetch", "--depth=1", "origin", "HEAD"], timeout=120)
+                _git_output([git, "-C", str(plugin), "reset", "--hard", "FETCH_HEAD"], timeout=60)
+        except ValueError as exc:
+            raise ValueError(f"failed to update mason.nvim: {exc}") from exc
     _write_mason_shim(plugin)
     return mason_status()
 
@@ -673,6 +865,8 @@ def install(name: str) -> dict:
                 [mason, "install", name],
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=120,
             )
             if result.returncode == 0:
@@ -756,6 +950,8 @@ def uninstall(name: str) -> dict:
                     [mason, "uninstall", name],
                     capture_output=True,
                     text=True,
+                    encoding="utf-8",
+                    errors="replace",
                     timeout=60,
                 )
         except (subprocess.TimeoutExpired, OSError):
@@ -857,6 +1053,8 @@ def probe(name: str) -> dict:
                 [name, "--version"],
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=30,
             )
             if proc.returncode == 0:

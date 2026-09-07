@@ -25,13 +25,37 @@ const bootstrapNames = ['git', 'nvim', 'mason']
 const bootstrapRows = computed(() => bootstrapNames.map(name => {
   const step = props.bootstrapSteps.find(item => item.name === name)
   const current = props.bootstrap?.[name] || {}
-  const status = step?.status || (current.available ? 'done' : 'missing')
+  const status = step?.status || (current.outdated || current.below_required ? 'outdated' : current.available ? 'done' : 'missing')
+  const requiredMessage = current.below_required && current.required_version
+    ? `${name} now version ${current.current_version || 'unknown'} need >= ${current.required_version}`
+    : ''
+  const updateMessage = current.outdated && current.latest_version
+    ? `${current.current_version || 'installed'} -> ${current.latest_version}`
+    : ''
+  const versionMessage = current.current_version
+    ? `${current.current_version}${current.latest_version ? ` (latest ${current.latest_version})` : ''}`
+    : ''
   return {
     name,
     status,
-    message: step?.message || current.command || (current.available ? 'installed' : 'not installed'),
+    message: step?.message || requiredMessage || updateMessage || versionMessage || current.command || (current.available ? 'installed' : 'not installed'),
   }
 }))
+
+const bootstrapNeedsInstall = computed(() => bootstrapRows.value.some(row => row.status === 'missing' || row.status === 'outdated'))
+const bootstrapHasOutdated = computed(() => bootstrapRows.value.some(row => row.status === 'outdated'))
+const bootstrapActionLabel = computed(() => {
+  if (props.busyId === 'mason') return bootstrapHasOutdated.value ? 'Updating' : 'Installing'
+  return bootstrapHasOutdated.value ? 'Update tools' : 'Install tools'
+})
+const masonVersionText = computed(() => {
+  if (!props.mason.available) return ''
+  const current = props.mason.current_version || 'installed'
+  if (props.mason.outdated && props.mason.latest_version) {
+    return `Mason ${current} -> ${props.mason.latest_version}`
+  }
+  return `Mason ${current}`
+})
 
 const bootstrapProgress = computed(() => {
   const done = bootstrapRows.value.filter(row => row.status === 'done').length
@@ -112,16 +136,19 @@ function toggleEnabled(server) {
       <div>
         <h1>LSP</h1>
         <p>Language servers from Mason. Installed servers are used by read diagnostics automatically.</p>
+        <p v-if="masonVersionText" class="lsp-page__mason-status" :class="{ 'is-outdated': mason.outdated }">
+          {{ masonVersionText }}
+        </p>
       </div>
       <div class="lsp-page__head-actions">
         <button
-          v-if="!mason.available"
+          v-if="bootstrapNeedsInstall"
           type="button"
           class="btn-sheen"
           :disabled="busyId === 'mason'"
           @click="showMasonModal = true"
         >
-          {{ busyId === 'mason' ? 'Installing' : 'Install Mason' }}
+          {{ bootstrapActionLabel }}
         </button>
         <button type="button" class="btn-sheen" :disabled="loading" @click="emit('refresh')">
           {{ loading ? 'Loading' : 'Refresh' }}
@@ -276,7 +303,7 @@ function toggleEnabled(server) {
         <div class="lsp-modal__head">
           <div>
             <h2>Install Mason</h2>
-            <p>Git and Neovim are required before Mason can manage LSP servers.</p>
+            <p>Git and Neovim are required before Mason can manage LSP servers. Existing Mason installs are updated when a newer version is available.</p>
           </div>
           <button type="button" class="lsp-modal__close--danger" :disabled="busyId === 'mason'" @click="showMasonModal = false">Close</button>
         </div>
@@ -289,7 +316,7 @@ function toggleEnabled(server) {
         </div>
         <div class="lsp-modal__actions">
           <button type="button" class="btn-sheen" :disabled="busyId === 'mason'" @click="emit('install-mason')">
-            {{ busyId === 'mason' ? 'Installing' : 'Confirm install' }}
+            {{ busyId === 'mason' ? (bootstrapHasOutdated ? 'Updating' : 'Installing') : (bootstrapHasOutdated ? 'Confirm update' : 'Confirm install') }}
           </button>
         </div>
       </div>
@@ -329,6 +356,15 @@ function toggleEnabled(server) {
   font-size: 12px;
   line-height: 1.55;
   max-width: 480px;
+}
+
+.lsp-page .lsp-page__mason-status {
+  color: var(--ok);
+  font: 600 10px/1.4 var(--mono);
+}
+
+.lsp-page .lsp-page__mason-status.is-outdated {
+  color: var(--accent-text);
 }
 
 .lsp-page button {
@@ -670,6 +706,7 @@ function toggleEnabled(server) {
 }
 
 .lsp-modal__step.is-running { color: var(--accent-text); background: var(--accent-bg); }
+.lsp-modal__step.is-outdated { color: var(--accent-text); background: var(--accent-bg); }
 .lsp-modal__step.is-done { color: var(--ok); background: var(--ok-bg); }
 .lsp-modal__step.is-error { color: var(--err); background: var(--err-bg); }
 
