@@ -4,6 +4,7 @@ import { gsap } from 'gsap'
 import { animate, stagger } from 'animejs'
 import GitPanel from './GitPanel.vue'
 import TerminalPanel from './TerminalPanel.vue'
+import UnknownTree from './UnknownTree.vue'
 
 const props = defineProps({
   tab: { type: String, default: 'evidence' },
@@ -103,12 +104,36 @@ function remainingTaskCountFor(analysis) {
 }
 
 function taskProgressFor(analysis) {
+  if (analysis.investigation_tree) {
+    const tree = analysis.investigation_tree
+    const idOf = value => String(value || '').split(':').pop()
+    const resolutions = new Map((tree.resolutions || []).map(r => [idOf(r.unknown_id), r]))
+    const nodes = tree.nodes || []
+    const completed = nodes.filter(n => {
+      const status = resolutions.get(idOf(n.id))?.status
+      return status === 'resolved' || (status === 'deferred' && !n.blocking)
+    }).length
+    return { completed, total: nodes.length, percent: nodes.length ? Math.round(completed / nodes.length * 100) : 0 }
+  }
   const rows = analysisRowsFor(analysis)
   const investigationRows = rows.filter(item => item.kind === 'unknown')
   const completed = investigationRows.filter(item => ['known', 'deferred'].includes(item.status || '')).length
   const total = investigationRows.length
   const percent = total ? Math.round((completed / total) * 100) : 0
   return { completed, total, percent }
+}
+
+function unknownTreeFor(analysis) {
+  if (analysis.investigation_tree) return analysis.investigation_tree
+  const idOf = value => String(value || '').split(':').pop()
+  const originals = new Map([...(analysis.unknowns || []), ...(analysis.new_unknowns || [])].map(n => [idOf(n.id), n]))
+  const nodes = analysisRowsFor(analysis).filter(row => row.kind === 'unknown').map(row => {
+    const original = originals.get(idOf(row.id)) || {}
+    return { ...original, id: idOf(row.id), question: original.question || row.text,
+      parent_id: original.parent_id || row.parent_id, domain: original.domain || row.domain,
+      status: row.status }
+  })
+  return { nodes, resolutions: [], active_unknown_id: '', active_path: [], phase: 'history' }
 }
 
 function groupedTasksFor(analysis) {
@@ -586,6 +611,7 @@ function onRowLeave(el) {
 
           <Transition appear @enter="taskEnter" @leave="taskLeave">
             <div v-show="task.open" class="task-block__body">
+            <UnknownTree v-if="unknownTreeFor(task).nodes?.length" :tree="unknownTreeFor(task)" :visible="task.open && tab === 'tasks'" />
             <div v-if="taskProgressFor(task).total" class="tk-progress">
               <div class="tk-progress-bar"><i :style="{ width: taskProgressFor(task).percent + '%' }"></i></div>
               <span>{{ taskProgressFor(task).completed }}/{{ taskProgressFor(task).total }} unknowns resolved · {{ taskProgressFor(task).percent }}%</span>
@@ -593,7 +619,7 @@ function onRowLeave(el) {
 
             <template v-if="analysisRowsFor(task).length">
               <div v-for="(items, kind) in groupedTasksFor(task)" :key="kind">
-                <div v-if="items.length" class="tk-group">
+                <div v-if="items.length && kind !== 'unknown'" class="tk-group">
                   <div class="tk-group-head">
                     <span class="tk-group-icon" :class="`tk-group-icon--${kind}`">
                       <svg v-if="kind === 'goal'" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="3"/></svg>

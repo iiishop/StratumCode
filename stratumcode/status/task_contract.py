@@ -256,6 +256,12 @@ def _unknowns(value, criteria=None) -> list[dict]:
             "type": unknown_type,
             "why": why,
             "resolution_strategy": strategy,
+            "domain": (
+                str(raw.get("domain")) if isinstance(raw, dict) and raw.get("domain") in {"requirement", "solution"}
+                else "requirement" if unknown_type == "product_decision" else "solution"
+            ),
+            "parent_id": (str(raw.get("parent_id")).strip() or None)
+            if isinstance(raw, dict) and raw.get("parent_id") is not None else None,
             "acceptance_criteria_ids": accepted_ids,
             **({
                 field: raw[field]
@@ -321,19 +327,10 @@ def _ensure_task_contract(analysis: dict) -> dict:
     )
     analysis["behavior_contract"] = _behavior_contract(analysis.get("behavior_contract"))
     analysis["scope"] = _scope(analysis.get("scope"))
-    analysis["unknowns"] = _limited_unknowns(
+    analysis["unknowns"] = _unknowns(
         analysis.get("unknowns"),
         analysis.get("acceptance_criteria"),
-        analysis["effort"] if raw_effort else None,
     )
-    if analysis.get("execution_mode") == "read_only":
-        for unknown in analysis["unknowns"]:
-            if (
-                unknown["type"] in DELIVERY_FACT_UNKNOWN_TYPES
-                and unknown["acceptance_criteria_ids"]
-            ):
-                unknown["blocking"] = True
-                unknown["resolution_strategy"] = "investigate_project"
     return analysis
 
 
@@ -614,16 +611,10 @@ def _canonicalize_task_contract(analysis: dict) -> None:
     if rejected and not targets:
         targets = ["Locate the existing code path responsible for the requested behavior."]
     analysis["investigation_targets"] = targets
-    analysis["unknowns"] = _canonical_unknowns(
-        analysis.get("unknowns"), targets, references, rejected
-    )
-    unknown_limit = app_settings.get_task_limit("task_unknowns")
-    if unknown_limit and len(analysis["unknowns"]) > unknown_limit:
-        warnings.append(
-            f"unknowns: kept {unknown_limit} canonical items and removed "
-            f"{len(analysis['unknowns']) - unknown_limit} lower-priority items"
-        )
-        analysis["unknowns"] = analysis["unknowns"][:unknown_limit]
+    analysis["unknowns"] = [
+        {**item, "id": f"U_GOAL{index}", "parent_id": None, "origin": "investigation_goal"}
+        for index, item in enumerate(_unknowns(analysis.get("unknowns", []), analysis["acceptance_criteria"]), 1)
+    ]
     analysis["statements"] = (
         requirements
         + intent_statements

@@ -23,7 +23,7 @@ UNSAFE_LIGHT_TOOLS = {
     "rollback_patch",
     "terminal",
 }
-EXTRA_READ_ONLY_TOOLS = ("git", "lsp_tool", "patch_history", "python_static_check")
+EXTRA_READ_ONLY_TOOLS = ("list_directory", "git", "lsp_tool", "patch_history", "python_static_check")
 LOCAL_LIGHT_TOOLS = ("run_investigation", "run_write_loop", "run_full_pipeline", "run_subagent")
 
 
@@ -202,7 +202,16 @@ def _schema_item(name: str, description: str, parameters: dict) -> dict:
 
 
 def _tool_result_text(result: ToolResult) -> str:
-    return result.output or result.title
+    text = result.output or result.title
+    if result.title.startswith("[error]"):
+        text = result.title + "\n" + result.output
+    metadata = {k: v for k, v in result.metadata.items() if k in {
+        "path", "workspace_root", "pattern", "count", "truncated", "recursive", "ignored_directories",
+        "start_line", "end_line", "total_lines", "total_files", "batched", "error_code", "suggestions",
+    }}
+    if metadata:
+        text += "\n\nTool scope/status: " + json.dumps(metadata, ensure_ascii=False)
+    return text
 
 
 def _run_investigation_tool(arguments: dict, workspace_dir: str, session_id: int | None) -> str:
@@ -359,7 +368,7 @@ def _event_summary(events: list[dict]) -> list[dict]:
 
 
 def _record_events_memory(workspace_dir: str, session_id: int | None, message: str, events: list[dict]) -> dict:
-    turn_id = f"turn-{uuid4().hex[:12]}"
+    turn_id = memory_system.current_turn_id() or f"turn-{uuid4().hex[:12]}"
     delta = memory_system.delta_from_events(
         workspace_dir=workspace_dir,
         session_id=session_id,

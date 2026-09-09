@@ -34,9 +34,9 @@ class InvestigationContextBuilder:
         request = run_request(run)
         investigation_analysis = {
             **run.analysis,
-            "unknowns": _open_analysis_unknowns(run.analysis, run.last_investigation),
+            "unknowns": run.analysis.get("unknowns", []),
         }
-        unresolved = (run.last_investigation or {}).get("unknowns")
+        unresolved = (run.last_investigation or {}).get("new_unknowns", []) + (run.last_investigation or {}).get("unknowns", [])
         if isinstance(unresolved, list) and unresolved:
             investigation_analysis = {
                 **investigation_analysis,
@@ -96,7 +96,9 @@ def _analysis_context(analysis: dict) -> list[str]:
             parts.append(f"symbol={clue['symbol']}")
         lines.append("Clue to verify: " + " ".join(str(part) for part in parts if part))
     lines.extend(
-        "Initial unknown {id} [{type}, {strategy}, blocking={blocking}]: {question}".format(
+        "Unknown {id} [{type}, {strategy}, blocking={blocking}, domain={domain}, parent={parent}]: {question}".format(
+            domain=item.get("domain", "solution"),
+            parent=item.get("parent_id"),
             id=item.get("id", ""),
             type=item.get("type", ""),
             strategy=item.get("resolution_strategy", ""),

@@ -27,6 +27,8 @@ class InvestigationTransitionPolicy:
             )
 
         if next_step == "done":
+            if not (investigation.get("audit_result") or {}).get("complete"):
+                return InvestigationTransitionDecision(chat.ChatState.FAILED, "Investigation has no complete Root Audit.")
             if _analysis_requests_implementation(run.analysis):
                 return InvestigationTransitionDecision(
                     chat.ChatState.FAILED,
@@ -55,7 +57,7 @@ class InvestigationTransitionPolicy:
             )
 
         if next_step == "failed":
-            if investigation and _recorded_covers_unknowns(investigation, run.analysis):
+            if investigation and _has_complete_audit(investigation):
                 run.investigation_passes += 1
                 if run.investigation_passes >= MAX_INVESTIGATION_PASSES:
                     return _pass_limit_decision(run)
@@ -90,27 +92,19 @@ class InvestigationTransitionPolicy:
 
 
 def _pass_limit_decision(run) -> InvestigationTransitionDecision:
-    if _analysis_requests_implementation(run.analysis):
-        return InvestigationTransitionDecision(
-            chat.ChatState.FAILED,
-            "Investigation exceeded the maximum pass limit without resolving blockers.",
-        )
     return InvestigationTransitionDecision(
-        chat._chat_finish_state(run),
+        chat.ChatState.FAILED,
         "Investigation exceeded the maximum pass limit without resolving blockers.",
     )
 
 
 def _investigation_allows_patch(investigation: dict) -> bool:
-    if _has_task_status(investigation, "blocked"):
+    if not (investigation.get("audit_result") or {}).get("complete"):
         return False
-    if _has_task_status(investigation, "unknown"):
+    from ..investigator.tree import open_blockers
+    if open_blockers(investigation):
         return False
-    if _has_blocking_unknown(investigation):
-        return False
-    raw_step = investigation.get("step_result")
-    step: dict = raw_step if isinstance(raw_step, dict) else {}
-    return bool(investigation.get("ready_for_patch_planning") or step.get("next_step") == "write_code")
+    return bool(investigation.get("ready_for_patch_planning"))
 
 
 def _has_open_tasks(investigation: dict) -> bool:
@@ -146,22 +140,8 @@ def _has_blocking_unknown(investigation: dict | None) -> bool:
     return False
 
 
-def _recorded_covers_unknowns(investigation: dict | None, analysis: dict | None) -> bool:
-    if not investigation or not analysis:
-        return False
-    recorded_unknown_ids = {
-        str(r.get("unknown_id") or "")
-        for r in investigation.get("resolutions", [])
-        if isinstance(r, dict)
-        and str(r.get("status") or "") in ("resolved", "partially_resolved", "deferred")
-    }
-    unknown_ids = {
-        str(u.get("id") or "")
-        for u in analysis.get("unknowns", [])
-        if isinstance(u, dict)
-        and u.get("blocking")
-    }
-    return bool(unknown_ids and unknown_ids <= recorded_unknown_ids)
+def _has_complete_audit(investigation: dict | None) -> bool:
+    return bool(investigation and (investigation.get("audit_result") or {}).get("complete"))
 
 
 def _blocking_unknown_ids(investigation: dict | None) -> list[str]:

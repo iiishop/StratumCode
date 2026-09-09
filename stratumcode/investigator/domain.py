@@ -644,6 +644,10 @@ def _investigation_task_updates(value, unknowns: list[dict], resolutions: list[d
             "reason": item.get("resolution_strategy", ""),
             "trace": [],
         })
-    return updates[:8]
-
+    by_id = {_normalize_unknown_id(n.get("id")): n for n in unknowns}
+    for update in updates:
+        source = by_id.get(_normalize_unknown_id(update.get("id")), {})
+        update["domain"] = source.get("domain", "solution")
+        update["parent_id"] = source.get("parent_id")
+    return updates
 

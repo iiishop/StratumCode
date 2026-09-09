@@ -47,6 +47,7 @@ def ask(
     usage_total = empty_usage(pricing_rules)
     messages = [{"role": "user", "content": prompt}]
     tools = tool_schema(list(tool_names or default_light_tools()))
+    task_context_message = None
 
     with skill_runtime.target_scope(skill_runtime.GLOBAL_TARGET):
         _select_initial_skills(
@@ -102,7 +103,12 @@ def ask(
                     "content": output,
                 })
             if task_state is not None:
-                messages.append({"role": "user", "content": _task_state_prompt(task_state)})
+                rendered_state = _task_state_prompt(task_state)
+                if rendered_state and (task_context_message is None or rendered_state != task_context_message["content"]):
+                    if task_context_message is not None:
+                        messages[:] = [m for m in messages if m is not task_context_message]
+                    task_context_message = {"role": "user", "content": rendered_state}
+                    messages.append(task_context_message)
 
 
 def stream(message: str, context: list[str], workspace_dir: str, *, session_id: int | None = None) -> Iterator[dict]:
@@ -123,7 +129,7 @@ def stream(message: str, context: list[str], workspace_dir: str, *, session_id: 
             analysis = task_state.current()
             if analysis is None:
                 raise ValueError("light agent task state is unavailable")
-            with memory_system.event_sink(publish), event_sink(publish):
+            with memory_system.turn_scope(turn_id), memory_system.event_sink(publish), event_sink(publish):
                 memory_snapshot = memory_system.select(
                     workspace_dir=workspace_dir,
                     session_id=session_id,
@@ -168,7 +174,9 @@ def stream(message: str, context: list[str], workspace_dir: str, *, session_id: 
                     "content": result,
                     "streaming": False,
                 }))
-                _record_direct_output_memory(workspace_dir, session_id, turn_id, result, publish)
+                # Short-term memory must survive a disabled or failed memory model.
+                memory_system.record_delta(workspace_dir, memory_system.conversation_delta(session_id, turn_id, message, result))
+                _record_direct_output_memory(workspace_dir, session_id, turn_id, result, publish, user_request=message)
             publish({"op": "done"})
         except Exception as exc:
             publish({"op": "error", "message": f"Light agent stream failed: {exc}"})
@@ -257,10 +265,11 @@ def _record_direct_output_memory(
     turn_id: str,
     output: str,
     publish,
+    *, user_request: str = "",
 ) -> None:
-    delta = memory_system.delta_from_output(session_id=session_id, turn_id=turn_id, output=output)
+    delta = memory_system.delta_from_output(session_id=session_id, turn_id=turn_id, output=output, workspace_dir=workspace_dir, user_request=user_request)
     result = memory_system.record_delta(workspace_dir, delta)
-    if result.get("refs"):
+    if result.get("refs") or result.get("records"):
         publish(start_event(f"memory-write-{uuid4().hex[:8]}", "memory_write", {
             "status": "accepted",
             "summary": f"Recorded {len(result.get('refs', []))} conversation reference(s).",

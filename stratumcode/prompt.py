@@ -89,9 +89,7 @@ list is treated as invalid and the analyzer will retry.
   "acceptance_criteria": [
     {{"text": "observable behavior that must be true when done", "authority": "derived", "derived_from": ["REQ1"]}}
   ],
-  "unknowns": [
-    {{"question": "specific fact or decision to verify", "blocking": true, "type": "code_fact|doc_fact|runtime_fact|product_decision|engineering_decision|risk", "why": "why this matters", "resolution_strategy": "investigate_project|deferred", "acceptance_criteria_ids": ["AC1"]}}
-  ],
+  "unknowns": [{{"question": "one independently answerable goal-level question?", "type": "code_fact", "blocking": true, "resolution_strategy": "investigate_project", "domain": "requirement", "parent_id": null}}],
   "clues": [
     {{"kind": "file|line|symbol|route|other", "value": "literal sourced clue", "path": "", "line": 0, "symbol": "", "source_ref": "SRC1", "note": ""}}
   ]
@@ -156,20 +154,17 @@ acceptance_contract may also contain:
 Omit these optional keys instead of restating acceptance criteria or adding
 normal engineering expectations.
 
-For unknowns:
-{{
-  "unknown_content": [
-    {{
-      "question": "specific question whose resolution status must be tracked",
-      "blocking": true,
-      "type": "code_fact|doc_fact|runtime_fact|product_decision|engineering_decision|risk|deferred",
-      "why": "why this question matters",
-      "resolution_strategy": "investigate_project|deferred",
-      "reference_id": "REF1 when this question may be answered by a reference baseline",
-      "acceptance_slots": [1]
-    }}
-  ]
-}}
+TaskAnalysis extracts the grounded task contract and its initial root QUESTIONS.
+Return unknowns as one or more independently answerable goal-level questions when investigation is needed.
+Each node asks ONE question, never a requirement, implementation command, checklist, or bundled subquestions.
+Several independent goals produce separate roots (runtime assigns U_GOAL1, U_GOAL2, ...).
+For example, turn "force persistence on idle while preserving incremental saves" into
+"How can idle-triggered persistence be guaranteed without disrupting incremental saves?"
+This asks for one behavior-preserving mechanism; do not separately re-ask already explicit user decisions.
+Use question, type=code_fact, blocking=true, resolution_strategy=investigate_project,
+domain=requirement|solution, parent_id=null and acceptance_slots. Do not predict detailed child trees.
+Investigation discovers concrete dependencies dynamically from evidence.
+investigation_targets are non-exhaustive orientation hints, never completion obligations.
 
 Rules:
 - Do not write AC/U ids; use 1-based acceptance_slots when needed.
@@ -328,10 +323,23 @@ Principles:
   not whole-file reads or broad greps.
 - Resolve every blocking fact required by a read_only deliverable before finishing.
   Do not replace requested audit categories with framework or project-structure facts.
-- When a read_only contract has no project unknowns, answer its acceptance criteria
-  directly in finish_investigation.summary. Do not scan the workspace, merely restate
-  the question, classify the request, explain why investigation is unnecessary, mention
-  the current workspace, or speculate about project code the user did not ask about.
+- The runtime preserves the goal-level root questions from task analysis, including multiple independent roots.
+  Every Unknown, including each root, is ONE independently answerable interrogative, not a requirement.
+  Research ONLY active_unknown. Do not generate a plan, checklist or prebuilt tree of Unknowns.
+  Create a child only when studying the current question reveals a concrete unanswered dependency.
+  If several independent questions arise together, create separate sibling nodes under the current node.
+  There is no one-child-per-call limit. Never join independent questions into a paragraph to fit one node.
+  Example: "What happens on conversation termination?", "How do flushSessionSave and scheduleSave interact?",
+  and "Where is agentStatus set to idle?" are three siblings, NOT one multi-question node.
+  Higher nodes explain the goal; deeper nodes establish the specific details needed by their parent.
+  Descend into the first discovered child and recursively finish its entire subtree. Return to its parent
+  and reconsider the question with the child's answer. Discover further children if needed; otherwise
+  resolve the parent only when its question is answered and no unanswered required dependency remains.
+  Only then advance to its next sibling. Apply the same rule between independent root questions.
+  After a small batch of evidence calls the runtime forces a reflection checkpoint. Record grounded
+  findings and the next concrete child before looking up a narrower detail. For read-only requests,
+  implementation mechanisms are valid factual children, not prohibited design choices.
+  For non-project requests avoid unrelated workspace inspection and audit the requested deliverable.
 - Use clearify only for an unresolved blocking product_decision. A direct question
   that can be answered from established facts does not need conversational orientation.
 - Prefer current project facts over framework defaults or general knowledge.
@@ -356,7 +364,7 @@ Principles:
   hypothesis must be falsifiable, the expected observation must name what the tool
   result can show, and the decision impact must say which unknown/belief/branch
   will change. "Learn more" or "inspect related code" is not a valid reason.
-- target_unknown_ids must use the exact unknown ids from the task contract unknowns
+- target_unknown_ids must use the exact recorded dynamic investigation unknown ids
   list (for example U1, U2). Copy them exactly; do not invent, renumber, or guess ids.
 - For resolve_unknowns, evidence ids must be observation ids returned by
   read/glob/grep tools; never use tool call ids like call_... as evidence.
@@ -364,9 +372,13 @@ Principles:
   requirements. Call resolve_unknowns only when an unknown has a real answer or
   a meaningful partial answer; call record_investigation_findings only for
   material beliefs/new unknowns, not as an unlock button.
-- Do not call finish_investigation before every blocking unknown is resolved
-  with evidence. Finishing early is blocked and wastes rounds; before finishing,
-  re-check the task contract unknowns and resolve each one.
+- Resolve blocking children before their parent. No resolution, partially_resolved
+  and needs_clearify remain open. Only non-blocking nodes may be deferred.
+- After current blockers close, call audit_investigation. Review requirement
+  semantics and solution evidence against the entire contract. Every material gap
+  must be a normal new_unknown (domain=requirement|solution, parent_id=the relevant existing node;
+  global gaps attach to the goal root). The runtime reopens affected ancestors.
+  Finish only after a complete, current Root Audit. New evidence or findings require re-audit.
 - When requested behavior is attached to a state transition, search the state
   identifier and account for every writer or producer, including event handlers,
   watchers, callbacks, and programmatic updates, plus the shared consumer.
@@ -381,9 +393,10 @@ Principles:
   camel/kebab/singular/plural variants before concluding absence.
 - Use hypothesis-verifier only for an atomic inference that matters to the
   planned patch and is not directly observed.
-- New investigation unknowns are only for material unresolved facts. Do not turn
-  implementation mechanisms or design choices into blocking investigation unknowns;
-  Design owns those choices once the current behavior and constraints are grounded.
+- New unknowns require id, question, type, domain, parent_id, blocking and resolution_strategy.
+  Dependencies use the active node as parent. Requirement and solution children may
+  recursively create each other. Investigate material engineering constraints;
+  leave detailed design choices to Design once requirements and facts are established.
 - Call record_investigation_findings with only a reason when observations should
   be recorded. The runtime will request finding slots. Then finish with
   patch_planning_facts when code work should continue.
@@ -1864,5 +1877,3 @@ def _format_unknown(item) -> str:
 
 def build_investigation_finalize(reason: str = "Investigation needs a final structured summary.") -> str:
     return INVESTIGATION_FINALIZE.replace("{reason}", reason, 1).strip()
-
-

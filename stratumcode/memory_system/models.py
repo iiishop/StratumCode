@@ -147,6 +147,7 @@ class MemorySnapshot:
     conflicts: list[dict] = field(default_factory=list)
     summaries: list[dict] = field(default_factory=list)
     omitted: dict = field(default_factory=dict)
+    recent_turns: list[dict] = field(default_factory=list)
 
     def to_legacy_context(self) -> dict:
         tasks = [
@@ -186,8 +187,8 @@ class MemorySnapshot:
         return {
             "tasks": tasks,
             "goals": [item for item in tasks if item.get("kind") == "goal"],
-            "recent_user_messages": [],
-            "recent_turns": [],
+            "recent_user_messages": [turn.get("user", "") for turn in self.recent_turns],
+            "recent_turns": self.recent_turns,
             "observations": observations,
             "knowledge": knowledge,
             "investigations": investigations,

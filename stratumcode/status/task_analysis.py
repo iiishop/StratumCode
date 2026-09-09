@@ -252,29 +252,15 @@ def analyze_task_stream(
             "Investigation unknowns",
             description="Identify facts and decisions that still require verification.",
         )
-    if partial_unknowns is not None:
-        unknowns_slot = partial_unknowns
-        unknowns_errors: list[str] = []
-    else:
-        unknowns_slot, errors = _task_slot_json(
-            provider,
-            model,
-            tracked_call_model,
-            content_text,
-            [
-                system,
-                {"role": "user", "content": prompt.build_task_unknowns_slot_user(
-                    message=message,
-                    directory=workspace_dir,
-                    context=slot_context,
-                    intent_slot=_contract_slot_payload(canonical_acceptance),
-                    acceptance_slots=acceptance_slots,
-                    source_catalog=source_catalog,
-                )},
-            ],
-            "unknowns",
-        )
-        unknowns_errors = errors
+    unknowns_slot, unknowns_errors = _task_slot_json(
+        provider=provider, model=model, call_model=tracked_call_model, content_text=content_text,
+        messages=[system, {"role": "user", "content": prompt.build_task_unknowns_slot_user(
+            message=message, directory=workspace_dir, context=slot_context,
+            intent_slot=_intent_slot_payload(canonical_intent),
+            acceptance_slots=acceptance_slots, source_catalog=source_catalog,
+        )}], label="unknowns",
+        required=lambda data: isinstance(data.get("unknowns"), list) and bool(data["unknowns"]),
+    )
     analyzer_errors.extend(unknowns_errors)
     minimal_recovery_error = ""
     try:
@@ -299,7 +285,7 @@ def analyze_task_stream(
     analysis["model"] = model
     analysis["provider"] = provider["name"]
     analysis["analyzer_attempts"] = analyzer_attempts
-    partial_recovery = intent_slot is None or acceptance_recovered or unknowns_slot is None
+    partial_recovery = intent_slot is None or acceptance_recovered
     if analyzer_errors:
         analysis["analyzer_warnings"] = (
             list(analysis.get("analyzer_warnings", []))
@@ -580,7 +566,6 @@ def _analysis_from_slots(message: str, context: list[str], intent_slot: dict, ac
     intent_data: dict = nested_intent if isinstance(nested_intent, dict) else intent_slot
     intent_meta = intent_slot
     acceptance_data = acceptance_slot or {}
-    unknown_data = unknowns_slot or {}
     intent_type = str(intent_data.get("intent_type") or intent_data.get("type") or fallback["intent"]["type"]).strip().casefold()
     if intent_type not in TASK_INTENT_TYPES:
         intent_type = fallback["intent"]["type"]
@@ -607,7 +592,7 @@ def _analysis_from_slots(message: str, context: list[str], intent_slot: dict, ac
         quality_gate = app_settings.get_effort_profile(effort)["quality_gate"]
     summary = str(intent_data.get("summary") or fallback["intent"]["summary"]).strip()
     acceptance = _runtime_acceptance_slots(acceptance_data, message, context)
-    unknowns = _runtime_unknowns(unknown_data, acceptance, fallback, effort=effort)
+    unknowns = _runtime_unknowns(unknowns_slot or intent_slot, acceptance, fallback, effort=effort)
     data = {
         "intent": {"type": intent_type, "summary": summary},
         "execution_mode": execution_mode,
@@ -923,7 +908,7 @@ def _runtime_unknowns(
         return fallback["unknowns"]
     criteria_ids = [item["id"] for item in acceptance]
     items = []
-    for raw_item in raw[:5]:
+    for raw_item in raw:
         if isinstance(raw_item, dict):
             question = str(raw_item.get("question") or raw_item.get("text") or raw_item.get("description") or "").strip()
             if not question:
@@ -943,7 +928,10 @@ def _runtime_unknowns(
                     else "investigate_project"
                 )
             items.append({
-                "id": f"U{len(items) + 1}",
+                "id": f"U_GOAL{len(items) + 1}",
+                "domain": raw_item.get("domain", "requirement"),
+                "parent_id": None,
+                "origin": "investigation_goal",
                 "question": question,
                 "blocking": blocking,
                 "type": unknown_type,
@@ -1063,15 +1051,7 @@ def _minimal_task_analysis(message: str, context: list[str], raw: str = "") -> d
     result["intent"] = {"type": "other", "summary": summary}
     result["execution_mode"] = "read_only"
     result["acceptance_criteria"] = [{"id": "AC1", "text": request[:220] or summary}]
-    result["unknowns"] = [{
-        "id": "U1",
-        "question": _implementation_unknown(request or summary),
-        "blocking": True,
-        "type": "code_fact",
-        "why": "Patch planning needs the exact code path and project convention for this requested behavior.",
-        "resolution_strategy": "investigate_project",
-        "acceptance_criteria_ids": ["AC1"],
-    }]
+    result["unknowns"] = []
     result["recovered_from_minimal_analyzer_output"] = True
     return result
 
@@ -1109,17 +1089,7 @@ def _fallback_task_analysis(message: str, context: list[str]) -> dict:
         "scope": {"in": [text[:220] or "Requested work"], "out": [], "undecided": []},
         "hypotheses": [],
         "clues": clues,
-        "unknowns": [
-            {
-                "id": "U1",
-                "question": _implementation_unknown(text),
-                "blocking": True,
-                "type": "code_fact",
-                "why": "Implementation or answer must be grounded in the current workspace.",
-                "resolution_strategy": "investigate_project",
-                "acceptance_criteria_ids": ["AC1"],
-            }
-        ],
+        "unknowns": [],
     }
 
 
@@ -1155,6 +1125,7 @@ def _validate_task_analysis(data: dict) -> dict:
         raise ValueError("intent.summary is required")
 
     result = dict(data)
+    result["unknowns"] = data.get("unknowns", [])
     result["intent"] = {"type": intent_type, "summary": summary}
     execution_mode = str(data.get("execution_mode") or "").strip().casefold()
     result["execution_mode"] = (
@@ -1331,5 +1302,3 @@ def _analysis_hypothesis(message: str, analysis: dict) -> str:
         if hypothesis.get("certainty") != "guess":
             return hypothesis["text"]
     return ""
-
-

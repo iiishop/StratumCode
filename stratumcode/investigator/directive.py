@@ -4,13 +4,13 @@ import json
 
 from .constants import CLEARIFY_RESOLUTION_REASON
 from .domain import (
-    _recorded_resolves_initial_unknowns,
     _reference_list,
     _semantic_repair_payload,
 )
 from .evidence import _resolution_evidence_lines
 from .state import InvestigationPhase
 from .tools import _phase_tool_choice, _phase_tools
+from .tree import open_blockers, audit_complete
 
 
 def _clearify_pending_evidence_unknowns(recorded: dict) -> list[dict]:
@@ -23,6 +23,7 @@ def _clearify_pending_evidence_unknowns(recorded: dict) -> list[dict]:
         for item in recorded.get("resolutions", [])
         if isinstance(item, dict)
         and str(item.get("reason") or "") == CLEARIFY_RESOLUTION_REASON
+        and item.get("kind") != "user_decision"
         and not _reference_list(item.get("evidence"))
     ]
 
@@ -158,7 +159,7 @@ def _investigation_directive(
             "first to obtain the missing observations, then call record_investigation_findings "
             "to append only the missing belief(s), then add a minimal resolution patch with "
             "repair_mode=append_missing_only and only the new belief_ids/evidence. "
-            "After the missing list is addressed, call finish_investigation to let the "
+            "After the missing list is addressed, call audit_investigation to let the "
             "quality gate re-audit the resolutions. The missing list: "
             f"{json.dumps(repair, ensure_ascii=False)}"
         )
@@ -168,16 +169,12 @@ def _investigation_directive(
             _phase_tool_choice(InvestigationPhase.REPAIR),
             prompt,
         )
-    if _recorded_resolves_initial_unknowns(
-        recorded_findings,
-        analysis,
-        repair_ids=semantic_repair_required_ids,
-    ):
+    if not open_blockers(recorded_findings, analysis):
         if finish_evidence_blocked:
             prompt = (
                 "The previous finish attempt was rejected because a resolution "
                 "references a file that was never read. Use read/grep/glob/code_nav "
-                "to obtain the missing observations, then call finish_investigation again."
+                "to obtain the missing observations, then call audit_investigation again."
             )
             return (
                 InvestigationPhase.FINISH_WITH_EVIDENCE_GAP,
@@ -188,6 +185,18 @@ def _investigation_directive(
                 ),
                 _phase_tool_choice(InvestigationPhase.FINISH_WITH_EVIDENCE_GAP),
                 prompt,
+            )
+        if not audit_complete(recorded_findings, analysis, observations):
+            return (
+                InvestigationPhase.AUDIT,
+                _phase_tools(InvestigationPhase.AUDIT, tools=tools),
+                _phase_tool_choice(InvestigationPhase.AUDIT),
+                "Root Audit: review the original request, full task contract, all nodes, resolutions, beliefs and evidence. "
+                "Search for material counterexamples in intended behavior, success, scope, constraints and decisions (requirement), "
+                "and architecture, ownership, integrations, runtime risk and validation paths (solution). "
+                "Represent every incomplete domain as blocking new_unknowns or existing open blockers. "
+                "Independent goal gaps may be new root questions with parent_id=null; specific gaps attach to the relevant existing node. Each node asks one question, and independent gaps are separate nodes. Consider remaining non-blocking risks explicitly in reasons. "
+                "For non-project read-only requests, assess solution applicability without unnecessary repository inspection.",
             )
         return (
             InvestigationPhase.FINISH,
@@ -201,21 +210,6 @@ def _investigation_directive(
             InvestigationPhase.SYNTHESIZE,
             _phase_tools(InvestigationPhase.SYNTHESIZE, tools=tools),
             _phase_tool_choice(InvestigationPhase.SYNTHESIZE),
-            prompt,
-        )
-    if read_only_no_unknowns:
-        prompt = (
-            "The task contract has no project facts to investigate. Answer the user's "
-            "request directly in finish_investigation.summary. The summary must satisfy "
-            "the acceptance criteria; do not merely classify, restate, or explain why "
-            "the request does not require project inspection. Do not mention the current "
-            "workspace, speculate about its code, or offer additional project work unless "
-            "the user requested it."
-        )
-        return (
-            InvestigationPhase.READ_ONLY_FINISH,
-            _phase_tools(InvestigationPhase.READ_ONLY_FINISH, tools=tools),
-            _phase_tool_choice(InvestigationPhase.READ_ONLY_FINISH),
             prompt,
         )
     if resolution_required_ids:

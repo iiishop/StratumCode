@@ -70,9 +70,9 @@ def _record_slot_template(
     resolution_ids: list[str] | None = None,
 ) -> dict[str, JSONValue]:
     return {
+        "new_unknowns": "____",
         "beliefs": ["____" for _ in belief_observation_ids or []],
         "resolutions": ["____" for _ in resolution_ids or []],
-        "new_unknowns": "____",
     }
 
 
@@ -100,9 +100,22 @@ def _record_slot_contract(path: str) -> str:
             "status is resolved, partially_resolved, needs_clearify, or deferred."
         ),
         "new_unknowns": (
-            "Return a JSON array of new unknown objects with id, question, blocking, resolution_strategy. "
-            "resolution_strategy is investigate_project, clearify, or deferred. Add only material facts "
-            "that must be resolved before design; do not add implementation-mechanism or design-choice questions."
+            "Return one JSON object with questions (array), continuation (children, continue_current, or synthesize), and reason. "
+            "Decide the NEXT inquiry before summarizing findings. Each questions item has id, question, type, domain, parent_id, blocking, resolution_strategy. "
+            "Read the record_reason carefully: a stated need to investigate a narrower mechanism is a discovered dependency NOW, "
+            "not something to omit because it has not been investigated yet. For example, after identifying prompt builders, "
+            "'how does skill content reach the model?' is a child under the current architectural question before reading skill_runtime. "
+            "Use children with nonempty questions for these dependencies. Continue_current requires explaining why the next lookup "
+            "tests the SAME atomic question rather than another mechanism. Synthesize means no further lookup is needed. "
+            "domain is requirement or solution. parent_id must be the active Unknown. Add only concrete dependencies discovered while studying it, not a speculative checklist. "
+            "resolution_strategy is investigate_project, clearify, or deferred. For read-only investigations, "
+            "implementation mechanisms, state transitions and evidence flow ARE valid factual child questions. "
+            "If the current question is still broad and the next lookup concerns a narrower unanswered fact, "
+            "register every independently answerable discovered question as a separate sibling under the active node, in research order. "
+            "Each question must be one interrogative with one answer target, never a list of subquestions or a requirement. "
+            "For example, ending-path behavior, flush/schedule interaction, and the idle transition site are THREE sibling questions, not one question. "
+            "Multiple siblings may be registered together, but only the first is investigated; finish its entire subtree before the next sibling. "
+            "An empty questions array requires a concrete same-question or synthesis reason. Do not invent a preplanned checklist."
         ),
         "user_decisions_required": "Return a JSON array of user decision question strings.",
     }
@@ -171,6 +184,14 @@ def _record_findings_by_slots(
         state.observations.pending_ids,
         required_resolution_ids,
     )
+    resolution_slot_ids = [node_id for node_id in resolution_slot_ids
+                           if _normalize_unknown_id(node_id) == state.traversal.active_unknown_id]
+    from .tree import all_unknowns
+    child_ids = {n["id"] for n in all_unknowns(state.findings.recorded, runtime.analysis)
+                 if n.get("parent_id") == state.traversal.active_unknown_id}
+    child_answers = [r for r in state.findings.recorded.get("resolutions", [])
+                     if r.get("unknown_id") in child_ids and r.get("status") == "resolved"]
+    child_evidence = {e for r in child_answers for e in r.get("evidence", [])}
     slot_messages = [
         {"role": "system", "content": prompt.build_investigation_static(
             app_settings.get_output_language()
@@ -186,6 +207,14 @@ def _record_findings_by_slots(
             resolution_slot_ids,
         )},
     ]
+    slot_messages.append({"role": "user", "content": json.dumps({
+        "active_unknown_id": state.traversal.active_unknown_id,
+        "active_path": state.traversal.active_path,
+        "completed_child_answers": child_answers,
+        "completed_child_observations": [_observation_context_view(o) for o in state.observations.items
+                                         if o.get("id") in child_evidence],
+        "new_unknown_policy": "One independently answerable question per node, including roots. Register all concretely discovered independent questions as separate siblings with parent_id=active_unknown_id, in intended research order. Do not concatenate questions to satisfy a one-child limit: there is no one-child limit. Research one node at a time, recursively finish children and revisit their parent before advancing to a sibling. Keep the parent partial until every required dependency closes and no unanswered dependency remains. Do not invent a tree in advance.",
+    }, ensure_ascii=False)})
     usage_events: list[dict] = []
 
     def ask(path: str, prompt_text: str) -> JSONValue:
@@ -193,7 +222,7 @@ def _record_findings_by_slots(
             path,
             resolution_slot_ids,
             required_resolution_ids,
-        )
+        ) or path == "new_unknowns"
         slot_prompt = _record_slot_prompt(
             path,
             prompt_text,
@@ -208,15 +237,28 @@ def _record_findings_by_slots(
         raw = ""
         attempts = (
             REQUIRED_FINDING_SLOT_ATTEMPTS
-            if path.startswith(("beliefs[", "resolutions["))
+            if path == "new_unknowns" or path.startswith(("beliefs[", "resolutions["))
             else 1
         )
         expected = (
-            "a JSON array or null"
+            "one JSON object with questions array, continuation and reason"
             if path == "new_unknowns"
             else "one JSON object" + ("." if required else " or null.")
         )
-        attempt_messages = [*slot_messages, {"role": "user", "content": slot_prompt}]
+        messages_for_slot = slot_messages
+        if path.startswith("beliefs["):
+            index = int(path.split("[", 1)[1].split("]", 1)[0])
+            observation_id = belief_observation_ids[index]
+            observation = next(o for o in state.observations.items if o.get("id") == observation_id)
+            messages_for_slot = [slot_messages[0], {"role": "user", "content": json.dumps({
+                "active_question": next((n for n in all_unknowns(state.findings.recorded, runtime.analysis)
+                                         if n["id"] == state.traversal.active_unknown_id), None),
+                "bound_observation": _observation_context_view(observation),
+                "existing_beliefs": [b for b in state.findings.recorded.get("beliefs", [])
+                                     if observation_id in b.get("evidence", [])],
+                "instruction": "Extract only what this observation establishes. Return null if already recorded or merely tool setup status with no finding about the question.",
+            }, ensure_ascii=False)}]
+        attempt_messages = [*messages_for_slot, {"role": "user", "content": slot_prompt}]
         for attempt in range(attempts):
             assistant = _call_model(
                 runtime.provider,
@@ -240,7 +282,7 @@ def _record_findings_by_slots(
                 break
             if attempt + 1 < attempts:
                 attempt_messages = [
-                    *slot_messages,
+                    *messages_for_slot,
                     {"role": "user", "content": slot_prompt},
                     {"role": "assistant", "content": raw},
                     {"role": "user", "content": (
@@ -259,6 +301,7 @@ def _record_findings_by_slots(
     ), ask)
     yield from usage_events
     filled = filled if isinstance(filled, dict) else {}
+    next_inquiry = filled.get("new_unknowns") or {}
     beliefs = _runtime_slot_beliefs(
         filled.get("beliefs"),
         belief_observation_ids,
@@ -278,13 +321,17 @@ def _record_findings_by_slots(
         "beliefs": beliefs,
         "resolutions": resolutions,
         "new_unknowns": _runtime_new_unknowns(
-            filled.get("new_unknowns"),
+            next_inquiry.get("questions", []),
             runtime.analysis,
             state.findings.recorded,
             resolutions,
+            active_id=state.traversal.active_unknown_id,
         ),
+        "next_inquiry_reason": next_inquiry.get("reason", ""),
     }
     return result
+
+
 
 
 def _semantic_repair_observation_ids(
@@ -312,13 +359,14 @@ def _record_slot_context(
     belief_observation_ids: list[str] | None = None,
     resolution_slot_ids: list[str] | None = None,
 ) -> str:
+    from .tree import all_unknowns
     payload = {
         "mode": "record_investigation_findings_slots",
         "record_reason": reason,
         "cache_policy": "Fill one bound item per request. Runtime owns ids and evidence links.",
         "task": {
             "intent": analysis.get("intent", {}),
-            "unknowns": analysis.get("unknowns", []),
+            "unknowns": all_unknowns(recorded_findings, analysis),
             "acceptance_criteria": analysis.get("acceptance_criteria", []),
         },
         "pending_observation_ids": list(pending_observation_ids),
@@ -438,11 +486,7 @@ def _record_resolution_slot_ids(
 ) -> list[str]:
     unknowns = _merge_unknowns(
         _initial_unknowns(analysis)
-        + (
-            []
-            if _analysis_is_read_only(analysis)
-            else _unknowns(recorded_findings.get("new_unknowns"))
-        )
+        + _unknowns(recorded_findings.get("new_unknowns"))
     )
     investigable = {
         item["id"]
@@ -503,7 +547,12 @@ def _valid_record_slot_value(value: str, path: str, *, required: bool) -> bool:
     except json.JSONDecodeError:
         return False
     if path == "new_unknowns":
-        return parsed is None or parsed == {} or isinstance(parsed, list)
+        if not isinstance(parsed, dict) or not isinstance(parsed.get("questions"), list):
+            return False
+        action = parsed.get("continuation")
+        return (bool(str(parsed.get("reason") or "").strip())
+                and action in {"children", "continue_current", "synthesize"}
+                and bool(parsed["questions"]) == (action == "children"))
     if parsed is None:
         return not required
     if not isinstance(parsed, dict):
@@ -566,21 +615,27 @@ def _runtime_slot_resolutions(
     for unknown_id, raw in zip(resolution_ids, raw_items):
         if not isinstance(raw, dict):
             continue
+        child_ids = {n["id"] for n in _unknowns(recorded_findings.get("new_unknowns"))
+                     if n.get("parent_id") == unknown_id}
+        child_resolutions = [r for r in recorded_findings.get("resolutions", [])
+                             if r.get("unknown_id") in child_ids and r.get("status") == "resolved"]
+        child_evidence = {e for r in child_resolutions for e in r.get("evidence", [])}
         matching_evidence_ids = [
             str(item.get("id") or "").strip()
             for item in observations
             if isinstance(item, dict)
             and str(item.get("id") or "").strip()
-            and unknown_id in {
+            and (str(item.get("id")) in child_evidence or unknown_id in {
                 _normalize_unknown_id(value)
                 for value in item.get("target_unknown_ids", [])
-            }
+            })
         ]
         pending_evidence_ids = [
             item for item in matching_evidence_ids
             if item in pending
         ]
-        evidence_ids = pending_evidence_ids or matching_evidence_ids
+        evidence_ids = _dedupe_strings([*(pending_evidence_ids or matching_evidence_ids),
+                                      *(e for e in matching_evidence_ids if e in child_evidence)])
         belief_ids = [
             item["id"]
             for item in beliefs
@@ -600,38 +655,10 @@ def _runtime_new_unknowns(
     analysis: dict,
     recorded_findings: dict,
     resolutions: list[dict] | None = None,
+    *, active_id: str = "",
 ) -> list[dict]:
-    if _analysis_is_read_only(analysis):
-        return []
-    if any(
-        item.get("status") != "resolved"
-        for item in resolutions or []
-        if isinstance(item, dict)
-    ):
-        return []
-    existing = _merge_unknowns(
-        _initial_unknowns(analysis)
-        + _unknowns(recorded_findings.get("unknowns"))
-        + _unknowns(recorded_findings.get("new_unknowns"))
-    )
-    known_questions = {_question_key(item["question"]) for item in existing}
-    used_ids = {str(item.get("id") or "").strip() for item in existing}
-    next_id = max(
-        (int(match.group(1)) for item in used_ids if (match := re.fullmatch(r"U(\d+)", item))),
-        default=0,
-    ) + 1
-    result = []
-    for item in _unknowns(value):
-        question_key = _question_key(item.get("question", ""))
-        if not question_key or question_key in known_questions:
-            continue
-        while f"U{next_id}" in used_ids:
-            next_id += 1
-        result.append({**item, "id": f"U{next_id}"})
-        known_questions.add(question_key)
-        used_ids.add(f"U{next_id}")
-        next_id += 1
-    return result
+    from .tree import prepare_new_unknowns
+    return prepare_new_unknowns(value, recorded_findings, analysis, active_id=active_id)
 
 
 def _grounding_observation_text(observation: dict) -> str:
@@ -706,6 +733,9 @@ def _resolution_kind(raw: dict, status: str) -> str:
 
 def _continued_recorded_findings(previous: dict | None, observations: list[dict]) -> dict:
     recorded = _merge_recorded_findings(_empty_recorded_findings(), previous or {})
+    for key in ("audit_cycle", "tree_bootstrapped"):
+        if key in (previous or {}):
+            recorded[key] = previous[key]
     observation_ids = {
         str(item.get("id") or "").strip()
         for item in observations
@@ -755,6 +785,9 @@ def _recorded_findings_signature(recorded: dict) -> str:
             "id": _normalize_unknown_id(item.get("id")),
             "status": str(item.get("status") or "").strip(),
             "strategy": str(item.get("resolution_strategy") or "").strip(),
+            "domain": item.get("domain"),
+            "parent_id": item.get("parent_id"),
+            "question": item.get("question"),
         }
         for item in _unknowns(recorded.get("unknowns")) + _unknowns(recorded.get("new_unknowns"))
     ]
@@ -772,6 +805,9 @@ def _recorded_findings_signature(recorded: dict) -> str:
 
 def _merge_recorded_findings(current: dict, update: dict) -> dict:
     merged = {field: list(current.get(field, [])) for field in FINDING_FIELDS}
+    for key in ("audit_result", "audit_cycle", "tree_bootstrapped"):
+        if key in current:
+            merged[key] = current[key]
     belief_aliases: dict[str, str] = {}
     if isinstance(update.get("beliefs"), list):
         merged["beliefs"], belief_aliases = _merge_beliefs_by_identity(

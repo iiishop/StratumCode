@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from .tree import all_unknowns, open_blockers, audit_complete, validate_closure, is_open
 from collections.abc import Iterator
 from uuid import uuid4
 
@@ -95,7 +96,7 @@ def _audit_recorded_findings(
     state: InvestigationState,
     runtime: InvestigationRuntime,
 ) -> Iterator[dict]:
-    initial_unknowns = _initial_unknowns(runtime.analysis)
+    initial_unknowns = all_unknowns(state.findings.recorded, runtime.analysis)
     target_resolutions = [
         item
         for item in state.findings.recorded.get("resolutions", [])
@@ -133,7 +134,7 @@ def _audit_recorded_findings(
         "constraints": runtime.analysis.get("constraint_statements", []),
         "scope": runtime.analysis.get("scope_statements", {}),
         "reference_baselines": runtime.analysis.get("reference_baselines", []),
-        "unknowns": runtime.analysis.get("unknowns", []),
+        "unknowns": initial_unknowns,
         "execution_mode": runtime.analysis.get("execution_mode", ""),
     }
     all_beliefs = [
@@ -329,6 +330,8 @@ def _finalize_investigation(
     *,
     reason: str = "Investigation needs a final structured summary.",
 ) -> Iterator[dict]:
+    if not audit_complete(state.findings.recorded, runtime.analysis, state.observations.items):
+        return _runtime_recovered_investigation(reason, runtime.analysis, state.observations.items, state.findings.recorded)
     state.messages.append({"role": "user", "content": prompt.build_investigation_finalize(reason)})
     last_error = ""
     last_content = ""
@@ -644,8 +647,7 @@ def _runtime_recovered_investigation(
     facts = _runtime_patch_facts(observations, recorded_findings)
     initial_unknowns = _initial_unknowns(analysis)
     recorded_unknowns = _unknowns(recorded_findings.get("unknowns"))
-    if not _analysis_is_read_only(analysis):
-        recorded_unknowns += _unknowns(recorded_findings.get("new_unknowns"))
+    recorded_unknowns += _unknowns(recorded_findings.get("new_unknowns"))
     known_unknowns = _merge_unknowns(initial_unknowns + recorded_unknowns)
     resolutions = _complete_resolutions(
         _resolutions(recorded_findings.get("resolutions")),
@@ -653,7 +655,7 @@ def _runtime_recovered_investigation(
         recorded_unknowns,
     )
     unknowns = _unresolved_from_resolutions(resolutions, known_unknowns)
-    read_only_complete = _analysis_is_read_only(analysis) and not unknowns
+    read_only_complete = _analysis_is_read_only(analysis) and audit_complete(recorded_findings, analysis or {}, observations)
     read_only_summary = "\n\n".join(
         str(item.get("answer") or "").strip()
         for item in resolutions
@@ -841,8 +843,8 @@ def _finish_payload(
     repairs: list[str] = []
     explicit_unknowns = _unknowns(arguments.get("unknowns"))
     unknowns = list(explicit_unknowns)
-    new_unknowns = [] if _analysis_is_read_only(analysis) else _unknowns(arguments.get("new_unknowns"))
-    initial_unknowns = _initial_unknowns(analysis)
+    new_unknowns = _unknowns(arguments.get("new_unknowns"))
+    initial_unknowns = all_unknowns(arguments, analysis)
     user_decisions = _string_list(arguments.get("user_decisions_required"))
     decision_questions = [_decision_question(item) for item in user_decisions]
     known_unknowns = initial_unknowns + unknowns + new_unknowns
@@ -892,24 +894,14 @@ def _finish_payload(
         patch_context = _patch_context(arguments.get("patch_planning_context"), repairs, repair_conflicts)
     model_ready = bool(arguments.get("ready_for_patch_planning"))
     ready = model_ready
-    if expected_step and expected_step.get("next_step") == "write_code" and not ready:
-        if not repair_conflicts:
-            raise ValueError("finish_investigation conflicts with accepted write_code checkpoint")
-        ready = True
-        for item in unknowns:
-            item["blocking"] = False
-            item["resolution_strategy"] = "deferred"
-        repairs.append("Deferred blockers that conflicted with accepted write_code checkpoint")
+    unknowns = [n for n in initial_unknowns if is_open(n, {"resolutions": resolutions})]
     if any(item["blocking"] for item in unknowns):
         if model_ready and any(item["blocking"] for item in explicit_unknowns) and not repair_conflicts:
             raise ValueError("ready_for_patch_planning conflicts with blocking unknowns")
         ready = False
     _require_items_accounted(required_items, arguments.get("task_updates"), resolutions, repair_conflicts)
-    unknowns = _resolve_task_update_conflicts(unknowns, arguments.get("task_updates"), repairs, repair_conflicts)
-    if not unknowns and repair_conflicts:
-        ready = True
     readiness = _runtime_readiness(
-        model_ready=ready,
+        model_ready=_analysis_requests_implementation(analysis),
         analysis=analysis,
         initial_unknowns=initial_unknowns,
         resolutions=resolutions,
@@ -946,24 +938,6 @@ def _finish_payload(
             "reasons": bugfix_reasons,
         }
     ready = readiness["ready"]
-    hard_readiness_reasons = [
-        reason for reason in readiness.get("reasons", [])
-        if (
-            reason.endswith(":not_resolved")
-            or reason.endswith(":missing_evidence")
-        )
-    ]
-    if not ready and model_ready and patch_context and not any(
-        item.get("blocking") and item.get("resolution_strategy") == "clearify"
-        for item in unknowns
-    ) and not hard_readiness_reasons:
-        ready = True
-        readiness = {**readiness, "ready": True, "runtime_override": "patch_facts_present"}
-        for item in unknowns:
-            if item.get("blocking"):
-                item["blocking"] = False
-                item["resolution_strategy"] = "deferred"
-        repairs.append("Allowed patch planning from grounded patch facts and deferred remaining investigate_project unknowns")
     repair_request = _resolution_repair_request(
         arguments,
         initial_unknowns,
@@ -997,6 +971,15 @@ def _finish_payload(
         resolutions,
         analysis,
     )
+    final["new_unknowns"] = initial_unknowns
+    final["unknowns"] = [n for n in initial_unknowns if is_open(n, final)]
+    validate_closure(final)
+    final["audit_result"] = arguments.get("audit_result", {})
+    audited = audit_complete(arguments, analysis or {}, observations or [])
+    final["ready_for_patch_planning"] = bool(ready and audited and not open_blockers(final) and _analysis_requests_implementation(analysis))
+    final["readiness"]["ready"] = final["ready_for_patch_planning"]
+    if not audited:
+        final["readiness"]["reasons"].append("root_audit_required")
     if repair_request:
         final["resolution_repair"] = repair_request
     return final
@@ -1089,7 +1072,7 @@ def _apply_investigation_audit(
     allow_verification: bool = True,
     analysis: dict | None = None,
 ) -> tuple[dict, list[dict], dict[str, str]]:
-    result = {field: list(recorded.get(field, [])) for field in FINDING_FIELDS}
+    result = {**recorded, **{field: list(recorded.get(field, [])) for field in FINDING_FIELDS}}
     beliefs = [dict(item) for item in result["beliefs"] if isinstance(item, dict)]
     result["beliefs"] = beliefs
     for belief in beliefs:
@@ -1316,6 +1299,8 @@ def _finish_arguments(
         for field in FINDING_FIELDS
     }
     combined.update({
+        "audit_result": recorded.get("audit_result", {}),
+        "bugfix_readiness": finish.get("bugfix_readiness", {}),
         "summary": summary,
         "ready_for_patch_planning": _recommended_next_step(finish) == "patch_planning",
         "recommended_next_step": _recommended_next_step(finish),
@@ -1684,4 +1669,3 @@ def _apply_direct_resolution_gate(
         allow_verification=False,
     )
     return gated
-

@@ -5,6 +5,8 @@ from . import store
 
 
 def resolve_references(workspace_dir: str, session_id: int | None, query: str) -> list[dict]:
+    if session_id is None:
+        return []
     refs = store.list_refs(workspace_dir, session_id, limit=80)
     if not refs:
         return []
@@ -12,7 +14,9 @@ def resolve_references(workspace_dir: str, session_id: int | None, query: str) -
         "query": query,
         "refs": [_ref_candidate(ref) for ref in refs],
     })
-    items = data.get("references") if isinstance(data, dict) else []
+    if not isinstance(data, dict) or data.get("needs_clarification"):
+        return []
+    items = data.get("references")
     if not isinstance(items, list):
         return []
     by_id = {str(ref.get("id") or ""): ref for ref in refs}
@@ -25,7 +29,7 @@ def resolve_references(workspace_dir: str, session_id: int | None, query: str) -
             continue
         confidence = _enum(item.get("confidence"), {"high", "medium", "low"})
         reason = str(item.get("reason") or "").strip()
-        if confidence and reason:
+        if confidence == "high" and reason:
             resolved.append({**ref, "confidence": confidence, "reason": reason})
     return resolved[:5]
 
@@ -35,6 +39,8 @@ def _ref_candidate(ref: dict) -> dict:
     return {
         "id": ref.get("id", ""),
         "ref_key": ref.get("ref_key", ""),
+        "turn_id": ref.get("turn_id", ""),
+        "created_at": ref.get("created_at", ""),
         "label": ref.get("label", ""),
         "content": ref.get("content", ""),
         "target_record_id": ref.get("target_record_id", ""),

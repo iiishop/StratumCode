@@ -39,6 +39,7 @@ from .constants import (
     INVESTIGATION_CAPABILITY,
     MAX_DUPLICATE_NO_PROGRESS,
     MAX_PENDING_DISCOVERY_OBSERVATIONS,
+    MAX_DISCOVERY_BEFORE_REFLECTION,
     MAX_REPEATED_RECORD_NO_PROGRESS,
     MAX_REPEATED_TOOL_ERRORS,
     READ_ONLY_SUMMARY_MIN_RESOLUTION_RATIO,
@@ -72,6 +73,10 @@ from .domain import (
     _validate_resolution_refs,
 )
 from .directive import _investigation_directive
+from .tree import (all_unknowns, open_blockers, validate_closure, validate_update, select_active, is_open, reopen_parents,
+                   prepare_new_unknowns, audit_complete, normalize_audit,
+                   ensure_goal_root, validate_active_write)
+from .tools import _audit_investigation_tool_schema
 from .finalize import (
     _apply_direct_resolution_gate,
     _apply_investigation_audit,
@@ -258,6 +263,9 @@ def _apply_required_next_tool(
     current_tools: list[dict],
 ) -> tuple[list[dict], str | dict]:
     required = state.control.required_next_tool
+    if required == "finish_investigation" and not audit_complete(state.findings.recorded, runtime.analysis, state.observations.items):
+        state.control.required_next_tool = ""
+        required = ""
     if not required:
         return current_tools, state.control.current_tool_choice
     tools = _named(current_tools, required) or _named(runtime.tools, required)
@@ -275,20 +283,49 @@ def _prepare_round(
 ) -> tuple[str | None, InvestigationPhase, list[dict], set[str], list[str], dict | None, dict | None, set[str]]:
     del previous_rounds_usage
 
+    # Round directives are a replaceable view, not another copy of the investigation history.
+    start = state.control.round_context_start
+    del state.messages[start:start + state.control.round_context_count]
+    state.control.round_context_start = len(state.messages)
+    state.control.round_context_count = 0
+
+    reopen_parents(state.findings.recorded, runtime.analysis)
+    active = select_active(state.traversal, state.findings.recorded, runtime.analysis)
+    tree_analysis = _analysis_with_recorded_unknowns(runtime.analysis, state.findings.recorded)
+    if active:
+        policy = (
+            "Establish intended behavior, success semantics, scope and user decisions. "
+            "Use a solution child when repository evidence can narrow a material ambiguity before clearify."
+            if active["domain"] == "requirement" else
+            "Establish repository/runtime facts, ownership, integration, engineering risks and validation paths. "
+            "If constraints conflict with the requested behavior, create a requirement child; never silently rewrite the contract."
+        )
+        state.messages.append({"role": "user", "content": json.dumps({
+            "active_unknown": active, "active_path": state.traversal.active_path,
+            "returning_from_child": state.traversal.revisit_unknown_id == active["id"],
+            "return_rule": "Reconsider this parent's single question using completed child answers. Record a partial answer and any newly discovered sibling questions, or resolve it only when all required children are closed and no further unknown remains. Do not skip the parent to study its next sibling.",
+            "policy": policy, "child_rule": "Research ONLY this Unknown. Discover concrete children only when needed while researching it; never pre-enumerate a checklist. Every new child uses parent_id=active_unknown.id. Return to the parent after its children close.",
+        }, ensure_ascii=False)})
+
     current_tools = runtime.tools
     state.control.current_tool_choice = "required"
     clearify_unknown = _pending_clearify_unknown(
-        state.findings.recorded,
-        runtime.analysis,
+        {**state.findings.recorded, "unknowns": [], "new_unknowns": []},
+        {**tree_analysis, "unknowns": [active] if active else []},
         state.verification.clearify_questions,
     )
-    verification_request = state.verification.queue[0] if state.verification.queue else None
+    if clearify_unknown and active and not _same_unknown_id(clearify_unknown["id"], active["id"]):
+        clearify_unknown = None
+    verification_request = next((item for item in state.verification.queue
+                                 if active and _same_unknown_id(item.get("unknown_id"), active["id"])), None)
     semantic_repair_required_ids = (
         _semantic_repair_resolution_ids(state.findings.recorded)
         if runtime.semantic_gate_enabled
         else set()
     )
-    resolution_required_ids = _unknowns_needing_resolution(state.findings.recorded, state.observations.items, runtime.analysis)
+    resolution_required_ids = _unknowns_needing_resolution(state.findings.recorded, state.observations.items, tree_analysis)
+    semantic_repair_required_ids = {node_id for node_id in semantic_repair_required_ids
+                                    if active and _same_unknown_id(node_id, active["id"])}
     resolution_required_ids = _dedupe_strings([
         *resolution_required_ids,
         *sorted(semantic_repair_required_ids),
@@ -296,14 +333,36 @@ def _prepare_round(
             _pending_observation_unknown_ids(
                 state.observations.items,
                 state.observations.pending_ids,
-                runtime.analysis,
+                tree_analysis,
                 state.findings.recorded,
             )
             if len(state.observations.pending_ids) >= MAX_PENDING_DISCOVERY_OBSERVATIONS
             else []
         ),
     ])
+    resolution_required_ids = [node_id for node_id in resolution_required_ids
+                               if active and _same_unknown_id(node_id, active["id"])]
+    if active and state.traversal.revisit_unknown_id == active["id"]:
+        resolution_required_ids = [active["id"]]
     discovery_required_ids = list(state.control.force_discovery_ids)
+    for node_id in list(state.control.evidence_gaps):
+        resolution = next((r for r in state.findings.recorded.get("resolutions", [])
+                           if r.get("unknown_id") == node_id), None)
+        issues = _require_file_reads([resolution], state.observations.items, runtime.workspace_dir) if resolution else []
+        if resolution and runtime.workspace_dir:
+            issues += _require_lsp_definition_reads([resolution], state.observations.items, runtime.workspace_dir)
+        if issues:
+            state.control.evidence_gaps[node_id] = list(dict.fromkeys(issues))
+        else:
+            del state.control.evidence_gaps[node_id]
+    discovery_required_ids = _dedupe_strings([*discovery_required_ids, *state.control.evidence_gaps])
+    resolution_required_ids = [i for i in resolution_required_ids if i not in state.control.evidence_gaps]
+    semantic_repair_required_ids -= state.control.evidence_gaps.keys()
+    if active and active["id"] in state.control.evidence_gaps:
+        state.messages.append({"role": "user", "content": json.dumps({
+            "required_evidence_repair": state.control.evidence_gaps[active["id"]],
+            "instruction": "Read the named implementation locations before resolving again. Repeating the same answer does not supply missing evidence.",
+        }, ensure_ascii=False)})
     if state.control.force_synthesis_reason and not discovery_required_ids:
         discovery_required_ids = _unknowns_missing_project_evidence(
             state.findings.recorded,
@@ -317,7 +376,8 @@ def _prepare_round(
         observations=state.observations.items,
         semantic_repair_required_ids=semantic_repair_required_ids,
         resolution_required_ids=resolution_required_ids,
-        discovery_required_ids=discovery_required_ids,
+        discovery_required_ids=[node_id for node_id in discovery_required_ids
+                                if active and _same_unknown_id(node_id, active["id"])],
         clearify_unknown=clearify_unknown,
         verification_request=verification_request,
         finish_evidence_blocked=state.control.finish_evidence_blocked,
@@ -325,9 +385,22 @@ def _prepare_round(
         semantic_gate_enabled=runtime.semantic_gate_enabled,
         read_only_no_unknowns=(
             runtime.analysis.get("execution_mode") == "read_only"
-            and not runtime.analysis.get("unknowns")
+            and not open_blockers(state.findings.recorded, runtime.analysis)
         ),
     )
+    if current_phase == InvestigationPhase.AUDIT:
+        state.messages.append({"role": "user", "content": json.dumps({
+            "root_audit_context": {"contract": {k: runtime.analysis.get(k) for k in (
+                "origin_message", "intent", "execution_mode", "acceptance_criteria", "constraints", "scope", "behavior_contract")},
+            "unknowns": all_unknowns(state.findings.recorded, runtime.analysis),
+            "resolutions": state.findings.recorded.get("resolutions", []),
+            "beliefs": state.findings.recorded.get("beliefs", []),
+            "observations": [{"id": o.get("id"), "tool": o.get("tool"), "path": o.get("path"),
+                              "target_unknown_ids": o.get("target_unknown_ids", []),
+                              "summary": str(o.get("summary") or "")[:1000],
+                              "evidence_excerpt": str(o.get("evidence_excerpt") or "")[:2400],
+                              "excerpt_is_partial": True} for o in state.observations.items]},
+        }, ensure_ascii=False)})
     # 方案 A：最少调查轮数未达到时，禁止提前结束（fast 也要跑
     # rounds_per_unknown × blocking_unknown 轮）。结束类 phase
     # （FINISH/READ_ONLY_FINISH/SYNTHESIZE）强制降级为 DISCOVERY_REQUIRED，
@@ -343,10 +416,10 @@ def _prepare_round(
             InvestigationPhase.READ_ONLY_FINISH,
             InvestigationPhase.SYNTHESIZE,
         )
-        and not _recorded_resolves_initial_unknowns(
+        and not audit_complete(
             state.findings.recorded,
             runtime.analysis,
-            repair_ids=semantic_repair_required_ids,
+            state.observations.items,
         )
     )
     if directive_prompt and not budget_floor_active:
@@ -364,6 +437,28 @@ def _prepare_round(
         runtime,
         current_tools=current_tools,
     )
+    if current_phase == InvestigationPhase.AUDIT:
+        current_tools = [_audit_investigation_tool_schema()]
+        state.control.current_tool_choice = {"type": "function", "function": {"name": "audit_investigation"}}
+        state.control.required_next_tool = ""
+    if active and _needs_reflection(state) and current_phase not in {
+        InvestigationPhase.CLEARIFY, InvestigationPhase.VERIFY,
+        InvestigationPhase.AUDIT, InvestigationPhase.FINISH,
+    }:
+        current_phase = InvestigationPhase.REFLECT
+        current_tools = [_record_findings_tool_schema()]
+        state.control.current_tool_choice = {"type": "function", "function": {"name": "record_investigation_findings"}}
+        state.control.required_next_tool = ""
+        state.messages.append({"role": "user", "content": (
+            "Mandatory investigation checkpoint. Stop reading and call record_investigation_findings "
+            "with a reason so the runtime requests grounded finding slots. Explain what the current "
+            "observations establish about the active Unknown. If a narrower unanswered question is now "
+            "needed, register it under the active node before researching that detail. If several independent "
+            "questions are discovered, register separate sibling nodes in research order, never a compound question. "
+            "Keep the parent partial while children remain open. If the evidence answers the question, "
+            "resolve it instead of inventing children. Do not keep all detailed research under U_GOAL."
+        )})
+    state.control.round_context_count = len(state.messages) - state.control.round_context_start
     state.control.current_tools = current_tools
     allowed_tool_names = {
         str(((tool.get("function") or {}).get("name")) or "")
@@ -380,6 +475,12 @@ def _prepare_round(
         verification_request,
         semantic_repair_required_ids,
     )
+
+
+def _needs_reflection(state: InvestigationState) -> bool:
+    return (bool(state.traversal.revisit_unknown_id)
+            or state.progress.discovery_since_record >= MAX_DISCOVERY_BEFORE_REFLECTION
+            or len(state.observations.pending_ids) >= MAX_PENDING_DISCOVERY_OBSERVATIONS)
 
 
 def _collect_tool_calls(
@@ -462,15 +563,20 @@ def _handle_resolve(
             state.findings.recorded,
         ),
     )
+    validate_active_write({"resolutions": resolutions}, state.traversal.active_unknown_id)
     _validate_resolution_refs(
         resolutions,
         _beliefs(state.findings.recorded.get("beliefs")),
         state.observations.items,
     )
-    state.findings.recorded = _merge_recorded_findings(
+    candidate = _merge_recorded_findings(
         state.findings.recorded,
         {"resolutions": resolutions},
     )
+    validate_update(state.findings.recorded, candidate, runtime.analysis)
+    state.findings.recorded = candidate
+    state.traversal.revisit_unknown_id = ""
+    state.progress.discovery_since_record = 0
     state.findings.recorded = _bind_grounding_evidence(
         state.findings.recorded,
         state.observations.items,
@@ -532,6 +638,17 @@ def _handle_record(
     del verification_request, clearify_unknown
 
     _require_control_reason(arguments, name)
+    if "new_unknowns" in arguments:
+        arguments["new_unknowns"] = prepare_new_unknowns(
+            arguments["new_unknowns"], state.findings.recorded, runtime.analysis,
+            active_id=state.traversal.active_unknown_id,
+        )
+        state.traversal.bootstrapped = True
+        state.findings.recorded["tree_bootstrapped"] = True
+        if (not arguments["new_unknowns"] and not _has_finding_fields(arguments)
+                and not state.observations.pending_ids and not _needs_reflection(state)):
+            state.messages.append(_tool_message(call_id, json.dumps({"recorded": True, "new_unknowns": []})))
+            return DispatchAction.CONTINUE_TOOLS
     if semantic_repair_required_ids and isinstance(arguments.get("resolutions"), list) and arguments["resolutions"]:
         _require_repair_resolutions(arguments, semantic_repair_required_ids)
     if (
@@ -557,9 +674,8 @@ def _handle_record(
     if (
         not _has_finding_fields(arguments)
         or (
-            runtime.analysis.get("_canonicalized")
+            ("new_unknowns" not in arguments or not str(arguments.get("next_inquiry_reason") or "").strip())
             and state.observations.pending_ids
-            and not _record_consumes_observations(arguments, state.observations.pending_ids)
         )
     ):
         arguments = yield from _record_findings_by_slots(
@@ -573,6 +689,11 @@ def _handle_record(
         state.observations.pending_ids,
         resolution_required_ids,
     ):
+        if _needs_reflection(state):
+            raise ValueError(
+                "Investigation checkpoint produced no material findings. Record what the observations "
+                "establish, a partial resolution, or a concrete discovered child; repeated empty checkpoints stop the run."
+            )
         output = json.dumps({
             "recorded": False,
             "code": "no_material_findings",
@@ -588,6 +709,7 @@ def _handle_record(
         state.messages.append(_tool_message(call_id, output))
         _bump_hardlock(state)
         return DispatchAction.CONTINUE_TOOLS
+    validate_active_write(arguments, state.traversal.active_unknown_id)
     _require_finding_fields(arguments)
     _reject_empty_repair(arguments, state.findings.recorded)
     # 剥离模型提交的 repair 诊断字段：repair_mode/semantic_missing
@@ -596,7 +718,23 @@ def _handle_record(
     # _semantic_repair_resolution_ids 永远判该 unknown 待修，
     # 即使证据已补齐也无限 REPAIR（U4 类死循环根因）。
     arguments = _strip_submitted_repair_diagnostics(arguments)
-    state.findings.recorded = _merge_recorded_findings(state.findings.recorded, arguments)
+    if "unknowns" in arguments:
+        arguments["unknowns"] = _unknowns(arguments["unknowns"])
+        known_ids = {n["id"] for n in all_unknowns(state.findings.recorded, runtime.analysis)}
+        if any(_normalize_unknown_id(n["id"]) not in known_ids for n in arguments["unknowns"]):
+            raise ValueError("Register discovered children through new_unknowns, not unknowns")
+    if "resolutions" in arguments:
+        arguments["resolutions"] = _resolutions(arguments["resolutions"])
+    candidate = _merge_recorded_findings(state.findings.recorded, arguments)
+    # A discovery and provisional parent answer can arrive in the same slot pass.
+    candidate["resolutions"] = [dict(r) for r in candidate.get("resolutions", [])]
+    reopen_parents(candidate, runtime.analysis)
+    _validate_resolution_refs(candidate.get("resolutions", []),
+                              _beliefs(candidate.get("beliefs")), state.observations.items)
+    validate_update(state.findings.recorded, candidate, runtime.analysis)
+    state.findings.recorded = candidate
+    state.progress.discovery_since_record = 0
+    state.traversal.revisit_unknown_id = ""
     state.findings.recorded = _bind_grounding_evidence(
         state.findings.recorded,
         state.observations.items,
@@ -629,6 +767,8 @@ def _handle_record(
     output = json.dumps({
         "recorded": True,
         "counts": {field: len(state.findings.recorded.get(field, [])) for field in FINDING_FIELDS},
+        "discovered_unknowns": arguments.get("new_unknowns", []),
+        "next_inquiry_reason": arguments.get("next_inquiry_reason", ""),
         **({"stalled": True} if state.control.stop_investigation else {}),
     }, ensure_ascii=False)
     yield start_event(call_id, "tool", _tool_event(
@@ -658,18 +798,12 @@ def _handle_finish(
     runtime: InvestigationRuntime,
 ) -> Iterator[DispatchAction]:
     _require_control_reason(arguments, name)
-    state.findings.recorded = _apply_direct_resolution_gate(
-        state.findings.recorded,
-        state.observations.items,
-        strict_grounding=runtime.semantic_gate_enabled and _analysis_requests_implementation(runtime.analysis),
-    )
-    decision = yield from _decide_finish_transition(
-        state,
-        runtime,
-    )
-    if decision is FinishDecision.ACCEPT:
-        return _accept_finish(state, call_id, arguments, runtime)
-    return _enter_finish_block(state, call_id, decision, runtime)
+    if not audit_complete(state.findings.recorded, runtime.analysis, state.observations.items):
+        raise ValueError("finish requires a current complete Root Audit; call audit_investigation after closing blocking unknowns")
+    # Root Audit already performed quality checks and signed their resulting state.
+    # Finishing must not mutate that state or launch the same review again.
+    yield from ()
+    return _accept_finish(state, call_id, arguments, runtime)
 
 
 def _decide_finish_transition(
@@ -698,7 +832,7 @@ def _decide_finish_transition(
             observations=state.observations.items,
             strict_grounding=_analysis_requests_implementation(runtime.analysis),
             allow_verification=runtime.subagent_enabled and _analysis_requests_implementation(runtime.analysis),
-            analysis=runtime.analysis,
+            analysis=_analysis_with_recorded_unknowns(runtime.analysis, state.findings.recorded),
         )
         _semantic_repair_resolution_ids(
             state.findings.recorded,
@@ -822,6 +956,7 @@ def _handle_clearify(
         arguments["target_unknown_ids"] = [clearify_unknown["id"]]
         arguments.setdefault("reason", "Resolve the blocking product decision.")
         arguments.setdefault("question", clearify_unknown["question"])
+    validate_active_write(arguments, state.traversal.active_unknown_id)
     target_ids = _target_unknown_ids(arguments)
     target_ids = [
         item for item in target_ids
@@ -935,6 +1070,13 @@ def _record_discovery_progress(
     state.progress.repeated_tool_error_count = 0
     state.caches.tool[cache_key] = output
     observation = _tool_observation(name, call_id, output)
+    # Cache hits bypass _run_tool_stream, so bind provenance at the common boundary.
+    observation["target_unknown_ids"] = list(arguments.get("target_unknown_ids") or observation.get("target_unknown_ids") or [])
+    observation["reason"] = str(arguments.get("reason") or observation.get("reason") or "")
+    observation["investigation_contract"] = _extract_discovery_contract(dict(arguments)) or observation.get("investigation_contract", {})
+    if name == "read" and arguments.get("path"):
+        observation["path"] = observation.get("path") or arguments["path"]
+    state.progress.discovery_since_record += 1
     state.observations.items.append(observation)
     state.caches.tool_observation_ids[cache_key] = observation["id"]
     state.observations.pending_ids.append(observation["id"])
@@ -948,7 +1090,7 @@ def _record_discovery_progress(
             verification_request["unknown_id"],
             verification_request["hypothesis"],
         ))
-        state.verification.queue.pop(0)
+        state.verification.queue.remove(verification_request)
     state.messages.append(_tool_message(call_id, output))
 
 
@@ -966,9 +1108,17 @@ def _handle_discovery(
 ) -> Iterator[DispatchAction]:
     del semantic_repair_required_ids, resolution_required_ids, round_index
 
+    if not state.traversal.active_unknown_id:
+        raise ValueError("Discovery requires an active Unknown; register audit gaps before gathering evidence")
+    if not arguments.get("target_unknown_ids"):
+        arguments["target_unknown_ids"] = [state.traversal.active_unknown_id]
+    validate_active_write(arguments, state.traversal.active_unknown_id)
     cache_key = _tool_cache_key(name, arguments)
     if cache_key in state.caches.tool:
         cached_observation_id = state.caches.tool_observation_ids.get(cache_key, "")
+        state.progress.discovery_since_record += 1
+        if cached_observation_id and cached_observation_id not in state.observations.pending_ids:
+            state.observations.pending_ids.append(cached_observation_id)
         state.progress.duplicate_no_progress_total += 1
         if state.progress.duplicate_no_progress_signature == cache_key:
             state.progress.duplicate_no_progress_count += 1
@@ -1021,6 +1171,14 @@ def _handle_discovery(
         _read_from_file_cache(arguments, state.caches.read_file) if name == "read" else None
     )
     if cached_output is not None:
+        _validate_tool_contract(
+            name, target_unknown_ids=_target_unknown_ids(arguments),
+            reason=str(arguments.get("reason") or "").strip(),
+            orientation=bool(arguments.get("orientation")),
+            analysis=_analysis_with_recorded_unknowns(runtime.analysis, state.findings.recorded),
+            discovery_contract=_extract_discovery_contract(dict(arguments)),
+            relax_discovery_contract=(runtime.semantic_gate_enabled and _get_investigation_phase(state) == InvestigationPhase.REPAIR),
+        )
         output = cached_output
         yield start_event(call_id, registry.event_type(name), _tool_event(
             name,
@@ -1073,11 +1231,22 @@ def _dispatch_tool_calls(
 ) -> Iterator[DispatchAction]:
     round_error_names: set[str] = set()
     asked_clearify_ids: set[str] = set()
+    batch_active_id = state.traversal.active_unknown_id
     for raw_call in tool_calls:
         call_id = raw_call.get("id") or f"call-{uuid4().hex[:8]}"
         function = raw_call.get("function") or {}
         name = function.get("name") or ""
         arguments = {}
+        select_active(state.traversal, state.findings.recorded, runtime.analysis)
+        if state.traversal.active_unknown_id != batch_active_id:
+            output = json.dumps({
+                "skipped": True, "reason": "Active Unknown changed; replan remaining calls next round.",
+                "active_unknown_id": state.traversal.active_unknown_id,
+                "active_path": state.traversal.active_path,
+            }, ensure_ascii=False)
+            state.messages.append(_tool_message(call_id, output))
+            yield start_event(call_id, "tool", _tool_event(name, {}, output, description="Investigation focus changed"))
+            continue
         if name == "load_skill":
             _, output, _ = execute_skill_tool_call(raw_call)
             yield from skill_runtime.pop_events()
@@ -1096,6 +1265,18 @@ def _dispatch_tool_calls(
             )
             if name == "record_investigation_findings":
                 arguments = _record_arguments(arguments)
+            if _needs_reflection(state) and name not in {
+                "record_investigation_findings", "resolve_unknowns", "clearify",
+                "audit_investigation", "finish_investigation",
+            } and not verification_request:
+                output = json.dumps({
+                    "skipped": True, "code": "reflection_required",
+                    "required_tool": "record_investigation_findings",
+                    "message": "Record the evidence and the next discovered child before more discovery.",
+                })
+                state.messages.append(_tool_message(call_id, output))
+                yield start_event(call_id, "tool", _tool_event(name, arguments, output, description="Investigation checkpoint"))
+                continue
             if verification_request and name == "subagent":
                 arguments = {
                     "agent": "hypothesis-verifier",
@@ -1122,11 +1303,14 @@ def _dispatch_tool_calls(
                         "Stop after one independent verdict for this atomic hypothesis."
                     ),
                 }
+            select_active(state.traversal, state.findings.recorded, runtime.analysis)
+            if name != "audit_investigation":
+                validate_active_write(arguments, state.traversal.active_unknown_id)
             if name not in allowed_tool_names:
-                if _recorded_resolves_initial_unknowns(
+                if audit_complete(
                     state.findings.recorded,
                     runtime.analysis,
-                    repair_ids=semantic_repair_required_ids,
+                    state.observations.items,
                 ) and name != "finish_investigation":
                     output = json.dumps({
                         "error": "investigation_already_resolved",
@@ -1203,6 +1387,66 @@ def _dispatch_tool_calls(
                     "the blocked discovery call with the same arguments."
                 )})
                 continue
+            if name == "audit_investigation":
+                _require_control_reason(arguments, name)
+                limit = int(runtime.effort_profile.get("max_audit_cycles", {"fast": 1, "standard": 2, "deep": 3}.get(runtime.analysis.get("effort"), 2)))
+                if limit and state.traversal.audit_cycle >= limit:
+                    state.control.stop_investigation = True
+                    state.control.finalization_reason = "Root Audit attempt budget exhausted; investigation remains incomplete."
+                    output = json.dumps({"error": "audit_budget_exhausted", "audit_cycle": state.traversal.audit_cycle})
+                    state.messages.append(_tool_message(call_id, output))
+                    yield start_event(call_id, "tool", _tool_event(name, arguments, output, description="Root Audit", status="error"))
+                    break
+                # Failed quality checks are audit attempts too, not a free retry loop.
+                state.traversal.audit_cycle += 1
+                state.findings.recorded["audit_cycle"] = state.traversal.audit_cycle
+                state.findings.recorded = _apply_direct_resolution_gate(
+                    state.findings.recorded, state.observations.items,
+                    strict_grounding=runtime.semantic_gate_enabled and _analysis_requests_implementation(runtime.analysis),
+                )
+                quality_decision = FinishDecision.ACCEPT
+                # Check the same evidence prerequisites as final packaging before signing.
+                for resolution in state.findings.recorded.get("resolutions", []):
+                    if resolution.get("status") != "resolved":
+                        continue
+                    issues = _require_file_reads([resolution], state.observations.items, runtime.workspace_dir)
+                    if runtime.workspace_dir:
+                        issues += _require_lsp_definition_reads([resolution], state.observations.items, runtime.workspace_dir)
+                    if issues:
+                        resolution["status"] = "partially_resolved"
+                        issues = list(dict.fromkeys(issues))
+                        resolution["reason"] = "; ".join(issues)
+                        state.control.evidence_gaps[resolution["unknown_id"]] = issues
+                        quality_decision = FinishDecision.REPAIR
+                reopen_parents(state.findings.recorded, runtime.analysis)
+                if quality_decision is FinishDecision.ACCEPT:
+                    quality_decision = yield from _decide_finish_transition(state, runtime)
+                if quality_decision is not FinishDecision.ACCEPT:
+                    output = json.dumps({
+                        "error": "resolution_quality_incomplete", "next_action": quality_decision.value,
+                        "open_unknowns": open_blockers(state.findings.recorded, runtime.analysis),
+                        "evidence_gaps": state.control.evidence_gaps,
+                        "audit_cycle": state.traversal.audit_cycle,
+                        "instruction": "Supply the listed missing evidence; do not repeat an unchanged resolution.",
+                    }, ensure_ascii=False)
+                    state.control.required_next_tool = ""
+                    state.messages.append(_tool_message(call_id, output))
+                    yield start_event(call_id, "tool", _tool_event(name, arguments, output, description="Root Audit requires repair", status="error"))
+                    break
+                additions = prepare_new_unknowns(arguments.get("new_unknowns", []), state.findings.recorded, runtime.analysis, origin="root_audit")
+                candidate = _merge_recorded_findings(state.findings.recorded, {"new_unknowns": additions})
+                candidate["resolutions"] = [dict(r) for r in candidate.get("resolutions", [])]
+                reopen_parents(candidate, runtime.analysis)
+                audit = normalize_audit(arguments, candidate, runtime.analysis, state.observations.items)
+                candidate["audit_result"] = audit
+                candidate["audit_cycle"] = state.traversal.audit_cycle
+                state.findings.recorded = candidate
+                state.control.finish_evidence_blocked = False
+                state.control.required_next_tool = ""
+                output = json.dumps({"audit_result": audit, "new_unknowns": additions, "audit_cycle": state.traversal.audit_cycle}, ensure_ascii=False)
+                yield start_event(call_id, "tool", _tool_event(name, arguments, output, description="Root Audit"))
+                state.messages.append(_tool_message(call_id, output))
+                break
             if name == "resolve_unknowns":
                 yield from _handle_resolve(
                     state,
@@ -1283,23 +1527,7 @@ def _dispatch_tool_calls(
                 partial_arguments = _record_arguments(partial_arguments)
             if name == "resolve_unknowns":
                 partial_arguments = _resolve_unknown_arguments(partial_arguments)
-                salvaged_resolutions = _salvage_resolution_candidates(
-                    partial_arguments,
-                    state.observations.items,
-                )
-                if salvaged_resolutions:
-                    state.findings.recorded = _merge_recorded_findings(
-                        state.findings.recorded,
-                        {"resolutions": salvaged_resolutions},
-                    )
-                    state.findings.recorded = _bind_grounding_evidence(
-                        state.findings.recorded,
-                        state.observations.items,
-                    )
-            if name == "record_investigation_findings" and _has_finding_fields(partial_arguments):
-                state.findings.recorded = _merge_recorded_findings(state.findings.recorded, partial_arguments)
-                state.observations.pending_ids.clear()
-                state.findings.last_quality_audit = {}
+            # Rejected submissions must not mutate the authoritative tree or resolutions.
             output = _tool_repair_error_json(
                 exc,
                 name,
@@ -1323,7 +1551,7 @@ def _dispatch_tool_calls(
                 "input": raw_arguments,
                 "output": output,
             })
-            if error_name == "finish_investigation" and not state.control.finish_evidence_blocked:
+            if error_name == "finish_investigation" and not state.control.finish_evidence_blocked and "Audit" not in str(exc):
                 # finish 参数错误（requires reason 等）后模型倾向停止，而停止会走自动
                 # finalize 吞掉失败（不完整的 investigation 流向下游导致
                 # patch_planning_failed）。hard-lock：参数类失败第一次就强制模型
@@ -1356,6 +1584,24 @@ def _dispatch_tool_calls(
                 "visibility": "diagnostic",
             })
             break
+    # Every call in an assistant batch needs a tool response, including calls after a control break.
+    answered = {m.get("tool_call_id") for m in state.messages if m.get("role") == "tool"}
+    for raw_call in tool_calls:
+        if raw_call.get("id") and raw_call["id"] not in answered:
+            state.messages.append(_tool_message(raw_call["id"], json.dumps({
+                "skipped": True, "reason": "Investigation control changed; replan next round.",
+            })))
+    select_active(state.traversal, state.findings.recorded, runtime.analysis)
+    yield {"op": "update", "id": runtime.stage_id, "patch": {
+        "analysis_id": runtime.analysis.get("id", ""),
+        "investigation_tree": {
+            "nodes": all_unknowns(state.findings.recorded, runtime.analysis),
+            "resolutions": state.findings.recorded.get("resolutions", []),
+            "active_unknown_id": state.traversal.active_unknown_id,
+            "active_path": list(state.traversal.active_path),
+            "phase": "research" if state.traversal.active_unknown_id else "audit",
+        },
+    }}
     if state.control.final is not None:
         return DispatchAction.TERMINATE
     if state.control.stop_investigation:
@@ -1480,6 +1726,9 @@ def _initialize_investigation_stream(
         if isinstance(item, dict) and item.get("fresh", True)
     ])
     state.findings.recorded = _continued_recorded_findings(previous_findings, state.observations.items)
+    ensure_goal_root(state.findings.recorded, analysis, message)
+    state.traversal.bootstrapped = bool(all_unknowns(state.findings.recorded, analysis) or state.findings.recorded.get("tree_bootstrapped"))
+    state.traversal.audit_cycle = int(state.findings.recorded.get("audit_cycle", 0))
     state.control.finalization_reason = (
         "Investigation model stopped before finish_investigation; summarizing observed facts."
     )
@@ -1507,18 +1756,12 @@ def _finish_investigation_stream(
     state: InvestigationState,
     runtime: InvestigationRuntime,
 ) -> Iterator[dict]:
-    if state.control.final is None and state.control.stop_investigation:
+    if state.control.final is None:
         state.control.final = _runtime_recovered_investigation(
             state.control.finalization_reason,
             runtime.analysis,
             state.observations.items,
             state.findings.recorded,
-        )
-    elif state.control.final is None:
-        state.control.final = yield from _finalize_investigation(
-            state,
-            runtime,
-            reason=state.control.finalization_reason,
         )
     if state.findings.last_quality_audit:
         state.control.final["quality_audit"] = state.findings.last_quality_audit
@@ -1531,9 +1774,30 @@ def _finish_investigation_stream(
     )
 
     implementation_intent = _analysis_requests_implementation(runtime.analysis)
+    final = state.control.final
+    final["new_unknowns"] = all_unknowns(state.findings.recorded, runtime.analysis)
+    final["audit_result"] = state.findings.recorded.get("audit_result", {})
+    final["audit_cycle"] = state.traversal.audit_cycle
+    final["tree_bootstrapped"] = state.traversal.bootstrapped
+    final["active_unknown_id"] = state.traversal.active_unknown_id
+    final["active_path"] = state.traversal.active_path
+    final["unknowns"] = [n for n in final["new_unknowns"] if is_open(n, final)]
+    audited = audit_complete(state.findings.recorded, runtime.analysis, state.observations.items)
+    final["ready_for_patch_planning"] = bool(implementation_intent and audited and final.get("ready_for_patch_planning") and not open_blockers(final))
+    if not audited or open_blockers(final):
+        final["audit_result"] = {**final["audit_result"], "complete": False}
+        final["runtime_failure"] = True
+        final["recovery_reason"] = state.control.finalization_reason
+        final["summary"] = "Investigation incomplete: " + state.control.finalization_reason
     yield {"op": "update", "id": runtime.stage_id, "patch": {
         "state": "done",
         "phase": "patch_planning_ready" if state.control.final.get("ready_for_patch_planning") and implementation_intent else "done",
+        "analysis_id": runtime.analysis.get("id", ""),
+        "investigation_tree": {
+            "nodes": final["new_unknowns"], "resolutions": final.get("resolutions", []),
+            "active_unknown_id": "", "active_path": [],
+            "phase": "incomplete" if final.get("runtime_failure") else "done",
+        },
     }}
     step = _step_result(state.control.final, implementation_intent=implementation_intent)
     state.control.final["step_result"] = step
@@ -1574,6 +1838,20 @@ def _run_investigation_round(
         current_round_index=round_index,
         previous_rounds_usage=state.usage.total,
     )
+    yield {"op": "update", "id": runtime.stage_id, "patch": {
+        "phase": _current_phase.value,
+        "active_unknown_id": state.traversal.active_unknown_id,
+        "active_path": list(state.traversal.active_path),
+        "audit_cycle": state.traversal.audit_cycle,
+        "analysis_id": runtime.analysis.get("id", ""),
+        "investigation_tree": {
+            "nodes": all_unknowns(state.findings.recorded, runtime.analysis),
+            "resolutions": state.findings.recorded.get("resolutions", []),
+            "active_unknown_id": state.traversal.active_unknown_id,
+            "active_path": list(state.traversal.active_path),
+            "phase": _current_phase.value,
+        },
+    }}
     tool_calls = yield from _collect_tool_calls(
         state,
         directive_prompt,
@@ -1649,6 +1927,7 @@ def _investigation_tools() -> list[dict]:
         for tool in registry.list_for_capability(INVESTIGATION_CAPABILITY)
     ]
     tools.append(_resolve_unknowns_tool_schema())
+    tools.append(_audit_investigation_tool_schema())
     tools.append(_record_findings_tool_schema())
     tools.append(_finish_tool_schema())
     return tools
@@ -1674,7 +1953,13 @@ def _read_from_file_cache(arguments: dict, file_cache: dict[str, str]) -> str | 
         return json.dumps({
             "title": f"read {path} L{start+1}-{min(end, len(lines))} (cached)",
             "output": "\n".join(selection),
-            "metadata": {"cached": True},
+            "metadata": {
+                "cached": True, "path": path,
+                "start_line": start + 1, "end_line": min(end, len(lines)),
+                "target_unknown_ids": list(arguments.get("target_unknown_ids") or []),
+                "reason": arguments.get("reason", ""),
+                "investigation_contract": _extract_discovery_contract(dict(arguments)),
+            },
         }, ensure_ascii=False)
     return None
 
@@ -1781,13 +2066,12 @@ def _pending_clearify_unknown(
     for item in candidates:
         if (
             item.get("blocking")
-            and item.get("type") in ("product_decision", "engineering_decision")
+            and item.get("type") == "product_decision"
             and not any(_same_unknown_id(item["id"], completed_id) for completed_id in completed)
             and not any(_same_unknown_id(item["id"], delegated_id) for delegated_id in delegated)
             and (
                 item.get("resolution_strategy") == "clearify"
                 or any(_same_unknown_id(item["id"], pending_id) for pending_id in needs_clearify)
-                or item.get("type") == "engineering_decision"
             )
         ):
             result = dict(item)
@@ -1818,11 +2102,7 @@ def _unknown_blocks_finish(unknown_id: str | None, analysis: dict | None, record
 def _analysis_with_recorded_unknowns(analysis: dict, recorded: dict) -> dict:
     merged = {
         **analysis,
-        "unknowns": _merge_unknowns(
-            _initial_unknowns(analysis)
-            + _unknowns(recorded.get("unknowns"))
-            + _unknowns(recorded.get("new_unknowns"))
-        ),
+        "unknowns": all_unknowns(recorded, analysis),
     }
     # 已 resolve 的 unknown 会被 _open_analysis_unknowns 从 unknowns 移除，
     # 但它们仍是任务契约的一部分——保留 resolutions 让校验层能识别（模型
@@ -2063,6 +2343,7 @@ def _clearify_resolution_records(arguments: dict, answer: dict | None, state: In
         {
             "unknown_id": unknown_id,
             "status": status,
+            "kind": "user_decision",
             "answer": text,
             "evidence": [],
             "belief_ids": [],

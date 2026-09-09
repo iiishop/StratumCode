@@ -58,7 +58,7 @@ def graph_data(workspace_dir: str) -> dict:
         })
     return {
         "nodes": nodes,
-        "edges": edges,
+        "edges": list({edge["id"]: edge for edge in edges}.values()),
         "records": data["records"],
         "diagnostics": _diagnostics(workspace_dir, data["records"], supported_record_ids, data["links"]),
     }

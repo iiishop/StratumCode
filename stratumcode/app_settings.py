@@ -88,6 +88,7 @@ EFFORT_PROFILES = {
         "quality_gate": "basic",
         "subagent_enabled": False,
         "limits": {
+            "max_audit_cycles": {"label": "Root Audit cycles", "description": "Safety budget for Root Audit; 0 means unlimited.", "default": 1},
             "acceptance_limit": {
                 "label": "Acceptance criteria",
                 "description": "Maximum acceptance criteria for fast tasks. 0 means unlimited.",
@@ -116,6 +117,7 @@ EFFORT_PROFILES = {
         "quality_gate": "semantic",
         "subagent_enabled": True,
         "limits": {
+            "max_audit_cycles": {"label": "Root Audit cycles", "description": "Safety budget for Root Audit; 0 means unlimited.", "default": 2},
             "acceptance_limit": {
                 "label": "Acceptance criteria",
                 "description": "Maximum acceptance criteria for standard tasks. 0 means unlimited.",
@@ -144,6 +146,7 @@ EFFORT_PROFILES = {
         "quality_gate": "strict",
         "subagent_enabled": True,
         "limits": {
+            "max_audit_cycles": {"label": "Root Audit cycles", "description": "Safety budget for Root Audit; 0 means unlimited.", "default": 3},
             "acceptance_limit": {
                 "label": "Acceptance criteria",
                 "description": "Maximum acceptance criteria for deep tasks. 0 means unlimited.",
