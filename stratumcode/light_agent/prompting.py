@@ -31,6 +31,13 @@ def build_light_agent_prompt(message: str, context: list[str], workspace_dir: st
         ],
         "context": context,
         "memory_context": memory_context,
+        "coordinator_protocol": [
+            "Every response must select a tool action; free-form assistant text never ends a task. Use finish_light_response to deliver an answer, including ordinary conversation. Put the answer only in that tool's answer field.",
+            "Initially choose between immediate answer delivery, begin_light_lookup for a single bounded fact/shallow overview, or delegation. Discovery tools are exposed only after begin_light_lookup. For deep review or causal debugging, delegate directly; do not label it a lookup to gain local read tools.",
+            "Delegate unresolved complex work with run_investigation, and authorized implementation with the existing write workflows. After delegation, local discovery is no longer available: use the specialist result for reporting or continue through the specialist workflow.",
+            "Workflow transitions, delegation and finish_light_response must each be the sole tool call in their response. Batch independent reads only within the current lookup question.",
+            "finish_light_response requires answer and unresolved_questions, not a status. Runtime derives complete/partial from actual outcomes and remaining in-scope gaps. Deferred follow-ups are not in-scope gaps. Provenance is runtime-owned. Deliver useful findings even if a delegate is incomplete, explicitly distinguish accepted conclusions, uncertainty and follow-up verification; do not claim overall success for an incomplete task.",
+        ],
         "decision_policy": {
             "direct_answer": [
                 "Use when the answer does not depend on unknown project facts.",
@@ -45,6 +52,7 @@ def build_light_agent_prompt(message: str, context: list[str], workspace_dir: st
             "run_investigation": [
                 "Use when the answer requires grounded project investigation but should not write files.",
                 "Use for broad evaluations such as project review; do not personally expand every review axis.",
+                "Delegate cross-layer debugging, intermittent failures, persistence/concurrency/lifecycle problems, and reports that a previous fix did not work. A narrow symptom can require deep investigation. After minimal routing, pass the symptom, previous attempted fix and verified code locations; do not first solve the root cause locally. Investigation is read-only and does not authorize another patch.",
                 "The runtime will inject an authored task_analysis argument.",
             ],
             "run_write_loop": [
@@ -62,6 +70,7 @@ def build_light_agent_prompt(message: str, context: list[str], workspace_dir: st
             "Do not turn a broad request into a long local investigation when the delegated investigator is the right tool.",
             "Prefer delegation once the workflow choice is clear.",
             "Do not use direct read-only tools as a substitute for delegated investigation.",
+            "When competing explanations remain, identify the missing observation and delegate instead of repeatedly reconsidering the same evidence. Do not replay hypotheses you already ruled out without new evidence. Example: events still disappear after a flush-at-idle fix requires save/acknowledgement/restore investigation, not another speculative fix.",
         ],
         "task_state_rules": [
             "Internal fallback task memory is not the user request.",
@@ -69,14 +78,13 @@ def build_light_agent_prompt(message: str, context: list[str], workspace_dir: st
             "For run_investigation and run_write_loop, task authoring is handled by the runtime.",
         ],
         "tool_call_requirements": [
-            "Before calling tools, put a concise user-visible reason in assistant content.",
+            "Select the next tool action directly; do not produce a separate deliberation transcript in assistant content.",
             "When a tool schema has a reason or operation_summary field, fill it with the concrete reason for that call.",
             "The reason must state the uncertainty resolved or decision enabled by that call.",
         ],
         "thinking_content_shape": [
-            "State your current judgment.",
-            "State the remaining uncertainty.",
-            "State why the next tool or delegation path is appropriate.",
+            "Express the remaining uncertainty and action concisely in the selected tool's question/reason/message fields.",
+            "Deliver the established result, relevant evidence and unresolved limitations in finish_light_response.answer in the user's language, never in free-form assistant content.",
         ],
     })
 
@@ -94,8 +102,8 @@ def build_task_authoring_prompt(base_analysis: dict, messages: list[dict]) -> st
             "Do not add or change effort; it is controlled outside this authoring step.",
             "Unknowns must be concrete uncertainties that investigation or design must resolve.",
             _unknown_limit_rule(base_analysis),
-            "Merge related uncertainties instead of listing every review axis.",
-            "For broad requests such as project evaluation, create a small set of synthesis unknowns rather than exhaustive category unknowns.",
+            "Keep root questions at the requested outcome level; never merge independent factual questions into a parenthesized checklist.",
+            "For broad evaluations, create synthesis roots such as 'What assessment does the implementation of each frontend component support?' and 'What assessment does the frontend architecture support?'. Preserve all requested coverage in acceptance criteria. These roots require investigation children, not flat bulk research: the investigator establishes the inventory, registers each subject's unanswered question, and recursively investigates it before synthesis. Preserve verified inventory in clues/scope, not as assumed implementation knowledge.",
             "Every unknown is ONE independently answerable question, including each root. Express the requested goal as a question, not a copied requirement or command. Put independent goal questions in separate root nodes (parent_id=null), never a compound checklist. Discovered detail questions belong to investigation, not a preplanned tree.",
             "For run_investigation, prefer read_only task contracts and do not create implementation-oriented unknowns.",
             "For run_write_loop, focus unknowns on design inputs, files, validation, and patch risks.",
@@ -131,8 +139,14 @@ def build_task_authoring_prompt(base_analysis: dict, messages: list[dict]) -> st
                 "blocking": True,
                 "type": "code_fact|doc_fact|runtime_fact|product_decision|engineering_decision|risk",
                 "why": "string",
-                "resolution_strategy": "investigate_project|clearify|deferred",
+                "resolution_strategy": "investigate_project|clearify",
                 "acceptance_criteria_ids": ["AC1"],
+            }],
+            "follow_ups": [{
+                "id": "FOLLOWUP1", "question": "One out-of-scope verification question",
+                "reason": "Why current read-only investigation cannot answer it",
+                "required_capability": "Execution, reproduction environment, or other missing capability",
+                "status": "pending",
             }],
             "hypotheses": [{"text": "string", "certainty": "certain|uncertain|guess"}],
             "clues": [{"kind": "file|line|symbol|route|other", "value": "string", "path": "string"}],
@@ -173,8 +187,8 @@ def compact_messages(messages: list[dict]) -> list[dict]:
 def _unknown_limit_rule(base_analysis: dict) -> str:
     limit = _unknown_limit(base_analysis)
     if not limit:
-        return "Unknowns are unlimited by settings, but still prefer the smallest sufficient set."
-    return f"Unknowns must contain at most {limit} items; merge related uncertainties instead of listing more."
+        return "Initial root questions are unlimited by settings; prefer the smallest sufficient set of synthesis roots, not a prebuilt detail tree."
+    return f"Initial unknowns must contain at most {limit} synthesis roots. This is not a limit on subsequently discovered children; do not compress independent detail questions into one root."
 
 
 def _unknown_limit(base_analysis: dict) -> int:

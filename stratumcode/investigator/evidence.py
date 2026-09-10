@@ -618,8 +618,7 @@ def _enforce_resolution_evidence(resolutions: list[dict], initial_unknowns: list
         if not source:
             continue
         if (
-            source.get("blocking")
-            and source.get("resolution_strategy") == "investigate_project"
+            source.get("resolution_strategy") == "investigate_project"
             and resolution.get("status") == "resolved"
             and not (resolution.get("evidence") or resolution.get("belief_ids"))
             and not _is_user_product_decision(resolution, initial_unknowns)

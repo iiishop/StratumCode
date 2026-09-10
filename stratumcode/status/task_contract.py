@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 
 from .. import app_settings
+from ..followups import partition_follow_ups
 
 TASK_AUTHORITIES = {"user_explicit", "user_reference", "user_observed_failure", "verified_fact", "derived"}
 AUTHORITATIVE_AUTHORITIES = {"user_explicit", "user_reference", "user_observed_failure"}
@@ -265,7 +266,7 @@ def _unknowns(value, criteria=None) -> list[dict]:
             "acceptance_criteria_ids": accepted_ids,
             **({
                 field: raw[field]
-                for field in ("origin", "reference_id")
+                for field in ("origin", "reference_id", "required_capability", "related_unknown_ids")
                 if isinstance(raw, dict) and field in raw
             }),
         })
@@ -283,7 +284,7 @@ def _normalize_unknown_policy(unknown_type: str, strategy: str, blocking: bool) 
     Returns:
         规范化后的 type、strategy 和 blocking 三元组。
     """
-    if strategy == "deferred" or not blocking:
+    if strategy == "deferred":
         return unknown_type, "deferred", False
     if strategy == "clearify":
         if unknown_type != "product_decision":
@@ -331,6 +332,7 @@ def _ensure_task_contract(analysis: dict) -> dict:
         analysis.get("unknowns"),
         analysis.get("acceptance_criteria"),
     )
+    analysis["unknowns"], analysis["follow_ups"] = partition_follow_ups(analysis)
     return analysis
 
 

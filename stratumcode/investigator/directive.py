@@ -10,7 +10,7 @@ from .domain import (
 from .evidence import _resolution_evidence_lines
 from .state import InvestigationPhase
 from .tools import _phase_tool_choice, _phase_tools
-from .tree import open_blockers, audit_complete
+from .tree import pending_unknowns, audit_complete
 
 
 def _clearify_pending_evidence_unknowns(recorded: dict) -> list[dict]:
@@ -79,9 +79,9 @@ def _resolution_required_prompt(
         if isinstance(item, dict)
     }
     return "\n".join([
-        "Existing project evidence is sufficient to write an explicit resolution.",
-        "Do not call more discovery tools for these unknowns.",
-        "Call resolve_unknowns with resolutions for: " + ", ".join(unknown_ids),
+        "Related evidence is available, but relevance does not establish sufficiency.",
+        "Read missing implementation details before concluding; discovery tools remain available.",
+        "When the evidence answers the question, call resolve_unknowns for: " + ", ".join(unknown_ids),
         "Each resolution must include unknown_id, status, answer, observation_ids or belief_ids, and reason.",
         "If an unknown is still not fully resolved, record a partially_resolved resolution naming the precise missing evidence.",
         "Questions:",
@@ -169,7 +169,7 @@ def _investigation_directive(
             _phase_tool_choice(InvestigationPhase.REPAIR),
             prompt,
         )
-    if not open_blockers(recorded_findings, analysis):
+    if not pending_unknowns(recorded_findings, analysis):
         if finish_evidence_blocked:
             prompt = (
                 "The previous finish attempt was rejected because a resolution "
@@ -191,11 +191,12 @@ def _investigation_directive(
                 InvestigationPhase.AUDIT,
                 _phase_tools(InvestigationPhase.AUDIT, tools=tools),
                 _phase_tool_choice(InvestigationPhase.AUDIT),
-                "Root Audit: review the original request, full task contract, all nodes, resolutions, beliefs and evidence. "
+                "Root Audit checks request coverage and cross-question consistency, not node acceptance again. Trust accepted findings. "
+                "Only newly observed contradictory evidence justifies reopen_investigation_unknown. "
                 "Search for material counterexamples in intended behavior, success, scope, constraints and decisions (requirement), "
                 "and architecture, ownership, integrations, runtime risk and validation paths (solution). "
                 "Represent every incomplete domain as blocking new_unknowns or existing open blockers. "
-                "Independent goal gaps may be new root questions with parent_id=null; specific gaps attach to the relevant existing node. Each node asks one question, and independent gaps are separate nodes. Consider remaining non-blocking risks explicitly in reasons. "
+                "New gaps must be new root questions with parent_id=null and related_unknown_ids linking accepted findings. Never add dependencies under accepted nodes or repeat answered questions. Each node asks one question. Out-of-scope checks are follow-ups, not blockers. "
                 "For non-project read-only requests, assess solution applicability without unnecessary repository inspection.",
             )
         return (

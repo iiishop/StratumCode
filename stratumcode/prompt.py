@@ -215,8 +215,10 @@ Rules:
   deliverable.
 - For audit/report requests that name multiple categories, create at least one
   unknown for each requested category before splitting any one category into
-  sub-questions. If the unknown budget is tight, combine sub-questions inside a
-  category instead of dropping another requested category.
+  sub-questions. Root limits constrain initial synthesis questions, not subsequent
+  investigation children. Preserve requested coverage in acceptance criteria;
+  never pack independent sub-questions into a root to fit a budget. Investigation
+  discovers the relevant subjects and registers their unanswered questions as children.
 - Write one acceptance criterion per independent observable final state or state
   transition, usually 1-4 criteria. Never split by file or implementation step.
 - For a question or investigation, an evidence-backed answer or determination is
@@ -325,19 +327,39 @@ Principles:
   Do not replace requested audit categories with framework or project-structure facts.
 - The runtime preserves the goal-level root questions from task analysis, including multiple independent roots.
   Every Unknown, including each root, is ONE independently answerable interrogative, not a requirement.
-  Research ONLY active_unknown. Do not generate a plan, checklist or prebuilt tree of Unknowns.
-  Create a child only when studying the current question reveals a concrete unanswered dependency.
+  Research ONLY active_unknown. Do not invent an ungrounded checklist or prebuild hypothetical descendants.
+  A goal-level synthesis question is not an atomic leaf just because it has one question mark.
+  For collection-wide work (each/all components, modules, endpoints), first establish the relevant
+  inventory with scope-level evidence, reusing a verified inventory already in context when available.
+  Once the subjects are identified, register ONE child question per subject needing investigation
+  BEFORE inspecting its implementation. A known component with unknown behavior is already a concrete
+  unanswered dependency; it need not contain a surprising bug or newly discovered symbol to merit a node.
+  This evidence-backed decomposition is required investigation, NOT speculative planning.
+  For a synthesis question spanning independent concerns, likewise register the unanswered factual
+  concerns established by the request and project evidence before investigating them separately.
+  Keep the parent for scope discovery and eventual synthesis, not a bucket for every subject's reads.
   If several independent questions arise together, create separate sibling nodes under the current node.
   There is no one-child-per-call limit. Never join independent questions into a paragraph to fit one node.
-  Example: "What happens on conversation termination?", "How do flushSessionSave and scheduleSave interact?",
-  and "Where is agentStatus set to idle?" are three siblings, NOT one multi-question node.
+  Example: after listing BranchSelector.vue and CloneDialog.vue for a component review, register
+  "How does BranchSelector implement branch selection?" and "How does CloneDialog implement cloning?"
+  as siblings. Study BranchSelector first; if its state ownership or failure recovery is unanswered,
+  register those distinct questions beneath BranchSelector before following their code paths.
+  For an architecture review, "Who owns shared frontend state?", "How are API calls organized?" and
+  "How are global and component styles isolated?" are separate factual children when in scope,
+  not a single root-level sequence of store/API/style reads. Reuse established component evidence.
   Higher nodes explain the goal; deeper nodes establish the specific details needed by their parent.
-  Descend into the first discovered child and recursively finish its entire subtree. Return to its parent
-  and reconsider the question with the child's answer. Discover further children if needed; otherwise
+  Descend into the first discovered child and recursively finish its entire subtree. If it has an unresolved
+  sibling, continue that sibling directly; do not re-record or audit the parent between siblings.
+  After all child subtrees are complete, return to their parent
+  and reconsider the question with its children's answers. Discover further children if needed; otherwise
   resolve the parent only when its question is answered and no unanswered required dependency remains.
   Only then advance to its next sibling. Apply the same rule between independent root questions.
-  After a small batch of evidence calls the runtime forces a reflection checkpoint. Record grounded
-  findings and the next concrete child before looking up a narrower detail. For read-only requests,
+  Register discovered children immediately; do not wait for a forced reflection checkpoint or finish
+  their research under the parent first. "Next inspect the remaining components/concerns" with an empty
+  new_unknowns array is NOT same-question continuation. Same-leaf continuation means more evidence for
+  one answer target (for example a second read range), not another member of a collection.
+  Do not create a node for every tool call or already answered fact, duplicate existing children,
+  or reconstruct a decorative tree after completion. For read-only requests,
   implementation mechanisms are valid factual children, not prohibited design choices.
   For non-project requests avoid unrelated workspace inspection and audit the requested deliverable.
 - Use clearify only for an unresolved blocking product_decision. A direct question
@@ -374,10 +396,19 @@ Principles:
   material beliefs/new unknowns, not as an unlock button.
 - Resolve blocking children before their parent. No resolution, partially_resolved
   and needs_clearify remain open. Only non-blocking nodes may be deferred.
+  Non-blocking is not the same as deferred. Keep answerable project questions in the tree.
+  Work requiring execution, reproduction, or unavailable capabilities belongs to the separate
+  follow-up ledger, not the current investigation. Mark such entries resolution_strategy=deferred
+  with a concrete why; the runtime transfers them out of the tree. Report these limitations in
+  the final answer, never treat postponed verification as verified evidence or silently execute it.
+  Each resolution must state the answer, scope, limitations and its real observation/belief
+  references. Acceptance runs at node submission; resolve only when its children and evidence
+  suffice. Do not defer evidence validation until the final audit.
 - After current blockers close, call audit_investigation. Review requirement
-  semantics and solution evidence against the entire contract. Every material gap
-  must be a normal new_unknown (domain=requirement|solution, parent_id=the relevant existing node;
-  global gaps attach to the goal root). The runtime reopens affected ancestors.
+  coverage and cross-question consistency against the contract, trusting accepted node results.
+  Every newly discovered gap is a new root Unknown (parent_id=null), optionally linked via
+  related_unknown_ids. Do not add dependencies under accepted nodes or re-audit their unchanged
+  evidence. Only a real new contradictory observation justifies the exceptional reopen tool.
   Finish only after a complete, current Root Audit. New evidence or findings require re-audit.
 - When requested behavior is attached to a state transition, search the state
   identifier and account for every writer or producer, including event handlers,
@@ -397,8 +428,10 @@ Principles:
   Dependencies use the active node as parent. Requirement and solution children may
   recursively create each other. Investigate material engineering constraints;
   leave detailed design choices to Design once requirements and facts are established.
-- Call record_investigation_findings with only a reason when observations should
-  be recorded. The runtime will request finding slots. Then finish with
+- Call record_investigation_findings with reason, new_unknowns, and next_inquiry_reason.
+  Register discovered child questions explicitly; runtime slots record evidence-backed findings.
+  Use an empty new_unknowns only for the same leaf, existing children, or synthesis with no remaining gap.
+  Keep reasons concise rather than repeating the accumulated report. Then finish with
   patch_planning_facts when code work should continue.
 
 The runtime enforces tool targeting, allowed transitions, evidence references,
@@ -440,8 +473,9 @@ User request:
 
 ## Tool usage
 - read accepts a single path, or a paths array (1-8 files) to read several files
-  in one call. When multiple files need inspection, prefer paths over repeated
-  single-path read calls; results are separated by ==== path ==== markers.
+  in one call. Batch files only when they provide evidence for the SAME active
+  leaf question, not to investigate sibling components under their parent.
+  Results are separated by ==== path ==== markers.
 
 {round_limit_text}"""
 
@@ -452,7 +486,9 @@ Use only the tool results already present in this conversation.
 
 If explicit unknowns can be resolved from existing observations, call
 resolve_unknowns. If broader findings still need slot recording, call
-record_investigation_findings with only a reason. The runtime derives task_updates
+record_investigation_findings with reason, new_unknowns and next_inquiry_reason.
+Keep concrete unanswered dependencies explicit rather than claiming completion.
+The runtime derives task_updates
 and carries unresolved contract unknowns.
 
 Then call finish_investigation with reason, recommended_next_step, and

@@ -609,6 +609,7 @@ def _analysis_from_slots(message: str, context: list[str], intent_slot: dict, ac
         "reference_baselines": intent_meta.get("reference_baselines", []),
         "investigation_targets": intent_meta.get("investigation_targets", []),
         "unknowns": unknowns,
+        "follow_ups": unknowns_slot.get("follow_ups", []),
     }
     if execution_mode_recovered:
         data["analyzer_warnings"] = [

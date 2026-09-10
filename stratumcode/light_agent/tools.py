@@ -117,6 +117,8 @@ def light_tools() -> dict[str, LightTool]:
             description=(
                 "Run the existing investigation state for complex read-only codebase investigation. "
                 "Use this when simple read/grep/code_nav is not enough."
+                " Delegate intermittent bugs, cross-layer lifecycle/persistence issues, or a failed previous fix "
+                "after minimal routing; identifying the root cause belongs inside this investigation."
             ),
             parameters={
                 "type": "object",
@@ -285,6 +287,8 @@ def _run_subagent_tool(arguments: dict, workspace_dir: str, session_id: int | No
         "agent": agent,
         "events": _event_summary(events),
         "final": _last_output(events),
+        "completed": any(e.get("op") == "done" for e in events)
+                     and not any(e.get("op") == "error" or e.get("error") for e in events),
     })
 
 

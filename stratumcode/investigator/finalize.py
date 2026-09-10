@@ -95,6 +95,8 @@ from .util import _dedupe_strings, _round_indexes, _string_list
 def _audit_recorded_findings(
     state: InvestigationState,
     runtime: InvestigationRuntime,
+    *,
+    target_unknown_ids: set[str] | None = None,
 ) -> Iterator[dict]:
     initial_unknowns = all_unknowns(state.findings.recorded, runtime.analysis)
     target_resolutions = [
@@ -102,6 +104,7 @@ def _audit_recorded_findings(
         for item in state.findings.recorded.get("resolutions", [])
         if isinstance(item, dict)
         and _resolution_requires_semantic_audit(item, initial_unknowns)
+        and (target_unknown_ids is None or item.get("unknown_id") in target_unknown_ids)
     ]
     resolved_ids = [
         str(item.get("unknown_id") or "").strip()
@@ -1328,12 +1331,8 @@ def _drop_invalid_resolution_refs(
     repairs: list[str],
     workspace_dir: str = "",
 ) -> list[dict]:
-    file_issues = _require_file_reads(resolutions, observations, workspace_dir)
-    if workspace_dir:
-        lsp_issues = _require_lsp_definition_reads(resolutions, observations, workspace_dir)
-        file_issues = file_issues + lsp_issues
-    if file_issues:
-        raise ValueError("; ".join(file_issues))
+    # Provenance is the structured observation ledger, not paths guessed from prose.
+    # Packaging must not introduce a new acceptance policy after nodes were closed.
     evidence_ids = {
         str(item.get("id") or "").strip()
         for item in observations

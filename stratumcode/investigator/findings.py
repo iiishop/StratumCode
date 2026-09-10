@@ -70,7 +70,7 @@ def _record_slot_template(
     resolution_ids: list[str] | None = None,
 ) -> dict[str, JSONValue]:
     return {
-        "new_unknowns": "____",
+        "next_inquiry": "____",
         "beliefs": ["____" for _ in belief_observation_ids or []],
         "resolutions": ["____" for _ in resolution_ids or []],
     }
@@ -99,15 +99,21 @@ def _record_slot_contract(path: str) -> str:
             "Return a JSON array of objects with unknown_id, status, answer, observation_ids, belief_ids, reason. "
             "status is resolved, partially_resolved, needs_clearify, or deferred."
         ),
-        "new_unknowns": (
-            "Return one JSON object with questions (array), continuation (children, continue_current, or synthesize), and reason. "
+        "next_inquiry": (
+            "Return one JSON object with questions (array), continuation (children, continue_current, existing_children, or synthesize), and reason. "
+            "This internal next_inquiry object is distinct from the external tool's new_unknowns array. "
+            "If an existing child already covers the remaining question, use existing_children with questions=[]; do not recreate it. "
+            "Only propose dependencies of the active question. Once it is answered, use synthesize; do not propose work belonging to its parent before returning there. "
             "Decide the NEXT inquiry before summarizing findings. Each questions item has id, question, type, domain, parent_id, blocking, resolution_strategy. "
             "Read the record_reason carefully: a stated need to investigate a narrower mechanism is a discovered dependency NOW, "
+            "including each identified component/module in a collection review or independent factual concern in an architecture review. "
+            "A verified inventory establishes the subjects, not their implementations: register one unanswered question per subject before detailed reads. "
+            "'Next inspect the remaining components' requires children, not continue_current; a broad parent's wording does not make different subjects one leaf. "
             "not something to omit because it has not been investigated yet. For example, after identifying prompt builders, "
             "'how does skill content reach the model?' is a child under the current architectural question before reading skill_runtime. "
             "Use children with nonempty questions for these dependencies. Continue_current requires explaining why the next lookup "
             "tests the SAME atomic question rather than another mechanism. Synthesize means no further lookup is needed. "
-            "domain is requirement or solution. parent_id must be the active Unknown. Add only concrete dependencies discovered while studying it, not a speculative checklist. "
+            "domain is requirement or solution. parent_id must be the active Unknown. Decompose known scope or observed mechanisms, not hypothetical descendants. Reuse existing answers; do not manufacture questions for facts already established. "
             "resolution_strategy is investigate_project, clearify, or deferred. For read-only investigations, "
             "implementation mechanisms, state transitions and evidence flow ARE valid factual child questions. "
             "If the current question is still broad and the next lookup concerns a narrower unanswered fact, "
@@ -171,6 +177,8 @@ def _record_findings_by_slots(
     *,
     reason: str,
     required_resolution_ids: list[str] | None = None,
+    authored_questions: list[dict] | None = None,
+    next_inquiry_reason: str = "",
 ) -> Iterator[dict]:
     required_resolution_ids = required_resolution_ids or []
     belief_observation_ids = _dedupe_strings([
@@ -202,7 +210,7 @@ def _record_findings_by_slots(
             state.observations.items,
             state.findings.recorded,
             state.observations.pending_ids,
-            required_resolution_ids,
+            [state.traversal.active_unknown_id],
             belief_observation_ids,
             resolution_slot_ids,
         )},
@@ -213,7 +221,7 @@ def _record_findings_by_slots(
         "completed_child_answers": child_answers,
         "completed_child_observations": [_observation_context_view(o) for o in state.observations.items
                                          if o.get("id") in child_evidence],
-        "new_unknown_policy": "One independently answerable question per node, including roots. Register all concretely discovered independent questions as separate siblings with parent_id=active_unknown_id, in intended research order. Do not concatenate questions to satisfy a one-child limit: there is no one-child limit. Research one node at a time, recursively finish children and revisit their parent before advancing to a sibling. Keep the parent partial until every required dependency closes and no unanswered dependency remains. Do not invent a tree in advance.",
+        "new_unknown_policy": "One answer target per node. A known inventory with unexamined members requires per-subject children before detail reads; independent architectural concerns likewise require separate factual children. Finish all pending child subtrees before parent synthesis. Do not propose questions for an ancestor while its child is active; resolve the child first. Reuse existing answers and avoid speculative descendants.",
     }, ensure_ascii=False)})
     usage_events: list[dict] = []
 
@@ -222,7 +230,7 @@ def _record_findings_by_slots(
             path,
             resolution_slot_ids,
             required_resolution_ids,
-        ) or path == "new_unknowns"
+        ) or path == "next_inquiry"
         slot_prompt = _record_slot_prompt(
             path,
             prompt_text,
@@ -237,12 +245,12 @@ def _record_findings_by_slots(
         raw = ""
         attempts = (
             REQUIRED_FINDING_SLOT_ATTEMPTS
-            if path == "new_unknowns" or path.startswith(("beliefs[", "resolutions["))
+            if path == "next_inquiry" or path.startswith(("beliefs[", "resolutions["))
             else 1
         )
         expected = (
             "one JSON object with questions array, continuation and reason"
-            if path == "new_unknowns"
+            if path == "next_inquiry"
             else "one JSON object" + ("." if required else " or null.")
         )
         messages_for_slot = slot_messages
@@ -291,17 +299,23 @@ def _record_findings_by_slots(
                 ]
         if not _valid_record_slot_value(raw, path, required=required):
             if not required:
-                return [] if path == "new_unknowns" else None
+                return None
             raise ValueError(f"{path} must return {expected}")
         return raw
 
-    filled = json2slots(_record_slot_template(
-        belief_observation_ids,
-        resolution_slot_ids,
-    ), ask)
-    yield from usage_events
+    template = _record_slot_template(belief_observation_ids, resolution_slot_ids)
+    if authored_questions is not None and next_inquiry_reason.strip():
+        # Reuse the primary model's decision instead of asking it again in a slot.
+        template.pop("next_inquiry")
+    try:
+        filled = json2slots(template, ask)
+    finally:
+        # Failed internal requests still consume tokens and must appear in the usage log.
+        yield from usage_events
     filled = filled if isinstance(filled, dict) else {}
-    next_inquiry = filled.get("new_unknowns") or {}
+    if "next_inquiry" not in template:
+        filled["next_inquiry"] = {"questions": authored_questions, "reason": next_inquiry_reason}
+    next_inquiry = filled.get("next_inquiry") or {}
     beliefs = _runtime_slot_beliefs(
         filled.get("beliefs"),
         belief_observation_ids,
@@ -546,12 +560,12 @@ def _valid_record_slot_value(value: str, path: str, *, required: bool) -> bool:
         parsed = json.loads(text)
     except json.JSONDecodeError:
         return False
-    if path == "new_unknowns":
+    if path == "next_inquiry":
         if not isinstance(parsed, dict) or not isinstance(parsed.get("questions"), list):
             return False
         action = parsed.get("continuation")
         return (bool(str(parsed.get("reason") or "").strip())
-                and action in {"children", "continue_current", "synthesize"}
+                and action in {"children", "continue_current", "existing_children", "synthesize"}
                 and bool(parsed["questions"]) == (action == "children"))
     if parsed is None:
         return not required
@@ -805,7 +819,10 @@ def _recorded_findings_signature(recorded: dict) -> str:
 
 def _merge_recorded_findings(current: dict, update: dict) -> dict:
     merged = {field: list(current.get(field, [])) for field in FINDING_FIELDS}
-    for key in ("audit_result", "audit_cycle", "tree_bootstrapped"):
+    merged["follow_ups"] = list({item["id"]: dict(item)
+                                 for source in (current, update)
+                                 for item in source.get("follow_ups", [])}.values())
+    for key in ("audit_result", "audit_cycle", "audit_attempts", "tree_bootstrapped"):
         if key in current:
             merged[key] = current[key]
     belief_aliases: dict[str, str] = {}

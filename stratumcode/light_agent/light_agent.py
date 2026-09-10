@@ -11,16 +11,18 @@ from .. import memory_system
 from ..agent_runtime import (
     add_usage,
     assistant_message,
-    assistant_visible_text,
     call_model,
     content_text,
     empty_usage,
     finish_initial_skill_selection,
+    output_truncated,
     start_event,
     tool_arguments,
     usage_delta,
 )
 from .clearify import event_sink
+from .coordinator import FINISH, LOOKUP, LightCoordinator
+from .handoff import answer_handoff
 from .prompting import build_light_agent_prompt
 from .task_seed import light_task_analysis
 from .task_state import LightTaskState
@@ -36,6 +38,7 @@ def ask(
     task_state: LightTaskState | None = None,
     session_id: int | None = None,
     skill_selection_context: str = "",
+    coordinator: LightCoordinator | None = None,
 ) -> str:
     setting = setting or model_settings.resolve(model_settings.LIGHT_AGENT)
     if setting is None:
@@ -47,6 +50,7 @@ def ask(
     usage_total = empty_usage(pricing_rules)
     messages = [{"role": "user", "content": prompt}]
     tools = tool_schema(list(tool_names or default_light_tools()))
+    coordinator = coordinator or LightCoordinator()
     task_context_message = None
 
     with skill_runtime.target_scope(skill_runtime.GLOBAL_TARGET):
@@ -64,25 +68,54 @@ def ask(
                 "done": False,
                 "open": False,
             }))
-            assistant = call_model(provider, model, messages, tools=tools, use_skills=True)
+            assistant = call_model(provider, model, messages, tools=coordinator.schemas(tools),
+                                   tool_choice="required", use_skills=True)
             _emit_usage(thinking_id, pricing_rules, usage_total, assistant)
             tool_calls = assistant.get("tool_calls") or []
-            content = assistant_visible_text(assistant)
-            if not tool_calls:
+            finish_reason = str(assistant.get("finish_reason") or "").strip().casefold()
+            failure = (
+                "output_truncated" if output_truncated(assistant)
+                else "content_filter" if finish_reason == "content_filter"
+                else "provider_interrupted" if finish_reason in {"insufficient_system_resource", "failed", "cancelled"}
+                else "missing_coordinator_action" if not tool_calls
+                else ""
+            )
+            _emit({"op": "update", "id": thinking_id, "patch": {
+                "finish_reason": finish_reason or "unknown",
+                "response_status": failure or "generated_action",
+            }})
+            if failure:
                 _emit({"op": "update", "id": thinking_id, "patch": {
-                    "text": content or "Ready to answer.",
+                    "text": f"Model response rejected: {failure}. No answer or tool action accepted.",
                     "done": True,
                     "open": False,
                 }})
-                return content_text(assistant.get("content") or "")
-
-            messages.append(assistant_message(assistant))
+                raise ValueError(f"Model did not produce a coordinator action ({failure}; finish_reason={finish_reason or 'unknown'})")
             _emit({"op": "update", "id": thinking_id, "patch": {
-                "text": "\n\n".join(item for item in (content, _tool_call_summary(tool_calls)) if item),
+                "text": _tool_call_summary(tool_calls),
                 "done": True,
                 "open": False,
             }})
+            coordinator.validate_batch(tool_calls, tools)
+            messages.append(assistant_message(assistant))
             for call in tool_calls:
+                name = call["function"]["name"]
+                if name in {LOOKUP, FINISH}:
+                    arguments = tool_arguments(call["function"]["arguments"])
+                    if name == FINISH:
+                        answer = coordinator.finish(arguments)
+                        _emit(start_event(call["id"], "tool", {
+                            "name": name, "status": "done", "input": json.dumps(arguments, ensure_ascii=False),
+                            "output": json.dumps(coordinator.completion, ensure_ascii=False), "open": False,
+                        }))
+                        return answer
+                    output = json.dumps(coordinator.begin_lookup(arguments), ensure_ascii=False)
+                    _emit(start_event(call["id"], "tool", {
+                        "name": name, "status": "done", "input": json.dumps(arguments, ensure_ascii=False),
+                        "output": output, "open": False,
+                    }))
+                    messages.append({"role": "tool", "tool_call_id": call["id"], "content": output})
+                    continue
                 if task_state is not None:
                     task_events, task_assistant = _state_machine_task_events(
                         task_state,
@@ -97,10 +130,11 @@ def ask(
                         _emit(event)
                     call = _with_current_analysis(call, task_state)
                 output = execute_tool_call(call, workspace_dir, session_id=session_id)
+                coordinator.observe(call, output)
                 messages.append({
                     "role": "tool",
                     "tool_call_id": call.get("id") or "",
-                    "content": output,
+                    "content": answer_handoff(call, output),
                 })
             if task_state is not None:
                 rendered_state = _task_state_prompt(task_state)
@@ -115,6 +149,7 @@ def stream(message: str, context: list[str], workspace_dir: str, *, session_id: 
     output_id = "light-agent-output"
     events: queue.Queue = queue.Queue()
     task_state = LightTaskState(light_task_analysis(message, context))
+    coordinator = LightCoordinator()
     turn_id = f"turn-{uuid4().hex[:12]}"
 
     def publish(event: dict) -> None:
@@ -122,6 +157,8 @@ def stream(message: str, context: list[str], workspace_dir: str, *, session_id: 
         events.put(event)
 
     def run_agent() -> None:
+        stage_started = False
+        answer_published = False
         try:
             setting = model_settings.resolve(model_settings.LIGHT_AGENT)
             if setting is None:
@@ -152,12 +189,14 @@ def stream(message: str, context: list[str], workspace_dir: str, *, session_id: 
                     "phase": "deciding",
                     **_stage_model_data(setting),
                 }))
+                stage_started = True
                 result = ask(
                     build_light_agent_prompt(message, context, workspace_dir, memory_context),
                     workspace_dir=workspace_dir,
                     setting=setting,
                     task_state=task_state,
                     session_id=session_id,
+                    coordinator=coordinator,
                     skill_selection_context=_skill_selection_context(
                         message,
                         context,
@@ -168,17 +207,25 @@ def stream(message: str, context: list[str], workspace_dir: str, *, session_id: 
                 )
                 publish({"op": "update", "id": stage_id, "patch": {
                     "state": "done",
-                    "phase": "answered",
+                    "phase": "answered" if coordinator.completion.get("status") == "complete" else "partial",
                 }})
                 publish(start_event(output_id, "output", {
                     "content": result,
                     "streaming": False,
+                    "completion": coordinator.completion,
                 }))
+                answer_published = True
                 # Short-term memory must survive a disabled or failed memory model.
                 memory_system.record_delta(workspace_dir, memory_system.conversation_delta(session_id, turn_id, message, result))
-                _record_direct_output_memory(workspace_dir, session_id, turn_id, result, publish, user_request=message)
+                if coordinator.completion.get("status") == "complete":
+                    _record_direct_output_memory(workspace_dir, session_id, turn_id, result, publish, user_request=message)
             publish({"op": "done"})
         except Exception as exc:
+            if stage_started and not answer_published:
+                publish({"op": "update", "id": stage_id, "patch": {
+                    "state": "failed",
+                    "phase": "failed",
+                }})
             publish({"op": "error", "message": f"Light agent stream failed: {exc}"})
         finally:
             events.put(None)

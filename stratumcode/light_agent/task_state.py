@@ -66,7 +66,8 @@ class LightTaskState:
             "task_analysis_id": analysis.get("id", ""),
             "intent": analysis.get("intent", {}),
             "execution_mode": analysis.get("execution_mode", ""),
-            "tasks": items if isinstance(items, list) else [],
+            "tasks": [{key: item[key] for key in ("id", "kind", "text", "status", "parent_id") if key in item}
+                      for item in items if isinstance(item, dict)] if isinstance(items, list) else [],
         }
         return json.dumps(payload, ensure_ascii=False, indent=2)
 

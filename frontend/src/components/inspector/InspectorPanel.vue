@@ -5,6 +5,7 @@ import { animate, stagger } from 'animejs'
 import GitPanel from './GitPanel.vue'
 import TerminalPanel from './TerminalPanel.vue'
 import UnknownTree from './UnknownTree.vue'
+import InvestigationFollowUps from './InvestigationFollowUps.vue'
 
 const props = defineProps({
   tab: { type: String, default: 'evidence' },
@@ -74,7 +75,29 @@ const panelStyle = computed(() => ({
 }))
 const activeDescription = computed(() => activeTab.value?.description || 'Details for the current session.')
 
+function followUpsFor(analysis) {
+  const tree = analysis.investigation_tree || {}
+  const items = new Map([...(analysis.follow_ups || []), ...(tree.follow_ups || [])].map(item => [item.id, item]))
+  const idOf = value => String(value || '').split(':').pop()
+  const deferred = new Set([...(analysis.resolutions || []), ...(tree.resolutions || [])]
+    .filter(item => item.status === 'deferred').map(item => idOf(item.unknown_id)))
+  for (const node of [...(analysis.unknowns || []), ...(analysis.new_unknowns || []), ...(tree.nodes || [])]) {
+    if (node.resolution_strategy !== 'deferred' && !(node.blocking === false && deferred.has(idOf(node.id)))) continue
+    const id = `FOLLOWUP:${idOf(node.id)}`
+    if (!items.has(id)) items.set(id, { id, question: node.question, reason: node.why,
+      source_unknown_id: idOf(node.id), parent_id: node.parent_id, required_capability: node.required_capability })
+  }
+  return [...items.values()]
+}
+
 function analysisRowsFor(analysis) {
+  if (!analysis) return []
+  const transferred = new Set(followUpsFor(analysis).map(item => item.source_unknown_id))
+  return rawAnalysisRowsFor(analysis).filter(row => row.kind !== 'unknown' ||
+    !transferred.has(String(row.id || '').split(':').pop()))
+}
+
+function rawAnalysisRowsFor(analysis) {
   if (!analysis) return []
   const updates = Array.isArray(analysis.task_updates) ? analysis.task_updates : []
   if (updates.length) return dedupeTaskRows([
@@ -90,7 +113,7 @@ function analysisRowsFor(analysis) {
       id: item.id,
       kind: 'unknown',
       text: typeof item === 'string' ? item : item.question || item.text,
-      status: item.blocking === false ? 'deferred' : 'unknown',
+      status: 'unknown',
       answers: item.answers,
     })),
   ].filter(item => item.text)
@@ -105,7 +128,7 @@ function remainingTaskCountFor(analysis) {
 
 function taskProgressFor(analysis) {
   if (analysis.investigation_tree) {
-    const tree = analysis.investigation_tree
+    const tree = unknownTreeFor(analysis)
     const idOf = value => String(value || '').split(':').pop()
     const resolutions = new Map((tree.resolutions || []).map(r => [idOf(r.unknown_id), r]))
     const nodes = tree.nodes || []
@@ -124,7 +147,23 @@ function taskProgressFor(analysis) {
 }
 
 function unknownTreeFor(analysis) {
-  if (analysis.investigation_tree) return analysis.investigation_tree
+  if (analysis.investigation_tree) {
+    const tree = analysis.investigation_tree
+    const removed = new Set(followUpsFor(analysis).map(item => item.source_unknown_id))
+    const idOf = value => String(value || '').split(':').pop()
+    const originals = new Map((tree.nodes || []).map(node => [idOf(node.id), node]))
+    const nodes = (tree.nodes || []).filter(node => !removed.has(idOf(node.id))).map(node => {
+      let parent = node.parent_id
+      const seen = new Set()
+      while (parent && removed.has(idOf(parent)) && !seen.has(parent)) {
+        seen.add(parent)
+        parent = originals.get(idOf(parent))?.parent_id
+      }
+      return { ...node, parent_id: parent }
+    })
+    return { ...tree, nodes, active_unknown_id: removed.has(idOf(tree.active_unknown_id)) ? '' : tree.active_unknown_id,
+      active_path: (tree.active_path || []).filter(id => !removed.has(idOf(id))) }
+  }
   const idOf = value => String(value || '').split(':').pop()
   const originals = new Map([...(analysis.unknowns || []), ...(analysis.new_unknowns || [])].map(n => [idOf(n.id), n]))
   const nodes = analysisRowsFor(analysis).filter(row => row.kind === 'unknown').map(row => {
@@ -169,7 +208,7 @@ function missingUnknownRows(analysis, rows) {
       id: `${analysis.id || 'task'}:${item.id}`,
       kind: 'unknown',
       text: item.question || item.text,
-      status: item.blocking === false ? 'deferred' : 'unknown',
+      status: 'unknown',
       answers: item.answers,
     }))
     .filter(item => item.text)
@@ -612,6 +651,7 @@ function onRowLeave(el) {
           <Transition appear @enter="taskEnter" @leave="taskLeave">
             <div v-show="task.open" class="task-block__body">
             <UnknownTree v-if="unknownTreeFor(task).nodes?.length" :tree="unknownTreeFor(task)" :visible="task.open && tab === 'tasks'" />
+            <InvestigationFollowUps :items="followUpsFor(task)" />
             <div v-if="taskProgressFor(task).total" class="tk-progress">
               <div class="tk-progress-bar"><i :style="{ width: taskProgressFor(task).percent + '%' }"></i></div>
               <span>{{ taskProgressFor(task).completed }}/{{ taskProgressFor(task).total }} unknowns resolved · {{ taskProgressFor(task).percent }}%</span>

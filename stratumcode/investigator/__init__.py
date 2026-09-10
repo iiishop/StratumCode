@@ -73,10 +73,11 @@ from .domain import (
     _validate_resolution_refs,
 )
 from .directive import _investigation_directive
-from .tree import (all_unknowns, open_blockers, validate_closure, validate_update, select_active, is_open, reopen_parents,
-                   prepare_new_unknowns, audit_complete, normalize_audit,
+from .acceptance import accept_resolutions
+from .tree import (all_unknowns, open_blockers, pending_unknowns, validate_closure, validate_update, select_active, is_open, reopen_parents,
+                   prepare_new_unknowns, audit_complete, begin_audit_attempt, normalize_audit, reopen_unknown,
                    ensure_goal_root, validate_active_write)
-from .tools import _audit_investigation_tool_schema
+from .tools import _audit_investigation_tool_schema, _reopen_unknown_tool_schema
 from .finalize import (
     _apply_direct_resolution_gate,
     _apply_investigation_audit,
@@ -263,6 +264,10 @@ def _apply_required_next_tool(
     current_tools: list[dict],
 ) -> tuple[list[dict], str | dict]:
     required = state.control.required_next_tool
+    if required in {"resolve_unknowns", "record_investigation_findings"}:
+        # Checkpoint scheduling owns recording; evidence relevance cannot lock discovery.
+        state.control.required_next_tool = ""
+        required = ""
     if required == "finish_investigation" and not audit_complete(state.findings.recorded, runtime.analysis, state.observations.items):
         state.control.required_next_tool = ""
         required = ""
@@ -303,8 +308,8 @@ def _prepare_round(
         state.messages.append({"role": "user", "content": json.dumps({
             "active_unknown": active, "active_path": state.traversal.active_path,
             "returning_from_child": state.traversal.revisit_unknown_id == active["id"],
-            "return_rule": "Reconsider this parent's single question using completed child answers. Record a partial answer and any newly discovered sibling questions, or resolve it only when all required children are closed and no further unknown remains. Do not skip the parent to study its next sibling.",
-            "policy": policy, "child_rule": "Research ONLY this Unknown. Discover concrete children only when needed while researching it; never pre-enumerate a checklist. Every new child uses parent_id=active_unknown.id. Return to the parent after its children close.",
+            "return_rule": "Finish every pending child subtree before parent synthesis. Reconsider this question using completed child answers; discover further dependencies if needed, or resolve it when no required unknown remains.",
+            "policy": policy, "child_rule": "Research ONLY this Unknown. For a collection/synthesis question, establish scope then register each known subject's unanswered question or independent factual concern BEFORE its detailed investigation. Grounded decomposition is not a speculative checklist. Do not hide cross-subject research in same-question continuation. Every new child uses parent_id=active_unknown.id; finish child subtrees before parent synthesis.",
         }, ensure_ascii=False)})
 
     current_tools = runtime.tools
@@ -438,8 +443,8 @@ def _prepare_round(
         current_tools=current_tools,
     )
     if current_phase == InvestigationPhase.AUDIT:
-        current_tools = [_audit_investigation_tool_schema()]
-        state.control.current_tool_choice = {"type": "function", "function": {"name": "audit_investigation"}}
+        current_tools = _phase_tools(current_phase, tools=runtime.tools)
+        state.control.current_tool_choice = "required"
         state.control.required_next_tool = ""
     if active and _needs_reflection(state) and current_phase not in {
         InvestigationPhase.CLEARIFY, InvestigationPhase.VERIFY,
@@ -539,6 +544,39 @@ def _collect_tool_calls(
     return tool_calls
 
 
+def _accept_candidate(state, runtime, candidate):
+    current = state.findings.recorded
+    candidate = accept_resolutions(current, candidate, runtime.analysis,
+                                   state.observations.items, strict_grounding=runtime.semantic_gate_enabled and _analysis_requests_implementation(runtime.analysis))
+    previous = {r["unknown_id"]: r for r in current.get("resolutions", [])}
+    changed = {r["unknown_id"] for r in candidate.get("resolutions", [])
+               if r.get("status") == "resolved" and r != previous.get(r["unknown_id"])}
+    if changed and runtime.semantic_gate_enabled and runtime.analysis.get("_canonicalized"):
+        # Reuse the existing semantic gate, but only at the changed node's commit boundary.
+        state.findings.recorded = candidate
+        try:
+            audit = yield from _audit_recorded_findings(state, runtime, target_unknown_ids=changed)
+            checked, requests, questions = _apply_investigation_audit(
+                candidate, audit, observations=state.observations.items,
+                strict_grounding=_analysis_requests_implementation(runtime.analysis),
+                allow_verification=_analysis_requests_implementation(runtime.analysis) and runtime.subagent_enabled,
+                analysis=_analysis_with_recorded_unknowns(runtime.analysis, candidate),
+            )
+            # A local verdict must not rewrite unrelated accepted findings.
+            replacements = {r["unknown_id"]: r for r in checked["resolutions"] if r["unknown_id"] in changed}
+            candidate["resolutions"] = [replacements.get(r["unknown_id"], r) for r in candidate["resolutions"]]
+            if requests:
+                attempted = state.verification.attempted | {(r.get("unknown_id"), r.get("hypothesis")) for r in state.verification.queue}
+                state.verification.queue.extend(r for r in requests if (r.get("unknown_id"), r.get("hypothesis")) not in attempted)
+            if questions:
+                state.verification.clearify_questions.update(questions)
+        finally:
+            state.findings.recorded = current
+        reopen_parents(candidate, runtime.analysis)
+        validate_update(current, candidate, runtime.analysis)
+    return candidate
+
+
 def _handle_resolve(
     state: InvestigationState,
     call_id: str,
@@ -573,10 +611,13 @@ def _handle_resolve(
         state.findings.recorded,
         {"resolutions": resolutions},
     )
-    validate_update(state.findings.recorded, candidate, runtime.analysis)
+    candidate = yield from _accept_candidate(state, runtime, candidate)
+    submitted_ids = {r["unknown_id"] for r in resolutions}
+    resolutions = [r for r in candidate.get("resolutions", []) if r["unknown_id"] in submitted_ids]
     state.findings.recorded = candidate
     state.traversal.revisit_unknown_id = ""
     state.progress.discovery_since_record = 0
+    state.control.required_next_tool = ""
     state.findings.recorded = _bind_grounding_evidence(
         state.findings.recorded,
         state.observations.items,
@@ -603,7 +644,8 @@ def _handle_resolve(
         resolutions,
     )
     output = json.dumps({
-        "resolved": True,
+        "resolved": all(r.get("status") == "resolved" for r in resolutions),
+        "acceptance": [{"unknown_id": r["unknown_id"], "status": r.get("status"), "reason": r.get("reason", "")} for r in resolutions],
         "counts": {"resolutions": len(resolutions)},
         "unknown_ids": [item["unknown_id"] for item in resolutions],
     }, ensure_ascii=False)
@@ -683,21 +725,25 @@ def _handle_record(
             runtime,
             reason=str(arguments.get("reason") or "").strip(),
             required_resolution_ids=resolution_required_ids,
+            authored_questions=arguments.get("new_unknowns"),
+            next_inquiry_reason=str(arguments.get("next_inquiry_reason") or ""),
         )
     if _empty_discovery_recording(
         arguments,
         state.observations.pending_ids,
         resolution_required_ids,
     ):
-        if _needs_reflection(state):
-            raise ValueError(
-                "Investigation checkpoint produced no material findings. Record what the observations "
-                "establish, a partial resolution, or a concrete discovered child; repeated empty checkpoints stop the run."
-            )
+        # A location-only or negative observation need not justify a belief/resolution.
+        # Acknowledge the checkpoint, retaining all observations for later grounding.
+        reviewed_ids = list(state.observations.pending_ids)
+        state.observations.pending_ids.clear()
+        state.progress.discovery_since_record = 0
+        state.traversal.revisit_unknown_id = ""
+        state.control.required_next_tool = ""
         output = json.dumps({
             "recorded": False,
             "code": "no_material_findings",
-            "pending_observation_ids": state.observations.pending_ids,
+            "reviewed_observation_ids": reviewed_ids,
             "next_action": "continue_discovery",
         }, ensure_ascii=False)
         yield start_event(call_id, "tool", _tool_event(
@@ -731,7 +777,7 @@ def _handle_record(
     reopen_parents(candidate, runtime.analysis)
     _validate_resolution_refs(candidate.get("resolutions", []),
                               _beliefs(candidate.get("beliefs")), state.observations.items)
-    validate_update(state.findings.recorded, candidate, runtime.analysis)
+    candidate = yield from _accept_candidate(state, runtime, candidate)
     state.findings.recorded = candidate
     state.progress.discovery_since_record = 0
     state.traversal.revisit_unknown_id = ""
@@ -1304,7 +1350,7 @@ def _dispatch_tool_calls(
                     ),
                 }
             select_active(state.traversal, state.findings.recorded, runtime.analysis)
-            if name != "audit_investigation":
+            if name not in {"audit_investigation", "reopen_investigation_unknown"}:
                 validate_active_write(arguments, state.traversal.active_unknown_id)
             if name not in allowed_tool_names:
                 if audit_complete(
@@ -1387,52 +1433,38 @@ def _dispatch_tool_calls(
                     "the blocked discovery call with the same arguments."
                 )})
                 continue
+            if name == "reopen_investigation_unknown":
+                _require_control_reason(arguments, name)
+                node_id = _normalize_unknown_id(arguments.get("unknown_id"))
+                refs = arguments.get("contradicting_observation_ids")
+                old = next((r for r in state.findings.recorded.get("resolutions", []) if r.get("unknown_id") == node_id), {})
+                available = {o.get("id") for o in state.observations.items} - set(old.get("evidence", []))
+                if not isinstance(refs, list) or not refs or any(ref not in available for ref in refs):
+                    raise ValueError("Reopening requires new contradicting observation IDs; coverage gaps must be new roots")
+                reopen_unknown(state.findings.recorded, runtime.analysis, node_id, arguments["reason"])
+                state.traversal.active_unknown_id = node_id
+                state.traversal.revisit_unknown_id = ""
+                state.progress.discovery_since_record = 0
+                state.control.required_next_tool = ""
+                state.control.force_synthesis_reason = ""
+                state.control.force_discovery_ids = [node_id]
+                output = json.dumps({"reopened": node_id, "next_action": "continue_discovery"})
+                state.messages.append(_tool_message(call_id, output))
+                yield start_event(call_id, "tool", _tool_event(name, arguments, output, description="Reopen evidence gap"))
+                break
             if name == "audit_investigation":
                 _require_control_reason(arguments, name)
                 limit = int(runtime.effort_profile.get("max_audit_cycles", {"fast": 1, "standard": 2, "deep": 3}.get(runtime.analysis.get("effort"), 2)))
-                if limit and state.traversal.audit_cycle >= limit:
+                if not begin_audit_attempt(state.findings.recorded, runtime.analysis, state.observations.items, limit):
                     state.control.stop_investigation = True
-                    state.control.finalization_reason = "Root Audit attempt budget exhausted; investigation remains incomplete."
+                    state.control.finalization_reason = "Root Audit repeated without new evidence or resolved questions; investigation remains incomplete."
                     output = json.dumps({"error": "audit_budget_exhausted", "audit_cycle": state.traversal.audit_cycle})
                     state.messages.append(_tool_message(call_id, output))
                     yield start_event(call_id, "tool", _tool_event(name, arguments, output, description="Root Audit", status="error"))
                     break
-                # Failed quality checks are audit attempts too, not a free retry loop.
                 state.traversal.audit_cycle += 1
                 state.findings.recorded["audit_cycle"] = state.traversal.audit_cycle
-                state.findings.recorded = _apply_direct_resolution_gate(
-                    state.findings.recorded, state.observations.items,
-                    strict_grounding=runtime.semantic_gate_enabled and _analysis_requests_implementation(runtime.analysis),
-                )
-                quality_decision = FinishDecision.ACCEPT
-                # Check the same evidence prerequisites as final packaging before signing.
-                for resolution in state.findings.recorded.get("resolutions", []):
-                    if resolution.get("status") != "resolved":
-                        continue
-                    issues = _require_file_reads([resolution], state.observations.items, runtime.workspace_dir)
-                    if runtime.workspace_dir:
-                        issues += _require_lsp_definition_reads([resolution], state.observations.items, runtime.workspace_dir)
-                    if issues:
-                        resolution["status"] = "partially_resolved"
-                        issues = list(dict.fromkeys(issues))
-                        resolution["reason"] = "; ".join(issues)
-                        state.control.evidence_gaps[resolution["unknown_id"]] = issues
-                        quality_decision = FinishDecision.REPAIR
-                reopen_parents(state.findings.recorded, runtime.analysis)
-                if quality_decision is FinishDecision.ACCEPT:
-                    quality_decision = yield from _decide_finish_transition(state, runtime)
-                if quality_decision is not FinishDecision.ACCEPT:
-                    output = json.dumps({
-                        "error": "resolution_quality_incomplete", "next_action": quality_decision.value,
-                        "open_unknowns": open_blockers(state.findings.recorded, runtime.analysis),
-                        "evidence_gaps": state.control.evidence_gaps,
-                        "audit_cycle": state.traversal.audit_cycle,
-                        "instruction": "Supply the listed missing evidence; do not repeat an unchanged resolution.",
-                    }, ensure_ascii=False)
-                    state.control.required_next_tool = ""
-                    state.messages.append(_tool_message(call_id, output))
-                    yield start_event(call_id, "tool", _tool_event(name, arguments, output, description="Root Audit requires repair", status="error"))
-                    break
+                # Node acceptance already ran at commit. Root audit checks coverage only.
                 additions = prepare_new_unknowns(arguments.get("new_unknowns", []), state.findings.recorded, runtime.analysis, origin="root_audit")
                 candidate = _merge_recorded_findings(state.findings.recorded, {"new_unknowns": additions})
                 candidate["resolutions"] = [dict(r) for r in candidate.get("resolutions", [])]
@@ -1596,6 +1628,7 @@ def _dispatch_tool_calls(
         "analysis_id": runtime.analysis.get("id", ""),
         "investigation_tree": {
             "nodes": all_unknowns(state.findings.recorded, runtime.analysis),
+            "follow_ups": state.findings.recorded.get("follow_ups", []),
             "resolutions": state.findings.recorded.get("resolutions", []),
             "active_unknown_id": state.traversal.active_unknown_id,
             "active_path": list(state.traversal.active_path),
@@ -1776,6 +1809,13 @@ def _finish_investigation_stream(
     implementation_intent = _analysis_requests_implementation(runtime.analysis)
     final = state.control.final
     final["new_unknowns"] = all_unknowns(state.findings.recorded, runtime.analysis)
+    final["follow_ups"] = state.findings.recorded.get("follow_ups", [])
+    transferred_ids = {item.get("source_unknown_id") for item in final["follow_ups"]}
+    final["resolutions"] = [item for item in final.get("resolutions", [])
+                            if _normalize_unknown_id(item.get("unknown_id")) not in transferred_ids]
+    final["task_updates"] = [item for item in final.get("task_updates", [])
+                             if item.get("kind") != "unknown" or
+                             _normalize_unknown_id(item.get("id")) not in transferred_ids]
     final["audit_result"] = state.findings.recorded.get("audit_result", {})
     final["audit_cycle"] = state.traversal.audit_cycle
     final["tree_bootstrapped"] = state.traversal.bootstrapped
@@ -1790,11 +1830,12 @@ def _finish_investigation_stream(
         final["recovery_reason"] = state.control.finalization_reason
         final["summary"] = "Investigation incomplete: " + state.control.finalization_reason
     yield {"op": "update", "id": runtime.stage_id, "patch": {
-        "state": "done",
-        "phase": "patch_planning_ready" if state.control.final.get("ready_for_patch_planning") and implementation_intent else "done",
+        "state": "failed" if final.get("runtime_failure") else "done",
+        "phase": "incomplete" if final.get("runtime_failure") else "patch_planning_ready" if state.control.final.get("ready_for_patch_planning") and implementation_intent else "done",
         "analysis_id": runtime.analysis.get("id", ""),
         "investigation_tree": {
             "nodes": final["new_unknowns"], "resolutions": final.get("resolutions", []),
+            "follow_ups": final["follow_ups"],
             "active_unknown_id": "", "active_path": [],
             "phase": "incomplete" if final.get("runtime_failure") else "done",
         },
@@ -1846,6 +1887,7 @@ def _run_investigation_round(
         "analysis_id": runtime.analysis.get("id", ""),
         "investigation_tree": {
             "nodes": all_unknowns(state.findings.recorded, runtime.analysis),
+            "follow_ups": state.findings.recorded.get("follow_ups", []),
             "resolutions": state.findings.recorded.get("resolutions", []),
             "active_unknown_id": state.traversal.active_unknown_id,
             "active_path": list(state.traversal.active_path),
@@ -1928,6 +1970,7 @@ def _investigation_tools() -> list[dict]:
     ]
     tools.append(_resolve_unknowns_tool_schema())
     tools.append(_audit_investigation_tool_schema())
+    tools.append(_reopen_unknown_tool_schema())
     tools.append(_record_findings_tool_schema())
     tools.append(_finish_tool_schema())
     return tools

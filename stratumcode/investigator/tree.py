@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from ..followups import partition_follow_ups
 
 from .ids import _normalize_unknown_id, _question_key, _unknowns
 
@@ -16,7 +17,22 @@ def all_unknowns(recorded: dict, analysis: dict | None = None) -> list[dict]:
                 node["id"] = _normalize_unknown_id(node["id"])
                 node["parent_id"] = _normalize_unknown_id(node.get("parent_id")) or None
                 nodes[node["id"]] = node
-    return list(nodes.values())
+    active, follow_ups = partition_follow_ups(analysis or {}, {**recorded, "unknowns": list(nodes.values()), "new_unknowns": []})
+    recorded["follow_ups"] = follow_ups
+    active_ids = {node["id"] for node in active}
+    for field in ("unknowns", "new_unknowns"):
+        if field in recorded:
+            recorded[field] = [node for node in active if any(
+                _normalize_unknown_id(old.get("id")) == node["id"]
+                for old in recorded[field] if isinstance(old, dict)
+            )]
+    recorded["task_updates"] = [row for row in recorded.get("task_updates", [])
+                                if row.get("kind") != "unknown" or
+                                _normalize_unknown_id(row.get("id")) in active_ids]
+    transferred = {item.get("source_unknown_id") for item in follow_ups}
+    recorded["resolutions"] = [row for row in recorded.get("resolutions", [])
+                               if _normalize_unknown_id(row.get("unknown_id")) not in transferred]
+    return active
 
 
 def ensure_goal_root(recorded: dict, analysis: dict, message: str) -> None:
@@ -24,6 +40,8 @@ def ensure_goal_root(recorded: dict, analysis: dict, message: str) -> None:
     nodes = all_unknowns(recorded, analysis)
     if nodes:
         validate_tree(nodes)
+        return
+    if recorded.get("follow_ups"):
         return
     goal = str(analysis.get("origin_message") or message or
                (analysis.get("intent") or {}).get("summary") or "").strip()
@@ -76,9 +94,24 @@ def is_open(node: dict, recorded: dict) -> bool:
 
 
 def open_blockers(recorded: dict, analysis: dict | None = None) -> list[dict]:
+    return [n for n in pending_unknowns(recorded, analysis) if n.get("blocking")]
+
+
+def pending_unknowns(recorded: dict, analysis: dict | None = None) -> list[dict]:
     nodes = all_unknowns(recorded, analysis)
     validate_tree(nodes)
-    return [n for n in nodes if n.get("blocking") and is_open(n, recorded)]
+    return [n for n in nodes if is_open(n, recorded)]
+
+
+def reopen_unknown(recorded: dict, analysis: dict, node_id: str, reason: str) -> None:
+    node_id = _normalize_unknown_id(node_id)
+    node = next((n for n in all_unknowns(recorded, analysis) if n["id"] == node_id), None)
+    if node is None or is_open(node, recorded) or not reason.strip():
+        raise ValueError("Reopening requires a closed existing Unknown and a concrete evidence gap")
+    resolution = resolution_for(node_id, recorded)
+    resolution.update(status="partially_resolved", reason=reason)
+    recorded.pop("audit_result", None)
+    reopen_parents(recorded, analysis)
 
 
 def validate_closure(recorded: dict, analysis: dict | None = None) -> None:
@@ -87,9 +120,9 @@ def validate_closure(recorded: dict, analysis: dict | None = None) -> None:
     for node in nodes:
         if not is_open(node, recorded):
             children = [n["id"] for n in nodes if n.get("parent_id") == node["id"]
-                        and n.get("blocking") and is_open(n, recorded)]
+                        and is_open(n, recorded)]
             if children:
-                raise ValueError(f"{node['id']} cannot close before blocking children: {', '.join(children)}")
+                raise ValueError(f"{node['id']} cannot close before pending children: {', '.join(children)}")
     known = {n["id"] for n in nodes}
     for resolution in recorded.get("resolutions", []):
         if _normalize_unknown_id(resolution.get("unknown_id")) not in known:
@@ -107,11 +140,11 @@ def reopen_parents(recorded: dict, analysis: dict) -> None:
             if is_open(node, recorded):
                 continue
             children = [n["id"] for n in nodes if n.get("parent_id") == node["id"]
-                        and n.get("blocking") and is_open(n, recorded)]
+                        and is_open(n, recorded)]
             if children:
                 resolution = resolution_for(node["id"], recorded)
                 resolution["status"] = "partially_resolved"
-                resolution["reason"] = "Blocking dependencies reopened: " + ", ".join(children)
+                resolution["reason"] = "Pending dependencies reopened: " + ", ".join(children)
                 changed = True
 
 
@@ -119,8 +152,12 @@ def select_active(traversal, recorded: dict, analysis: dict) -> dict | None:
     nodes = all_unknowns(recorded, analysis)
     validate_tree(nodes)
     by_id = {n["id"]: n for n in nodes}
-    blockers = {n["id"] for n in open_blockers(recorded, analysis)}
+    blockers = {n["id"] for n in pending_unknowns(recorded, analysis)}
     current = by_id.get(traversal.active_unknown_id)
+    if current and current["id"] == traversal.revisit_unknown_id and any(
+        n.get("parent_id") == current["id"] and n["id"] in blockers for n in nodes
+    ):
+        traversal.revisit_unknown_id = ""
     while current and current["id"] not in blockers:
         current = by_id.get(current.get("parent_id"))
         if current and current["id"] in blockers:
@@ -150,6 +187,8 @@ def prepare_new_unknowns(value, recorded: dict, analysis: dict, *, origin="disco
         raise ValueError("new_unknowns must be an array")
     existing = all_unknowns(recorded, analysis)
     used = {n["id"] for n in existing}
+    used.update(item["source_unknown_id"] for item in recorded.get("follow_ups", [])
+                if item.get("source_unknown_id"))
     equivalent = {(n["domain"], _question_key(n["question"])): n["id"]
                   for n in existing if is_open(n, recorded)}
     aliases = {}
@@ -170,8 +209,10 @@ def prepare_new_unknowns(value, recorded: dict, analysis: dict, *, origin="disco
         node["id"] = supplied
         node["parent_id"] = _normalize_unknown_id(node.get("parent_id")) or None
         if origin == "root_audit":
-            # A global independent gap may be a new root; never attach it to an arbitrary root.
-            pass
+            if node["parent_id"] is not None:
+                raise ValueError("Coverage gaps must be new roots; use related_unknown_ids for accepted findings")
+            if any(_question_key(n["question"]) == key[1] for n in existing):
+                raise ValueError("Coverage audit requires a new question, not an already answered question")
         elif active_id:
             if node["parent_id"] not in (None, active_id):
                 raise ValueError(f"New questions must be discovered dependencies of active Unknown {active_id}")
@@ -208,12 +249,22 @@ def audit_complete(recorded: dict, analysis: dict, observations: list[dict]) -> 
     audit = recorded.get("audit_result") or {}
     return bool(audit.get("complete") and all((audit.get(d) or {}).get("complete") for d in ("requirement", "solution"))
                 and audit.get("signature") == audit_signature(recorded, analysis, observations)
-                and not open_blockers(recorded, analysis))
+                and not pending_unknowns(recorded, analysis))
+
+
+def begin_audit_attempt(recorded: dict, analysis: dict, observations: list[dict], limit: int) -> bool:
+    signature = audit_signature(recorded, analysis, observations)
+    previous = recorded.get("audit_attempts", {})
+    count = previous.get("count", 0) if previous.get("signature") == signature else 0
+    if limit and count >= limit:
+        return False
+    recorded["audit_attempts"] = {"signature": signature, "count": count + 1}
+    return True
 
 
 def normalize_audit(arguments: dict, recorded: dict, analysis: dict, observations: list[dict]) -> dict:
     validate_closure(recorded, analysis)
-    blockers = open_blockers(recorded, analysis)
+    blockers = pending_unknowns(recorded, analysis)
     result = {}
     for domain in ("requirement", "solution"):
         raw = arguments.get(domain)
@@ -224,7 +275,7 @@ def normalize_audit(arguments: dict, recorded: dict, analysis: dict, observation
             raise ValueError(f"incomplete {domain} audit requires a represented blocking unknown")
         supplied = raw.get("open_unknown_ids", [])
         if not isinstance(supplied, list) or any(_normalize_unknown_id(i) not in ids for i in supplied):
-            raise ValueError(f"audit {domain} references invalid open blocking unknowns")
+            raise ValueError(f"audit {domain} references invalid pending unknowns")
         result[domain] = {"complete": raw["complete"] and not ids, "reason": raw["reason"], "open_unknown_ids": ids}
     result["complete"] = all(result[d]["complete"] for d in ("requirement", "solution")) and not blockers
     result["signature"] = audit_signature(recorded, analysis, observations)
