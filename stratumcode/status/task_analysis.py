@@ -188,7 +188,9 @@ def analyze_task_stream(
             detail=f"{len(canonical_intent.get('requirements', []))} requirements",
             state="done",
         )
-    acceptance_slot = _conditional_bugfix_acceptance(canonical_intent)
+    # The compact/intent pass may already contain the acceptance contract.
+    # Keep one selected value for progress, unknown mapping, and final assembly.
+    acceptance_slot = partial_acceptance or _conditional_bugfix_acceptance(canonical_intent)
     acceptance_recovered = False
     if progress_event_id:
         yield stage_progress(
@@ -259,7 +261,7 @@ def analyze_task_stream(
             intent_slot=_intent_slot_payload(canonical_intent),
             acceptance_slots=acceptance_slots, source_catalog=source_catalog,
         )}], label="unknowns",
-        required=lambda data: isinstance(data.get("unknowns"), list) and bool(data["unknowns"]),
+        required=lambda data: isinstance(data.get("unknowns"), list),
     )
     analyzer_errors.extend(unknowns_errors)
     minimal_recovery_error = ""
@@ -610,6 +612,7 @@ def _analysis_from_slots(message: str, context: list[str], intent_slot: dict, ac
         "investigation_targets": intent_meta.get("investigation_targets", []),
         "unknowns": unknowns,
         "follow_ups": unknowns_slot.get("follow_ups", []),
+        "design_questions": unknowns_slot.get("design_questions", []),
     }
     if execution_mode_recovered:
         data["analyzer_warnings"] = [
@@ -925,7 +928,7 @@ def _runtime_unknowns(
             else:
                 strategy = (
                     "deferred"
-                    if requested_strategy == "deferred" or not blocking
+                    if requested_strategy == "deferred"
                     else "investigate_project"
                 )
             items.append({

@@ -40,6 +40,8 @@ def implementation_stream(
     patch_plan: dict,
     workspace_dir: str,
 ) -> Iterator[dict]:
+    if patch_plan.get("_repair_issues"):
+        raise ValueError("Implementation requires a valid patch plan: " + "; ".join(patch_plan["_repair_issues"]))
     setting = model_settings.resolve(model_settings.DEFAULT_STAGE)
     if setting is None:
         raise ValueError("No model configured for implementation. Configure a default model in Providers.")

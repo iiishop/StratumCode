@@ -128,13 +128,20 @@ def ask(
                         _emit_usage(f"{thinking_id}-task-author", pricing_rules, usage_total, task_assistant)
                     for event in task_events:
                         _emit(event)
-                    call = _with_current_analysis(call, task_state)
+                    try:
+                        call = _with_current_analysis(call, task_state)
+                    except ValueError as exc:
+                        output = json.dumps({"error": str(exc)}, ensure_ascii=False)
+                        _emit(start_event(call["id"], "tool", {"name": _tool_call_name(call), "status": "error", "output": output}))
+                        messages.append({"role": "tool", "tool_call_id": call["id"], "content": output})
+                        continue
                 output = execute_tool_call(call, workspace_dir, session_id=session_id)
                 coordinator.observe(call, output)
+                artifact_ref = task_state.retain_delegate(call, output) if task_state is not None else ""
                 messages.append({
                     "role": "tool",
                     "tool_call_id": call.get("id") or "",
-                    "content": answer_handoff(call, output),
+                    "content": answer_handoff(call, output, artifact_ref=artifact_ref),
                 })
             if task_state is not None:
                 rendered_state = _task_state_prompt(task_state)
@@ -332,6 +339,8 @@ def _state_machine_task_events(
     provider: dict,
     model: str,
 ) -> tuple[list[dict], dict | None]:
+    if _tool_call_name(call) == "run_write_loop" and tool_arguments(call.get("function", {}).get("arguments")).get("investigation_source"):
+        return [], None
     try:
         return task_state.publish_events_for_tool(
             _tool_call_name(call),
@@ -350,6 +359,25 @@ def _state_machine_task_events(
 
 def _with_current_analysis(call: dict, task_state: LightTaskState) -> dict:
     name = _tool_call_name(call)
+    if name == "run_write_loop":
+        arguments = tool_arguments(call.get("function", {}).get("arguments"))
+        source = arguments.pop("investigation_source", "")
+        if source:
+            artifact = task_state.delegate_artifacts.get(source)
+            if artifact is None:
+                raise ValueError("Unknown investigation_source; use a source returned by this turn's delegate")
+            task_state.set_analysis(artifact["analysis"])
+            arguments.update(artifact)
+            return {**call, "function": {**call["function"], "arguments": json.dumps(arguments, ensure_ascii=False)}}
+    if name == "run_full_pipeline" and task_state.origin_message:
+        result = dict(call)
+        function = dict(result.get("function") or {})
+        arguments = tool_arguments(function.get("arguments"))
+        # Full-task delegation must preserve the user's contract, not a model paraphrase.
+        arguments["message"] = task_state.origin_message
+        function["arguments"] = json.dumps(arguments, ensure_ascii=False)
+        result["function"] = function
+        return result
     if name not in {"run_investigation", "run_write_loop"}:
         return call
     analysis = task_state.current()

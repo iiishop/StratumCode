@@ -136,7 +136,9 @@ def light_tools() -> dict[str, LightTool]:
             name="run_write_loop",
             description=(
                 "Run the existing rigorous write loop from the design state. Requires the light "
-                "agent to provide analysis and investigation; this tool never runs analyzer or "
+                "agent to reference investigation_source returned by a previous delegate; runtime "
+                "restores its original analysis and investigation without model transcription. "
+                "Legacy explicit analysis and investigation are also supported. This tool never runs analyzer or "
                 "investigation itself. "
                 "Returns validation-centered output instead of raw patch output."
             ),
@@ -147,8 +149,9 @@ def light_tools() -> dict[str, LightTool]:
                     "context": {"type": "array", "items": {"type": "string"}},
                     "analysis": {"type": "object"},
                     "investigation": {"type": "object"},
+                    "investigation_source": {"type": "string", "description": "Exact source returned by a delegate in this turn; do not reconstruct its evidence."},
                 },
-                "required": ["message", "analysis", "investigation"],
+                "required": ["message"],
                 "additionalProperties": False,
             },
             execute=_run_write_loop_tool,
@@ -156,17 +159,17 @@ def light_tools() -> dict[str, LightTool]:
         "run_full_pipeline": LightTool(
             name="run_full_pipeline",
             description=(
-                "Run the existing full workflow for one focused subtask from the analyzer entry: "
+                "Run the existing full workflow for the original user request from the analyzer entry: "
                 "analysis, investigation, design, patch planning, implementation, and validation. "
-                "Use this after the light agent decomposes a broad request into a concrete, "
-                "small-scope implementation task."
+                "The runtime preserves the original request, not a narrowed paraphrase. "
+                "To continue an existing investigation, use run_write_loop with its investigation_source instead."
             ),
             parameters={
                 "type": "object",
                 "properties": {
                     "message": {
                         "type": "string",
-                        "description": "One focused subtask to complete through the full legacy workflow.",
+                        "description": "Original user request; runtime preserves the original turn contract.",
                     },
                     "context": {"type": "array", "items": {"type": "string"}},
                 },
@@ -255,6 +258,7 @@ def _run_write_loop_tool(arguments: dict, workspace_dir: str, session_id: int | 
         "state": run.state.value,
         "analysis": _analysis_summary(run.analysis or {}),
         "investigation_summary": (run.last_investigation or {}).get("summary", ""),
+        "final": _last_output(events),
         "validation_result": run.validation_result or {},
         "changed_files": run.changed_files,
         "events": _event_summary(events),

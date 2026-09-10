@@ -161,8 +161,16 @@ Several independent goals produce separate roots (runtime assigns U_GOAL1, U_GOA
 For example, turn "force persistence on idle while preserving incremental saves" into
 "How can idle-triggered persistence be guaranteed without disrupting incremental saves?"
 This asks for one behavior-preserving mechanism; do not separately re-ask already explicit user decisions.
-Use question, type=code_fact, blocking=true, resolution_strategy=investigate_project,
-domain=requirement|solution, parent_id=null and acceptance_slots. Do not predict detailed child trees.
+Use truthful question types and strategies, domain=requirement|solution, parent_id=null
+and acceptance_slots. Unknowns are existing facts that the read-only investigator can establish.
+Future architecture, library selection, coordinate models and storage design belong in
+design_questions (an array of question strings), not code_fact Unknowns: Design owns those decisions.
+Checks requiring installation, service startup, network probes or restart tests belong in
+follow_ups with id, question, reason, required_capability and owner_phase=validation.
+They remain implementation/validation obligations when required by the acceptance criteria.
+For an empty/new project, first establish the workspace baseline; do not demand evidence
+of code that will only exist after implementation. Do not turn every feature into a code-fact question.
+Do not predict detailed child trees.
 Investigation discovers concrete dependencies dynamically from evidence.
 investigation_targets are non-exhaustive orientation hints, never completion obligations.
 
@@ -763,7 +771,10 @@ For patch_verification:
 
 Rules:
 - Keep the plan minimal: the fewest steps that cover the approved design.
-- If the current runtime_slot needs no code change, return needed=false,
+- Creating or editing any deliverable file, including README/documentation,
+  requires needed=true and a real file-change step. Describing future validation
+  honestly in a new README is not a no-change inspection.
+- If the current runtime_slot needs no file change, return needed=false,
   step_content=[], a concrete skip_reason, and skip_project_fact_slots proving
   the current project already satisfies or preserves that decision.
 - Do not write implementation step ids or responsibility_chain objects.
@@ -772,6 +783,12 @@ Rules:
   bound by runtime_slot; do not write decision_slots.
 - Copy existing file paths exactly from project facts and use mode=modify.
   Use mode=create only when the approved design explicitly requires a new file.
+- File lifecycle follows planned step order: create each new file exactly once.
+  If planned_steps_so_far already creates that file, use mode=modify for later
+  distinct responsibilities, even though the file does not exist on disk yet.
+  These steps depend on the preceding same-file step completing. Preserve its
+  behavior; do not recreate or overwrite the file. Each step remains a separately
+  auditable behavior goal, not one giant file-wide implementation.
 - Respect safe_action from investigation.structured_findings when present; do
   not plan extraction for action=skip candidates. action=review candidates may
   be planned only when the design chose a behavior-preserving variant strategy.
@@ -895,10 +912,12 @@ Return one compact JSON object only. Do not use Markdown.
 
 For each candidate implementation step, decide whether its action requires a
 code change. A step requires NO code change only when it performs nothing but
-manual review, inspection, verification, confirmation, or documentation that the
-requested behavior already exists and needs no edit. Anything that adds, edits,
+manual review, inspection, verification, or confirmation that the
+requested behavior already exists and needs no file edit. Anything that adds, edits,
 creates, deletes, renames, moves, reconfigures, or otherwise modifies source
-code, tests, build files, or configuration REQUIRES a code change.
+code, tests, build files, configuration, README, or any documentation file
+REQUIRES a change. The legacy requires_code_change field means any file change,
+not merely executable source code. Writing a new document is never a no-change step.
 
 Do not rely on keywords such as "manual review", "verification only", "no code
 change", "already implemented", or their translations. Judge by the concrete
@@ -1344,6 +1363,8 @@ def build_design_requirement_slot_user(
             "scope": analysis.get("scope", {}),
             "reference_baselines": analysis.get("reference_baselines", []),
             "canonical_statements": analysis.get("statements", []),
+            "design_questions": analysis.get("design_questions", []),
+            "validation_follow_ups": analysis.get("follow_ups", []),
         },
         "investigation": {
             "summary": investigation.get("summary", ""),
@@ -1401,6 +1422,8 @@ def build_design_decision_slots_user(
             "canonical_statements": analysis.get("statements", []),
         },
         "investigation": {
+            "design_questions": analysis.get("design_questions", []),
+            "validation_follow_ups": analysis.get("follow_ups", []),
             "summary": investigation.get("summary", ""),
             "patch_planning_facts": _numbered_project_facts(investigation),
             "structured_findings": investigation.get("structured_findings", {}),

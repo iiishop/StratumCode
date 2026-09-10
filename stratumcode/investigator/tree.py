@@ -41,7 +41,7 @@ def ensure_goal_root(recorded: dict, analysis: dict, message: str) -> None:
     if nodes:
         validate_tree(nodes)
         return
-    if recorded.get("follow_ups"):
+    if recorded.get("follow_ups") or (analysis.get("_canonicalized") and analysis.get("unknowns") == []):
         return
     goal = str(analysis.get("origin_message") or message or
                (analysis.get("intent") or {}).get("summary") or "").strip()

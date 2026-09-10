@@ -85,6 +85,7 @@ def patch_planning_stream(
     out_of_scope = _strings(design_plan.get("out_of_scope"))
     acceptance_verification = {}
     skipped_decision_slots = []
+    skip_issues = []
     facts = _project_facts(investigation)
     acceptance_count = len(analysis.get("acceptance_criteria", []))
     decisions = [
@@ -150,6 +151,7 @@ def patch_planning_stream(
                 workspace_dir,
                 acceptance_count=acceptance_count,
                 fact_count=len(facts),
+                planned_steps=step_content,
             )
             if not slot or not slot_issues:
                 break
@@ -417,44 +419,9 @@ def patch_planning_stream(
                 "content": reason,
                 "streaming": False,
             })
-            # 给模型修正机会：去掉无效 skip 或改为具体代码修改，而不是直接判失败
-            skip_repair_ok = False
-            for skip_repair_attempt in _attempt_indexes(attempts):
-                messages.extend([
-                    {"role": "assistant", "content": json.dumps(verification or {}, ensure_ascii=False)[:4000]},
-                    {"role": "user", "content": (
-                        reason
-                        + "\nRemove the rejected runtime skip candidates or replace them "
-                        + "with concrete code changes, then return corrected patch_verification JSON."
-                    )},
-                ])
-                verification = yield from _content_json_stream(
-                    provider,
-                    model,
-                    messages,
-                    pricing_rules,
-                    usage_total,
-                    run_id,
-                    f"verification-skip-repair-{skip_repair_attempt}",
-                )
-                rejected_skips = _rejected_skip_reviews(verification.get("skip_reviews"))
-                if not rejected_skips:
-                    skip_repair_ok = True
-                    break
-            if not skip_repair_ok:
-                reason = "Patch verification rejected runtime skip candidates after repair: " + "; ".join(
-                    str(item.get("reason") or item.get("decision_slot"))
-                    for item in rejected_skips
-                )
-                yield start_event(f"{run_id}-skip-rejected", "output", {
-                    "content": reason,
-                    "streaming": False,
-                })
-                yield {"op": "update", "id": stage_id, "patch": {
-                    "state": "error",
-                    "phase": "patch_planning_failed",
-                }}
-                return
+            # Verification JSON cannot add missing implementation steps. Repair
+            # the plan itself rather than invite the reviewer to drop its veto.
+            skip_issues.append(reason)
         if isinstance(verification, dict):
             _merge_acceptance_verification(
                 acceptance_verification,
@@ -495,7 +462,7 @@ def patch_planning_stream(
         })
         yield {"op": "update", "id": stage_id, "patch": {"state": "error", "phase": "patch_planning_failed"}}
         return
-    issues = validate_patch_plan(plan, analysis, design_plan, workspace_dir, investigation)
+    issues = skip_issues + validate_patch_plan(plan, analysis, design_plan, workspace_dir, investigation)
     if not issues:
         # 结构验证通过后再做完成条件交叉一致性审计：IS 间同一输入/调用被断言为
         # 互斥结果（如 x=2x 既是"任意实数"又是"a=-1,b=0"）属于 plan 级矛盾，
@@ -530,14 +497,13 @@ def patch_planning_stream(
             return
         yield start_event(f"{run_id}-repair-hint", "output", {
             "content": (
-                "Patch plan needs minor fixes:\n"
+                "Patch plan failed validation:\n"
                 + "\n".join(f"- {item}" for item in issues)
             ),
             "streaming": False,
         })
         yield {"op": "update", "id": stage_id, "patch": {"state": "running", "phase": "repairing"}}
         plan["_repair_issues"] = issues
-        plan["execution_authorization"] = patch_authorization.create_authorization(plan, workspace_dir)
         yield start_event(f"{run_id}-plan", "patch_plan", plan)
         yield {"op": "update", "id": stage_id, "patch": {"state": "done", "phase": "needs_repair"}}
         yield {"op": "done", "patch_plan": plan, "repair_needed": True}
@@ -712,7 +678,6 @@ def validate_patch_plan(plan: dict, analysis: dict, design_plan: dict, workspace
     if duplicate_step_ids:
         issues.append("duplicate implementation step ids: " + ", ".join(sorted(duplicate_step_ids)))
     seen_responsibilities: dict[tuple[str, str, str], str] = {}
-    steps_by_file: dict[str, list[dict]] = {}
     for item in steps:
         key = _step_responsibility_key(item)
         if key in seen_responsibilities:
@@ -722,14 +687,6 @@ def validate_patch_plan(plan: dict, analysis: dict, design_plan: dict, workspace
             )
         else:
             seen_responsibilities[key] = str(item.get("id") or "?")
-        if item.get("file"):
-            steps_by_file.setdefault(str(item["file"]), []).append(item)
-    for file, file_steps in steps_by_file.items():
-        modes = {str(item.get("mode") or "modify") for item in file_steps}
-        if len(modes) > 1:
-            issues.append(f"file has conflicting create/modify steps: {file}")
-        if "create" in modes and len(file_steps) > 1:
-            issues.append(f"created file must have exactly one implementation step: {file}")
     step_ids = {item.get("id") for item in steps if item.get("id")}
     step_files = {item.get("file") for item in steps if item.get("file")}
     files = set(plan.get("files_to_change") or [])
@@ -762,6 +719,7 @@ def validate_patch_plan(plan: dict, analysis: dict, design_plan: dict, workspace
             issues.append(f"acceptance_mapping {item.get('acceptance_id') or '?'} has no verification")
     workspace = Path(workspace_dir or ".").resolve()
     workspace_files = _known_workspace_files(workspace)
+    created_files = set()
     for step in steps:
         step_id = step.get("id") or "?"
         if not step.get("id"):
@@ -776,8 +734,10 @@ def validate_patch_plan(plan: dict, analysis: dict, design_plan: dict, workspace
             issues.append(f"step {step_id} has invalid mode: {mode} (valid modes: modify, create)")
         if not step.get("target"):
             issues.append(f"step {step_id} has no target")
-        if file_issue := _planned_file_issue(step["file"], mode, workspace):
+        if file_issue := _planned_file_issue(step["file"], mode, workspace, created_files):
             issues.append(f"step {step_id} {file_issue}")
+        elif mode == "create":
+            created_files.add((workspace / step["file"]).resolve())
         mentioned_files = _mentioned_workspace_files(step, workspace_files)
         structured_file = str(step.get("file") or "").replace("\\", "/")
         reference_files = _derived_reference_files(
@@ -1258,6 +1218,7 @@ def _slot_step_issues(
     *,
     acceptance_count: int,
     fact_count: int,
+    planned_steps: list[dict] | None = None,
 ) -> list[str]:
     if not slot:
         return []
@@ -1272,6 +1233,8 @@ def _slot_step_issues(
     if not _has_usable_steps(steps):
         return ["needed=true requires at least one step_content item with a workspace-relative file"]
     workspace = Path(workspace_dir or ".").resolve()
+    created_files = {(workspace / item["file"]).resolve()
+                     for item in planned_steps or [] if item.get("mode") == "create" and item.get("file")}
     issues = []
     for index, item in enumerate(steps, start=1):
         if not isinstance(item, dict) or not str(item.get("file") or "").strip():
@@ -1285,10 +1248,12 @@ def _slot_step_issues(
         except ValueError as exc:
             issues.append(f"step_content item {index} {exc}")
             continue
-        if mode == "modify":
+        if mode == "modify" and (workspace / item["file"]).resolve() not in created_files:
             item["file"] = _repair_unique_modify_target(str(item["file"]), workspace)
-        if issue := _planned_file_issue(str(item["file"]), mode, workspace):
+        if issue := _planned_file_issue(str(item["file"]), mode, workspace, created_files):
             issues.append(f"step_content item {index} {issue}")
+        elif mode == "create":
+            created_files.add((workspace / item["file"]).resolve())
         for field in ("purpose", "target", "action", "required_behavior_if_removed", "minimality_check"):
             if not str(item.get(field) or "").strip():
                 issues.append(f"step_content item {index} has no {field}")
@@ -1728,7 +1693,7 @@ def _repair_unique_modify_target(file: str, workspace: Path) -> str:
     return matches[0] if len(matches) == 1 else file
 
 
-def _planned_file_issue(file: str, mode: str, workspace: Path) -> str:
+def _planned_file_issue(file: str, mode: str, workspace: Path, created_files: set[Path] | None = None) -> str:
     if Path(file).is_absolute():
         return "file must be workspace-relative"
     try:
@@ -1737,10 +1702,13 @@ def _planned_file_issue(file: str, mode: str, workspace: Path) -> str:
         return "file path is invalid"
     if workspace not in (target, *target.parents):
         return "file is outside workspace"
-    if mode == "modify" and not target.is_file():
+    planned = target in (created_files or set())
+    if mode == "modify" and not target.is_file() and not planned:
         return f"modify target does not exist: {file}"
     if mode == "create" and target.exists():
         return f"create target already exists: {file}"
+    if mode == "create" and planned:
+        return f"file already has a preceding create step; use mode=modify for this later responsibility: {file}"
     return ""
 
 

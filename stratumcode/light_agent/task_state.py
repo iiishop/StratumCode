@@ -13,10 +13,28 @@ LIGHT_AUTHORED_TASK_TOOLS = {"run_investigation", "run_write_loop"}
 
 class LightTaskState:
     def __init__(self, analysis: dict) -> None:
+        self.origin_message = str(analysis.get("origin_message") or "")
         self.analyses: dict[str, dict] = {}
         self.active_id = ""
         self.published_ids: set[str] = set()
+        self.delegate_artifacts: dict[str, dict] = {}
         self.set_analysis(analysis)
+
+    def retain_delegate(self, call: dict, output: str) -> str:
+        if call.get("function", {}).get("name") not in {"run_investigation", "run_full_pipeline"}:
+            return ""
+        try:
+            payload = json.loads(output)
+        except (TypeError, ValueError):
+            return ""
+        if not isinstance(payload, dict) or not isinstance(payload.get("investigation"), dict):
+            return ""
+        source = str(call.get("id") or "")
+        analysis = payload.get("analysis") or self.current()
+        if not source or not isinstance(analysis, dict):
+            return ""
+        self.delegate_artifacts[source] = deepcopy({"analysis": analysis, "investigation": payload["investigation"]})
+        return source
 
     def set_analysis(self, analysis: dict) -> None:
         analysis_id = str(analysis.get("id") or "").strip()
