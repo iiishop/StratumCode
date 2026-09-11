@@ -29,6 +29,8 @@ async def _terminal(params: dict, ctx: dict) -> ToolResult:
 terminal_tool = ToolDef(
     name="terminal",
     description=(
+        "Use for ad-hoc commands, builds, tests, or checks not covered by a dedicated available capability. "
+        "For repeatable application lifecycle and owned restart/log handling, prefer an available managed-launch capability. "
         "Run a terminal command in the workspace. Supports blocking calls and background "
         "sessions. Use background=true for long-lived servers, watchers, or slow commands. "
         "On Windows, auto selects Windows PowerShell when available, otherwise cmd; it is not Bash. "

@@ -4,6 +4,8 @@ import { gsap } from 'gsap'
 import { animate, stagger } from 'animejs'
 import GitPanel from './GitPanel.vue'
 import TerminalPanel from './TerminalPanel.vue'
+import ApplicationPanel from './ApplicationPanel.vue'
+import HttpPanel from './HttpPanel.vue'
 import UnknownTree from './UnknownTree.vue'
 import InvestigationFollowUps from './InvestigationFollowUps.vue'
 
@@ -584,8 +586,13 @@ function onRowLeave(el) {
         </section>
       </template>
 
+      <template v-else-if="tab === 'http'">
+        <HttpPanel :key="workspaceKey" />
+      </template>
+
       <template v-else-if="tab === 'terminal'">
-        <TerminalPanel />
+        <ApplicationPanel :key="workspaceKey" />
+        <details style="margin-top: 20px"><summary>后台终端记录</summary><TerminalPanel /></details>
       </template>
 
       <template v-else-if="tab === 'git'">

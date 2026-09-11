@@ -192,8 +192,16 @@ const inspectorTabs = computed(() => [
     count: evidenceRuns.length,
   },
   {
+    id: 'http',
+    label: 'API',
+    icon: '{}',
+    color: '#126957',
+    soft: '#e3f5f0',
+    description: 'HTTP requests, saved API checks, and observed responses.',
+  },
+  {
     id: 'terminal',
-    label: 'Terminal',
+    label: 'Apps / Terminal',
     icon: '>_',
     color: '#12846f',
     soft: '#e3f5f0',

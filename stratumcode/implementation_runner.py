@@ -27,7 +27,7 @@ from .tools import registry
 # 超过后才判定实现失败。
 MAX_PROSE_ENDINGS = 2
 
-TERMINAL_TOOLS = ("terminal", "process", "read_terminal")
+TERMINAL_TOOLS = ("terminal", "process", "read_terminal", "application")
 IMPLEMENTATION_TOOLS = ("read", *TERMINAL_TOOLS, "apply_patch", "finish_step")
 VALIDATION_TOOLS = ("read", "code_nav", *TERMINAL_TOOLS)
 LEGACY_USER_DECISION_VERDICT = "user_decision"
@@ -803,8 +803,10 @@ def _validation_tools() -> list[dict]:
 
 
 def _validation_tool_names() -> tuple[str, ...]:
-    mcp_tools = tuple(tool.name for tool in registry.list_all() if tool.name.startswith("mcp_"))
-    return VALIDATION_TOOLS + tuple(name for name in mcp_tools if name not in VALIDATION_TOOLS)
+    discovered = tuple(tool.name for tool in registry.list_all()
+                       if "validation" in tool.capabilities or tool.name.startswith("mcp_"))
+    # Retain legacy builtins while new capabilities are registered by their owner.
+    return tuple(dict.fromkeys((*VALIDATION_TOOLS, *discovered)))
 
 
 def _tools_for(names: tuple[str, ...]) -> list[dict]:
@@ -932,10 +934,11 @@ def _prepare_tool_arguments(name: str, arguments: dict, patch_plan: dict) -> dic
     return patched
 
 
-def _run_tool(name: str, call_id: str, arguments: dict, workspace_dir: str) -> Iterator[dict]:
+def _run_tool(name: str, call_id: str, arguments: dict, workspace_dir: str, *, allowed_names=None) -> Iterator[dict]:
     tool = registry.get(name)
-    if (name not in (*IMPLEMENTATION_TOOLS, *VALIDATION_TOOLS) and not _is_mcp_tool(name)) or tool is None:
-        output = json.dumps({"error": f"tool not allowed in implementation: {name}"}, ensure_ascii=False)
+    allowed = (name in allowed_names) if allowed_names is not None else (name in (*IMPLEMENTATION_TOOLS, *VALIDATION_TOOLS) or _is_mcp_tool(name))
+    if not allowed or tool is None:
+        output = json.dumps({"error": f"tool not allowed in this stage: {name}"}, ensure_ascii=False)
         yield start_event(call_id, "tool", {
             "name": name or "invalid",
             "description": "Implementation tool",
@@ -1052,6 +1055,8 @@ def _validation_tool_validated(name: str, output: str) -> bool:
     if title.startswith("[error]"):
         return False
     metadata = data.get("metadata") if isinstance(data.get("metadata"), dict) else {}
+    if metadata.get("validation_observation") is False:
+        return False
     if name == "code_nav":
         return metadata.get("status") == "ok"
     if name == "read":
@@ -1060,7 +1065,8 @@ def _validation_tool_validated(name: str, output: str) -> bool:
     if name in ("terminal", "process"):
         # 跑过命令且无 [error] 即算验证尝试（模型用 terminal 跑测试/编译）
         return True
-    return _is_mcp_tool(name)
+    tool = registry.get(name)
+    return _is_mcp_tool(name) or bool(tool and "validation" in tool.capabilities)
 
 
 def _is_mcp_tool(name: str) -> bool:
@@ -1219,7 +1225,8 @@ def _validation_stream(
                             messages.append({"role": "tool", "tool_call_id": call_id, "content": output})
                             continue
                         mcp_rounds += 1
-                    output = yield from _run_tool(name, call_id, arguments, workspace_dir)
+                    output = yield from _run_tool(name, call_id, arguments, workspace_dir,
+                                                  allowed_names=_validation_tool_names())
                 if _validation_tool_validated(name, output):
                     semantic_checked = True
             except Exception as exc:

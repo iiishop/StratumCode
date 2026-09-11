@@ -38,7 +38,7 @@ def _clearify_required_prompt(unknown: dict) -> str:
     ])
 
 
-def _discover_lsp_first_prompt(analysis: dict) -> str | None:
+def _discovery_evidence_prompt(analysis: dict) -> str | None:
     if not any(
         isinstance(item, dict)
         and item.get("resolution_strategy") == "investigate_project"
@@ -46,24 +46,12 @@ def _discover_lsp_first_prompt(analysis: dict) -> str | None:
     ):
         return None
     return (
-        "Discovery routing: for source-code questions, you MUST start with LSP "
-        "navigation before whole-file reads. Use code_nav(operation='symbols', "
-        "path=...) to list a file's symbols; code_nav(operation='definition' or "
-        "'references' or 'inspect', symbol=..., path=...) to resolve a symbol; "
-        "then read only the relevant line ranges as grounding evidence. "
-        "Looking up a function/class/variable's definition, references, or call "
-        "sites is a semantic query — you MUST use code_nav for it, even if the "
-        "symbol name looks like a plain string; grep for such lookups is "
-        "forbidden. grep is only for literal text patterns that are NOT symbol "
-        "lookups (error strings, log text, comments, UI labels). Do not read an "
-        "entire file just to locate a symbol's usages: code_nav references "
-        "returns the exact sites; read only those cited line ranges. If code_nav "
-        "reports an unavailable language server, use lsp_tool status/install "
-        "once for that language; if LSP remains unavailable, fall back to "
-        "grep/read and record that fallback. For cross-file, "
-        "parent/caller, consumer, or state-transition claims, gather semantic "
-        "references or the corresponding caller/consumer observations before "
-        "resolving."
+        "Discovery evidence: choose the next authorized capability from the supplied "
+        "tool descriptions to answer the active question, reusing sufficient current "
+        "observations. For cross-file, parent/caller, consumer or state-transition "
+        "claims, establish the corresponding relationships and relevant implementation "
+        "before resolving; a name match alone is insufficient. No mandatory first tool. "
+        "Keep discovery read-only and report evidence gaps requiring execution separately."
     )
 
 
@@ -173,8 +161,9 @@ def _investigation_directive(
         if finish_evidence_blocked:
             prompt = (
                 "The previous finish attempt was rejected because a resolution "
-                "references a file that was never read. Use read/grep/glob/code_nav "
-                "to obtain the missing observations, then call audit_investigation again."
+                "references a file that was never read. Select an available source-observation "
+                "capability whose output establishes the missing content evidence, then call "
+                "audit_investigation again. A path listing alone does not establish file contents."
             )
             return (
                 InvestigationPhase.FINISH_WITH_EVIDENCE_GAP,
@@ -245,5 +234,5 @@ def _investigation_directive(
         InvestigationPhase.DISCOVER,
         _phase_tools(InvestigationPhase.DISCOVER, tools=tools),
         _phase_tool_choice(InvestigationPhase.DISCOVER),
-        _discover_lsp_first_prompt(analysis),
+        _discovery_evidence_prompt(analysis),
     )
