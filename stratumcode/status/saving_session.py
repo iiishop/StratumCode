@@ -25,7 +25,7 @@ def handle(run):
         delta = memory_system.delta_from_events(
             workspace_dir=run.workspace_dir,
             session_id=run.session_id,
-            turn_id=f"turn-{uuid4().hex[:12]}",
+            turn_id=memory_system.current_turn_id() or f"turn-{uuid4().hex[:12]}",
             events=[{
                 "op": "done",
                 "investigation": run.last_investigation,

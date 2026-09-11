@@ -23,7 +23,9 @@ def handle(run):
         scopes=("turn", "session", "project"),
         token_budget=3500,
     )
-    run.session_context = memory_snapshot.to_legacy_context() or _session_context(state)
+    legacy = _session_context(state)
+    selected = memory_snapshot.to_legacy_context()
+    run.session_context = {key: selected.get(key) or value for key, value in legacy.items()}
     run.analyzer_session_context = _select_session_memory(run.message, None, run.session_context)
     workspace_context = _workspace_snapshot(run.workspace_dir)
     if workspace_context:

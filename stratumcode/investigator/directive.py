@@ -4,13 +4,13 @@ import json
 
 from .constants import CLEARIFY_RESOLUTION_REASON
 from .domain import (
-    _recorded_resolves_initial_unknowns,
     _reference_list,
     _semantic_repair_payload,
 )
 from .evidence import _resolution_evidence_lines
 from .state import InvestigationPhase
 from .tools import _phase_tool_choice, _phase_tools
+from .tree import pending_unknowns, audit_complete
 
 
 def _clearify_pending_evidence_unknowns(recorded: dict) -> list[dict]:
@@ -23,6 +23,7 @@ def _clearify_pending_evidence_unknowns(recorded: dict) -> list[dict]:
         for item in recorded.get("resolutions", [])
         if isinstance(item, dict)
         and str(item.get("reason") or "") == CLEARIFY_RESOLUTION_REASON
+        and item.get("kind") != "user_decision"
         and not _reference_list(item.get("evidence"))
     ]
 
@@ -37,7 +38,7 @@ def _clearify_required_prompt(unknown: dict) -> str:
     ])
 
 
-def _discover_lsp_first_prompt(analysis: dict) -> str | None:
+def _discovery_evidence_prompt(analysis: dict) -> str | None:
     if not any(
         isinstance(item, dict)
         and item.get("resolution_strategy") == "investigate_project"
@@ -45,24 +46,12 @@ def _discover_lsp_first_prompt(analysis: dict) -> str | None:
     ):
         return None
     return (
-        "Discovery routing: for source-code questions, you MUST start with LSP "
-        "navigation before whole-file reads. Use code_nav(operation='symbols', "
-        "path=...) to list a file's symbols; code_nav(operation='definition' or "
-        "'references' or 'inspect', symbol=..., path=...) to resolve a symbol; "
-        "then read only the relevant line ranges as grounding evidence. "
-        "Looking up a function/class/variable's definition, references, or call "
-        "sites is a semantic query — you MUST use code_nav for it, even if the "
-        "symbol name looks like a plain string; grep for such lookups is "
-        "forbidden. grep is only for literal text patterns that are NOT symbol "
-        "lookups (error strings, log text, comments, UI labels). Do not read an "
-        "entire file just to locate a symbol's usages: code_nav references "
-        "returns the exact sites; read only those cited line ranges. If code_nav "
-        "reports an unavailable language server, use lsp_tool status/install "
-        "once for that language; if LSP remains unavailable, fall back to "
-        "grep/read and record that fallback. For cross-file, "
-        "parent/caller, consumer, or state-transition claims, gather semantic "
-        "references or the corresponding caller/consumer observations before "
-        "resolving."
+        "Discovery evidence: choose the next authorized capability from the supplied "
+        "tool descriptions to answer the active question, reusing sufficient current "
+        "observations. For cross-file, parent/caller, consumer or state-transition "
+        "claims, establish the corresponding relationships and relevant implementation "
+        "before resolving; a name match alone is insufficient. No mandatory first tool. "
+        "Keep discovery read-only and report evidence gaps requiring execution separately."
     )
 
 
@@ -78,9 +67,9 @@ def _resolution_required_prompt(
         if isinstance(item, dict)
     }
     return "\n".join([
-        "Existing project evidence is sufficient to write an explicit resolution.",
-        "Do not call more discovery tools for these unknowns.",
-        "Call resolve_unknowns with resolutions for: " + ", ".join(unknown_ids),
+        "Related evidence is available, but relevance does not establish sufficiency.",
+        "Read missing implementation details before concluding; discovery tools remain available.",
+        "When the evidence answers the question, call resolve_unknowns for: " + ", ".join(unknown_ids),
         "Each resolution must include unknown_id, status, answer, observation_ids or belief_ids, and reason.",
         "If an unknown is still not fully resolved, record a partially_resolved resolution naming the precise missing evidence.",
         "Questions:",
@@ -158,7 +147,7 @@ def _investigation_directive(
             "first to obtain the missing observations, then call record_investigation_findings "
             "to append only the missing belief(s), then add a minimal resolution patch with "
             "repair_mode=append_missing_only and only the new belief_ids/evidence. "
-            "After the missing list is addressed, call finish_investigation to let the "
+            "After the missing list is addressed, call audit_investigation to let the "
             "quality gate re-audit the resolutions. The missing list: "
             f"{json.dumps(repair, ensure_ascii=False)}"
         )
@@ -168,16 +157,13 @@ def _investigation_directive(
             _phase_tool_choice(InvestigationPhase.REPAIR),
             prompt,
         )
-    if _recorded_resolves_initial_unknowns(
-        recorded_findings,
-        analysis,
-        repair_ids=semantic_repair_required_ids,
-    ):
+    if not pending_unknowns(recorded_findings, analysis):
         if finish_evidence_blocked:
             prompt = (
                 "The previous finish attempt was rejected because a resolution "
-                "references a file that was never read. Use read/grep/glob/code_nav "
-                "to obtain the missing observations, then call finish_investigation again."
+                "references a file that was never read. Select an available source-observation "
+                "capability whose output establishes the missing content evidence, then call "
+                "audit_investigation again. A path listing alone does not establish file contents."
             )
             return (
                 InvestigationPhase.FINISH_WITH_EVIDENCE_GAP,
@@ -188,6 +174,19 @@ def _investigation_directive(
                 ),
                 _phase_tool_choice(InvestigationPhase.FINISH_WITH_EVIDENCE_GAP),
                 prompt,
+            )
+        if not audit_complete(recorded_findings, analysis, observations):
+            return (
+                InvestigationPhase.AUDIT,
+                _phase_tools(InvestigationPhase.AUDIT, tools=tools),
+                _phase_tool_choice(InvestigationPhase.AUDIT),
+                "Root Audit checks request coverage and cross-question consistency, not node acceptance again. Trust accepted findings. "
+                "Only newly observed contradictory evidence justifies reopen_investigation_unknown. "
+                "Search for material counterexamples in intended behavior, success, scope, constraints and decisions (requirement), "
+                "and architecture, ownership, integrations, runtime risk and validation paths (solution). "
+                "Represent every incomplete domain as blocking new_unknowns or existing open blockers. "
+                "New gaps must be new root questions with parent_id=null and related_unknown_ids linking accepted findings. Never add dependencies under accepted nodes or repeat answered questions. Each node asks one question. Out-of-scope checks are follow-ups, not blockers. "
+                "For non-project read-only requests, assess solution applicability without unnecessary repository inspection.",
             )
         return (
             InvestigationPhase.FINISH,
@@ -201,21 +200,6 @@ def _investigation_directive(
             InvestigationPhase.SYNTHESIZE,
             _phase_tools(InvestigationPhase.SYNTHESIZE, tools=tools),
             _phase_tool_choice(InvestigationPhase.SYNTHESIZE),
-            prompt,
-        )
-    if read_only_no_unknowns:
-        prompt = (
-            "The task contract has no project facts to investigate. Answer the user's "
-            "request directly in finish_investigation.summary. The summary must satisfy "
-            "the acceptance criteria; do not merely classify, restate, or explain why "
-            "the request does not require project inspection. Do not mention the current "
-            "workspace, speculate about its code, or offer additional project work unless "
-            "the user requested it."
-        )
-        return (
-            InvestigationPhase.READ_ONLY_FINISH,
-            _phase_tools(InvestigationPhase.READ_ONLY_FINISH, tools=tools),
-            _phase_tool_choice(InvestigationPhase.READ_ONLY_FINISH),
             prompt,
         )
     if resolution_required_ids:
@@ -250,5 +234,5 @@ def _investigation_directive(
         InvestigationPhase.DISCOVER,
         _phase_tools(InvestigationPhase.DISCOVER, tools=tools),
         _phase_tool_choice(InvestigationPhase.DISCOVER),
-        _discover_lsp_first_prompt(analysis),
+        _discovery_evidence_prompt(analysis),
     )

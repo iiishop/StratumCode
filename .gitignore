@@ -22,5 +22,11 @@ doc/
 .release-notes.md
 .DS_Store
 tools/
+!stratumcode/tools/
+stratumcode/tools/*
+!stratumcode/tools/builtin/
+stratumcode/tools/builtin/*
+!stratumcode/tools/builtin/application.py
+!stratumcode/tools/builtin/http_request.py
 AGENTS.md
 .StratumCode/

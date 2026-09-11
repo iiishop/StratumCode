@@ -15,8 +15,13 @@ def normalize_records(
     records: list[MemoryRecord],
     evidence: list[MemoryEvidence],
 ) -> list[MemoryRecord]:
-    supported_ids = {item.record_id for item in evidence if item.record_id}
-    return [_normalize_record(workspace_dir, record, record.id in supported_ids) for record in records]
+    return [_normalize_record(workspace_dir, record, any(
+        e.record_id == record.id and e.payload.get("validated_source") and (
+            e.kind == "tool_observation" and record.kind in VERIFIED_FACT_KINDS
+            or e.kind == "user_statement" and record.kind == "decision"
+            or e.kind == "conversation" and record.kind == "conversation"
+        ) for e in evidence
+    )) for record in records]
 
 
 def normalize_evidence(workspace_dir: str, evidence: list[MemoryEvidence]) -> list[MemoryEvidence]:
@@ -97,5 +102,5 @@ def _normalize_record(workspace_dir: str, record: MemoryRecord, has_evidence: bo
 
 def _verified_is_supported(record: MemoryRecord, has_evidence: bool) -> bool:
     if has_evidence:
-        return record.kind in VERIFIED_FACT_KINDS
+        return record.kind in VERIFIED_FACT_KINDS | {"decision", "conversation"}
     return False

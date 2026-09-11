@@ -29,8 +29,14 @@ async def _terminal(params: dict, ctx: dict) -> ToolResult:
 terminal_tool = ToolDef(
     name="terminal",
     description=(
+        "Use for ad-hoc commands, builds, tests, or checks not covered by a dedicated available capability. "
+        "For repeatable application lifecycle and owned restart/log handling, prefer an available managed-launch capability. "
         "Run a terminal command in the workspace. Supports blocking calls and background "
-        "sessions. Use background=true for long-lived servers, watchers, or slow commands."
+        "sessions. Use background=true for long-lived servers, watchers, or slow commands. "
+        "On Windows, auto selects Windows PowerShell when available, otherwise cmd; it is not Bash. "
+        "In Windows PowerShell use curl.exe for curl flags (curl is an Invoke-WebRequest alias), "
+        "Select-Object -First instead of head, and do not use Bash heredocs or &&. "
+        "Select shell explicitly if the command requires different syntax."
     ),
     parameters={
         "type": "object",
@@ -40,7 +46,7 @@ terminal_tool = ToolDef(
             "shell": {
                 "type": "string",
                 "enum": ["auto", "cmd", "powershell", "pwsh", "bash", "git_bash", "sh"],
-                "description": "Shell runtime. auto picks a native default for the OS.",
+                "description": "Shell runtime. Windows auto selects powershell if available, else cmd; POSIX auto selects bash if available, else sh.",
             },
             "background": {"type": "boolean", "description": "Return immediately and keep the process running"},
             "timeout_seconds": {"type": "number", "description": "Blocking call timeout. Default 120 seconds."},

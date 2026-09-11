@@ -548,8 +548,8 @@ def _validate_resolution_refs(resolutions: list[dict], beliefs: list[dict], obse
             raise ValueError(
                 f"resolution {resolution['unknown_id']} references unknown evidence ids: "
                 + ", ".join(missing_evidence)
-                + ". Evidence ids must be observation ids returned by read/glob/grep "
-                "(not tool call ids)"
+                + ". Copy exact IDs or refs from the observation index; IDs may use call_ prefixes. "
+                "Do not invent descriptive obs_* identifiers"
                 + (f"; current observations: {', '.join(sample_ids)}" + ("..." if len(evidence_ids) > 8 else "") if sample_ids else "")
             )
         missing_beliefs = [item for item in resolution.get("belief_ids", []) if item not in belief_by_id]
@@ -644,6 +644,9 @@ def _investigation_task_updates(value, unknowns: list[dict], resolutions: list[d
             "reason": item.get("resolution_strategy", ""),
             "trace": [],
         })
-    return updates[:8]
-
-
+    by_id = {_normalize_unknown_id(n.get("id")): n for n in unknowns}
+    for update in updates:
+        source = by_id.get(_normalize_unknown_id(update.get("id")), {})
+        update["domain"] = source.get("domain", "solution")
+        update["parent_id"] = source.get("parent_id")
+    return updates

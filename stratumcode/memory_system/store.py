@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import sqlite3
 from dataclasses import asdict
 from uuid import uuid4
@@ -15,33 +16,53 @@ from .normalization import graph_relation, normalize_evidence, normalize_payload
 CONFLICT_CANDIDATE_KINDS = {"fact", "change", "validation", "decision"}
 
 
-def list_records(workspace_dir: str, *, include_reverted: bool = False, limit: int = 500) -> list[dict]:
+def list_records(workspace_dir: str, *, include_reverted: bool = False, limit: int = 500,
+                 scoped: bool = False, session_id: int | None = None) -> list[dict]:
     with db.db_session(workspace_dir) as conn:
         rows = conn.execute(
             """
             SELECT * FROM memory_records
             WHERE (? OR status != 'reverted')
-            ORDER BY updated_at DESC, created_at DESC
+              AND (? = 0 OR scope = 'project' OR (? IS NOT NULL AND session_id = ?))
+            ORDER BY updated_at DESC, created_at DESC, rowid DESC
             LIMIT ?
             """,
-            (1 if include_reverted else 0, int(limit)),
+            (1 if include_reverted else 0, int(scoped), session_id, session_id, int(limit)),
         ).fetchall()
         supported_ids = _supported_record_ids(conn)
-    return [_row_record(workspace_dir, row, supported_ids) for row in rows]
+        freshness, relations, superseded = _dependency_state(workspace_dir, conn)
+    result = [_row_record(workspace_dir, row, supported_ids) for row in rows]
+    for item in result:
+        item["freshness"] = freshness.get(item["id"], item["freshness"])
+        item["relations"] = relations.get(item["id"], [])
+        item["superseded_by"] = superseded.get(item["id"], [])
+    return result
 
 
 def list_refs(workspace_dir: str, session_id: int | None, *, limit: int = 80) -> list[dict]:
+    if session_id is None:
+        return []
     with db.db_session(workspace_dir) as conn:
         rows = conn.execute(
             """
             SELECT * FROM conversation_refs
             WHERE (? IS NULL OR session_id = ?)
-            ORDER BY created_at DESC
+            ORDER BY created_at DESC, rowid DESC
             LIMIT ?
             """,
             (session_id, session_id, int(limit)),
         ).fetchall()
     return [_row_ref(row) for row in rows]
+
+
+def list_conversations(workspace_dir: str, session_id: int, *, limit: int = 4) -> list[dict]:
+    with db.db_session(workspace_dir) as conn:
+        rows = conn.execute(
+            "SELECT * FROM memory_records WHERE session_id = ? AND kind = 'conversation' "
+            "AND status != 'reverted' ORDER BY created_at DESC, rowid DESC LIMIT ?",
+            (session_id, limit),
+        ).fetchall()
+    return [{**dict(row), "payload": _loads(row["payload_json"], {})} for row in rows]
 
 
 def record_delta(workspace_dir: str, delta: MemoryDelta) -> dict:
@@ -52,31 +73,50 @@ def record_delta(workspace_dir: str, delta: MemoryDelta) -> dict:
     records = normalize_records(workspace_dir, records, evidence)
     with db.db_session(workspace_dir) as conn:
         existing = _existing_statements(conn)
-        semantic_links = []
+    aliases = {}
+    for record in records:
+        key = _record_key(record)
+        known = existing.get(key)
+        if record.source not in {"conversation_runtime", "event_runtime"}:
+            canonical_id = known[0] if known else "mem-" + hashlib.sha256(repr(key).encode()).hexdigest()[:24]
+            aliases[record.id] = canonical_id
+            record.id = canonical_id
+        existing[key] = (record.id, record.statement)
+    for record in records:
+        record.source_record_ids = list(dict.fromkeys(aliases.get(i, i) for i in record.source_record_ids if aliases.get(i, i) != record.id))
+    for item in evidence:
+        item.record_id = aliases.get(item.record_id, item.record_id)
+    links = [MemoryLink(aliases.get(l.source_id, l.source_id), aliases.get(l.target_id, l.target_id), graph_relation(l.relation)) for l in delta.links]
+    for ref in delta.refs:
+        ref.target_record_id = aliases.get(ref.target_record_id, ref.target_record_id)
+    # LLM work must not hold a SQLite writer transaction and block the next turn's exact history.
+    semantic_links = []
+    for record in records:
+        relation, target_id = _semantic_relation(existing, record)
+        if target_id and relation != "none" and target_id != record.id:
+            semantic_links.append({"source_id": record.id, "target_id": target_id, "relation": relation})
+    with db.db_session(workspace_dir) as conn:
         for record in records:
-            relation, target_id = _semantic_relation(existing, record)
+            old = conn.execute("SELECT source_record_ids_json, confidence, status FROM memory_records WHERE id = ?", (record.id,)).fetchone()
+            if old:
+                record.source_record_ids = list(dict.fromkeys([*_loads(old["source_record_ids_json"], []), *record.source_record_ids]))
+                if old["status"] in {"reverted", "edited"}:
+                    continue
             _upsert_record(conn, record)
             _upsert_fts(conn, record)
-            if target_id and relation != "none":
-                semantic_links.append({"source_id": record.id, "target_id": target_id, "relation": relation})
-                conn.execute(
-                    "INSERT OR IGNORE INTO memory_links (source_id, target_id, relation) VALUES (?, ?, ?)",
-                    (record.id, target_id, relation),
-                )
-            existing[(record.subject_kind.casefold(), record.subject_key.casefold(), record.kind.casefold(), _statement_key(record.statement))] = (
-                record.id,
-                record.statement,
-            )
+        for link in semantic_links:
+            _insert_link(conn, MemoryLink(**link))
         for item in evidence:
             _insert_evidence(conn, item)
-        for link in delta.links:
-            _insert_link(conn, MemoryLink(link.source_id, link.target_id, graph_relation(link.relation)))
+        for link in links:
+            if link.source_id != link.target_id:
+                _insert_link(conn, link)
         for ref in delta.refs:
             _insert_ref(conn, ref)
     return {
         "records": [asdict(record) for record in records],
         "refs": [asdict(ref) for ref in delta.refs],
-        "links": [asdict(link) for link in delta.links] + semantic_links,
+        "links": [asdict(link) for link in links] + semantic_links,
     }
 
 
@@ -221,6 +261,14 @@ def _row_record(workspace_dir: str, row, supported_ids: set[str]) -> dict:
         _loads(item.pop("payload_json", "{}"), {}),
     )
     item["freshness"] = _computed_freshness(workspace_dir, item)
+    if item.get("source") == "assistant_output" and not item["payload"].get("audit", {}).get("supported_by_observation"):
+        # Old prose-derived records cannot remain verified merely because the LLM invented an excerpt.
+        item["confidence"] = "inferred"
+        item["freshness"] = "unknown"
+        if item.get("kind") in CONFLICT_CANDIDATE_KINDS:
+            item["status"] = "pending"
+        if item.get("scope") == "project":
+            item["scope"] = "session"
     if item.get("confidence") == "verified" and item.get("id") not in supported_ids:
         item["confidence"] = "inferred"
         item.setdefault("payload", {})["audit"] = {
@@ -245,8 +293,71 @@ def _decode_json_fields(item: dict) -> dict:
 
 
 def _supported_record_ids(conn) -> set[str]:
-    rows = conn.execute("SELECT DISTINCT record_id FROM memory_evidence").fetchall()
-    return {str(row["record_id"]) for row in rows}
+    rows = conn.execute("SELECT record_id, payload_json FROM memory_evidence").fetchall()
+    return {str(row["record_id"]) for row in rows if _loads(row["payload_json"], {}).get("validated_source")}
+
+
+def _dependency_state(workspace_dir: str, conn) -> tuple[dict, dict, dict]:
+    records = {r["id"]: dict(r) for r in conn.execute("SELECT * FROM memory_records")}
+    evidence = {}
+    fingerprint_cache = {}
+    latest_evidence = {}
+    for row in conn.execute("SELECT record_id, fingerprint_json, payload_json FROM memory_evidence ORDER BY created_at, rowid"):
+        if not _loads(row["payload_json"], {}).get("validated_source"):
+            continue
+        fp = _loads(row["fingerprint_json"], {})
+        if fp:
+            key = row["fingerprint_json"]
+            if key not in fingerprint_cache:
+                try:
+                    fingerprint_cache[key] = freshness_status(workspace_dir, fp)
+                except OSError:
+                    fingerprint_cache[key] = "unknown"
+            latest_evidence[(row["record_id"], fp.get("path", ""))] = fingerprint_cache[key]
+        else:
+            latest_evidence[(row["record_id"], "")] = "fresh"
+    for (record_id, _), state in latest_evidence.items():
+        evidence.setdefault(record_id, []).append(state)
+    relations = {}
+    superseded = {}
+    for link in conn.execute("SELECT source_id, target_id, relation FROM memory_links"):
+        data = dict(link)
+        relations.setdefault(link["source_id"], []).append(data)
+        relations.setdefault(link["target_id"], []).append(data)
+        source = records.get(link["source_id"], {})
+        if link["relation"] == "supersedes" and source.get("status") in {"accepted", "edited"}:
+            superseded.setdefault(link["target_id"], []).append(link["source_id"])
+    result = {}
+    visiting = set()
+    def resolve(record_id: str) -> str:
+        if record_id in result:
+            return result[record_id]
+        record = records.get(record_id)
+        if not record or record_id in visiting or record["status"] == "reverted":
+            return "stale"
+        visiting.add(record_id)
+        states = evidence.get(record_id, [])
+        payload = _loads(record["payload_json"], {})
+        if not states and payload.get("fingerprint"):
+            try:
+                states = [freshness_status(workspace_dir, payload["fingerprint"])]
+            except OSError:
+                states = ["unknown"]
+        base = "stale" if "stale" in states else "unknown" if "unknown" in states else "fresh" if states else "unknown"
+        source_ids = _loads(record["source_record_ids_json"], [])
+        source_states = [resolve(i) for i in source_ids]
+        if "stale" in source_states:
+            base = "stale"
+        elif record["kind"] == "summary":
+            base = "fresh" if source_states and all(s == "fresh" for s in source_states) else "unknown"
+        visiting.remove(record_id)
+        result[record_id] = base
+        return base
+    for record_id in records:
+        resolve(record_id)
+    superseded = {target: [source for source in sources if result.get(source) == "fresh"]
+                  for target, sources in superseded.items()}
+    return result, relations, superseded
 
 
 def _loads(value: str, default_value):
@@ -271,17 +382,22 @@ def _records_with_ids(records: list[MemoryRecord]) -> list[MemoryRecord]:
     ]
 
 
-def _existing_statements(conn) -> dict[tuple[str, str, str, str], tuple[str, str]]:
+def _record_key(record: MemoryRecord) -> tuple:
+    owner = "" if record.scope == "project" else str(record.session_id) + (":" + record.turn_id if record.scope == "turn" else "")
+    return (record.scope, owner, record.subject_kind.casefold(), record.subject_key.casefold(),
+            record.kind.casefold(), _statement_key(record.statement),
+            str(record.payload.get("predicate", "")), str(record.payload.get("applies_when", "")))
+
+
+def _existing_statements(conn) -> dict[tuple, tuple[str, str]]:
     rows = conn.execute(
-        "SELECT id, subject_kind, subject_key, kind, statement FROM memory_records WHERE status != 'reverted'"
+        "SELECT * FROM memory_records ORDER BY created_at, rowid"
     ).fetchall()
     return {
-        (
-            str(row["subject_kind"]).casefold(),
-            str(row["subject_key"]).casefold(),
-            str(row["kind"]).casefold(),
-            _statement_key(str(row["statement"])),
-        ): (
+        _record_key(MemoryRecord(id=row["id"], scope=row["scope"], kind=row["kind"],
+                                subject_kind=row["subject_kind"], subject_key=row["subject_key"],
+                                statement=row["statement"], session_id=row["session_id"], turn_id=row["turn_id"],
+                                payload=_loads(row["payload_json"], {}))): (
             str(row["id"]),
             str(row["statement"]),
         )
@@ -297,9 +413,12 @@ def _semantic_relation(existing: dict, record: MemoryRecord) -> tuple[str, str]:
     kind = str(record.kind).casefold()
     statement_key = _statement_key(record.statement)
     candidates = []
-    for (known_subject_kind, known_subject_key, known_kind, known_statement_key), (known_id, known_statement) in existing.items():
+    own_key = _record_key(record)
+    for key, (known_id, known_statement) in existing.items():
+        scope, owner, known_subject_kind, known_subject_key, known_kind, known_statement_key, _, _ = key
         if (
-            known_subject_kind != subject_kind
+            scope != own_key[0] or owner != own_key[1] or known_id == record.id
+            or known_subject_kind != subject_kind
             or known_subject_key != subject_key
             or known_kind != kind
             or known_statement_key == statement_key

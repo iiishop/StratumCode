@@ -28,6 +28,8 @@ CREATE TABLE IF NOT EXISTS patch_authorizations (
 
 
 def create_authorization(plan: dict, workspace_dir: str) -> dict:
+    if plan.get("_repair_issues"):
+        raise AuthorizationError("INVALID_PATCH_PLAN", "A rejected plan cannot receive write authorization")
     _init()
     root = Path(workspace_dir or ".").resolve()
     plan_hash = hash_plan(plan)
@@ -152,6 +154,10 @@ def validate_step_reference(request: dict, root: Path) -> tuple[dict, str, dict]
     step = steps.get(step_id)
     if not step:
         raise AuthorizationError("STEP_NOT_AUTHORIZED", step_id)
+    states = _loads(row.get("step_states_json"), {})
+    for predecessor in step.get("depends_on_steps") or []:
+        if states.get(predecessor) != "validation_required":
+            raise AuthorizationError("STEP_DEPENDENCY_NOT_COMPLETE", predecessor)
     return row, step_id, step
 
 
@@ -278,6 +284,7 @@ def _allowed_steps(plan: dict, root: Path) -> dict:
         for step_id in item.get("covered_by") or []:
             acceptance_by_step.setdefault(str(step_id), set()).add(acceptance_id)
     steps = {}
+    previous_by_file = {}
     for item in plan.get("implementation_steps") or []:
         step_id = str(item.get("id") or "").strip()
         rels = _strings(item.get("files")) or [str(item.get("file") or "").strip()]
@@ -293,6 +300,7 @@ def _allowed_steps(plan: dict, root: Path) -> dict:
                 for rel in rels
             }
         steps[step_id] = {
+            "depends_on_steps": sorted({previous_by_file[_path_key(rel)] for rel in rels if _path_key(rel) in previous_by_file}),
             "files": rels,
             "purpose": str(item.get("purpose") or "").strip(),
             "target": str(item.get("target") or "").strip(),
@@ -306,6 +314,8 @@ def _allowed_steps(plan: dict, root: Path) -> dict:
             "capabilities": sorted(capabilities),
             "max_changed_bytes": 20_000,
         }
+        for rel in rels:
+            previous_by_file[_path_key(rel)] = step_id
     return steps
 
 

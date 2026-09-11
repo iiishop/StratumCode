@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from .graph import graph_data
+from .conversation import conversation_delta, current_turn_id, turn_scope
 from .ingestion import delta_from_events, delta_from_output
 from .llm import event_sink
 from .models import MemoryDelta, MemoryEvidence, MemoryLink, MemoryPayload, MemoryRecord, MemorySnapshot
@@ -9,6 +10,9 @@ from .selector import select
 from .store import list_records, record_delta, revert_record, update_record
 
 __all__ = [
+    "conversation_delta",
+    "current_turn_id",
+    "turn_scope",
     "MemoryDelta",
     "MemoryEvidence",
     "MemoryLink",

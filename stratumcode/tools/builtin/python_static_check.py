@@ -113,7 +113,13 @@ def _set_parents(tree: ast.AST) -> ast.AST:
 
 python_static_check_tool = ToolDef(
     name="python_static_check",
-    description="Batch AST scan for Python imports, top-level definitions, and likely unused items. Use before many grep/code_nav calls for dead-code or duplicate-definition audits.",
+    description=(
+        "Batch AST scan of Python source for imports, top-level definitions and likely unused items. "
+        "Suitable for a scoped structural inventory or identifying dead-code audit candidates "
+        "without many individual lookups. Does not execute code or prove a definition is unused: "
+        "dynamic imports, reflection and external consumers need separate evidence. "
+        "Not a general linter or runtime validator; inspect per-file parse errors and coverage."
+    ),
     parameters={
         "type": "object",
         "properties": {

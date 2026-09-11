@@ -50,9 +50,10 @@ def contextual_fallback_task_analysis(
     tool_name: str,
 ) -> dict:
     analysis = deepcopy(base_analysis)
-    request = _latest_user_request(messages) or str(base_analysis.get("origin_message") or "").strip()
+    request = str(base_analysis.get("origin_message") or "").strip() or _latest_user_request(messages)
     request = request or str((base_analysis.get("intent") or {}).get("summary") or "Handle the current request.").strip()
-    summary = _contextual_summary(messages, request)
+    # Assistant progress and injected task-state messages are context, not the goal.
+    summary = _compact_text(request, 220)
     execution_mode = "implement" if tool_name == "run_write_loop" else "read_only"
     analysis.update({
         "intent": {
@@ -91,7 +92,7 @@ def _latest_user_request(messages: list[dict]) -> str:
     for message in reversed(messages):
         if message.get("role") == "user":
             text = content_text(message.get("content"))
-            if text.strip():
+            if text.strip() and not text.startswith("Updated task state after the previous tool call:"):
                 return _compact_text(text, 220)
     return ""
 
@@ -135,9 +136,9 @@ def _fallback_scope(request: str, execution_mode: str) -> dict:
 
 def _fallback_unknown(request: str, execution_mode: str) -> dict:
     if execution_mode == "implement":
-        question = f"What exact files, code paths, and validation checks are required for: {_compact_text(request, 140)}?"
+        question = f"How can the requested behavior be implemented: {_compact_text(request, 140)}?"
     else:
-        question = f"What project facts, architecture paths, and risks are needed to answer: {_compact_text(request, 140)}?"
+        question = f"What is the evidence-backed answer to this request: {_compact_text(request, 140)}?"
     return {
         "id": "U1",
         "question": question,

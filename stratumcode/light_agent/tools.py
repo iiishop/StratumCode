@@ -23,7 +23,7 @@ UNSAFE_LIGHT_TOOLS = {
     "rollback_patch",
     "terminal",
 }
-EXTRA_READ_ONLY_TOOLS = ("git", "lsp_tool", "patch_history", "python_static_check")
+EXTRA_READ_ONLY_TOOLS = ("list_directory", "git", "lsp_tool", "patch_history", "python_static_check")
 LOCAL_LIGHT_TOOLS = ("run_investigation", "run_write_loop", "run_full_pipeline", "run_subagent")
 
 
@@ -117,6 +117,8 @@ def light_tools() -> dict[str, LightTool]:
             description=(
                 "Run the existing investigation state for complex read-only codebase investigation. "
                 "Use this when simple read/grep/code_nav is not enough."
+                " Delegate intermittent bugs, cross-layer lifecycle/persistence issues, or a failed previous fix "
+                "after minimal routing; identifying the root cause belongs inside this investigation."
             ),
             parameters={
                 "type": "object",
@@ -134,7 +136,9 @@ def light_tools() -> dict[str, LightTool]:
             name="run_write_loop",
             description=(
                 "Run the existing rigorous write loop from the design state. Requires the light "
-                "agent to provide analysis and investigation; this tool never runs analyzer or "
+                "agent to reference investigation_source returned by a previous delegate; runtime "
+                "restores its original analysis and investigation without model transcription. "
+                "Legacy explicit analysis and investigation are also supported. This tool never runs analyzer or "
                 "investigation itself. "
                 "Returns validation-centered output instead of raw patch output."
             ),
@@ -145,8 +149,9 @@ def light_tools() -> dict[str, LightTool]:
                     "context": {"type": "array", "items": {"type": "string"}},
                     "analysis": {"type": "object"},
                     "investigation": {"type": "object"},
+                    "investigation_source": {"type": "string", "description": "Exact source returned by a delegate in this turn; do not reconstruct its evidence."},
                 },
-                "required": ["message", "analysis", "investigation"],
+                "required": ["message"],
                 "additionalProperties": False,
             },
             execute=_run_write_loop_tool,
@@ -154,17 +159,17 @@ def light_tools() -> dict[str, LightTool]:
         "run_full_pipeline": LightTool(
             name="run_full_pipeline",
             description=(
-                "Run the existing full workflow for one focused subtask from the analyzer entry: "
+                "Run the existing full workflow for the original user request from the analyzer entry: "
                 "analysis, investigation, design, patch planning, implementation, and validation. "
-                "Use this after the light agent decomposes a broad request into a concrete, "
-                "small-scope implementation task."
+                "The runtime preserves the original request, not a narrowed paraphrase. "
+                "To continue an existing investigation, use run_write_loop with its investigation_source instead."
             ),
             parameters={
                 "type": "object",
                 "properties": {
                     "message": {
                         "type": "string",
-                        "description": "One focused subtask to complete through the full legacy workflow.",
+                        "description": "Original user request; runtime preserves the original turn contract.",
                     },
                     "context": {"type": "array", "items": {"type": "string"}},
                 },
@@ -202,7 +207,16 @@ def _schema_item(name: str, description: str, parameters: dict) -> dict:
 
 
 def _tool_result_text(result: ToolResult) -> str:
-    return result.output or result.title
+    text = result.output or result.title
+    if result.title.startswith("[error]"):
+        text = result.title + "\n" + result.output
+    metadata = {k: v for k, v in result.metadata.items() if k in {
+        "path", "workspace_root", "pattern", "count", "truncated", "recursive", "ignored_directories",
+        "start_line", "end_line", "total_lines", "total_files", "batched", "error_code", "suggestions",
+    }}
+    if metadata:
+        text += "\n\nTool scope/status: " + json.dumps(metadata, ensure_ascii=False)
+    return text
 
 
 def _run_investigation_tool(arguments: dict, workspace_dir: str, session_id: int | None) -> str:
@@ -244,6 +258,7 @@ def _run_write_loop_tool(arguments: dict, workspace_dir: str, session_id: int | 
         "state": run.state.value,
         "analysis": _analysis_summary(run.analysis or {}),
         "investigation_summary": (run.last_investigation or {}).get("summary", ""),
+        "final": _last_output(events),
         "validation_result": run.validation_result or {},
         "changed_files": run.changed_files,
         "events": _event_summary(events),
@@ -276,6 +291,8 @@ def _run_subagent_tool(arguments: dict, workspace_dir: str, session_id: int | No
         "agent": agent,
         "events": _event_summary(events),
         "final": _last_output(events),
+        "completed": any(e.get("op") == "done" for e in events)
+                     and not any(e.get("op") == "error" or e.get("error") for e in events),
     })
 
 
@@ -359,7 +376,7 @@ def _event_summary(events: list[dict]) -> list[dict]:
 
 
 def _record_events_memory(workspace_dir: str, session_id: int | None, message: str, events: list[dict]) -> dict:
-    turn_id = f"turn-{uuid4().hex[:12]}"
+    turn_id = memory_system.current_turn_id() or f"turn-{uuid4().hex[:12]}"
     delta = memory_system.delta_from_events(
         workspace_dir=workspace_dir,
         session_id=session_id,

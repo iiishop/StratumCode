@@ -90,16 +90,14 @@ def _merge_unknowns(items: list[dict]) -> list[dict]:
     for item in items:
         if not item.get("id") or not item.get("question"):
             continue
-        key = _question_key(item["question"])
+        key = (item.get("domain", "requirement" if item.get("type") == "product_decision" else "solution"), _question_key(item["question"]))
         existing_id = by_question.get(key)
         if existing_id:
             current = merged[existing_id]
-            merged[existing_id] = {
-                **current,
-                **item,
-                "id": existing_id,
-                "blocking": bool(current.get("blocking") or item.get("blocking")),
-            }
+            if existing_id == item["id"]:
+                merged[existing_id] = {**current, **item}
+            else:
+                merged[item["id"]] = item
             continue
         merged[item["id"]] = item
         by_question[key] = item["id"]

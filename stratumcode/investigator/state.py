@@ -17,6 +17,17 @@ class InvestigationPhase(StrEnum):
     RESOLVE = "resolve"
     DISCOVERY_REQUIRED = "discovery_required"
     DISCOVER = "discover"
+    AUDIT = "audit"
+    REFLECT = "reflect"
+
+
+@dataclass
+class TraversalState:
+    active_unknown_id: str = ""
+    revisit_unknown_id: str = ""
+    active_path: list[str] = field(default_factory=list)
+    audit_cycle: int = 0
+    bootstrapped: bool = False
 
 
 @dataclass
@@ -35,6 +46,7 @@ class CacheState:
 
 @dataclass
 class ProgressState:
+    discovery_since_record: int = 0
     repeated_tool_error_name: str = ""
     repeated_tool_error_count: int = 0
     already_resolved_error_count: int = 0
@@ -60,6 +72,9 @@ class VerificationState:
 
 @dataclass
 class ControlState:
+    evidence_gaps: dict[str, list[str]] = field(default_factory=dict)
+    round_context_start: int = 0
+    round_context_count: int = 0
     stop_investigation: bool = False
     finalization_reason: str = ""
     current_tool_choice: object = None
@@ -104,6 +119,7 @@ class InvestigationRuntime:
 
 @dataclass
 class InvestigationState:
+    traversal: TraversalState = field(default_factory=TraversalState)
     messages: list[dict] = field(default_factory=list)
     observations: ObservationState = field(default_factory=ObservationState)
     caches: CacheState = field(default_factory=CacheState)

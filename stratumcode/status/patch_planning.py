@@ -30,7 +30,7 @@ def handle(run):
     ):
         if event.get("op") == "done" and isinstance(event.get("patch_plan"), dict):
             run.patch_plan = event["patch_plan"]
-            repair_needed = bool(event.get("repair_needed"))
+            repair_needed = bool(event.get("repair_needed") or run.patch_plan.get("_repair_issues"))
         if event.get("op") == "done" and event.get("next_state"):
             next_state = str(event.get("next_state") or "")
             next_reason = str(event.get("reason") or "")
@@ -39,6 +39,10 @@ def handle(run):
         yield event
     if run.patch_plan:
         if repair_needed:
+            issues = run.patch_plan.get("_repair_issues", [])
+            feedback = "Patch plan validation failed: " + "; ".join(issues)
+            if feedback not in run.continuation_context:
+                run.continuation_context.append(feedback)
             MAX_PATCH_RETRIES = 2
             if run.patch_retries < MAX_PATCH_RETRIES:
                 run.patch_retries += 1
@@ -46,7 +50,7 @@ def handle(run):
                 hint = "; ".join(issues[:3]) if issues else "fix validation issues"
                 run.transition(chat.ChatState.PATCH_PLANNING, f"Patch plan needs repair ({run.patch_retries}/{MAX_PATCH_RETRIES}): {hint}")
                 return
-            run.transition(chat.ChatState.IMPLEMENTING, f"Patch plan has minor issues after {MAX_PATCH_RETRIES} repairs; proceeding anyway.")
+            run.transition(chat.ChatState.FAILED, feedback)
         else:
             run.patch_retries = 0
             run.transition(chat.ChatState.IMPLEMENTING, "Patch plan is ready.")

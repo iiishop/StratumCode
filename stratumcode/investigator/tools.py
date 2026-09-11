@@ -24,28 +24,25 @@ def _phase_tools(
 ) -> list[dict]:
     if phase == "clearify":
         return _named(tools, "clearify")
+    if phase == "audit":
+        return [_audit_investigation_tool_schema(), _reopen_unknown_tool_schema()]
+    if phase == "reflect":
+        return [_record_findings_tool_schema()]
     if phase == "verify":
         return _named(tools, "subagent")
     if phase == "repair":
-        return _named(tools, *(_REPAIR_ALLOWED_TOOL_NAMES | {"finish_investigation"}))
+        return _named(tools, *(_REPAIR_ALLOWED_TOOL_NAMES | {"audit_investigation"}))
     if phase == "finish_with_evidence_gap":
-        return _named(tools, *(_REPAIR_ALLOWED_TOOL_NAMES | {"finish_investigation"}))
+        return _named(tools, *(_REPAIR_ALLOWED_TOOL_NAMES | {"audit_investigation"}))
     if phase == "finish":
-        return [_finish_tool_schema()]
-    if phase == "synthesize":
-        return [
-            _resolve_unknowns_tool_schema(),
-            _record_findings_tool_schema(),
-            _finish_tool_schema(),
-        ]
+        return [_finish_tool_schema(), _reopen_unknown_tool_schema()]
+    if phase in {"synthesize", "resolve"}:
+        # Related observations are not proof that the question can be closed.
+        return [tool for tool in tools if tool["function"]["name"] not in {
+            "clearify", "audit_investigation", "finish_investigation", "reopen_investigation_unknown",
+        }]
     if phase == "read_only_finish":
-        return [_finish_tool_schema()]
-    if phase == "resolve":
-        return [
-            _resolve_unknowns_tool_schema(),
-            _record_findings_tool_schema(),
-            _finish_tool_schema(),
-        ]
+        return [_finish_tool_schema(), _reopen_unknown_tool_schema()]
     if phase == "discovery_required":
         return [
             tool for tool in tools
@@ -56,11 +53,13 @@ def _phase_tools(
                 "record_investigation_findings",
                 "resolve_unknowns",
                 "subagent",
+                "audit_investigation",
+                "reopen_investigation_unknown",
             }
         ]
     return [
         tool for tool in tools
-        if ((tool.get("function") or {}).get("name") or "") != "clearify"
+        if ((tool.get("function") or {}).get("name") or "") not in {"clearify", "audit_investigation", "reopen_investigation_unknown"}
     ]
 
 
@@ -72,8 +71,12 @@ def _named(tools: list[dict], *names: str) -> list[dict]:
 
 
 def _phase_tool_choice(phase) -> str | dict:
+    if phase in {"audit", "finish", "read_only_finish"}:
+        return "required"
     forced = {
         "clearify": "clearify",
+        "audit": "audit_investigation",
+        "reflect": "record_investigation_findings",
         "verify": "subagent",
         # REPAIR 不强制 record：repair 提示词要求"先用 read/grep 取证、
         # 再 record 追加缺失项"。强制 record 会让模型无法取证，只能空转
@@ -95,8 +98,9 @@ def _investigation_tool_schema(name: str, description: str, parameters: dict) ->
     properties = schema.setdefault("properties", {})
     properties["target_unknown_ids"] = {
         "type": "array",
+        "maxItems": 1,
         "items": {"type": "string"},
-        "description": "Task contract unknown IDs this tool call is intended to resolve or reduce.",
+        "description": "Only the runtime's active Unknown ID. Never investigate multiple nodes in one call.",
     }
     properties["reason"] = {
         "type": "string",
@@ -134,19 +138,58 @@ def _investigation_tool_schema(name: str, description: str, parameters: dict) ->
     return openai_tool_schema(name, description, schema)
 
 
+def _unknown_tree_schema() -> dict:
+    return {"type": "array", "items": {"type": "object", "properties": {
+        "id": {"type": "string"}, "question": {"type": "string", "description": "ONE independently answerable interrogative, not a requirement, checklist, or compound question. Put independently answerable questions in separate array items with the same parent_id."},
+        "domain": {"type": "string", "enum": ["requirement", "solution"]},
+        "parent_id": {"type": ["string", "null"]},
+        "related_unknown_ids": {"type": "array", "items": {"type": "string"}, "description": "Non-dependency references to accepted findings relevant to a new coverage gap."},
+        "type": {"type": "string"}, "blocking": {"type": "boolean"},
+        "resolution_strategy": {"type": "string", "enum": ["investigate_project", "clearify", "deferred"]},
+        "why": {"type": "string"}, "origin": {"type": "string"},
+        "acceptance_criteria_ids": {"type": "array", "items": {"type": "string"}},
+    }, "required": ["id", "question", "domain", "parent_id", "type", "blocking", "resolution_strategy"]}}
+
+
+def _reopen_unknown_tool_schema() -> dict:
+    return openai_tool_schema("reopen_investigation_unknown",
+        "Exceptional correction: reopen only for newly observed evidence contradicting an accepted conclusion. "
+        "Missing coverage must become a new root through audit_investigation, not a reopened answer.", {
+        "type": "object", "properties": {
+            "unknown_id": {"type": "string"},
+            "reason": {"type": "string", "description": "The specific evidence still needed for this question."},
+            "contradicting_observation_ids": {"type": "array", "minItems": 1, "items": {"type": "string"}},
+        }, "required": ["unknown_id", "reason", "contradicting_observation_ids"],
+    })
+
+
+def _audit_investigation_tool_schema() -> dict:
+    domain = {"type": "object", "properties": {
+        "complete": {"type": "boolean"}, "reason": {"type": "string"},
+        "open_unknown_ids": {"type": "array", "items": {"type": "string"}},
+    }, "required": ["complete", "reason", "open_unknown_ids"]}
+    return openai_tool_schema("audit_investigation", "Review coverage and cross-question consistency, trusting accepted node findings. Do not rerun node acceptance. Each new gap must be a new root (parent_id=null); use related_unknown_ids for provenance. Incomplete domains must identify pending questions.", {
+        "type": "object", "properties": {"reason": {"type": "string"},
+        "requirement": domain, "solution": domain, "new_unknowns": _unknown_tree_schema()},
+        "required": ["reason", "requirement", "solution", "new_unknowns"],
+    })
+
+
 def _record_findings_tool_schema() -> dict:
     return openai_tool_schema(
         "record_investigation_findings",
-        "Start runtime slot-based recording of grounded findings before finishing.",
+        "Record findings and register child questions BEFORE investigating them. A verified collection requires one unanswered question per subject; a synthesis requires separate factual concerns. These are grounded dependencies, not speculative planning. Supply reason, new_unknowns and next_inquiry_reason; runtime slots record findings.",
         {
             "type": "object",
             "properties": {
+                "new_unknowns": _unknown_tree_schema(),
+                "next_inquiry_reason": {"type": "string", "description": "Briefly explain the NEXT inquiry. Register known subjects' unanswered questions and narrower mechanisms in new_unknowns before their detail reads. 'Read each remaining component' is not same-leaf continuation. If new_unknowns is empty, explain same-leaf evidence gathering, existing-child traversal, or synthesis with no remaining gap; never hide unregistered child research here."},
                 "reason": {
                     "type": "string",
                     "description": "One short reason why current observations should be recorded now. Do not include findings JSON; runtime will request slots.",
                 },
             },
-            "required": ["reason"],
+            "required": ["reason", "new_unknowns", "next_inquiry_reason"],
         },
     )
 
@@ -307,6 +350,9 @@ def _tool_repair_error_json(
         "Reuse partial_arguments. Return only the same tool call with missing/invalid fields corrected; "
         "do not restart discovery or repeat the identical arguments."
     )
+    if "Audit" in str(exc):
+        error["required_action"] = "audit_investigation"
+        error["repair_instruction"] = "Resolve open blocking dependencies, then submit a current Root Audit. Do not retry finish before audit completion."
     if tool_name == "finish_investigation" and (
         "references file" in str(exc) or "claims behavior" in str(exc)
     ):
@@ -444,11 +490,23 @@ def _tool_event(
 
 
 def _tool_message(call_id: str, output: str) -> dict:
-    """Tool result message appended to the conversation."""
+    """Keep requested output, but not the runtime-only full-file snapshot duplicate."""
+    try:
+        payload = json.loads(output)
+    except (ValueError, TypeError):
+        payload = None
+    if isinstance(payload, dict) and isinstance(payload.get("metadata"), dict):
+        metadata = payload["metadata"]
+        if "full_text" in metadata:
+            metadata.pop("full_text")
+            metadata["full_text_retained_by_runtime"] = True
+            output = json.dumps(payload, ensure_ascii=False)
     return {"role": "tool", "tool_call_id": call_id, "content": output}
 
 
 def _run_tool_stream(name: str, call_id: str, arguments: dict, workspace_dir: str, analysis: dict | None = None, *, relax_discovery_contract: bool = False) -> Iterator[dict]:
+    # Removing orchestration fields must not erase the caller's observation provenance.
+    arguments = dict(arguments)
     registered_tool = registry.get(name)
     if (
         registered_tool is None
@@ -676,7 +734,7 @@ def _step_result(final: dict, *, implementation_intent: bool = True) -> dict:
         str(item.get("unknown_id") or "").strip()
         for item in final.get("resolutions", [])
         if isinstance(item, dict)
-        and str(item.get("status") or "") in ("resolved", "partially_resolved", "deferred")
+        and str(item.get("status") or "") == "resolved"
         and str(item.get("unknown_id") or "").strip()
     }
     investigate = [

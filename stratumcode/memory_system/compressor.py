@@ -7,7 +7,8 @@ from .models import MemoryRecord
 
 
 def summaries_for_records(records: list[MemoryRecord], *, session_id: int | None, turn_id: str) -> list[MemoryRecord]:
-    project_records = [record for record in records if record.scope == "project"]
+    project_records = [record for record in records if record.scope == "project" and record.status == "accepted"
+                       and record.kind != "summary" and record.freshness != "stale"]
     if len(project_records) < 2:
         return []
     data = call_memory_json("compress_records", {
@@ -23,7 +24,7 @@ def summaries_for_records(records: list[MemoryRecord], *, session_id: int | None
         statement = _text(item.get("statement"))
         confidence = _enum(item.get("confidence"), {"verified", "inferred", "uncertain"})
         source_ids = _valid_source_ids(item.get("source_record_ids"), project_records)
-        if not subject_kind or not subject_key or not statement or not confidence or not source_ids:
+        if not subject_kind or not subject_key or not statement or not confidence or len(set(source_ids)) < 2:
             continue
         result.append(MemoryRecord(
             id=f"summary-{uuid4().hex[:12]}",
@@ -33,13 +34,16 @@ def summaries_for_records(records: list[MemoryRecord], *, session_id: int | None
             subject_key=subject_key,
             statement=statement,
             confidence="inferred" if confidence == "verified" else confidence,
-            freshness="fresh",
+            freshness="unknown",
             session_id=session_id,
             turn_id=turn_id,
             source="memory_compressor",
             source_record_ids=source_ids,
             payload={"derived": True, **(item.get("payload") if isinstance(item.get("payload"), dict) else {})},
         ))
+    # Compression must reduce information volume, not create a paraphrase for every input.
+    if len(result) >= len(project_records) or sum(len(r.statement) for r in result) >= sum(len(r.statement) for r in project_records):
+        return []
     return result
 
 

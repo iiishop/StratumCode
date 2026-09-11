@@ -2,6 +2,7 @@
 import { computed, onMounted, ref } from 'vue'
 import { gsap } from 'gsap'
 import EventFrame from './EventFrame.vue'
+import InvestigationFollowUps from '../inspector/InvestigationFollowUps.vue'
 
 const props = defineProps({ event: { type: Object, required: true } })
 const rootRef = ref(null)
@@ -14,7 +15,14 @@ const constraints = computed(() => props.event.constraints || [])
 const acceptance = computed(() => props.event.acceptance_criteria || [])
 const hypotheses = computed(() => props.event.hypotheses || [])
 const clues = computed(() => (props.event.clues || []).filter(clue => !isWorkspaceSnapshotClue(clue)))
-const unknowns = computed(() => props.event.unknowns || [])
+const unknowns = computed(() => (props.event.unknowns || []).filter(item => item.resolution_strategy !== 'deferred'))
+const followUps = computed(() => [
+  ...(props.event.follow_ups || []),
+  ...(props.event.unknowns || []).filter(item => item.resolution_strategy === 'deferred').map(item => ({
+    id: `FOLLOWUP:${item.id}`, question: item.question, reason: item.why,
+    source_unknown_id: item.id, parent_id: item.parent_id, required_capability: item.required_capability,
+  })),
+])
 const analyzerErrors = computed(() => props.event.analyzer_errors || [])
 const hasAnalyzerDiagnostics = computed(() => props.event.analyzer_error || analyzerErrors.value.length || props.event.recovered_from_partial_analyzer_output)
 const scopeRows = computed(() => {
@@ -149,10 +157,12 @@ function onExpandLeave(el, done) {
           <li v-for="u in unknowns" :key="u.id || u" :class="{ 'is-blocking': u.blocking !== false }">
             <b v-if="u.id">{{ u.id }}</b>
             <span>{{ typeof u === 'string' ? u : u.question || u.text }}</span>
-            <em v-if="u.blocking === false">deferred</em>
+            <em v-if="u.blocking === false">non-blocking</em>
           </li>
         </ul>
       </div>
+
+      <InvestigationFollowUps :items="followUps" />
 
       <div v-if="acceptance.length" class="ta__card">
         <div class="ta__card-head">

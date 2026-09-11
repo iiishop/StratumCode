@@ -50,6 +50,7 @@ _CHAT_TRANSITIONS = {
         ChatState.FAILED,
     },
     ChatState.IMPLEMENTING: {
+        ChatState.PATCH_PLANNING,
         ChatState.INVESTIGATING,
         ChatState.VALIDATING,
         ChatState.SAVING_SESSION,

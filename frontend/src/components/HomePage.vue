@@ -192,8 +192,16 @@ const inspectorTabs = computed(() => [
     count: evidenceRuns.length,
   },
   {
+    id: 'http',
+    label: 'API',
+    icon: '{}',
+    color: '#126957',
+    soft: '#e3f5f0',
+    description: 'HTTP requests, saved API checks, and observed responses.',
+  },
+  {
     id: 'terminal',
-    label: 'Terminal',
+    label: 'Apps / Terminal',
     icon: '>_',
     color: '#12846f',
     soft: '#e3f5f0',
@@ -796,7 +804,7 @@ async function send(answer = null) {
   } finally {
     isStreaming.value = false
     agentStatus.state = 'idle'
-    scheduleSave()
+    flushSessionSave(props.session?.id)
     if (completedNormally && props.session?.id) {
       void generateSessionTitle(props.session.id, text, message)
     }
@@ -854,7 +862,7 @@ function stopChat() {
   })
   isStreaming.value = false
   Object.assign(agentStatus, { state: 'idle', phase: 'completed' })
-  scheduleSave()
+  flushSessionSave(props.session?.id)
   nextTick(scrollForNewContent)
 }
 
@@ -1011,6 +1019,13 @@ function upsertSubagent(data) {
 }
 
 function onAgentPacket(packet, type, data) {
+  if (type === 'stage' && data?.investigation_tree) {
+    const analysis = analysisForId(data.analysis_id) || activeTaskAnalysis.value
+    if (analysis) {
+      if (analysis.investigation_tree?.active_unknown_id !== data.investigation_tree.active_unknown_id) analysis.open = true
+      analysis.investigation_tree = data.investigation_tree
+    }
+  }
   if (packet.op === 'start' && type === 'hypothesis') {
     const run = reactive({
       id: packet.id,

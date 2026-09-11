@@ -9,6 +9,8 @@ from urllib.parse import parse_qs, urlparse
 
 from . import app_settings, chat, clearify_runtime, code_structure, git_panel, lsp, mcp, memory_system, model_settings, providers, sessions, skill_runtime, skills, subagents, terminal_manager, updates, workspaces
 from .tools import registry
+from . import application_manager
+from . import http_client
 
 
 _logger = logging.getLogger(__name__)
@@ -112,7 +114,38 @@ def _get_memory_graph(handler, body):
     handler._json(memory_system.graph_data(_memory_workspace_path(handler, params)))
 
 
+def _application_action(handler, body):
+    if handler.headers.get("Content-Type", "").split(";")[0].strip().lower() != "application/json":
+        handler._json({"error": "Application actions require application/json"}, status=415)
+        return
+    workspace = handler._workspace_path()
+    if body.get("workspace") != workspace:
+        handler._json({"error": "Workspace changed; refresh the application panel before acting."}, status=409)
+        return
+    handler._json(application_manager.action(workspace, body))
+
+
+def _http_action(handler, body):
+    import asyncio
+
+    if handler.headers.get("Content-Type", "").split(";")[0].strip().lower() != "application/json":
+        handler._json({"error": "HTTP actions require application/json"}, status=415)
+        return
+    workspace = handler._workspace_path()
+    if body.get("workspace") != workspace:
+        handler._json({"error": "Workspace changed; refresh the API panel."}, status=409)
+        return
+    try:
+        handler._json(asyncio.run(http_client.action(workspace, body)))
+    except (ValueError, TypeError, LookupError) as exc:
+        handler._json({"error": str(exc)}, status=400)
+
+
 _ROUTES: dict[tuple[str, str], object] = {
+    ("GET", "/api/http"): lambda h, b: h._json(http_client.snapshot(h._workspace_path())),
+    ("POST", "/api/http/action"): _http_action,
+    ("GET", "/api/applications"): lambda h, b: h._json(application_manager.snapshot(h._workspace_path())),
+    ("POST", "/api/applications/action"): _application_action,
 
     # GET
     ("GET", "/api/providers"):       lambda h, b: h._json(providers.list_saved()),
@@ -267,6 +300,10 @@ class _StratumThreadingHTTPServer(ThreadingHTTPServer):
 
 class _Handler(SimpleHTTPRequestHandler):
     """静态文件 + /api/* 路由合一的请求处理器。"""
+
+    # Windows registry MIME associations must not break ES module loading.
+    extensions_map = {**SimpleHTTPRequestHandler.extensions_map,
+                      ".js": "text/javascript", ".mjs": "text/javascript", ".css": "text/css"}
 
     def __init__(self, *args, workspace_dir: str, **kwargs):
         self.workspace_dir = workspace_dir
