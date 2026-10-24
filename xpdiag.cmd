@@ -2,7 +2,7 @@
 setlocal
 chcp 936 >nul 2>&1
 
-set "OUT=%USERPROFILE%\Desktop\XP_Shell_Driver_Diagnostic.txt"
+set "OUT=C:\XP_Diagnostic.txt"
 
 echo Windows XP Shell / Clipboard / Driver Diagnostic > "%OUT%"
 echo Generated: %DATE% %TIME% >> "%OUT%"
